@@ -1,9 +1,16 @@
 import { ensureConnected } from "./client";
 
+export type NotificationMode =
+  | "new_issues_only"
+  | "issues_exist"
+  | "issues"
+  | "always"
+  | "never";
+
 export type NotificationSettings = {
   notifyEnabled: boolean;
   notifyEmail: string | null;
-  notifyOn: "always" | "issues" | "never";
+  notifyOn: NotificationMode;
   notifyIncludeCsv: boolean;
 };
 
@@ -28,9 +35,16 @@ export type LinkDeltaRow = {
 type SiteNotificationRow = {
   notify_enabled: boolean;
   notify_email: string | null;
-  notify_on: "always" | "issues" | "never";
+  notify_on: "always" | "issues" | "issues_exist" | "new_issues_only" | "never";
   notify_include_csv: boolean;
 };
+
+function normalizeNotifyOn(
+  value: SiteNotificationRow["notify_on"],
+): NotificationMode {
+  if (value === "issues") return "issues_exist";
+  return value;
+}
 
 type LinkCountRow = {
   classification: string;
@@ -57,7 +71,7 @@ export async function getSiteNotificationSettings(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOn: row.notify_on,
+    notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
   };
 }
@@ -83,7 +97,7 @@ export async function getSiteNotificationSettingsForUser(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOn: row.notify_on,
+    notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
   };
 }
@@ -95,9 +109,11 @@ export async function updateSiteNotificationSettings(
   const existing = await getSiteNotificationSettings(siteId);
   if (!existing) throw new Error("site_not_found");
   const next: NotificationSettings = { ...existing, ...fields };
+  const normalizedNotifyOn =
+    next.notifyOn === "issues" ? "issues_exist" : next.notifyOn;
   if (
     next.notifyEnabled &&
-    next.notifyOn !== "never" &&
+    normalizedNotifyOn !== "never" &&
     (!next.notifyEmail || !isValidEmail(next.notifyEmail))
   ) {
     throw new Error("invalid_notify_email");
@@ -120,7 +136,7 @@ export async function updateSiteNotificationSettings(
       siteId,
       next.notifyEnabled,
       next.notifyEmail,
-      next.notifyOn,
+      normalizedNotifyOn,
       next.notifyIncludeCsv,
     ],
   );
@@ -129,7 +145,7 @@ export async function updateSiteNotificationSettings(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOn: row.notify_on,
+    notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
   };
 }
@@ -142,9 +158,11 @@ export async function updateSiteNotificationSettingsForUser(
   const existing = await getSiteNotificationSettingsForUser(userId, siteId);
   if (!existing) throw new Error("site_not_found");
   const next: NotificationSettings = { ...existing, ...fields };
+  const normalizedNotifyOn =
+    next.notifyOn === "issues" ? "issues_exist" : next.notifyOn;
   if (
     next.notifyEnabled &&
-    next.notifyOn !== "never" &&
+    normalizedNotifyOn !== "never" &&
     (!next.notifyEmail || !isValidEmail(next.notifyEmail))
   ) {
     throw new Error("invalid_notify_email");
@@ -168,7 +186,7 @@ export async function updateSiteNotificationSettingsForUser(
       userId,
       next.notifyEnabled,
       next.notifyEmail,
-      next.notifyOn,
+      normalizedNotifyOn,
       next.notifyIncludeCsv,
     ],
   );
@@ -177,7 +195,7 @@ export async function updateSiteNotificationSettingsForUser(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOn: row.notify_on,
+    notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
   };
 }
@@ -257,7 +275,7 @@ export async function getLinkCountsForRun(scanRunId: string): Promise<{
     `
       SELECT classification, COUNT(*)::text AS count
       FROM scan_links
-      WHERE scan_run_id = $1
+      WHERE scan_run_id = $1 AND ignored = false
       GROUP BY classification
     `,
     [scanRunId],
@@ -338,11 +356,13 @@ export async function getNewLinksSinceLastNotified(
           FROM scan_links cur
           WHERE cur.scan_run_id = $1
             AND cur.classification IN ('broken', 'blocked', 'no_response')
+            AND cur.ignored = false
             AND NOT EXISTS (
               SELECT 1 FROM scan_links prev
               WHERE prev.scan_run_id = $2
                 AND prev.link_url = cur.link_url
                 AND prev.classification = cur.classification
+                AND prev.ignored = false
             )
           ORDER BY cur.occurrence_count DESC
           LIMIT $3
@@ -361,6 +381,7 @@ export async function getNewLinksSinceLastNotified(
           FROM scan_links
           WHERE scan_run_id = $1
             AND classification IN ('broken', 'blocked', 'no_response')
+            AND ignored = false
           ORDER BY occurrence_count DESC
           LIMIT $2
         `,

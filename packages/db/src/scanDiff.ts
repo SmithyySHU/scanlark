@@ -117,6 +117,7 @@ export async function getScanDiff(
     unchangedScope?: "issues" | "ok" | "all";
     unchangedLimit?: number;
     unchangedOffset?: number;
+    includeIgnored?: boolean;
   },
 ): Promise<{
   summary: ScanDiffSummary;
@@ -135,6 +136,9 @@ export async function getScanDiff(
   const effectiveUnchangedScope = issuesOnly
     ? "issues"
     : (options?.unchangedScope ?? "all");
+  const includeIgnored = options?.includeIgnored ?? false;
+
+  const ignoredClause = includeIgnored ? "" : " AND l.ignored = false";
 
   const baseCte = `
     WITH current_links AS (
@@ -150,7 +154,7 @@ export async function getScanDiff(
       FROM scan_links l
       LEFT JOIN scan_link_occurrences o
         ON o.scan_run_id = l.scan_run_id AND o.link_url = l.link_url
-      WHERE l.scan_run_id = $1 AND l.ignored = false
+      WHERE l.scan_run_id = $1${ignoredClause}
       GROUP BY l.link_url, l.classification, l.status_code, l.error_message
     ),
     baseline_links AS (
@@ -166,7 +170,7 @@ export async function getScanDiff(
       FROM scan_links l
       LEFT JOIN scan_link_occurrences o
         ON o.scan_run_id = l.scan_run_id AND o.link_url = l.link_url
-      WHERE l.scan_run_id = $2 AND l.ignored = false
+      WHERE l.scan_run_id = $2${ignoredClause}
       GROUP BY l.link_url, l.classification, l.status_code, l.error_message
     ),
     joined AS (
@@ -366,7 +370,9 @@ export async function getScanDiff(
     unchangedRows = unchangedRes.rows;
   }
 
-  const rows = unchangedOnly ? unchangedRows : [...changeRows, ...unchangedRows];
+  const rows = unchangedOnly
+    ? unchangedRows
+    : [...changeRows, ...unchangedRows];
   const items: ScanDiffItem[] = rows.map((row) => ({
     link_url: row.link_url,
     change_type: row.change_type,

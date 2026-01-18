@@ -72,8 +72,6 @@ packages/
   db/         # SQL migrations + query layer
 ```
 
-````
-
 ---
 
 ## Local development
@@ -115,8 +113,8 @@ npm ci
 
 ```bash
 # Example (adjust to your repo’s migration command if different)
-psql "$DATABASE_URL" -f packages/db/migrations/001_add_dedup_tables.sql
-psql "$DATABASE_URL" -f packages/db/migrations/002_<your_next_migration>.sql
+psql "$DATABASE_URL" -f packages/db/migrations/001_init.sql
+psql "$DATABASE_URL" -f packages/db/migrations/002_add_scan_links.sql
 psql "$DATABASE_URL" -f packages/db/migrations/003_add_ignore_rules.sql
 psql "$DATABASE_URL" -f packages/db/migrations/004_add_users_auth_and_ownership.sql
 psql "$DATABASE_URL" -f packages/db/migrations/005_fix_users_updated_at.sql
@@ -158,8 +156,3 @@ Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the
 ## Notes
 
 This repository is under active development and will change as the MVP gets hardened.
-
-```
-
-```
-````

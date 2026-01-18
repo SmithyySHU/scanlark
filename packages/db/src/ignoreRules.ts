@@ -19,6 +19,35 @@ export interface IgnoreRule {
   created_at: Date;
 }
 
+const IGNORE_RULE_PRIORITY: Record<IgnoreRuleType, number> = {
+  domain: 0,
+  path_prefix: 1,
+  exact: 2,
+  contains: 3,
+  regex: 4,
+  status_code: 5,
+  classification: 6,
+};
+
+export function sortIgnoreRules(rules: IgnoreRule[]): IgnoreRule[] {
+  return [...rules].sort((a, b) => {
+    const priority =
+      (IGNORE_RULE_PRIORITY[a.rule_type] ?? 99) -
+      (IGNORE_RULE_PRIORITY[b.rule_type] ?? 99);
+    if (priority !== 0) return priority;
+    const aCreated =
+      a.created_at instanceof Date
+        ? a.created_at.getTime()
+        : new Date(a.created_at).getTime();
+    const bCreated =
+      b.created_at instanceof Date
+        ? b.created_at.getTime()
+        : new Date(b.created_at).getTime();
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return a.id.localeCompare(b.id);
+  });
+}
+
 export async function listIgnoreRulesForSite(
   siteId: string,
   opts?: { enabledOnly?: boolean },
@@ -150,6 +179,7 @@ export function findMatchingIgnoreRule(
   statusCode: number | null,
   rules: IgnoreRule[],
 ): IgnoreRule | null {
+  const orderedRules = sortIgnoreRules(rules);
   let host = "";
   let path = "";
   try {
@@ -184,7 +214,7 @@ export function findMatchingIgnoreRule(
     }
   };
 
-  for (const rule of rules) {
+  for (const rule of orderedRules) {
     if (!rule.is_enabled) continue;
     if (rule.site_id && siteId && rule.site_id !== siteId) continue;
     if (rule.rule_type === "domain") {

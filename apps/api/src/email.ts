@@ -1,10 +1,15 @@
 import nodemailer from "nodemailer";
+import { enqueueEmailOutbox } from "@scanlark/db";
 
 type EmailPayload = {
   to: string;
   subject: string;
   html: string;
   text?: string;
+  userId?: string | null;
+  siteId?: string | null;
+  scanRunId?: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 const EMAIL_ENABLED = process.env.EMAIL_ENABLED === "true";
@@ -25,6 +30,21 @@ function getTransport() {
 }
 
 export async function sendEmail(payload: EmailPayload): Promise<void> {
+  try {
+    await enqueueEmailOutbox({
+      to: payload.to,
+      subject: payload.subject,
+      html: payload.html,
+      text: payload.text,
+      userId: payload.userId ?? null,
+      siteId: payload.siteId ?? null,
+      scanRunId: payload.scanRunId ?? null,
+      metadata: payload.metadata ?? null,
+    });
+  } catch (err: unknown) {
+    console.error("Failed to write email outbox entry", err);
+  }
+
   if (!EMAIL_ENABLED) {
     console.log(
       `[email] disabled; would send to=${payload.to} subject="${payload.subject}"`,

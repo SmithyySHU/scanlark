@@ -13,7 +13,7 @@ export interface DbSiteRow {
   last_scheduled_at: Date | null;
   notify_enabled: boolean;
   notify_email: string | null;
-  notify_on: "always" | "issues" | "never";
+  notify_on: "always" | "issues" | "issues_exist" | "new_issues_only" | "never";
   notify_include_csv: boolean;
   notify_only_on_change: boolean;
   notify_include_blocked: boolean;
