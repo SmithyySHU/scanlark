@@ -5,7 +5,11 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
@@ -31,7 +35,10 @@ type SortOption =
   | "status_asc"
   | "status_desc"
   | "recent";
-type NotifyOnOption = "always" | "issues" | "never";
+type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
+type LinkNoteStatus = "open" | "snoozed" | "resolved";
+type FixQueueStatusFilter = LinkNoteStatus | "all";
+type FixQueueView = "results" | "changes" | "fix_queue";
 
 interface Site {
   id: string;
@@ -149,6 +156,62 @@ interface IgnoreRule {
   pattern: string;
   is_enabled: boolean;
   created_at: string;
+}
+
+interface LinkNote {
+  id: string;
+  user_id: string;
+  site_id: string;
+  link_url: string;
+  note: string;
+  status: LinkNoteStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LinkNotesResponse {
+  siteId: string;
+  count: number;
+  notes: LinkNote[];
+}
+
+interface FixQueueItem {
+  link_url: string;
+  change_type: "new_issue" | "outstanding_issue";
+  classification: LinkClassification;
+  status_code: number | null;
+  error_message: string | null;
+  source_pages: string[];
+  ignored: boolean;
+  ignore_reason: string | null;
+  note: {
+    note: string;
+    status: LinkNoteStatus;
+    updated_at: string;
+  } | null;
+}
+
+interface FixQueueResponse {
+  siteId: string;
+  currentRun: {
+    id: string;
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+  baselineRun: {
+    id: string;
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+  summary: {
+    newIssues: number;
+    outstandingIssues: number;
+    totalQueueItems: number;
+    withNotesOpen: number;
+    snoozed: number;
+    resolved: number;
+  };
+  items: FixQueueItem[];
 }
 
 interface ScanLinksResponse {
@@ -272,6 +335,7 @@ interface ScanDiffResponse {
     includeUnchanged: boolean;
     unchangedOnly: boolean;
     unchangedScope: "issues" | "ok" | "all";
+    includeIgnored?: boolean;
     unchangedLimit: number;
     unchangedOffset: number;
     unchangedReturned: number;
@@ -317,6 +381,10 @@ const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const SAMPLE_SITE_URL = "https://example.com";
+const SAMPLE_SITE_NAME = "Sample site";
+const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
+const SITE_NAME_STORAGE_PREFIX = "site_names:";
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -361,6 +429,108 @@ function normalizeTimeInput(value: string | null | undefined) {
   return value;
 }
 
+function getLocalTimeZone() {
+  if (typeof Intl === "undefined") return "local";
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+}
+
+function formatUtcDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function formatLocalDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function parseTimeUtc(timeUtc: string) {
+  const [hours, minutes] = timeUtc.split(":").map((value) => Number(value));
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  return { hours, minutes };
+}
+
+function buildUtcScheduleAnchor(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  const parsed = parseTimeUtc(timeUtc);
+  if (!parsed) return null;
+  const now = new Date();
+  const base = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      parsed.hours,
+      parsed.minutes,
+      0,
+      0,
+    ),
+  );
+  if (frequency === "daily") {
+    if (base.getTime() < now.getTime()) {
+      base.setUTCDate(base.getUTCDate() + 1);
+    }
+    return base;
+  }
+  const targetDay = dayOfWeek ?? 1;
+  const diff = (targetDay - base.getUTCDay() + 7) % 7;
+  base.setUTCDate(base.getUTCDate() + diff);
+  if (base.getTime() < now.getTime()) {
+    base.setUTCDate(base.getUTCDate() + 7);
+  }
+  return base;
+}
+
+function formatScheduleUtcLabel(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  if (frequency === "weekly") {
+    const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
+    return `${dayLabel} ${timeUtc}`;
+  }
+  return timeUtc;
+}
+
+function formatScheduleLocalLabel(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  const anchor = buildUtcScheduleAnchor(frequency, timeUtc, dayOfWeek);
+  if (!anchor) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(anchor);
+}
+
 function runStatusTone(status: string | null | undefined) {
   if (!status) return "neutral";
   if (status === "completed") return "success";
@@ -400,15 +570,66 @@ function formatScheduleSummary(
       ? (WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon")
       : "Daily";
   const nextLabel = formatDate(nextScheduledAt);
+  const localTimeZone = getLocalTimeZone();
+  const localLabel = formatScheduleLocalLabel(frequency, timeUtc, dayOfWeek);
+  const localSuffix =
+    localTimeZone && localTimeZone !== "UTC"
+      ? ` / ${localLabel} (${localTimeZone})`
+      : "";
   return `Auto-scan: ${frequency === "weekly" ? "Weekly" : "Daily"} ${
     frequency === "weekly" ? dayLabel : ""
-  } ${timeUtc} UTC (Next: ${nextLabel})`.replace("  ", " ");
+  } ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`.replace("  ", " ");
 }
 
 function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
   if (!isEnabled || notifyOn === "never") return "Alerts: Disabled";
-  const mode = notifyOn === "issues" ? "Only when issues" : "Always";
-  return `Alerts: Enabled (${mode})`;
+  if (notifyOn === "new_issues_only") return "Alerts: Enabled (New issues)";
+  if (notifyOn === "issues_exist") return "Alerts: Enabled (Issues exist)";
+  return "Alerts: Enabled (Always)";
+}
+
+function normalizeNotifyOn(value: string): NotifyOnOption {
+  if (value === "issues") return "issues_exist";
+  if (value === "new_issues_only") return "new_issues_only";
+  if (value === "issues_exist") return "issues_exist";
+  if (value === "always") return "always";
+  return "never";
+}
+
+function normalizeSitesNotifyOn(sites: Site[]): Site[] {
+  return sites.map((site) => ({
+    ...site,
+    notify_on: normalizeNotifyOn(site.notify_on),
+  }));
+}
+
+function normalizeSiteNotifyOn(site: Site): Site {
+  return {
+    ...site,
+    notify_on: normalizeNotifyOn(site.notify_on),
+  };
+}
+
+function getStorageKey(prefix: string, userId: string) {
+  return `${prefix}${userId}`;
+}
+
+function loadStorageMap(key: string) {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {}
+  return {};
+}
+
+function saveStorageMap(key: string, value: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
 }
 
 function getReportScanRunIdFromLocation() {
@@ -470,9 +691,12 @@ function changeTypeLabel(value: ScanDiffChangeType) {
   return "Removed";
 }
 
-function changeTypeTone(value: ScanDiffChangeType) {
+function changeTypeTone(value: ScanDiffChangeType | "outstanding_issue") {
   if (value === "new_issue") {
     return { bg: "var(--danger)", text: "white" };
+  }
+  if (value === "outstanding_issue") {
+    return { bg: "var(--warning)", text: "var(--text)" };
   }
   if (value === "fixed") {
     return { bg: "var(--success)", text: "white" };
@@ -658,6 +882,14 @@ const App: React.FC = () => {
   const [sitesLoading, setSitesLoading] = useState(false);
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [onboardingSiteUrl, setOnboardingSiteUrl] = useState("");
+  const [onboardingSiteName, setOnboardingSiteName] = useState("");
+  const [onboardingWorking, setOnboardingWorking] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const [onboardingScanRequested, setOnboardingScanRequested] = useState(false);
 
   const [history, setHistory] = useState<ScanRunSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -784,7 +1016,7 @@ const App: React.FC = () => {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyEmail, setNotifyEmail] = useState("");
-  const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("issues");
+  const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("new_issues_only");
   const [notifyIncludeCsv, setNotifyIncludeCsv] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
   const [notifySaving, setNotifySaving] = useState(false);
@@ -796,22 +1028,48 @@ const App: React.FC = () => {
   const [newRuleScope, setNewRuleScope] = useState<"site" | "global">("site");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
-  const [resultsView, setResultsView] = useState<"results" | "changes">(
-    "results",
-  );
+  const [resultsView, setResultsView] = useState<FixQueueView>("results");
   const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
   const [includeUnchanged, setIncludeUnchanged] = useState(false);
   const [unchangedOnly, setUnchangedOnly] = useState(false);
   const [unchangedOffset, setUnchangedOffset] = useState(0);
   const [unchangedLimit] = useState(50);
   const [diffOkTotal, setDiffOkTotal] = useState(0);
+  const [diffIncludeIgnored, setDiffIncludeIgnored] = useState(false);
   const [diffExportFilter, setDiffExportFilter] = useState<
     "all" | "new_issue" | "fixed" | "changed" | "added" | "removed"
   >("all");
+  const [actionMenuOpenId, setActionMenuOpenId] = useState<string | null>(null);
+  const [noteModalOpen, setNoteModalOpen] = useState(false);
+  const [noteTargetUrl, setNoteTargetUrl] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteStatus, setNoteStatus] = useState<LinkNoteStatus>("open");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteDeleting, setNoteDeleting] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [fixQueueIncludeNew, setFixQueueIncludeNew] = useState(true);
+  const [fixQueueIncludeOutstanding, setFixQueueIncludeOutstanding] =
+    useState(true);
+  const [fixQueueIncludeIgnored, setFixQueueIncludeIgnored] = useState(false);
+  const [fixQueueStatus, setFixQueueStatus] =
+    useState<FixQueueStatusFilter>("open");
+  const [fixQueueOffset, setFixQueueOffset] = useState(0);
+  const [fixQueueLimit] = useState(50);
+  const [fixQueueExpanded, setFixQueueExpanded] = useState<
+    Record<string, boolean>
+  >({});
   const [isNarrow, setIsNarrow] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const hasSites = sites.length > 0;
+  const localTimeZone = useMemo(() => getLocalTimeZone(), []);
+  const onboardingStorageKey = authUser
+    ? getStorageKey(ONBOARDING_STORAGE_PREFIX, authUser.id)
+    : null;
+  const siteNamesStorageKey = authUser
+    ? getStorageKey(SITE_NAME_STORAGE_PREFIX, authUser.id)
+    : null;
+  const showLocalTimeZone = localTimeZone && localTimeZone !== "UTC";
 
   useEffect(() => {
     selectedSiteIdRef.current = selectedSiteId;
@@ -824,6 +1082,15 @@ const App: React.FC = () => {
   useEffect(() => {
     activeRunIdRef.current = activeRunId;
   }, [activeRunId]);
+
+  useEffect(() => {
+    if (!siteNamesStorageKey) {
+      setSiteNameById({});
+      return;
+    }
+    const map = loadStorageMap(siteNamesStorageKey);
+    setSiteNameById(map as Record<string, string>);
+  }, [siteNamesStorageKey]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -858,6 +1125,17 @@ const App: React.FC = () => {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [userMenuOpen]);
+
+  useEffect(() => {
+    if (!actionMenuOpenId) return;
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-action-menu]")) return;
+      setActionMenuOpenId(null);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [actionMenuOpenId]);
 
   const pinnedRunId = activeRunId ?? selectedRunId;
 
@@ -1005,6 +1283,12 @@ const App: React.FC = () => {
       searchQuery.trim().length > 0 ||
       minOccurrencesOnly ||
       Object.values(statusFilters).some(Boolean));
+  const hasSecondaryFilters =
+    statusGroup !== "all" ||
+    showIgnored ||
+    searchQuery.trim().length > 0 ||
+    minOccurrencesOnly ||
+    Object.values(statusFilters).some(Boolean);
   const exportDisabled = !selectedRunId;
   const exportLinksDisabled = !selectedRunId;
 
@@ -1078,6 +1362,34 @@ const App: React.FC = () => {
     };
   }, [selectedRun?.id, selectedRun?.status]);
 
+  const linkNotesQuery = useQuery<LinkNotesResponse, Error>({
+    queryKey: ["linkNotes", selectedSiteId],
+    enabled: !!selectedSiteId,
+    queryFn: async () => {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/link-notes?status=all`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Link notes failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as LinkNotesResponse;
+    },
+  });
+  const linkNotes = linkNotesQuery.data?.notes ?? [];
+  const linkNotesByUrl = useMemo(() => {
+    const map = new Map<string, LinkNote>();
+    for (const note of linkNotes) {
+      map.set(note.link_url, note);
+    }
+    return map;
+  }, [linkNotes]);
+
   const diffLimit = 200;
   const diffBaseline = compareRunId ?? "prev";
   const diffQueryEnabled = !!selectedSiteId && !!selectedRunId;
@@ -1092,6 +1404,7 @@ const App: React.FC = () => {
       includeUnchanged,
       unchangedOnly,
       diffExportFilter,
+      diffIncludeIgnored,
       unchangedScope,
       unchangedLimit,
       unchangedOffset,
@@ -1111,6 +1424,7 @@ const App: React.FC = () => {
         unchangedScope,
         unchangedLimit: String(unchangedLimit),
         unchangedOffset: String(unchangedOffset),
+        includeIgnored: diffIncludeIgnored ? "true" : "false",
       });
       if (!unchangedOnly && diffExportFilter !== "all") {
         params.set("changeTypes", diffExportFilter);
@@ -1167,6 +1481,75 @@ const App: React.FC = () => {
   const canPrevUnchanged = includeUnchanged && unchangedOffset > 0;
   const canNextUnchanged =
     includeUnchanged && unchangedOffset + unchangedLimit < outstandingTotal;
+
+  const fixQueueBaseline = compareRunId ?? "prev";
+  const fixQueueRunId =
+    selectedRun?.status === "completed" ? selectedRun.id : null;
+  const fixQueueQuery = useQuery<FixQueueResponse, Error>({
+    queryKey: [
+      "fixQueue",
+      selectedSiteId,
+      fixQueueRunId,
+      fixQueueBaseline,
+      fixQueueIncludeNew,
+      fixQueueIncludeOutstanding,
+      fixQueueIncludeIgnored,
+      fixQueueStatus,
+      fixQueueLimit,
+      fixQueueOffset,
+    ],
+    enabled: !!selectedSiteId,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        baseline: fixQueueBaseline,
+        includeOutstanding: fixQueueIncludeOutstanding ? "true" : "false",
+        includeNew: fixQueueIncludeNew ? "true" : "false",
+        includeIgnored: fixQueueIncludeIgnored ? "true" : "false",
+        status: fixQueueStatus,
+        limit: String(fixQueueLimit),
+        offset: String(fixQueueOffset),
+      });
+      if (fixQueueRunId) {
+        params.set("runId", fixQueueRunId);
+      }
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/fix-queue?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Fix queue failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as FixQueueResponse;
+    },
+  });
+  const fixQueueData = fixQueueQuery.data ?? null;
+  const fixQueueError = fixQueueQuery.error
+    ? getErrorMessage(fixQueueQuery.error, "Failed to load fix queue")
+    : null;
+  const fixQueueLoading = fixQueueQuery.isLoading;
+  const fixQueueItems = fixQueueData?.items ?? [];
+  const fixQueueSummary = fixQueueData?.summary ?? null;
+  const fixQueueHasPrev = fixQueueOffset > 0;
+  const fixQueueHasNext =
+    fixQueueSummary &&
+    fixQueueOffset + fixQueueLimit < fixQueueSummary.totalQueueItems;
+
+  useEffect(() => {
+    setFixQueueOffset(0);
+  }, [
+    fixQueueIncludeNew,
+    fixQueueIncludeOutstanding,
+    fixQueueIncludeIgnored,
+    fixQueueStatus,
+    selectedSiteId,
+    fixQueueRunId,
+    fixQueueBaseline,
+  ]);
   const formatDiffSide = (side: ScanDiffSide | null) => {
     if (!side) return "Missing";
     const status = side.status_code == null ? "—" : side.status_code;
@@ -1178,6 +1561,10 @@ const App: React.FC = () => {
     const currentText = formatDiffSide(item.current);
     const baselinePages: string[] = item.baseline?.source_pages ?? [];
     const currentPages: string[] = item.current?.source_pages ?? [];
+    const note = linkNotesByUrl.get(item.link_url);
+    const hasNote = !!note;
+    const menuId = `diff:${item.change_type}:${item.link_url}`;
+    const menuOpen = actionMenuOpenId === menuId;
     return (
       <div
         key={`${item.change_type}:${item.link_url}`}
@@ -1192,22 +1579,174 @@ const App: React.FC = () => {
       >
         <div
           style={{
-            overflowWrap: "anywhere",
-            wordBreak: "break-word",
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            alignItems: "flex-start",
           }}
         >
-          <a
-            href={item.link_url}
-            target="_blank"
-            rel="noreferrer"
+          <div
             style={{
-              color: "var(--text)",
-              textDecoration: "none",
-              fontWeight: 600,
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+              flex: 1,
             }}
           >
-            {item.link_url}
-          </a>
+            <a
+              href={item.link_url}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                color: "var(--text)",
+                textDecoration: "none",
+                fontWeight: 600,
+              }}
+            >
+              {item.link_url}
+            </a>
+            {hasNote && (
+              <span
+                style={{
+                  marginLeft: "8px",
+                  fontSize: "11px",
+                  padding: "2px 6px",
+                  borderRadius: "999px",
+                  border: "1px solid var(--border)",
+                  color: "var(--muted)",
+                }}
+              >
+                Note
+              </span>
+            )}
+          </div>
+          <div style={{ position: "relative" }} data-action-menu>
+            <button
+              onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+              className="icon-button"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--muted)",
+                padding: "6px",
+              }}
+              aria-label="Open actions"
+              title="Actions"
+              data-no-drawer
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <div
+                className="action-menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  background: "var(--panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  boxShadow: "var(--shadow)",
+                  padding: "6px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                  minWidth: "220px",
+                  zIndex: 40,
+                }}
+              >
+                <button
+                  onClick={() => {
+                    void copyToClipboard(
+                      item.link_url,
+                      undefined,
+                      "Copied link URL",
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Copy Link URL
+                </button>
+                <button
+                  onClick={() => {
+                    window.open(item.link_url, "_blank", "noopener,noreferrer");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Link
+                </button>
+                <button
+                  onClick={() => {
+                    const source = currentPages[0];
+                    if (source) openSourcePage(source);
+                    else pushToast("No source page available", "warning");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Source Page
+                </button>
+                {currentPages.length > 1 && (
+                  <div
+                    style={{
+                      borderTop: "1px solid var(--border)",
+                      paddingTop: "6px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                    }}
+                  >
+                    {currentPages.map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => {
+                          openSourcePage(page);
+                          setActionMenuOpenId(null);
+                        }}
+                        style={{
+                          fontSize: "11px",
+                          textAlign: "left",
+                          color: "var(--muted)",
+                          background: "transparent",
+                          border: "1px solid transparent",
+                          padding: "4px 6px",
+                        }}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    void handleIgnoreLinkByUrl(item.link_url, selectedRunId);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Ignore this link
+                </button>
+                <button
+                  onClick={() => {
+                    openNoteModal(item.link_url);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  {hasNote ? "Edit Note" : "Add Note"}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
         <div>
           <span
@@ -1322,13 +1861,18 @@ const App: React.FC = () => {
     () => sites.find((site) => site.id === selectedSiteId) ?? null,
     [sites, selectedSiteId],
   );
+  const selectedSiteName = selectedSite
+    ? (siteNameById[selectedSite.id] ?? null)
+    : null;
   const resultsTitleCount =
     resultsView === "changes"
       ? diffChangeItems.length +
         (includeUnchanged ? diffUnchangedItems.length : 0)
-      : activeTab === "ignored"
-        ? ignoredResults.length
-        : filteredResults.length;
+      : resultsView === "fix_queue"
+        ? (fixQueueSummary?.totalQueueItems ?? 0)
+        : activeTab === "ignored"
+          ? ignoredResults.length
+          : filteredResults.length;
   const latestRunId = history[0]?.id ?? null;
   const isLatestRun = !!selectedRun && selectedRun.id === latestRunId;
   const runHeadingText = selectedRun
@@ -1338,6 +1882,17 @@ const App: React.FC = () => {
         ? "Last run"
         : "Selected run"
     : "Run summary";
+  const onboardingSteps = [
+    "Add your first site",
+    "Run your first scan",
+    "Review results",
+    "Set a schedule",
+    "Enable alerts",
+  ];
+  const onboardingStepIndex = Math.min(
+    onboardingStep,
+    onboardingSteps.length - 1,
+  );
 
   function markRunProgress(runId: string) {
     setLastProgressAtByRunId((prev) => ({
@@ -1459,6 +2014,9 @@ const App: React.FC = () => {
         queryClient.invalidateQueries({
           queryKey: ["scanDiff", payload.site_id],
         });
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", payload.site_id],
+        });
       }
     }
   }
@@ -1540,12 +2098,51 @@ const App: React.FC = () => {
   }, [authLoading, authUser]);
 
   useEffect(() => {
+    if (!authUser || !onboardingStorageKey) return;
+    if (onboardingOpen) return;
+    if (authLoading || sitesLoading) return;
+    if (sites.length === 0) {
+      const stored = localStorage.getItem(onboardingStorageKey);
+      if (!stored) {
+        setOnboardingStep(0);
+        setOnboardingOpen(true);
+      }
+      return;
+    }
+    if (historyLoading) return;
+    if (history.length === 0) {
+      const stored = localStorage.getItem(onboardingStorageKey);
+      if (!stored) {
+        setOnboardingStep(1);
+        setOnboardingOpen(true);
+      }
+    }
+  }, [
+    authLoading,
+    authUser,
+    history.length,
+    historyLoading,
+    onboardingOpen,
+    onboardingStorageKey,
+    sites.length,
+    sitesLoading,
+  ]);
+
+  useEffect(() => {
     if (authUser) {
       startEventStream();
     } else {
       stopEventStream();
     }
   }, [authUser]);
+
+  useEffect(() => {
+    if (!onboardingOpen || onboardingStep !== 1) return;
+    if (!onboardingScanRequested || !selectedRun) return;
+    if (selectedRun.status === "completed") {
+      setOnboardingStep(2);
+    }
+  }, [onboardingOpen, onboardingScanRequested, onboardingStep, selectedRun]);
 
   useEffect(() => {
     const handleVisibility = () => {
@@ -1770,6 +2367,14 @@ const App: React.FC = () => {
     activeRunIdRef.current = null;
     setDetailsOpen(false);
     setDetailsLinkId(null);
+    setSiteNameById({});
+    setOnboardingOpen(false);
+    setOnboardingStep(0);
+    setOnboardingSiteUrl("");
+    setOnboardingSiteName("");
+    setOnboardingWorking(false);
+    setOnboardingError(null);
+    setOnboardingScanRequested(false);
   }
 
   async function loadMe() {
@@ -1843,6 +2448,43 @@ const App: React.FC = () => {
     }
   }
 
+  function persistSiteName(siteId: string, name: string) {
+    if (!siteNamesStorageKey || !name.trim()) return;
+    setSiteNameById((prev) => {
+      const next = { ...prev, [siteId]: name.trim() };
+      saveStorageMap(siteNamesStorageKey, next);
+      return next;
+    });
+  }
+
+  function clearOnboardingState() {
+    if (!onboardingStorageKey || typeof window === "undefined") return;
+    window.localStorage.removeItem(onboardingStorageKey);
+  }
+
+  function completeOnboarding() {
+    if (onboardingStorageKey && typeof window !== "undefined") {
+      window.localStorage.setItem(
+        onboardingStorageKey,
+        new Date().toISOString(),
+      );
+    }
+    setOnboardingOpen(false);
+    setOnboardingStep(0);
+    setOnboardingScanRequested(false);
+    setOnboardingSiteUrl("");
+    setOnboardingSiteName("");
+    setOnboardingError(null);
+    setOnboardingWorking(false);
+  }
+
+  function openOnboarding(step = 0) {
+    setOnboardingError(null);
+    setOnboardingScanRequested(false);
+    setOnboardingStep(step);
+    setOnboardingOpen(true);
+  }
+
   async function loadSites() {
     setSitesLoading(true);
     setSitesError(null);
@@ -1851,10 +2493,11 @@ const App: React.FC = () => {
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data: SitesResponse = await res.json();
 
-      setSites(data.sites);
+      const normalizedSites = normalizeSitesNotifyOn(data.sites);
+      setSites(normalizedSites);
 
-      if (data.sites.length > 0) {
-        const first = data.sites[0];
+      if (normalizedSites.length > 0) {
+        const first = normalizedSites[0];
         setSelectedSiteId(first.id);
         selectedSiteIdRef.current = first.id;
 
@@ -1898,11 +2541,12 @@ const App: React.FC = () => {
       const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
       if (!res.ok) return;
       const data: SitesResponse = await res.json();
-      setSites(data.sites);
+      const normalizedSites = normalizeSitesNotifyOn(data.sites);
+      setSites(normalizedSites);
 
       const currentId = selectedSiteIdRef.current;
       if (currentId) {
-        const match = data.sites.find((site) => site.id === currentId);
+        const match = normalizedSites.find((site) => site.id === currentId);
         if (match) {
           setStartUrl(match.url);
           return;
@@ -2352,7 +2996,7 @@ const App: React.FC = () => {
     if (!selectedSiteId) {
       setNotifyEnabled(false);
       setNotifyEmail("");
-      setNotifyOn("issues");
+      setNotifyOn("new_issues_only");
       setNotifyIncludeCsv(false);
       setNotifyError(null);
       return;
@@ -2368,8 +3012,8 @@ const App: React.FC = () => {
     const idx = history.findIndex((run) => run.id === selectedRunId);
     const fallback =
       idx >= 0
-        ? history.slice(idx + 1).find((run) => run.status === "completed")?.id ??
-          null
+        ? (history.slice(idx + 1).find((run) => run.status === "completed")
+            ?.id ?? null)
         : null;
     if (fallback && fallback !== compareRunId) {
       setCompareRunId(fallback);
@@ -2391,7 +3035,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     setUnchangedOffset(0);
-  }, [diffExportFilter, compareRunId, selectedRunId]);
+  }, [diffExportFilter, compareRunId, selectedRunId, diffIncludeIgnored]);
 
   useEffect(() => {
     if (!selectedRunId) {
@@ -2410,9 +3054,7 @@ const App: React.FC = () => {
         if (!res.ok) return;
         const data: ScanLinksSummaryResponse = await res.json();
         if (cancelled) return;
-        const okRow = data.summary.find(
-          (row) => row.classification === "ok",
-        );
+        const okRow = data.summary.find((row) => row.classification === "ok");
         setDiffOkTotal(okRow?.count ?? 0);
       } catch {
         if (!cancelled) setDiffOkTotal(0);
@@ -2494,6 +3136,46 @@ const App: React.FC = () => {
     await handleRunScanWithUrl(startUrl);
   }
 
+  async function createSiteRecord(url: string, name?: string) {
+    const res = await apiFetch(`${API_BASE}/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url, name: name?.trim() || undefined }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+      );
+    }
+
+    const data = (await res.json()) as { site: Site };
+    return data.site;
+  }
+
+  function applyCreatedSite(site: Site, name?: string) {
+    const normalized = normalizeSiteNotifyOn(site);
+    setSites((prev) => {
+      const filtered = prev.filter((item) => item.id !== site.id);
+      return [normalized, ...filtered];
+    });
+    setSelectedSiteId(site.id);
+    selectedSiteIdRef.current = site.id;
+    setStartUrl(site.url);
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    setSelectedRunId(null);
+    selectedRunIdRef.current = null;
+    setResults([]);
+    resetOccurrencesState();
+    setHistory([]);
+    void loadHistory(site.id, { preserveSelection: false });
+    if (name) {
+      persistSiteName(site.id, name);
+    }
+  }
+
   function handleNewScanAction() {
     if (!hasSites) {
       setCreateError(null);
@@ -2506,6 +3188,15 @@ const App: React.FC = () => {
       return;
     }
     void handleRunScan();
+  }
+
+  function openFixQueue() {
+    setResultsView("fix_queue");
+    setFixQueueIncludeNew(true);
+    setFixQueueIncludeOutstanding(true);
+    setFixQueueIncludeIgnored(false);
+    setFixQueueStatus("open");
+    setFixQueueOffset(0);
   }
 
   async function handleCancelScan() {
@@ -2541,21 +3232,9 @@ const App: React.FC = () => {
     setCreatingSite(true);
     setCreateError(null);
     try {
-      const res = await apiFetch(`${API_BASE}/sites`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(
-          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
-      }
-
+      const site = await createSiteRecord(url);
+      applyCreatedSite(site);
       setNewSiteUrl("");
-      await loadSites();
       setAddSiteOpen(false);
       pushToast("Site added", "success");
     } catch (err: unknown) {
@@ -2563,6 +3242,67 @@ const App: React.FC = () => {
     } finally {
       setCreatingSite(false);
     }
+  }
+
+  async function handleCreateSampleSite() {
+    const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+    if (existing) {
+      await handleSelectSite(existing);
+      return;
+    }
+    try {
+      setCreatingSite(true);
+      const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+      applyCreatedSite(site, SAMPLE_SITE_NAME);
+      pushToast("Sample site added", "success");
+    } catch (err: unknown) {
+      setCreateError(getErrorMessage(err, "Failed to add sample site"));
+    } finally {
+      setCreatingSite(false);
+    }
+  }
+
+  async function handleOnboardingCreateSite() {
+    const url = onboardingSiteUrl.trim();
+    if (!url) return;
+    setOnboardingWorking(true);
+    setOnboardingError(null);
+    try {
+      const site = await createSiteRecord(url, onboardingSiteName);
+      applyCreatedSite(site, onboardingSiteName);
+      setOnboardingSiteUrl("");
+      setOnboardingSiteName("");
+      setOnboardingStep(1);
+    } catch (err: unknown) {
+      setOnboardingError(getErrorMessage(err, "Failed to create site"));
+    } finally {
+      setOnboardingWorking(false);
+    }
+  }
+
+  async function handleOnboardingSampleSite() {
+    setOnboardingWorking(true);
+    setOnboardingError(null);
+    try {
+      const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+      if (existing) {
+        await handleSelectSite(existing);
+      } else {
+        const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+        applyCreatedSite(site, SAMPLE_SITE_NAME);
+      }
+      setOnboardingStep(1);
+    } catch (err: unknown) {
+      setOnboardingError(getErrorMessage(err, "Failed to add sample site"));
+    } finally {
+      setOnboardingWorking(false);
+    }
+  }
+
+  async function handleOnboardingRunScan() {
+    if (!selectedSiteId) return;
+    setOnboardingScanRequested(true);
+    await handleRunScan();
   }
 
   async function handleDeleteSite(siteId: string) {
@@ -2708,7 +3448,7 @@ const App: React.FC = () => {
       };
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
-      setNotifyOn(data.notifyOn);
+      setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
     } catch (err: unknown) {
       setNotifyError(
@@ -2760,7 +3500,7 @@ const App: React.FC = () => {
 
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
-      setNotifyOn(data.notifyOn);
+      setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
 
       setSites((prev) =>
@@ -2770,7 +3510,7 @@ const App: React.FC = () => {
                 ...site,
                 notify_enabled: data.notifyEnabled,
                 notify_email: data.notifyEmail,
-                notify_on: data.notifyOn,
+                notify_on: normalizeNotifyOn(data.notifyOn),
                 notify_include_csv: data.notifyIncludeCsv,
               }
             : site,
@@ -2797,13 +3537,13 @@ const App: React.FC = () => {
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(
-          `Test email failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+          `Test alert failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
         );
       }
-      pushToast("Test email sent", "success");
+      pushToast("Test alert generated", "success");
     } catch (err: unknown) {
-      setNotifyError(getErrorMessage(err, "Failed to send test email"));
-      pushToast(getErrorMessage(err, "Failed to send test email"), "warning");
+      setNotifyError(getErrorMessage(err, "Failed to send test alert"));
+      pushToast(getErrorMessage(err, "Failed to send test alert"), "warning");
     } finally {
       setNotifyTestSending(false);
     }
@@ -2884,6 +3624,150 @@ const App: React.FC = () => {
       pushToast(toastMessage, "success");
     } catch (err) {
       pushToast("Copy failed", "warning");
+    }
+  }
+
+  function openNoteModal(linkUrl: string) {
+    const existing = linkNotesByUrl.get(linkUrl);
+    setNoteTargetUrl(linkUrl);
+    setNoteDraft(existing?.note ?? "");
+    setNoteStatus(existing?.status ?? "open");
+    setNoteError(null);
+    setNoteModalOpen(true);
+  }
+
+  async function handleSaveNote() {
+    if (!selectedSiteId || !noteTargetUrl) return;
+    if (!noteDraft.trim()) {
+      setNoteError("Note cannot be empty.");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            link_url: noteTargetUrl,
+            note: noteDraft.trim(),
+            status: noteStatus,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Save failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setNoteModalOpen(false);
+      setNoteTargetUrl(null);
+      setNoteDraft("");
+      queryClient.invalidateQueries({
+        queryKey: ["linkNotes", selectedSiteId],
+      });
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Note saved", "success");
+    } catch (err: unknown) {
+      setNoteError(getErrorMessage(err, "Failed to save note"));
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
+  async function handleDeleteNote() {
+    if (!selectedSiteId || !noteTargetUrl) return;
+    setNoteDeleting(true);
+    setNoteError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ link_url: noteTargetUrl }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Delete failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setNoteModalOpen(false);
+      setNoteTargetUrl(null);
+      setNoteDraft("");
+      queryClient.invalidateQueries({
+        queryKey: ["linkNotes", selectedSiteId],
+      });
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Note deleted", "info");
+    } catch (err: unknown) {
+      setNoteError(getErrorMessage(err, "Failed to delete note"));
+    } finally {
+      setNoteDeleting(false);
+    }
+  }
+
+  async function handleIgnoreLinkByUrl(linkUrl: string, runId?: string | null) {
+    const targetRunId = runId ?? selectedRunId;
+    if (!targetRunId) return;
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(
+          targetRunId,
+        )}/links/${encodeURIComponent(linkUrl)}/ignore`,
+        {
+          method: "POST",
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      if (selectedRunId && selectedRunId === targetRunId) {
+        await loadResults(selectedRunId);
+        await loadIgnoredResults(selectedRunId);
+      }
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Ignored link", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
+    }
+  }
+
+  function openSourcePage(url: string) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function openFirstSourceForResult(row: ScanLink) {
+    const existing = occurrencesByLinkId[row.id] ?? [];
+    if (existing.length > 0) {
+      openSourcePage(existing[0].source_page);
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to fetch source page: ${res.status}`);
+      }
+      const data = (await res.json()) as ScanLinkOccurrencesResponse;
+      const first = data.occurrences?.[0];
+      if (first?.source_page) {
+        openSourcePage(first.source_page);
+      } else {
+        pushToast("No source page available", "warning");
+      }
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to open source page"), "warning");
     }
   }
 
@@ -3078,6 +3962,11 @@ const App: React.FC = () => {
         await loadResults(selectedRunId);
         await loadIgnoredResults(selectedRunId);
       }
+      if (selectedSiteId) {
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", selectedSiteId],
+        });
+      }
       pushToast("Ignored link", "info");
     } catch (err: unknown) {
       if (selectedRunId) {
@@ -3122,6 +4011,11 @@ const App: React.FC = () => {
         rule?: IgnoreRule;
       };
       await loadResults(selectedRunId);
+      if (selectedSiteId) {
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", selectedSiteId],
+        });
+      }
       pushToast("Link ignored", "info", {
         label: "Undo",
         onClick: () => {
@@ -3148,6 +4042,11 @@ const App: React.FC = () => {
                 }
               }
               await loadResults(selectedRunId);
+              if (selectedSiteId) {
+                queryClient.invalidateQueries({
+                  queryKey: ["fixQueue", selectedSiteId],
+                });
+              }
               pushToast("Ignore undone", "success");
             } catch (err: unknown) {
               pushToast(
@@ -3193,6 +4092,7 @@ const App: React.FC = () => {
         baseline: diffBaseline,
         issuesOnly: diffIssuesOnly ? "true" : "false",
         exportScope: "all",
+        includeIgnored: diffIncludeIgnored ? "true" : "false",
       });
       if (diffExportFilter !== "all") {
         params.set("changeTypes", diffExportFilter);
@@ -3271,6 +4171,9 @@ const App: React.FC = () => {
         method: "POST",
       },
     );
+    if (selectedSiteId) {
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+    }
   }
 
   async function handleCreateIgnoreRule() {
@@ -3516,6 +4419,13 @@ const App: React.FC = () => {
     openDetails(row);
   }
 
+  function toggleFixQueueExpanded(linkUrl: string) {
+    setFixQueueExpanded((prev) => ({
+      ...prev,
+      [linkUrl]: !prev[linkUrl],
+    }));
+  }
+
   type LinkRowTheme = {
     accent: string;
     border: string;
@@ -3531,8 +4441,14 @@ const App: React.FC = () => {
     return rows.map((row) => {
       const theme = themeForRow(row);
       const linkCopyKey = `link:${row.id}`;
-      const sourceCopyKey = `source:${row.id}`;
       const host = safeHost(row.link_url);
+      const note = linkNotesByUrl.get(row.link_url);
+      const hasNote = !!note;
+      const sourcePages = (occurrencesByLinkId[row.id] ?? []).map(
+        (occ) => occ.source_page,
+      );
+      const menuId = `result:${row.id}`;
+      const menuOpen = actionMenuOpenId === menuId;
       const statusChipBg =
         row.status_code == null
           ? "var(--border)"
@@ -3576,6 +4492,20 @@ const App: React.FC = () => {
             </div>
             <div className="result-meta">
               {row.error_message ? row.error_message : "Tap for details"}
+              {hasNote && (
+                <span
+                  style={{
+                    marginLeft: "8px",
+                    fontSize: "11px",
+                    padding: "2px 6px",
+                    borderRadius: "999px",
+                    border: "1px solid var(--border)",
+                    color: "var(--muted)",
+                  }}
+                >
+                  Note
+                </span>
+              )}
             </div>
           </div>
           <div className="result-cell result-status">
@@ -3600,119 +4530,147 @@ const App: React.FC = () => {
               {row.occurrence_count === 1 ? "occurrence" : "occurrences"}
             </div>
           </div>
-          <div className="result-cell result-actions row-actions">
-            <button
-              onClick={() => copyToClipboard(row.link_url, linkCopyKey)}
-              className="icon-button"
-              style={{
-                borderColor: theme.copyBorder,
-                color: theme.copyColor,
-              }}
-              data-no-drawer
-              aria-label="Copy link"
-              title="Copy link"
+          <div
+            className="result-cell result-actions row-actions"
+            data-no-drawer
+          >
+            <div
+              style={{ position: "relative", display: "inline-flex" }}
+              data-action-menu
             >
-              <svg
-                viewBox="0 0 24 24"
-                width="14"
-                height="14"
-                aria-hidden="true"
+              <button
+                onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+                className="icon-button"
+                style={{
+                  borderColor: theme.copyBorder,
+                  color: theme.copyColor,
+                  padding: "6px",
+                }}
+                aria-label="Open actions"
+                title="Actions"
               >
-                <rect
-                  x="9"
-                  y="9"
-                  width="10"
-                  height="10"
-                  rx="2"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-                <rect
-                  x="5"
-                  y="5"
-                  width="10"
-                  height="10"
-                  rx="2"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={() =>
-                window.open(row.link_url, "_blank", "noopener,noreferrer")
-              }
-              className="icon-button"
-              style={{
-                borderColor: theme.copyBorder,
-                color: theme.copyColor,
-              }}
-              data-no-drawer
-              aria-label="Open link"
-              title="Open link"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="14"
-                height="14"
-                aria-hidden="true"
-              >
-                <path
-                  d="M9 5h10v10"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-                <path
-                  d="M19 5l-9 9"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-                <path
-                  d="M5 9v10h10"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-              </svg>
-            </button>
-            <button
-              onClick={() => handleIgnoreLink(row, "site_rule_exact")}
-              className="icon-button"
-              style={{
-                borderColor: theme.copyBorder,
-                color: theme.copyColor,
-              }}
-              data-no-drawer
-              disabled={row.ignored}
-              aria-label="Ignore link"
-              title={row.ignored ? "Already ignored" : "Ignore link"}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="14"
-                height="14"
-                aria-hidden="true"
-              >
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="9"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-                <path
-                  d="M7 7l10 10"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-              </svg>
-            </button>
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
+                >
+                  <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                  <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                  <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+                </svg>
+              </button>
+              {menuOpen && (
+                <div
+                  className="action-menu"
+                  style={{
+                    position: "absolute",
+                    right: 0,
+                    top: "calc(100% + 6px)",
+                    background: "var(--panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "12px",
+                    boxShadow: "var(--shadow)",
+                    padding: "6px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "4px",
+                    minWidth: "220px",
+                    zIndex: 40,
+                  }}
+                >
+                  <button
+                    onClick={() => {
+                      void copyToClipboard(
+                        row.link_url,
+                        linkCopyKey,
+                        "Copied link URL",
+                      );
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Copy Link URL
+                  </button>
+                  <button
+                    onClick={() => {
+                      window.open(
+                        row.link_url,
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Open Link
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (sourcePages.length > 0) {
+                        openSourcePage(sourcePages[0]);
+                      } else {
+                        void openFirstSourceForResult(row);
+                      }
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Open Source Page
+                  </button>
+                  {sourcePages.length > 1 && (
+                    <div
+                      style={{
+                        borderTop: "1px solid var(--border)",
+                        paddingTop: "6px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                      }}
+                    >
+                      {sourcePages.map((page) => (
+                        <button
+                          key={page}
+                          onClick={() => {
+                            openSourcePage(page);
+                            setActionMenuOpenId(null);
+                          }}
+                          style={{
+                            fontSize: "11px",
+                            textAlign: "left",
+                            color: "var(--muted)",
+                            background: "transparent",
+                            border: "1px solid transparent",
+                            padding: "4px 6px",
+                          }}
+                        >
+                          {page}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => {
+                      handleIgnoreLink(row, "site_rule_exact");
+                      setActionMenuOpenId(null);
+                    }}
+                    disabled={row.ignored}
+                    data-no-drawer
+                  >
+                    {row.ignored ? "Ignored" : "Ignore this link"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      openNoteModal(row.link_url);
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    {hasNote ? "Edit Note" : "Add Note"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -3751,6 +4709,287 @@ const App: React.FC = () => {
     panelBg: "var(--panel-elev)",
   };
 
+  const themeForClassification = (classification: LinkClassification) => {
+    if (classification === "blocked") return blockedTheme;
+    if (classification === "ok") return okTheme;
+    if (classification === "no_response") return noResponseTheme;
+    return brokenTheme;
+  };
+
+  const renderFixQueueRow = (item: FixQueueItem) => {
+    const theme = themeForClassification(item.classification);
+    const tone = changeTypeTone(item.change_type);
+    const statusChipBg =
+      item.status_code == null
+        ? "var(--border)"
+        : item.status_code >= 500
+          ? "var(--danger)"
+          : item.status_code === 404 || item.status_code === 410
+            ? "var(--danger)"
+            : item.status_code === 401 ||
+                item.status_code === 403 ||
+                item.status_code === 429
+              ? "var(--warning)"
+              : "var(--success)";
+    const statusChipText = item.status_code == null ? "var(--muted)" : "white";
+    const menuId = `fix:${item.change_type}:${item.link_url}`;
+    const menuOpen = actionMenuOpenId === menuId;
+    const isExpanded = !!fixQueueExpanded[item.link_url];
+    const noteSnippet =
+      item.note?.note && item.note.note.length > 120
+        ? `${item.note.note.slice(0, 120)}…`
+        : (item.note?.note ?? null);
+
+    return (
+      <div
+        key={`${item.change_type}:${item.link_url}`}
+        className="result-row"
+        style={{
+          borderLeft: `3px solid ${theme.border}`,
+          background: theme.panelBg,
+          boxShadow: "var(--soft-shadow)",
+          opacity: item.ignored ? 0.6 : 1,
+          margin: "10px 16px",
+        }}
+      >
+        <div className="result-cell result-link">
+          <div className="result-host">{safeHost(item.link_url)}</div>
+          <div className="result-url" title={item.link_url}>
+            {item.link_url}
+          </div>
+          <div className="result-meta">
+            {item.error_message || "Focus this link in your queue"}
+            {noteSnippet && (
+              <>
+                <span
+                  style={{
+                    marginLeft: "8px",
+                    fontSize: "11px",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {noteSnippet}
+                </span>
+                <span
+                  style={{
+                    marginLeft: "6px",
+                    fontSize: "11px",
+                    padding: "2px 6px",
+                    borderRadius: "999px",
+                    border: "1px solid var(--border)",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {item.note?.status === "resolved"
+                    ? "Resolved"
+                    : item.note?.status === "snoozed"
+                      ? "Snoozed"
+                      : "Note"}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="result-cell result-status">
+          <span
+            className="status-chip"
+            style={{ background: statusChipBg, color: statusChipText }}
+          >
+            {item.status_code ?? "No response"}
+          </span>
+          <span
+            className="status-chip subtle"
+            style={{ borderColor: theme.border }}
+          >
+            {formatClassification(item.classification)}
+          </span>
+          <span
+            className="status-chip"
+            style={{ background: tone.bg, color: tone.text }}
+          >
+            {item.change_type === "new_issue" ? "New" : "Outstanding"}
+          </span>
+          {item.ignored && <span className="status-chip subtle">Ignored</span>}
+        </div>
+        <div className="result-cell result-occ">
+          <div className="occ-count">{item.source_pages.length}</div>
+          <div className="occ-label">
+            {item.source_pages.length === 1 ? "source page" : "source pages"}
+          </div>
+          {item.source_pages.length > 0 && (
+            <button
+              onClick={() => toggleFixQueueExpanded(item.link_url)}
+              className="tab-pill"
+              style={{ marginTop: "6px" }}
+              data-no-drawer
+            >
+              {isExpanded ? "Hide sources" : "Show sources"}
+            </button>
+          )}
+        </div>
+        <div className="result-cell result-actions row-actions" data-no-drawer>
+          <div style={{ position: "relative" }} data-action-menu>
+            <button
+              onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+              className="icon-button"
+              style={{
+                borderColor: theme.copyBorder,
+                color: theme.copyColor,
+                padding: "6px",
+              }}
+              aria-label="Open actions"
+              title="Actions"
+              data-no-drawer
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <div
+                className="action-menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  background: "var(--panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  boxShadow: "var(--shadow)",
+                  padding: "6px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                  minWidth: "220px",
+                  zIndex: 40,
+                }}
+              >
+                <button
+                  onClick={() => {
+                    void copyToClipboard(
+                      item.link_url,
+                      undefined,
+                      "Copied link URL",
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Copy Link URL
+                </button>
+                <button
+                  onClick={() => {
+                    window.open(item.link_url, "_blank", "noopener,noreferrer");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Link
+                </button>
+                <button
+                  onClick={() => {
+                    const source = item.source_pages[0];
+                    if (source) openSourcePage(source);
+                    else pushToast("No source page available", "warning");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Source Page
+                </button>
+                {item.source_pages.length > 1 && (
+                  <div
+                    style={{
+                      borderTop: "1px solid var(--border)",
+                      paddingTop: "6px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                    }}
+                  >
+                    {item.source_pages.map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => {
+                          openSourcePage(page);
+                          setActionMenuOpenId(null);
+                        }}
+                        style={{
+                          fontSize: "11px",
+                          textAlign: "left",
+                          color: "var(--muted)",
+                          background: "transparent",
+                          border: "1px solid transparent",
+                          padding: "4px 6px",
+                        }}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    void handleIgnoreLinkByUrl(
+                      item.link_url,
+                      fixQueueData?.currentRun?.id ?? null,
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Ignore this link
+                </button>
+                <button
+                  onClick={() => {
+                    openNoteModal(item.link_url);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  {item.note ? "Edit Note" : "Add Note"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        {isExpanded && item.source_pages.length > 0 && (
+          <div
+            className="expand-panel"
+            style={{
+              padding: "10px 12px",
+              margin: "0 12px 12px",
+              border: "1px solid var(--border)",
+              borderRadius: "10px",
+              background: "var(--panel)",
+              boxShadow: "var(--soft-shadow)",
+            }}
+          >
+            {item.source_pages.map((page) => (
+              <div
+                key={page}
+                style={{
+                  fontSize: "12px",
+                  color: "var(--muted)",
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {page}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const selectedOccurrences = useMemo(() => {
     if (!selectedLink) return [];
     return occurrencesByLinkId[selectedLink.id] ?? [];
@@ -3770,6 +5009,9 @@ const App: React.FC = () => {
     : false;
   const showOccurrencesSkeleton =
     selectedOccurrencesLoading && selectedOccurrences.length === 0;
+  const noteExisting = noteTargetUrl
+    ? (linkNotesByUrl.get(noteTargetUrl) ?? null)
+    : null;
 
   return (
     <div
@@ -4651,6 +5893,24 @@ const App: React.FC = () => {
           background: var(--surface-2);
           border-color: var(--border);
         }
+        .action-menu button {
+          width: 100%;
+          text-align: left;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .action-menu button:hover {
+          background: var(--surface-2);
+        }
+        .action-menu button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
         .filter-dropdown__panel {
           position: absolute;
           top: calc(100% + 8px);
@@ -5444,6 +6704,47 @@ const App: React.FC = () => {
                             background: "var(--border)",
                           }}
                         />
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--muted)",
+                            padding: "4px 8px",
+                          }}
+                        >
+                          Help
+                        </div>
+                        <button
+                          onClick={() => {
+                            openOnboarding(0);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Run onboarding
+                        </button>
+                        <button
+                          onClick={() => {
+                            clearOnboardingState();
+                            openOnboarding(0);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Reset onboarding
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShortcutsOpen(true);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Keyboard shortcuts
+                        </button>
+                        <div
+                          style={{
+                            height: "1px",
+                            margin: "6px 0",
+                            background: "var(--border)",
+                          }}
+                        />
                         <button onClick={() => void handleLogout()}>
                           Logout
                         </button>
@@ -5632,8 +6933,30 @@ const App: React.FC = () => {
                                   whiteSpace: "nowrap",
                                 }}
                               >
-                                {site.url}
+                                {siteNameById[site.id] ?? site.url}
                               </div>
+                              {siteNameById[site.id] && (
+                                <div
+                                  style={{
+                                    fontSize: "11px",
+                                    color: "var(--muted)",
+                                    marginTop: "2px",
+                                  }}
+                                >
+                                  {site.url}
+                                </div>
+                              )}
+                              {site.url === SAMPLE_SITE_URL && (
+                                <div
+                                  style={{
+                                    fontSize: "10px",
+                                    color: "var(--muted)",
+                                    marginTop: "2px",
+                                  }}
+                                >
+                                  Sample site
+                                </div>
+                              )}
                               <div
                                 style={{
                                   fontSize: "11px",
@@ -5676,9 +6999,50 @@ const App: React.FC = () => {
                       })}
                       {!sitesLoading && filteredSites.length === 0 && (
                         <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                          style={{
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                          }}
                         >
-                          No sites match.
+                          {sites.length === 0 && !siteSearch.trim()
+                            ? "No sites yet."
+                            : "No sites match."}
+                          {sites.length === 0 && !siteSearch.trim() && (
+                            <div style={{ display: "flex", gap: "8px" }}>
+                              <button
+                                onClick={() => {
+                                  setCreateError(null);
+                                  setAddSiteOpen(true);
+                                }}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Add site
+                              </button>
+                              <button
+                                onClick={() => void handleCreateSampleSite()}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Try sample
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -5839,9 +7203,49 @@ const App: React.FC = () => {
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
-                            Next run:{" "}
-                            {formatDate(selectedSite.next_scheduled_at)}
+                            Time (UTC):{" "}
+                            {formatScheduleUtcLabel(
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                            )}
                           </div>
+                          {showLocalTimeZone && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Your time:{" "}
+                              {formatScheduleLocalLabel(
+                                scheduleFrequency,
+                                scheduleTimeUtc,
+                                scheduleDayOfWeek,
+                              )}{" "}
+                              ({localTimeZone})
+                            </div>
+                          )}
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Next run (UTC):{" "}
+                            {formatUtcDateTime(selectedSite.next_scheduled_at)}
+                          </div>
+                          {showLocalTimeZone && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Next run (local):{" "}
+                              {formatLocalDateTime(
+                                selectedSite.next_scheduled_at,
+                              )}{" "}
+                              ({localTimeZone})
+                            </div>
+                          )}
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
@@ -5972,8 +7376,13 @@ const App: React.FC = () => {
                                 color: "var(--text)",
                               }}
                             >
+                              <option value="new_issues_only">
+                                Only when NEW issues appear
+                              </option>
+                              <option value="issues_exist">
+                                Only when issues exist
+                              </option>
                               <option value="always">Always</option>
-                              <option value="issues">Only when issues</option>
                               <option value="never">Never</option>
                             </select>
                           </label>
@@ -6063,8 +7472,6 @@ const App: React.FC = () => {
                               disabled={
                                 notifyTestSending ||
                                 !notifyEmail.trim() ||
-                                !notifyEnabled ||
-                                notifyOn === "never" ||
                                 notifyLoading
                               }
                               style={{
@@ -6087,7 +7494,7 @@ const App: React.FC = () => {
                             >
                               {notifyTestSending
                                 ? "Sending..."
-                                : "Send test email"}
+                                : "Send test alert"}
                             </button>
                           </div>
                         </>
@@ -6217,7 +7624,8 @@ const App: React.FC = () => {
                                 }}
                               >
                                 <div style={{ marginBottom: "6px" }}>
-                                  No scans yet.
+                                  No scans yet. Run your first scan to see what
+                                  Scanlark finds (usually a minute or two).
                                 </div>
                                 <button
                                   onClick={handleRunScan}
@@ -6271,7 +7679,8 @@ const App: React.FC = () => {
                         fontFamily: "var(--font-display)",
                       }}
                     >
-                      {startUrl ? safeHost(startUrl) : "No site selected"}
+                      {selectedSiteName ??
+                        (startUrl ? safeHost(startUrl) : "No site selected")}
                     </div>
                     <div
                       style={{
@@ -6424,13 +7833,19 @@ const App: React.FC = () => {
                         marginBottom: "8px",
                       }}
                     >
-                      Add your first site to start scanning
+                      Add your first site
                     </div>
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Scanlark monitors your URLs, detects broken links, and
-                      highlights blocked or timed-out requests.
+                      Scan for broken links, track changes, and get alerts.
                     </div>
-                    <div style={{ marginTop: "16px" }}>
+                    <div
+                      style={{
+                        marginTop: "16px",
+                        display: "flex",
+                        gap: "10px",
+                        flexWrap: "wrap",
+                      }}
+                    >
                       <button
                         onClick={() => {
                           setCreateError(null);
@@ -6447,7 +7862,21 @@ const App: React.FC = () => {
                           cursor: "pointer",
                         }}
                       >
-                        Add a site
+                        Add site
+                      </button>
+                      <button
+                        onClick={() => void handleCreateSampleSite()}
+                        style={{
+                          padding: "8px 14px",
+                          borderRadius: "999px",
+                          border: "1px solid var(--border)",
+                          background: "var(--panel)",
+                          color: "var(--text)",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Try sample site
                       </button>
                     </div>
                   </div>
@@ -6632,9 +8061,7 @@ const App: React.FC = () => {
                             <span>
                               Outstanding issues {diffSummary.outstandingIssues}
                             </span>
-                            {!diffIssuesOnly && (
-                              <span>OK {diffOkTotal}</span>
-                            )}
+                            {!diffIssuesOnly && <span>OK {diffOkTotal}</span>}
                             {!diffIssuesOnly && (
                               <span>Added {diffSummary.added}</span>
                             )}
@@ -6687,6 +8114,22 @@ const App: React.FC = () => {
                                   </>
                                 ) : (
                                   "No previous scan to compare yet."
+                                )
+                              ) : resultsView === "fix_queue" ? (
+                                fixQueueSummary ? (
+                                  <>
+                                    New {fixQueueSummary.newIssues} •
+                                    Outstanding{" "}
+                                    {fixQueueSummary.outstandingIssues} • Total{" "}
+                                    {fixQueueSummary.totalQueueItems}
+                                  </>
+                                ) : fixQueueLoading ? (
+                                  <div
+                                    className="skeleton"
+                                    style={{ height: "16px", width: "260px" }}
+                                  />
+                                ) : (
+                                  "No fix queue items yet."
                                 )
                               ) : resultsLoading ? (
                                 <div
@@ -6743,31 +8186,37 @@ const App: React.FC = () => {
                             >
                               Changes
                             </button>
+                            <button
+                              className={`tab-pill ${resultsView === "fix_queue" ? "active" : ""}`}
+                              onClick={() => setResultsView("fix_queue")}
+                            >
+                              Fix Queue
+                            </button>
                             {resultsView === "results" &&
-                              ((
-                              [
-                                "all",
-                                "broken",
-                                "blocked",
-                                "no_response",
-                                "ok",
-                                "ignored",
-                              ] as const
-                            ).map((tab) => (
-                              <button
-                                key={tab}
-                                className={`tab-pill ${activeTab === tab ? "active" : ""}`}
-                                onClick={() => setActiveTab(tab)}
-                              >
-                                {tab === "ok"
-                                  ? "OK"
-                                  : tab === "no_response"
-                                    ? "No response"
-                                    : tab === "ignored"
-                                      ? "Ignored"
-                                      : tab[0].toUpperCase() + tab.slice(1)}
-                              </button>
-                            )))}
+                              (
+                                [
+                                  "all",
+                                  "broken",
+                                  "blocked",
+                                  "no_response",
+                                  "ok",
+                                  "ignored",
+                                ] as const
+                              ).map((tab) => (
+                                <button
+                                  key={tab}
+                                  className={`tab-pill ${activeTab === tab ? "active" : ""}`}
+                                  onClick={() => setActiveTab(tab)}
+                                >
+                                  {tab === "ok"
+                                    ? "OK"
+                                    : tab === "no_response"
+                                      ? "No response"
+                                      : tab === "ignored"
+                                        ? "Ignored"
+                                        : tab[0].toUpperCase() + tab.slice(1)}
+                                </button>
+                              ))}
                           </div>
                           <div className="results-controls">
                             {resultsView === "results" ? (
@@ -7020,7 +8469,7 @@ const App: React.FC = () => {
                                   )}
                                 </div>
                               </>
-                            ) : (
+                            ) : resultsView === "changes" ? (
                               <>
                                 <button
                                   onClick={() =>
@@ -7039,6 +8488,14 @@ const App: React.FC = () => {
                                 >
                                   Include unchanged
                                 </button>
+                                <button
+                                  onClick={() =>
+                                    setDiffIncludeIgnored((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${diffIncludeIgnored ? "active" : ""}`}
+                                >
+                                  Include ignored
+                                </button>
                                 <select
                                   value={diffExportFilter}
                                   onChange={(e) =>
@@ -7054,7 +8511,9 @@ const App: React.FC = () => {
                                   }
                                 >
                                   <option value="all">All changes</option>
-                                  <option value="new_issue">New issues only</option>
+                                  <option value="new_issue">
+                                    New issues only
+                                  </option>
                                   <option value="fixed">Fixed only</option>
                                   <option value="changed">Changed only</option>
                                   <option value="added">Added only</option>
@@ -7091,6 +8550,172 @@ const App: React.FC = () => {
                                   History
                                 </button>
                               </>
+                            ) : resultsView === "fix_queue" ? (
+                              <>
+                                <div
+                                  className="changes-summary"
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "8px",
+                                    padding: "12px 16px 0",
+                                  }}
+                                >
+                                  {fixQueueSummary && (
+                                    <>
+                                      <span className="summary-chip">
+                                        New issues {fixQueueSummary.newIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Outstanding{" "}
+                                        {fixQueueSummary.outstandingIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Total {fixQueueSummary.totalQueueItems}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Notes open{" "}
+                                        {fixQueueSummary.withNotesOpen}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Snoozed {fixQueueSummary.snoozed}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Resolved {fixQueueSummary.resolved}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                                {fixQueueData &&
+                                  !fixQueueData.baselineRun &&
+                                  fixQueueData.currentRun && (
+                                    <div
+                                      style={{
+                                        padding: "10px 12px",
+                                        borderRadius: "10px",
+                                        border: "1px dashed var(--border)",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No baseline yet. Showing current issues as
+                                      outstanding.
+                                    </div>
+                                  )}
+                                <div className="results-header">
+                                  <div>Link</div>
+                                  <div>Status</div>
+                                  <div>Source pages</div>
+                                  <div>Actions</div>
+                                </div>
+                                {fixQueueError && (
+                                  <div
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "10px",
+                                      border: "1px solid var(--border)",
+                                      color: "var(--warning)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    {fixQueueError}
+                                  </div>
+                                )}
+                                {fixQueueLoading &&
+                                  Array.from({ length: 5 }).map((_, idx) => (
+                                    <div key={idx} className="skeleton" />
+                                  ))}
+                                {!fixQueueLoading &&
+                                  fixQueueItems.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No queue items match these filters.
+                                    </div>
+                                  )}
+                                {fixQueueItems.map(renderFixQueueRow)}
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(true);
+                                      setFixQueueIncludeOutstanding(true);
+                                    }}
+                                    className={`tab-pill ${fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    New + Outstanding
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(true);
+                                      setFixQueueIncludeOutstanding(false);
+                                    }}
+                                    className={`tab-pill ${fixQueueIncludeNew && !fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    New only
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(false);
+                                      setFixQueueIncludeOutstanding(true);
+                                    }}
+                                    className={`tab-pill ${!fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    Outstanding only
+                                  </button>
+                                </div>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  {(
+                                    [
+                                      "open",
+                                      "snoozed",
+                                      "resolved",
+                                      "all",
+                                    ] as const
+                                  ).map((status) => (
+                                    <button
+                                      key={status}
+                                      onClick={() => setFixQueueStatus(status)}
+                                      className={`tab-pill ${fixQueueStatus === status ? "active" : ""}`}
+                                    >
+                                      {status === "open"
+                                        ? "Open"
+                                        : status === "snoozed"
+                                          ? "Snoozed"
+                                          : status === "resolved"
+                                            ? "Resolved"
+                                            : "All"}
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  onClick={() =>
+                                    setFixQueueIncludeIgnored((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${fixQueueIncludeIgnored ? "active" : ""}`}
+                                >
+                                  {fixQueueIncludeIgnored
+                                    ? "Including ignored"
+                                    : "Exclude ignored"}
+                                </button>
+                                <span
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  Sorted by severity
+                                </span>
+                              </>
                             )}
                           </div>
                         </div>
@@ -7104,11 +8729,19 @@ const App: React.FC = () => {
                         <div className="results-title">
                           <div>
                             <div className="results-title__label">
-                              {resultsView === "changes" ? "Changes" : "Results"}
+                              {resultsView === "changes"
+                                ? "Changes"
+                                : resultsView === "fix_queue"
+                                  ? "Fix Queue"
+                                  : "Results"}
                             </div>
                             <div className="results-title__meta">
                               Showing {resultsTitleCount}{" "}
-                              {resultsView === "changes" ? "change" : "link"}
+                              {resultsView === "changes"
+                                ? "change"
+                                : resultsView === "fix_queue"
+                                  ? "item"
+                                  : "link"}
                               {resultsTitleCount === 1 ? "" : "s"}
                             </div>
                           </div>
@@ -7242,9 +8875,11 @@ const App: React.FC = () => {
                                         (diffSummary?.outstandingIssues ?? 0) >
                                           0 && (
                                           <>
-                                            <div style={{ marginBottom: "8px" }}>
-                                              No new issue changes since the last
-                                              scan. You still have{" "}
+                                            <div
+                                              style={{ marginBottom: "8px" }}
+                                            >
+                                              No new issue changes since the
+                                              last scan. You still have{" "}
                                               {diffSummary?.outstandingIssues ??
                                                 0}{" "}
                                               outstanding issues.
@@ -7258,7 +8893,8 @@ const App: React.FC = () => {
                                               style={{
                                                 padding: "6px 10px",
                                                 borderRadius: "999px",
-                                                border: "1px solid var(--border)",
+                                                border:
+                                                  "1px solid var(--border)",
                                                 background: "var(--panel)",
                                                 fontSize: "12px",
                                                 cursor: "pointer",
@@ -7286,34 +8922,36 @@ const App: React.FC = () => {
                                     <span>
                                       Outstanding (unchanged){" "}
                                       {diffIssuesOnly
-                                        ? diffSummary?.outstandingIssues ?? 0
-                                        : diffSummary?.outstandingTotal ?? 0}
+                                        ? (diffSummary?.outstandingIssues ?? 0)
+                                        : (diffSummary?.outstandingTotal ?? 0)}
                                     </span>
                                     {diffMeta && (
                                       <span>
-                                        Showing {diffMeta.unchangedReturned}{" "}
-                                        of{" "}
+                                        Showing {diffMeta.unchangedReturned} of{" "}
                                         {diffIssuesOnly
-                                          ? diffSummary?.outstandingIssues ?? 0
-                                          : diffSummary?.outstandingTotal ?? 0}
+                                          ? (diffSummary?.outstandingIssues ??
+                                            0)
+                                          : (diffSummary?.outstandingTotal ??
+                                            0)}
                                       </span>
                                     )}
                                   </div>
                                 )}
-                                {includeUnchanged && diffUnchangedItems.length === 0 && (
-                                  <div
-                                    style={{
-                                      padding: "20px",
-                                      borderRadius: "12px",
-                                      border: "1px dashed var(--border)",
-                                      textAlign: "center",
-                                      color: "var(--muted)",
-                                      margin: "12px 16px",
-                                    }}
-                                  >
-                                    No unchanged items in this slice.
-                                  </div>
-                                )}
+                                {includeUnchanged &&
+                                  diffUnchangedItems.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No unchanged items in this slice.
+                                    </div>
+                                  )}
                                 {includeUnchanged &&
                                   diffUnchangedItems.map(renderDiffRow)}
                               </>
@@ -7363,8 +9001,7 @@ const App: React.FC = () => {
                                           style={{
                                             padding: "4px 8px",
                                             borderRadius: "999px",
-                                            border:
-                                              "1px solid var(--border)",
+                                            border: "1px solid var(--border)",
                                             background: "var(--panel)",
                                             fontSize: "11px",
                                             cursor: !selectedRunId
@@ -7395,8 +9032,37 @@ const App: React.FC = () => {
                                         ),
                                       )}
                                     {!resultsLoading &&
+                                      activeTab === "broken" &&
+                                      brokenResults.length === 0 &&
+                                      results.length > 0 &&
+                                      !hasSecondaryFilters && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            All clear. No broken links to fix
+                                            right now.
+                                          </div>
+                                          <div>
+                                            Consider enabling schedules and
+                                            alerts to stay ahead.
+                                          </div>
+                                        </div>
+                                      )}
+                                    {!resultsLoading &&
                                       filteredResults.length === 0 &&
-                                      results.length > 0 && (
+                                      results.length > 0 &&
+                                      !(
+                                        activeTab === "broken" &&
+                                        brokenResults.length === 0 &&
+                                        !hasSecondaryFilters
+                                      ) && (
                                         <div
                                           style={{
                                             padding: "20px",
@@ -7421,8 +9087,7 @@ const App: React.FC = () => {
                                             style={{
                                               padding: "6px 10px",
                                               borderRadius: "999px",
-                                              border:
-                                                "1px solid var(--border)",
+                                              border: "1px solid var(--border)",
                                               background: "var(--panel)",
                                               fontSize: "12px",
                                               cursor: "pointer",
@@ -7446,7 +9111,8 @@ const App: React.FC = () => {
                                         >
                                           <div style={{ marginBottom: "8px" }}>
                                             No results yet. Run a scan to
-                                            populate this list.
+                                            populate this list (usually a minute
+                                            or two).
                                           </div>
                                           <button
                                             onClick={handleRunScan}
@@ -7456,8 +9122,7 @@ const App: React.FC = () => {
                                             style={{
                                               padding: "6px 10px",
                                               borderRadius: "999px",
-                                              border:
-                                                "1px solid var(--border)",
+                                              border: "1px solid var(--border)",
                                               background: "var(--panel)",
                                               fontSize: "12px",
                                               cursor:
@@ -7520,7 +9185,8 @@ const App: React.FC = () => {
                                         </div>
                                       )}
                                     {ignoredResults.map((row) => {
-                                      const isOpen = !!ignoredOccurrences[row.id];
+                                      const isOpen =
+                                        !!ignoredOccurrences[row.id];
                                       return (
                                         <div
                                           key={row.id}
@@ -7558,7 +9224,9 @@ const App: React.FC = () => {
                                             >
                                               {isOpen ? "▼" : "▶"}
                                             </button>
-                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                            <div
+                                              style={{ flex: 1, minWidth: 0 }}
+                                            >
                                               <div
                                                 style={{
                                                   display: "flex",
@@ -7573,7 +9241,8 @@ const App: React.FC = () => {
                                                     fontSize: "11px",
                                                     padding: "2px 6px",
                                                     borderRadius: "999px",
-                                                    background: "var(--chip-bg)",
+                                                    background:
+                                                      "var(--chip-bg)",
                                                     color: "var(--chip-text)",
                                                   }}
                                                 >
@@ -7635,7 +9304,8 @@ const App: React.FC = () => {
                                               style={{
                                                 padding: "10px 12px",
                                                 margin: "0 12px 12px 34px",
-                                                border: "1px solid var(--border)",
+                                                border:
+                                                  "1px solid var(--border)",
                                                 borderRadius: "10px",
                                                 background: "var(--panel)",
                                                 boxShadow: "var(--soft-shadow)",
@@ -7687,25 +9357,104 @@ const App: React.FC = () => {
                           </div>
                         </div>
 
-                        {!isSelectedRunInProgress && resultsView === "results" && (
-                          <div
-                            style={{
-                              marginTop: "12px",
-                              display: "flex",
-                              gap: "12px",
-                              flexWrap: "wrap",
-                              justifyContent: "center",
-                            }}
-                          >
-                            {activeTab === "all" &&
-                              (brokenHasMore ||
-                                blockedHasMore ||
-                                okHasMore ||
-                                noResponseHasMore) && (
+                        {!isSelectedRunInProgress &&
+                          resultsView === "results" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {activeTab === "all" &&
+                                (brokenHasMore ||
+                                  blockedHasMore ||
+                                  okHasMore ||
+                                  noResponseHasMore) && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreAllResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--success)",
+                                      background: "var(--success)",
+                                      color: "white",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                              {activeTab === "broken" && brokenHasMore && (
                                 <button
                                   onClick={() =>
                                     selectedRunId &&
-                                    loadMoreAllResults(selectedRunId)
+                                    loadMoreBrokenResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--danger)",
+                                    background: "var(--danger)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                              {activeTab === "blocked" && blockedHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreBlockedResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--warning)",
+                                    background: "var(--warning)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                              {activeTab === "ok" && okHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreOkResults(selectedRunId)
                                   }
                                   disabled={resultsLoading}
                                   style={{
@@ -7727,231 +9476,215 @@ const App: React.FC = () => {
                                     : "Load More Results"}
                                 </button>
                               )}
-                            {activeTab === "broken" && brokenHasMore && (
-                              <button
-                                onClick={() =>
-                                  selectedRunId &&
-                                  loadMoreBrokenResults(selectedRunId)
-                                }
-                                disabled={resultsLoading}
-                                style={{
-                                  padding: "10px 18px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--danger)",
-                                  background: "var(--danger)",
-                                  color: "white",
-                                  cursor: resultsLoading
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: resultsLoading ? 0.6 : 1,
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {resultsLoading
-                                  ? "Loading..."
-                                  : "Load More Results"}
-                              </button>
-                            )}
-                            {activeTab === "blocked" && blockedHasMore && (
-                              <button
-                                onClick={() =>
-                                  selectedRunId &&
-                                  loadMoreBlockedResults(selectedRunId)
-                                }
-                                disabled={resultsLoading}
-                                style={{
-                                  padding: "10px 18px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--warning)",
-                                  background: "var(--warning)",
-                                  color: "white",
-                                  cursor: resultsLoading
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: resultsLoading ? 0.6 : 1,
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {resultsLoading
-                                  ? "Loading..."
-                                  : "Load More Results"}
-                              </button>
-                            )}
-                            {activeTab === "ok" && okHasMore && (
-                              <button
-                                onClick={() =>
-                                  selectedRunId &&
-                                  loadMoreOkResults(selectedRunId)
-                                }
-                                disabled={resultsLoading}
-                                style={{
-                                  padding: "10px 18px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--success)",
-                                  background: "var(--success)",
-                                  color: "white",
-                                  cursor: resultsLoading
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: resultsLoading ? 0.6 : 1,
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                {resultsLoading
-                                  ? "Loading..."
-                                  : "Load More Results"}
-                              </button>
-                            )}
-                            {activeTab === "no_response" &&
-                              noResponseHasMore && (
+                              {activeTab === "no_response" &&
+                                noResponseHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreNoResponseResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--border)",
+                                      color: "var(--text)",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                              {activeTab === "ignored" && ignoredHasMore && (
                                 <button
                                   onClick={() =>
                                     selectedRunId &&
-                                    loadMoreNoResponseResults(selectedRunId)
+                                    loadMoreIgnoredResults(selectedRunId)
                                   }
-                                  disabled={resultsLoading}
+                                  disabled={ignoredLoading}
                                   style={{
                                     padding: "10px 18px",
                                     borderRadius: "999px",
                                     border: "1px solid var(--border)",
-                                    background: "var(--border)",
+                                    background: "var(--panel)",
                                     color: "var(--text)",
-                                    cursor: resultsLoading
+                                    cursor: ignoredLoading
                                       ? "default"
                                       : "pointer",
-                                    opacity: resultsLoading ? 0.6 : 1,
+                                    opacity: ignoredLoading ? 0.6 : 1,
                                     fontSize: "12px",
                                     fontWeight: 600,
                                   }}
                                 >
-                                  {resultsLoading
+                                  {ignoredLoading
                                     ? "Loading..."
                                     : "Load More Results"}
                                 </button>
                               )}
-                            {activeTab === "ignored" && ignoredHasMore && (
+                            </div>
+                          )}
+                        {!isSelectedRunInProgress &&
+                          resultsView === "changes" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {!unchangedOnly && diffQuery.hasNextPage && (
+                                <button
+                                  onClick={() => diffQuery.fetchNextPage()}
+                                  disabled={diffQuery.isFetchingNextPage}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--accent)",
+                                    background: "var(--accent)",
+                                    color: "white",
+                                    cursor: diffQuery.isFetchingNextPage
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: diffQuery.isFetchingNextPage
+                                      ? 0.6
+                                      : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {diffQuery.isFetchingNextPage
+                                    ? "Loading..."
+                                    : "Load more changes"}
+                                </button>
+                              )}
+                              {includeUnchanged && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    alignItems: "center",
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <button
+                                    onClick={() =>
+                                      setUnchangedOffset((prev) =>
+                                        Math.max(0, prev - unchangedLimit),
+                                      )
+                                    }
+                                    disabled={!canPrevUnchanged}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: canPrevUnchanged
+                                        ? "pointer"
+                                        : "not-allowed",
+                                      opacity: canPrevUnchanged ? 1 : 0.6,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Prev outstanding
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      setUnchangedOffset(
+                                        (prev) => prev + unchangedLimit,
+                                      )
+                                    }
+                                    disabled={!canNextUnchanged}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: canNextUnchanged
+                                        ? "pointer"
+                                        : "not-allowed",
+                                      opacity: canNextUnchanged ? 1 : 0.6,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Next outstanding
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        {!isSelectedRunInProgress &&
+                          resultsView === "fix_queue" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
                               <button
                                 onClick={() =>
-                                  selectedRunId &&
-                                  loadMoreIgnoredResults(selectedRunId)
+                                  setFixQueueOffset((prev) =>
+                                    Math.max(0, prev - fixQueueLimit),
+                                  )
                                 }
-                                disabled={ignoredLoading}
+                                disabled={!fixQueueHasPrev}
                                 style={{
                                   padding: "10px 18px",
                                   borderRadius: "999px",
                                   border: "1px solid var(--border)",
                                   background: "var(--panel)",
                                   color: "var(--text)",
-                                  cursor: ignoredLoading
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: ignoredLoading ? 0.6 : 1,
+                                  cursor: fixQueueHasPrev
+                                    ? "pointer"
+                                    : "not-allowed",
+                                  opacity: fixQueueHasPrev ? 1 : 0.6,
                                   fontSize: "12px",
                                   fontWeight: 600,
                                 }}
                               >
-                                {ignoredLoading
-                                  ? "Loading..."
-                                  : "Load More Results"}
+                                Prev page
                               </button>
-                            )}
-                          </div>
-                        )}
-                        {!isSelectedRunInProgress && resultsView === "changes" && (
-                          <div
-                            style={{
-                              marginTop: "12px",
-                              display: "flex",
-                              gap: "12px",
-                              flexWrap: "wrap",
-                              justifyContent: "center",
-                            }}
-                          >
-                            {!unchangedOnly && diffQuery.hasNextPage && (
                               <button
-                                onClick={() => diffQuery.fetchNextPage()}
-                                disabled={diffQuery.isFetchingNextPage}
+                                onClick={() =>
+                                  setFixQueueOffset(
+                                    (prev) => prev + fixQueueLimit,
+                                  )
+                                }
+                                disabled={!fixQueueHasNext}
                                 style={{
                                   padding: "10px 18px",
                                   borderRadius: "999px",
-                                  border: "1px solid var(--accent)",
-                                  background: "var(--accent)",
-                                  color: "white",
-                                  cursor: diffQuery.isFetchingNextPage
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: diffQuery.isFetchingNextPage ? 0.6 : 1,
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  cursor: fixQueueHasNext
+                                    ? "pointer"
+                                    : "not-allowed",
+                                  opacity: fixQueueHasNext ? 1 : 0.6,
                                   fontSize: "12px",
                                   fontWeight: 600,
                                 }}
                               >
-                                {diffQuery.isFetchingNextPage
-                                  ? "Loading..."
-                                  : "Load more changes"}
+                                Next page
                               </button>
-                            )}
-                            {includeUnchanged && (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: "8px",
-                                  alignItems: "center",
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <button
-                                  onClick={() =>
-                                    setUnchangedOffset((prev) =>
-                                      Math.max(0, prev - unchangedLimit),
-                                    )
-                                  }
-                                  disabled={!canPrevUnchanged}
-                                  style={{
-                                    padding: "10px 18px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                    cursor: canPrevUnchanged
-                                      ? "pointer"
-                                      : "not-allowed",
-                                    opacity: canPrevUnchanged ? 1 : 0.6,
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Prev outstanding
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    setUnchangedOffset(
-                                      (prev) => prev + unchangedLimit,
-                                    )
-                                  }
-                                  disabled={!canNextUnchanged}
-                                  style={{
-                                    padding: "10px 18px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                    cursor: canNextUnchanged
-                                      ? "pointer"
-                                      : "not-allowed",
-                                    opacity: canNextUnchanged ? 1 : 0.6,
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Next outstanding
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
+                            </div>
+                          )}
                         <div className="results-footer-space" aria-hidden />
                       </div>
 
@@ -8260,6 +9993,745 @@ const App: React.FC = () => {
               />
             )}
 
+            {onboardingOpen && (
+              <div className="modal-backdrop">
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                  style={{ maxWidth: "560px" }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      gap: "12px",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>
+                        First-run onboarding
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Step {onboardingStepIndex + 1} of{" "}
+                        {onboardingSteps.length}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        completeOnboarding();
+                        pushToast("Onboarding skipped", "info");
+                      }}
+                      className="report-button"
+                    >
+                      Skip
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "6px",
+                      flexWrap: "wrap",
+                      marginTop: "12px",
+                    }}
+                  >
+                    {onboardingSteps.map((step, idx) => (
+                      <div
+                        key={step}
+                        style={{
+                          padding: "4px 8px",
+                          borderRadius: "999px",
+                          border: "1px solid var(--border)",
+                          background:
+                            idx === onboardingStepIndex
+                              ? "var(--panel-elev)"
+                              : "transparent",
+                          fontSize: "11px",
+                          color:
+                            idx === onboardingStepIndex
+                              ? "var(--text)"
+                              : "var(--muted)",
+                        }}
+                      >
+                        {step}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ marginTop: "16px" }}>
+                    {onboardingStep === 0 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            Add your first site
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Paste a homepage URL to start monitoring.
+                          </div>
+                        </div>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Site URL
+                          <input
+                            value={onboardingSiteUrl}
+                            onChange={(event) =>
+                              setOnboardingSiteUrl(event.target.value)
+                            }
+                            placeholder="https://example.com"
+                            autoFocus
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleOnboardingCreateSite();
+                              }
+                            }}
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Site name (optional)
+                          <input
+                            value={onboardingSiteName}
+                            onChange={(event) =>
+                              setOnboardingSiteName(event.target.value)
+                            }
+                            placeholder="Marketing site"
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        {onboardingError && (
+                          <div
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--warning)",
+                            }}
+                          >
+                            {onboardingError}
+                          </div>
+                        )}
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleOnboardingCreateSite()}
+                            disabled={
+                              onboardingWorking || !onboardingSiteUrl.trim()
+                            }
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "none",
+                              background: onboardingWorking
+                                ? "var(--panel-elev)"
+                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                              color: "white",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor:
+                                onboardingWorking || !onboardingSiteUrl.trim()
+                                  ? "not-allowed"
+                                  : "pointer",
+                            }}
+                          >
+                            {onboardingWorking ? "Adding..." : "Add site"}
+                          </button>
+                          <button
+                            onClick={() => void handleOnboardingSampleSite()}
+                            disabled={onboardingWorking}
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor: onboardingWorking
+                                ? "not-allowed"
+                                : "pointer",
+                            }}
+                          >
+                            Try sample site
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 1 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            Run your first scan
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Start a scan and watch progress in real time.
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => void handleOnboardingRunScan()}
+                          disabled={!selectedSiteId || triggeringScan}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: "10px",
+                            border: "none",
+                            background:
+                              !selectedSiteId || triggeringScan
+                                ? "var(--panel-elev)"
+                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                            color: "white",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor:
+                              !selectedSiteId || triggeringScan
+                                ? "not-allowed"
+                                : "pointer",
+                          }}
+                        >
+                          {triggeringScan ? "Starting..." : "Start scan"}
+                        </button>
+                        {selectedRun && (
+                          <div
+                            style={{
+                              padding: "12px",
+                              borderRadius: "12px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                            }}
+                          >
+                            <ScanProgressBar
+                              status={selectedRun.status}
+                              totalLinks={selectedRun.total_links}
+                              checkedLinks={selectedRun.checked_links}
+                              brokenLinks={selectedRun.broken_links}
+                              blockedLinks={0}
+                              noResponseLinks={0}
+                              lastUpdateAt={lastProgressAt ?? null}
+                            />
+                            <div
+                              style={{
+                                marginTop: "8px",
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Status: {selectedRun.status.replace("_", " ")}
+                            </div>
+                            {selectedRun.status === "failed" &&
+                              selectedRun.error_message && (
+                                <div
+                                  style={{
+                                    marginTop: "6px",
+                                    fontSize: "12px",
+                                    color: "var(--warning)",
+                                  }}
+                                >
+                                  {selectedRun.error_message}
+                                </div>
+                              )}
+                          </div>
+                        )}
+                        {selectedRun?.status === "completed" && (
+                          <button
+                            onClick={() => setOnboardingStep(2)}
+                            className="report-button"
+                          >
+                            Continue
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {onboardingStep === 2 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Review results</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            See a quick summary and jump into fixes or changes.
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "8px",
+                          }}
+                        >
+                          <span className="summary-chip">
+                            Broken {selectedRun?.broken_links ?? 0}
+                          </span>
+                          <span className="summary-chip">
+                            Blocked {blockedResults.length}
+                          </span>
+                          <span className="summary-chip">
+                            No response{" "}
+                            {
+                              visibleResults.filter(
+                                (row) => row.classification === "no_response",
+                              ).length
+                            }
+                          </span>
+                          <span className="summary-chip">
+                            OK{" "}
+                            {
+                              visibleResults.filter(
+                                (row) => row.classification === "ok",
+                              ).length
+                            }
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => {
+                              openFixQueue();
+                            }}
+                            className="report-button"
+                          >
+                            Open Fix Queue
+                          </button>
+                          <button
+                            onClick={() => setResultsView("changes")}
+                            className="report-button"
+                          >
+                            View Changes
+                          </button>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                          }}
+                        >
+                          <button
+                            onClick={() => setOnboardingStep(1)}
+                            className="report-button"
+                          >
+                            Back
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(3)}
+                            className="report-button"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 3 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Set a schedule</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Optional. Automate scans to keep checks consistent.
+                          </div>
+                        </div>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Auto-scan enabled</span>
+                          <input
+                            type="checkbox"
+                            checked={scheduleEnabled}
+                            onChange={(event) =>
+                              setScheduleEnabled(event.target.checked)
+                            }
+                          />
+                        </label>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr",
+                            gap: "8px",
+                          }}
+                        >
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Frequency
+                            <select
+                              value={scheduleFrequency}
+                              onChange={(event) =>
+                                setScheduleFrequency(
+                                  event.target.value as "daily" | "weekly",
+                                )
+                              }
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            >
+                              <option value="daily">Daily</option>
+                              <option value="weekly">Weekly</option>
+                            </select>
+                          </label>
+                          {scheduleFrequency === "weekly" && (
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Day of week (UTC)
+                              <select
+                                value={scheduleDayOfWeek}
+                                onChange={(event) =>
+                                  setScheduleDayOfWeek(
+                                    Number(event.target.value),
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              >
+                                <option value={0}>Sunday</option>
+                                <option value={1}>Monday</option>
+                                <option value={2}>Tuesday</option>
+                                <option value={3}>Wednesday</option>
+                                <option value={4}>Thursday</option>
+                                <option value={5}>Friday</option>
+                                <option value={6}>Saturday</option>
+                              </select>
+                            </label>
+                          )}
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Time (UTC)
+                            <input
+                              type="time"
+                              value={scheduleTimeUtc}
+                              onChange={(event) =>
+                                setScheduleTimeUtc(event.target.value)
+                              }
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Time (UTC):{" "}
+                          {formatScheduleUtcLabel(
+                            scheduleFrequency,
+                            scheduleTimeUtc,
+                            scheduleDayOfWeek,
+                          )}
+                        </div>
+                        {showLocalTimeZone && (
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Your time:{" "}
+                            {formatScheduleLocalLabel(
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                            )}{" "}
+                            ({localTimeZone})
+                          </div>
+                        )}
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleSaveSchedule()}
+                            disabled={scheduleSaving}
+                            className="report-button"
+                          >
+                            {scheduleSaving ? "Saving..." : "Save schedule"}
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(4)}
+                            className="report-button"
+                          >
+                            Skip for now
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 4 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Enable alerts</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Optional. Get notified when new issues appear.
+                          </div>
+                        </div>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Email alerts</span>
+                          <input
+                            type="checkbox"
+                            checked={notifyEnabled}
+                            onChange={(event) =>
+                              setNotifyEnabled(event.target.checked)
+                            }
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Email (optional)
+                          <input
+                            value={notifyEmail}
+                            onChange={(event) =>
+                              setNotifyEmail(event.target.value)
+                            }
+                            placeholder="you@company.com"
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Notify me
+                          <select
+                            value={notifyOn}
+                            onChange={(event) =>
+                              setNotifyOn(event.target.value as NotifyOnOption)
+                            }
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "6px 8px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <option value="new_issues_only">
+                              Only when NEW issues
+                            </option>
+                            <option value="issues_exist">
+                              When issues exist
+                            </option>
+                            <option value="always">Always</option>
+                            <option value="never">Never</option>
+                          </select>
+                        </label>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleSaveNotifications()}
+                            disabled={
+                              notifySaving ||
+                              notifyLoading ||
+                              (notifyEnabled &&
+                                notifyOn !== "never" &&
+                                !notifyEmail.trim())
+                            }
+                            className="report-button"
+                          >
+                            {notifySaving ? "Saving..." : "Save alerts"}
+                          </button>
+                          <button
+                            onClick={() => void handleSendTestEmail()}
+                            disabled={
+                              notifyTestSending ||
+                              !notifyEmail.trim() ||
+                              !notifyEnabled ||
+                              notifyOn === "never" ||
+                              notifyLoading
+                            }
+                            className="report-button"
+                          >
+                            {notifyTestSending
+                              ? "Sending..."
+                              : "Send test alert"}
+                          </button>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                          }}
+                        >
+                          <button
+                            onClick={() => setOnboardingStep(3)}
+                            className="report-button"
+                          >
+                            Back
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(5)}
+                            className="report-button"
+                          >
+                            Finish
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep >= onboardingSteps.length && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                          textAlign: "center",
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
+                          You're set
+                        </div>
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Your first scan is ready. Explore the dashboard or
+                          keep tuning schedules and alerts anytime.
+                        </div>
+                        <button
+                          onClick={() => {
+                            completeOnboarding();
+                          }}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: "10px",
+                            border: "none",
+                            background:
+                              "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                            color: "white",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Go to dashboard
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {ignoreRulesOpen && (
               <div
                 className="modal-backdrop"
@@ -8460,6 +10932,151 @@ const App: React.FC = () => {
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {noteModalOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setNoteModalOpen(false)}
+              >
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>Link note</div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Keep context that persists across scans.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setNoteModalOpen(false)}
+                      style={{
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        borderRadius: "10px",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {noteTargetUrl ?? "—"}
+                  </div>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Note
+                    <textarea
+                      value={noteDraft}
+                      onChange={(event) => setNoteDraft(event.target.value)}
+                      placeholder="Add a note about this link"
+                      rows={5}
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                        resize: "vertical",
+                      }}
+                    />
+                  </label>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Status
+                    <select
+                      value={noteStatus}
+                      onChange={(event) =>
+                        setNoteStatus(event.target.value as LinkNoteStatus)
+                      }
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "6px 8px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <option value="open">Open</option>
+                      <option value="snoozed">Snoozed</option>
+                      <option value="resolved">Resolved</option>
+                    </select>
+                  </label>
+                  {noteError && (
+                    <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                      {noteError}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: "8px",
+                    }}
+                  >
+                    <button
+                      onClick={handleDeleteNote}
+                      disabled={!noteExisting || noteDeleting}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        cursor:
+                          !noteExisting || noteDeleting
+                            ? "not-allowed"
+                            : "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      {noteDeleting ? "Deleting..." : "Delete note"}
+                    </button>
+                    <button
+                      onClick={handleSaveNote}
+                      disabled={noteSaving || !noteDraft.trim()}
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: noteSaving
+                          ? "var(--panel-elev)"
+                          : "var(--accent)",
+                        color: "white",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor:
+                          noteSaving || !noteDraft.trim()
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                    >
+                      {noteSaving ? "Saving..." : "Save note"}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -8720,23 +11337,23 @@ const App: React.FC = () => {
                           {selectedRunId &&
                             run.id !== selectedRunId &&
                             run.status === "completed" && (
-                            <button
-                              onClick={() => {
-                                setCompareRunId(run.id);
-                                setResultsView("changes");
-                              }}
-                              style={{
-                                padding: "4px 6px",
-                                borderRadius: "6px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                fontSize: "11px",
-                                cursor: "pointer",
-                              }}
-                            >
-                              Compare
-                            </button>
-                          )}
+                              <button
+                                onClick={() => {
+                                  setCompareRunId(run.id);
+                                  setResultsView("changes");
+                                }}
+                                style={{
+                                  padding: "4px 6px",
+                                  borderRadius: "6px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Compare
+                              </button>
+                            )}
                         </div>
                       </div>
                     ))}

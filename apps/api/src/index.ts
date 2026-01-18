@@ -21,7 +21,9 @@ import {
   getDiffBetweenRunsForUser,
   getBaselineRunForDiff,
   getCompletedRunForSite,
+  getFixQueueForRuns,
   getJobForScanRun,
+  getLatestCompletedScanForSiteForUser,
   getLatestScanForSiteForUser,
   getOccurrencesForScanLinkForUser,
   getRecentScanRunsForSiteForUser,
@@ -45,14 +47,19 @@ import {
   getTimeoutCountForRunForUser,
   getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
+  getLinkNoteForSiteByUrlForUser,
   getIgnoreRuleByIdForUser,
   listIgnoreRulesForUser,
   listIgnoreRulesForSiteForUser,
   listIgnoredLinksForRunForUser,
   listIgnoredOccurrencesForUser,
+  listLinkNotesForSiteForUser,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
   setScanRunStatus,
+  deleteLinkNoteForSiteForUser,
+  updateLinkNoteForSiteForUser,
+  upsertLinkNoteForSiteForUser,
   updateSiteNotificationSettingsForUser,
   updateSiteScheduleForUser,
   updateScanLinkAfterRecheck,
@@ -101,7 +108,14 @@ const DIFF_CHANGE_TYPES = new Set([
   "removed",
 ]);
 const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
-const NOTIFY_ON_OPTIONS = new Set(["always", "issues", "never"]);
+const NOTIFY_ON_OPTIONS = new Set([
+  "always",
+  "issues",
+  "issues_exist",
+  "new_issues_only",
+  "never",
+]);
+const LINK_NOTE_STATUSES = new Set(["open", "snoozed", "resolved", "all"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
@@ -180,6 +194,35 @@ function parseIgnoreRuleType(value: unknown): IgnoreRuleType | null {
   return IGNORE_RULE_TYPES.has(value as IgnoreRuleType)
     ? (value as IgnoreRuleType)
     : null;
+}
+
+function parseLinkNoteStatus(
+  value: unknown,
+  fallback: "all" | "open" = "all",
+): "open" | "snoozed" | "resolved" | "all" {
+  if (typeof value !== "string") return fallback;
+  return LINK_NOTE_STATUSES.has(value)
+    ? (value as "open" | "snoozed" | "resolved" | "all")
+    : fallback;
+}
+
+function normalizeNotifyOn(value: string): string {
+  if (value === "issues") return "issues_exist";
+  return value;
+}
+
+function validateIgnoreRulePattern(
+  ruleType: IgnoreRuleType,
+  pattern: string,
+): string | null {
+  if (ruleType === "regex") {
+    try {
+      new RegExp(pattern);
+    } catch (err: unknown) {
+      return err instanceof Error ? err.message : "Invalid regex pattern";
+    }
+  }
+  return null;
 }
 
 function getErrorMessage(err: unknown) {
@@ -456,7 +499,7 @@ async function handlePatchNotificationSettings(
   const patch: {
     notifyEnabled?: boolean;
     notifyEmail?: string | null;
-    notifyOn?: "always" | "issues" | "never";
+    notifyOn?: "always" | "issues_exist" | "new_issues_only" | "never";
     notifyIncludeCsv?: boolean;
   } = {};
 
@@ -486,10 +529,14 @@ async function handlePatchNotificationSettings(
         res,
         400,
         "invalid_notify_on",
-        "notifyOn must be always, issues, or never",
+        "notifyOn must be new_issues_only, issues_exist, always, or never",
       );
     }
-    patch.notifyOn = notifyOn as "always" | "issues" | "never";
+    patch.notifyOn = normalizeNotifyOn(notifyOn) as
+      | "always"
+      | "issues_exist"
+      | "new_issues_only"
+      | "never";
   }
   if (includeCsv !== undefined) {
     if (typeof includeCsv !== "boolean") {
@@ -546,12 +593,15 @@ app.get("/sites/:siteId/notifications", handleGetNotificationSettings);
 
 app.put("/sites/:siteId/notifications", async (req, res) => {
   const { enabled, email, onlyOnChange } = req.body ?? {};
-  const notifyOn = onlyOnChange === false ? "always" : "issues";
+  const notifyOn = onlyOnChange === false ? "always" : "new_issues_only";
   req.body = { enabled, email, notifyOn };
   await handlePatchNotificationSettings(req, res);
 });
 
-app.post("/sites/:siteId/notifications/test", async (req, res) => {
+async function handleSendTestAlert(
+  req: express.Request,
+  res: express.Response,
+) {
   const siteId = req.params.siteId;
   try {
     const userId = req.user?.id;
@@ -577,9 +627,12 @@ app.post("/sites/:siteId/notifications/test", async (req, res) => {
     res.json({ ok: true });
   } catch (err: unknown) {
     console.error("Error in POST /sites/:siteId/notifications/test", err);
-    sendInternalError(res, "Failed to send test email", err);
+    sendInternalError(res, "Failed to send test alert", err);
   }
-});
+}
+
+app.post("/sites/:siteId/notifications/test", handleSendTestAlert);
+app.post("/sites/:siteId/alerts/test", handleSendTestAlert);
 
 app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
   const scanRunId = req.params.scanRunId;
@@ -694,6 +747,7 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
   const baselineRaw =
     typeof req.query.baseline === "string" ? req.query.baseline : "prev";
   const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
   const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
   const includeUnchangedRaw = parseBooleanParam(
     req.query.includeUnchanged,
@@ -820,6 +874,7 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
           includeUnchanged,
           unchangedOnly,
           unchangedScope: effectiveUnchangedScope,
+          includeIgnored,
           unchangedLimit,
           unchangedOffset,
           unchangedReturned: 0,
@@ -842,6 +897,7 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
       unchangedScope,
       unchangedLimit,
       unchangedOffset,
+      includeIgnored,
     });
 
     return res.json({
@@ -849,12 +905,295 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
       currentRun: serializeRun(run),
       baselineRun: serializeRun(baselineRun),
       summary: diff.summary,
-      meta: diff.meta,
+      meta: { ...diff.meta, includeIgnored },
       items: diff.items,
     });
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/scan-runs/:scanRunId/diff", err);
     return sendInternalError(res, "Failed to compute scan diff", err);
+  }
+});
+
+app.get("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const status = parseLinkNoteStatus(req.query.status, "all");
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const notes = await listLinkNotesForSiteForUser(userId, siteId, status);
+    return res.json({ siteId, count: notes.length, notes });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to fetch link notes", err);
+  }
+});
+
+app.get("/sites/:siteId/link-notes/lookup", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl = typeof req.query.url === "string" ? req.query.url : "";
+  if (!linkUrl.trim()) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_link_url",
+      "url query param is required",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await getLinkNoteForSiteByUrlForUser(userId, siteId, linkUrl);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/link-notes/lookup", err);
+    return sendInternalError(res, "Failed to fetch link note", err);
+  }
+});
+
+app.put("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  const noteText = typeof req.body?.note === "string" ? req.body.note : "";
+  const status = parseLinkNoteStatus(req.body?.status, "open");
+
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+  if (!noteText.trim()) {
+    return sendApiError(res, 400, "invalid_note", "note is required");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await upsertLinkNoteForSiteForUser({
+      userId,
+      siteId,
+      linkUrl,
+      note: noteText.trim(),
+      status: status === "all" ? "open" : status,
+    });
+    if (!note) return sendNotFound(res);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in PUT /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to save link note", err);
+  }
+});
+
+app.patch("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  const noteRaw = req.body?.note;
+  const statusRaw = req.body?.status;
+  const nextNote = typeof noteRaw === "string" ? noteRaw.trim() : undefined;
+  const status = parseLinkNoteStatus(statusRaw, "all");
+  const hasNoteUpdate = typeof noteRaw === "string";
+  const hasStatusUpdate = status !== "all";
+
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+  if (!hasNoteUpdate && !hasStatusUpdate) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_update",
+      "note or status must be provided",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await updateLinkNoteForSiteForUser({
+      userId,
+      siteId,
+      linkUrl,
+      note: nextNote && nextNote.length > 0 ? nextNote : undefined,
+      status: status === "all" ? undefined : status,
+    });
+    if (!note) return sendNotFound(res);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to update link note", err);
+  }
+});
+
+app.delete("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const deleted = await deleteLinkNoteForSiteForUser(userId, siteId, linkUrl);
+    if (!deleted) return sendNotFound(res);
+    return res.json({ siteId, deleted: true });
+  } catch (err: unknown) {
+    console.error("Error in DELETE /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to delete link note", err);
+  }
+});
+
+app.get("/sites/:siteId/fix-queue", async (req, res) => {
+  const siteId = req.params.siteId;
+  const runIdRaw = typeof req.query.runId === "string" ? req.query.runId : "";
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const includeOutstanding = parseBooleanParam(
+    req.query.includeOutstanding,
+    true,
+  );
+  const includeNew = parseBooleanParam(req.query.includeNew, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
+  const status = parseLinkNoteStatus(req.query.status, "open");
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+
+    const currentRun = runIdRaw
+      ? await getCompletedRunForSite(siteId, runIdRaw)
+      : await getLatestCompletedScanForSiteForUser(userId, siteId);
+
+    if (!currentRun) {
+      return res.json({
+        siteId,
+        currentRun: null,
+        baselineRun: null,
+        summary: {
+          newIssues: 0,
+          outstandingIssues: 0,
+          totalQueueItems: 0,
+          withNotesOpen: 0,
+          snoozed: 0,
+          resolved: 0,
+        },
+        items: [],
+      });
+    }
+
+    if (
+      baselineRaw &&
+      baselineRaw !== "prev" &&
+      baselineRaw === currentRun.id
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, currentRun.id);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const serializeRun = (row: {
+      id: string;
+      started_at: Date;
+      finished_at: Date | null;
+    }) => ({
+      id: row.id,
+      started_at: row.started_at.toISOString(),
+      finished_at: row.finished_at ? row.finished_at.toISOString() : null,
+    });
+
+    await applyIgnoreRulesForScanRun(currentRun.id);
+    if (baselineRun) {
+      await applyIgnoreRulesForScanRun(baselineRun.id);
+    }
+
+    const queue = await getFixQueueForRuns({
+      userId,
+      siteId,
+      currentRunId: currentRun.id,
+      baselineRunId: baselineRun?.id ?? null,
+      includeNew,
+      includeOutstanding,
+      includeIgnored,
+      status,
+      limit,
+      offset,
+    });
+
+    return res.json({
+      siteId,
+      currentRun: serializeRun(currentRun),
+      baselineRun: baselineRun ? serializeRun(baselineRun) : null,
+      summary: queue.summary,
+      items: queue.items,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/fix-queue", err);
+    return sendInternalError(res, "Failed to fetch fix queue", err);
   }
 });
 
@@ -1402,6 +1741,7 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff.csv", async (req, res) => {
   const baselineRaw =
     typeof req.query.baseline === "string" ? req.query.baseline : "prev";
   const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
   const exportScope = parseExportScope(req.query.exportScope);
   const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
   const limitRaw = req.query.limit;
@@ -1525,6 +1865,7 @@ app.get("/sites/:siteId/scan-runs/:scanRunId/diff.csv", async (req, res) => {
         limit: pageLimit,
         offset: pageOffset,
         changeTypes: changeTypes ?? null,
+        includeIgnored,
       });
       items.push(...diff.items);
       if (exportScope === "page" || diff.items.length < pageLimit) break;
@@ -2094,6 +2435,16 @@ app.post("/ignore-rules", async (req, res) => {
       "pattern must be a non-empty string",
     );
   }
+  const invalidPattern = validateIgnoreRulePattern(ruleType, pattern);
+  if (invalidPattern) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_pattern",
+      "pattern must be a valid value",
+      invalidPattern,
+    );
+  }
 
   try {
     const userId = req.user?.id;
@@ -2156,6 +2507,18 @@ app.post("/sites/:siteId/ignore-rules", async (req, res) => {
       "invalid_pattern",
       "pattern must be a non-empty string",
     );
+  }
+  if (ruleType) {
+    const invalidPattern = validateIgnoreRulePattern(ruleType, pattern);
+    if (invalidPattern) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_pattern",
+        "pattern must be a valid value",
+        invalidPattern,
+      );
+    }
   }
 
   try {
@@ -2304,6 +2667,16 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
+      const invalidPattern = validateIgnoreRulePattern(ruleType, linkUrl);
+      if (invalidPattern) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_pattern",
+          "pattern must be a valid value",
+          invalidPattern,
+        );
+      }
       const rule = await createIgnoreRule(
         userId,
         run.site_id,
@@ -2387,6 +2760,16 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
+      const invalidPattern = validateIgnoreRulePattern(ruleType, link.link_url);
+      if (invalidPattern) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_pattern",
+          "pattern must be a valid value",
+          invalidPattern,
+        );
+      }
       const rule = await createIgnoreRule(
         userId,
         run.site_id,

@@ -25,6 +25,7 @@ export type { SiteScheduleFields, ScheduleFrequency } from "./siteSchedule";
 export {
   getLatestScanForSite,
   getLatestScanForSiteForUser,
+  getLatestCompletedScanForSiteForUser,
   getRecentScansForSite,
   getRecentScansForSiteForUser,
   getScanRunById,
@@ -65,6 +66,15 @@ export type {
   ScanDiffSide,
   ScanDiffSummary,
 } from "./scanDiff";
+
+export { getFixQueueForRuns } from "./fixQueue";
+export type {
+  FixQueueChangeType,
+  FixQueueItem,
+  FixQueueNote,
+  FixQueueStatusFilter,
+  FixQueueSummary,
+} from "./fixQueue";
 
 export {
   getResultsForScanRun,
@@ -110,6 +120,19 @@ export type {
 } from "./scanLinksDedup";
 
 export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
+
+export {
+  deleteLinkNoteForSiteForUser,
+  getLinkNoteForSiteByUrlForUser,
+  listLinkNotesForSiteForUser,
+  normalizeLinkUrl,
+  updateLinkNoteForSiteForUser,
+  upsertLinkNoteForSiteForUser,
+} from "./linkNotes";
+export type { LinkNote, LinkNoteStatus } from "./linkNotes";
+
+export { enqueueEmailOutbox } from "./emailOutbox";
+export type { EmailOutboxEntry } from "./emailOutbox";
 
 export {
   cancelScanJob,

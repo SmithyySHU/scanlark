@@ -93,6 +93,45 @@ export async function getLatestScanForSiteForUser(
   return res.rows[0];
 }
 
+export async function getLatestCompletedScanForSiteForUser(
+  userId: string,
+  siteId: string,
+): Promise<ScanRunRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        r.id,
+        r.site_id,
+        r.status,
+        r.started_at,
+        r.finished_at,
+        r.notified_at,
+        r.error_message,
+        r.updated_at,
+        r.start_url,
+        r.total_links,
+        r.checked_links,
+        r.broken_links
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.site_id = $1
+        AND s.user_id = $2
+        AND r.status = 'completed'
+        AND r.finished_at IS NOT NULL
+      ORDER BY r.finished_at DESC
+      LIMIT 1
+    `,
+    [siteId, userId],
+  );
+
+  if (res.rowCount === 0) {
+    return null;
+  }
+
+  return res.rows[0];
+}
+
 export async function getRecentScansForSite(
   siteId: string,
   limit: number,
