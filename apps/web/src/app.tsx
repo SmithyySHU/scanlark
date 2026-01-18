@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
@@ -160,6 +161,17 @@ interface ScanLinksResponse {
   links: ScanLink[];
 }
 
+interface ScanLinksSummaryRow {
+  classification: LinkClassification;
+  status_code: number | null;
+  count: number;
+}
+
+interface ScanLinksSummaryResponse {
+  scanRunId: string;
+  summary: ScanLinksSummaryRow[];
+}
+
 interface RecheckScanLinkResponse {
   scanLink: ScanLink;
 }
@@ -214,28 +226,58 @@ interface IgnoredOccurrencesResponse {
   occurrences: ScanLinkOccurrence[];
 }
 
-interface DiffLinkRow {
-  link_url: string;
+type ScanDiffChangeType =
+  | "new_issue"
+  | "fixed"
+  | "changed"
+  | "unchanged"
+  | "added"
+  | "removed";
+
+interface ScanDiffSide {
   classification: LinkClassification;
   status_code: number | null;
   error_message: string | null;
-  occurrence_count: number;
-  last_seen_at: string;
+  source_pages: string[];
 }
 
-interface DiffResponse {
-  scanRunId: string;
-  compareTo: string;
-  diff: {
-    added: DiffLinkRow[];
-    removed: DiffLinkRow[];
-    changed: Array<{ before: DiffLinkRow; after: DiffLinkRow }>;
-    unchangedCount: number;
-    totals: {
-      a: { broken: number; blocked: number; ok: number; no_response: number };
-      b: { broken: number; blocked: number; ok: number; no_response: number };
-    };
+interface ScanDiffItem {
+  link_url: string;
+  change_type: ScanDiffChangeType;
+  current: ScanDiffSide | null;
+  baseline: ScanDiffSide | null;
+}
+
+interface ScanDiffRun {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+interface ScanDiffResponse {
+  siteId: string;
+  currentRun: ScanDiffRun;
+  baselineRun: ScanDiffRun | null;
+  summary: {
+    newIssues: number;
+    fixedIssues: number;
+    changed: number;
+    outstandingIssues: number;
+    outstandingOk: number;
+    outstandingTotal: number;
+    removed: number;
+    added: number;
   };
+  meta: {
+    includeUnchanged: boolean;
+    unchangedOnly: boolean;
+    unchangedScope: "issues" | "ok" | "all";
+    unchangedLimit: number;
+    unchangedOffset: number;
+    unchangedReturned: number;
+    changesReturned: number;
+  };
+  items: ScanDiffItem[];
 }
 
 type ScanEventPayload = {
@@ -419,6 +461,34 @@ function formatClassification(value: LinkClassification) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function changeTypeLabel(value: ScanDiffChangeType) {
+  if (value === "new_issue") return "New issue";
+  if (value === "fixed") return "Fixed";
+  if (value === "changed") return "Changed";
+  if (value === "unchanged") return "Unchanged";
+  if (value === "added") return "Added";
+  return "Removed";
+}
+
+function changeTypeTone(value: ScanDiffChangeType) {
+  if (value === "new_issue") {
+    return { bg: "var(--danger)", text: "white" };
+  }
+  if (value === "fixed") {
+    return { bg: "var(--success)", text: "white" };
+  }
+  if (value === "changed") {
+    return { bg: "var(--warning)", text: "var(--text)" };
+  }
+  if (value === "unchanged") {
+    return { bg: "var(--panel-elev)", text: "var(--muted)" };
+  }
+  if (value === "added") {
+    return { bg: "var(--accent)", text: "white" };
+  }
+  return { bg: "var(--panel-elev)", text: "var(--text)" };
+}
+
 function getWhyDetails(row: ScanLink) {
   const status = row.status_code;
   if (status === 401 || status === 403 || status === 429) {
@@ -519,6 +589,12 @@ function buildScanLinksUrl(
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/links?${params.toString()}`;
 }
 
+function getFilenameFromDisposition(header: string | null) {
+  if (!header) return null;
+  const match = header.match(/filename="([^"]+)"/i);
+  return match?.[1] ?? null;
+}
+
 function buildIgnoredLinksUrl(
   runId: string,
   offset: number,
@@ -534,6 +610,7 @@ type LoadHistoryOpts = {
 
 const App: React.FC = () => {
   const scansRef = useRef<HTMLDivElement | null>(null);
+  const queryClient = useQueryClient();
 
   const sseRef = useRef<EventSource | null>(null);
   const sseRetryTimerRef = useRef<number | null>(null);
@@ -719,9 +796,18 @@ const App: React.FC = () => {
   const [newRuleScope, setNewRuleScope] = useState<"site" | "global">("site");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const [diffData, setDiffData] = useState<DiffResponse["diff"] | null>(null);
+  const [resultsView, setResultsView] = useState<"results" | "changes">(
+    "results",
+  );
+  const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
+  const [includeUnchanged, setIncludeUnchanged] = useState(false);
+  const [unchangedOnly, setUnchangedOnly] = useState(false);
+  const [unchangedOffset, setUnchangedOffset] = useState(0);
+  const [unchangedLimit] = useState(50);
+  const [diffOkTotal, setDiffOkTotal] = useState(0);
+  const [diffExportFilter, setDiffExportFilter] = useState<
+    "all" | "new_issue" | "fixed" | "changed" | "added" | "removed"
+  >("all");
   const [isNarrow, setIsNarrow] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -912,12 +998,13 @@ const App: React.FC = () => {
   ]);
 
   const hasActiveFilters =
-    activeTab !== "all" ||
-    statusGroup !== "all" ||
-    showIgnored ||
-    searchQuery.trim().length > 0 ||
-    minOccurrencesOnly ||
-    Object.values(statusFilters).some(Boolean);
+    resultsView === "results" &&
+    (activeTab !== "all" ||
+      statusGroup !== "all" ||
+      showIgnored ||
+      searchQuery.trim().length > 0 ||
+      minOccurrencesOnly ||
+      Object.values(statusFilters).some(Boolean));
   const exportDisabled = !selectedRunId;
   const exportLinksDisabled = !selectedRunId;
 
@@ -991,104 +1078,235 @@ const App: React.FC = () => {
     };
   }, [selectedRun?.id, selectedRun?.status]);
 
-  type DiffItem = {
-    key: string;
-    row: DiffLinkRow;
-    before: DiffLinkRow | null;
-    after: DiffLinkRow | null;
+  const diffLimit = 200;
+  const diffBaseline = compareRunId ?? "prev";
+  const diffQueryEnabled = !!selectedSiteId && !!selectedRunId;
+  const unchangedScope = diffIssuesOnly ? "issues" : "all";
+  const diffQuery = useInfiniteQuery<ScanDiffResponse, Error>({
+    queryKey: [
+      "scanDiff",
+      selectedSiteId,
+      selectedRunId,
+      diffBaseline,
+      diffIssuesOnly,
+      includeUnchanged,
+      unchangedOnly,
+      diffExportFilter,
+      unchangedScope,
+      unchangedLimit,
+      unchangedOffset,
+    ],
+    enabled: diffQueryEnabled,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const pageOffset = typeof pageParam === "number" ? pageParam : 0;
+      const includeUnchangedParam = includeUnchanged && pageOffset === 0;
+      const params = new URLSearchParams({
+        baseline: diffBaseline,
+        issuesOnly: diffIssuesOnly ? "true" : "false",
+        limit: String(diffLimit),
+        offset: String(pageOffset),
+        includeUnchanged: includeUnchangedParam ? "true" : "false",
+        unchangedOnly: unchangedOnly ? "true" : "false",
+        unchangedScope,
+        unchangedLimit: String(unchangedLimit),
+        unchangedOffset: String(unchangedOffset),
+      });
+      if (!unchangedOnly && diffExportFilter !== "all") {
+        params.set("changeTypes", diffExportFilter);
+      }
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/scan-runs/${encodeURIComponent(
+          selectedRunId ?? "",
+        )}/diff?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Diff failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as ScanDiffResponse;
+    },
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.items.length < diffLimit
+        ? undefined
+        : allPages.length * diffLimit,
+  });
+
+  const diffPages = diffQuery.data?.pages ?? [];
+  const diffSummary = diffPages[0]?.summary ?? null;
+  const diffBaselineRun = diffPages[0]?.baselineRun ?? null;
+  const diffMeta = diffPages[0]?.meta ?? null;
+  const diffItems = diffPages.flatMap<ScanDiffItem>((page) => page.items);
+  const diffChangeItems = diffItems.filter(
+    (item) => item.change_type !== "unchanged",
+  );
+  const diffUnchangedItems = (diffPages[0]?.items ?? []).filter(
+    (item) => item.change_type === "unchanged",
+  );
+  const diffError = diffQuery.error
+    ? getErrorMessage(diffQuery.error, "Failed to load changes")
+    : null;
+  const diffLoading = diffQuery.isLoading;
+  const hasDiffChanges =
+    !!diffSummary &&
+    (diffSummary.newIssues > 0 ||
+      diffSummary.fixedIssues > 0 ||
+      diffSummary.changed > 0 ||
+      diffSummary.added > 0 ||
+      diffSummary.removed > 0);
+  const outstandingTotal = diffSummary
+    ? diffIssuesOnly
+      ? diffSummary.outstandingIssues
+      : diffSummary.outstandingTotal
+    : 0;
+  const canPrevUnchanged = includeUnchanged && unchangedOffset > 0;
+  const canNextUnchanged =
+    includeUnchanged && unchangedOffset + unchangedLimit < outstandingTotal;
+  const formatDiffSide = (side: ScanDiffSide | null) => {
+    if (!side) return "Missing";
+    const status = side.status_code == null ? "—" : side.status_code;
+    return `${formatClassification(side.classification)} · ${status}`;
+  };
+  const renderDiffRow = (item: ScanDiffItem) => {
+    const tone = changeTypeTone(item.change_type);
+    const baselineText = formatDiffSide(item.baseline);
+    const currentText = formatDiffSide(item.current);
+    const baselinePages: string[] = item.baseline?.source_pages ?? [];
+    const currentPages: string[] = item.current?.source_pages ?? [];
+    return (
+      <div
+        key={`${item.change_type}:${item.link_url}`}
+        className="change-row"
+        style={{
+          borderRadius: "12px",
+          border: "1px solid var(--border)",
+          background: "var(--panel-elev)",
+          margin: "10px 16px",
+          padding: "12px",
+        }}
+      >
+        <div
+          style={{
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+          }}
+        >
+          <a
+            href={item.link_url}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              color: "var(--text)",
+              textDecoration: "none",
+              fontWeight: 600,
+            }}
+          >
+            {item.link_url}
+          </a>
+        </div>
+        <div>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "4px 10px",
+              borderRadius: "999px",
+              background: tone.bg,
+              color: tone.text,
+              fontSize: "11px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.02em",
+            }}
+          >
+            {changeTypeLabel(item.change_type)}
+          </span>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+            fontSize: "12px",
+            color: "var(--muted)",
+          }}
+        >
+          <span>Baseline: {baselineText}</span>
+          <span>Current: {currentText}</span>
+        </div>
+        <div>
+          <details>
+            <summary
+              style={{
+                cursor: "pointer",
+                fontSize: "12px",
+                color: "var(--text)",
+              }}
+            >
+              Current {currentPages.length} • Baseline {baselinePages.length}
+            </summary>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                gap: "8px",
+                marginTop: "8px",
+                fontSize: "12px",
+                color: "var(--muted)",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--text)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Current
+                </div>
+                {currentPages.length === 0 && <div>—</div>}
+                {currentPages.map((page) => (
+                  <div
+                    key={`cur:${item.link_url}:${page}`}
+                    style={{ overflowWrap: "anywhere" }}
+                  >
+                    {page}
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--text)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Baseline
+                </div>
+                {baselinePages.length === 0 && <div>—</div>}
+                {baselinePages.map((page) => (
+                  <div
+                    key={`base:${item.link_url}:${page}`}
+                    style={{ overflowWrap: "anywhere" }}
+                  >
+                    {page}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    );
   };
 
-  const issueDiff = useMemo(() => {
-    if (!diffData) return null;
-
-    const isIssue = (row: DiffLinkRow) => row.classification !== "ok";
-    const makeKey = (prefix: string, row: DiffLinkRow) =>
-      `${prefix}:${row.link_url}`;
-    const addUnique = (map: Map<string, DiffItem>, item: DiffItem) => {
-      if (!map.has(item.key)) map.set(item.key, item);
-    };
-
-    const addedMap = new Map<string, DiffItem>();
-    const removedMap = new Map<string, DiffItem>();
-    const changedMap = new Map<string, DiffItem>();
-
-    diffData.added.filter(isIssue).forEach((row) => {
-      addUnique(addedMap, {
-        key: makeKey("added", row),
-        row,
-        before: null,
-        after: null,
-      });
-    });
-    diffData.removed.filter(isIssue).forEach((row) => {
-      addUnique(removedMap, {
-        key: makeKey("removed", row),
-        row,
-        before: null,
-        after: null,
-      });
-    });
-
-    diffData.changed.forEach(({ before, after }) => {
-      const beforeIssue = isIssue(before);
-      const afterIssue = isIssue(after);
-      if (!beforeIssue && afterIssue) {
-        addUnique(addedMap, {
-          key: makeKey("added", after),
-          row: after,
-          before,
-          after,
-        });
-      } else if (beforeIssue && !afterIssue) {
-        addUnique(removedMap, {
-          key: makeKey("removed", before),
-          row: before,
-          before,
-          after,
-        });
-      } else if (beforeIssue && afterIssue) {
-        addUnique(changedMap, {
-          key: makeKey("changed", after),
-          row: after,
-          before,
-          after,
-        });
-      }
-    });
-
-    const added = Array.from(addedMap.values());
-    const removed = Array.from(removedMap.values());
-    const changed = Array.from(changedMap.values());
-    const totalIssues =
-      diffData.totals.a.broken +
-      diffData.totals.a.blocked +
-      diffData.totals.a.no_response;
-    const unchangedCount = Math.max(
-      0,
-      totalIssues - added.length - changed.length,
-    );
-
-    return { added, removed, changed, unchangedCount };
-  }, [diffData]);
-
-  const diffSummary = useMemo(() => {
-    if (!issueDiff) return null;
-    return {
-      addedIssues: issueDiff.added.length,
-      removedIssues: issueDiff.removed.length,
-      changed: issueDiff.changed.length,
-      unchanged: issueDiff.unchangedCount,
-    };
-  }, [issueDiff]);
-  const compareRun = useMemo(() => {
-    if (!compareRunId) return null;
-    return history.find((run) => run.id === compareRunId) ?? null;
-  }, [compareRunId, history]);
-  const hasDiffChanges =
-    !!issueDiff &&
-    (issueDiff.added.length > 0 ||
-      issueDiff.removed.length > 0 ||
-      issueDiff.changed.length > 0);
   const reportView = viewMode === "report";
   const reportRun = reportData?.scanRun ?? null;
   const reportSite = reportRun
@@ -1105,7 +1323,12 @@ const App: React.FC = () => {
     [sites, selectedSiteId],
   );
   const resultsTitleCount =
-    activeTab === "ignored" ? ignoredResults.length : filteredResults.length;
+    resultsView === "changes"
+      ? diffChangeItems.length +
+        (includeUnchanged ? diffUnchangedItems.length : 0)
+      : activeTab === "ignored"
+        ? ignoredResults.length
+        : filteredResults.length;
   const latestRunId = history[0]?.id ?? null;
   const isLatestRun = !!selectedRun && selectedRun.id === latestRunId;
   const runHeadingText = selectedRun
@@ -1205,7 +1428,7 @@ const App: React.FC = () => {
         id: runId,
         site_id: payload.site_id,
         status: payload.status,
-        started_at: payload.started_at ?? null,
+        started_at: payload.started_at ?? new Date().toISOString(),
         finished_at: payload.finished_at ?? null,
         start_url: payload.start_url ?? startUrl,
         total_links: payload.total_links ?? 0,
@@ -1230,6 +1453,12 @@ const App: React.FC = () => {
         selectedRunIdRef.current === runId
       ) {
         void refreshSelectedRun(runId);
+      }
+
+      if (payload.status === "completed" || payload.status === "failed") {
+        queryClient.invalidateQueries({
+          queryKey: ["scanDiff", payload.site_id],
+        });
       }
     }
   }
@@ -1432,7 +1661,6 @@ const App: React.FC = () => {
         setIgnoreRulesOpen(false);
         setHistoryOpen(false);
         setFiltersOpen(false);
-        setThemeMenuOpen(false);
         setAddSiteOpen(false);
         setShortcutsOpen(false);
       }
@@ -2135,11 +2363,14 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!selectedRunId || history.length === 0) {
       setCompareRunId(null);
-      setDiffData(null);
       return;
     }
     const idx = history.findIndex((run) => run.id === selectedRunId);
-    const fallback = history[idx + 1]?.id ?? null;
+    const fallback =
+      idx >= 0
+        ? history.slice(idx + 1).find((run) => run.status === "completed")?.id ??
+          null
+        : null;
     if (fallback && fallback !== compareRunId) {
       setCompareRunId(fallback);
     } else if (!fallback) {
@@ -2148,12 +2379,50 @@ const App: React.FC = () => {
   }, [history, selectedRunId]);
 
   useEffect(() => {
-    if (!selectedRunId || !compareRunId) {
-      setDiffData(null);
+    if (!includeUnchanged) {
+      setUnchangedOffset(0);
+      setUnchangedOnly(false);
+    }
+  }, [includeUnchanged]);
+
+  useEffect(() => {
+    setUnchangedOffset(0);
+  }, [diffIssuesOnly]);
+
+  useEffect(() => {
+    setUnchangedOffset(0);
+  }, [diffExportFilter, compareRunId, selectedRunId]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setDiffOkTotal(0);
       return;
     }
-    void loadDiff(selectedRunId, compareRunId);
-  }, [selectedRunId, compareRunId]);
+    let cancelled = false;
+    const loadSummary = async () => {
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(
+            selectedRunId,
+          )}/links/summary`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const data: ScanLinksSummaryResponse = await res.json();
+        if (cancelled) return;
+        const okRow = data.summary.find(
+          (row) => row.classification === "ok",
+        );
+        setDiffOkTotal(okRow?.count ?? 0);
+      } catch {
+        if (!cancelled) setDiffOkTotal(0);
+      }
+    };
+    void loadSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRunId]);
 
   async function refreshSelectedRun(runId: string) {
     try {
@@ -2917,22 +3186,46 @@ const App: React.FC = () => {
     }
   }
 
-  async function loadDiff(runId: string, compareTo: string) {
-    setDiffLoading(true);
-    setDiffError(null);
+  async function exportDiffCsv() {
+    if (!selectedSiteId || !selectedRunId) return;
     try {
+      const params = new URLSearchParams({
+        baseline: diffBaseline,
+        issuesOnly: diffIssuesOnly ? "true" : "false",
+        exportScope: "all",
+      });
+      if (diffExportFilter !== "all") {
+        params.set("changeTypes", diffExportFilter);
+      }
       const res = await apiFetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/diff?compareTo=${encodeURIComponent(compareTo)}`,
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId,
+        )}/scan-runs/${encodeURIComponent(selectedRunId)}/diff.csv?${params.toString()}`,
         { cache: "no-store" },
       );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const data: DiffResponse = await res.json();
-      setDiffData(data.diff);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Export failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const filename =
+        getFilenameFromDisposition(res.headers.get("Content-Disposition")) ??
+        "scanlark-diff.csv";
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      if (!diffBaselineRun) {
+        pushToast("No baseline scan yet – exported empty CSV", "info");
+      } else {
+        pushToast("Exported changes CSV", "success");
+      }
     } catch (err: unknown) {
-      setDiffError(getErrorMessage(err, "Failed to load diff"));
-      setDiffData(null);
-    } finally {
-      setDiffLoading(false);
+      pushToast(getErrorMessage(err, "Failed to export CSV"), "warning");
     }
   }
 
@@ -3797,6 +4090,32 @@ const App: React.FC = () => {
         .results-header.single {
           grid-template-columns: minmax(0, 1fr);
         }
+        .changes-header {
+          grid-template-columns:
+            minmax(0, 1.8fr)
+            minmax(110px, 0.5fr)
+            minmax(0, 1.2fr)
+            minmax(0, 1fr);
+        }
+        .change-row {
+          display: grid;
+          grid-template-columns:
+            minmax(0, 1.8fr)
+            minmax(110px, 0.5fr)
+            minmax(0, 1.2fr)
+            minmax(0, 1fr);
+          gap: 12px;
+          align-items: start;
+        }
+        .summary-chip {
+          font-size: 11px;
+          color: var(--text);
+          background: var(--panel-elev);
+          border: 1px solid var(--border);
+          padding: 4px 10px;
+          border-radius: 999px;
+          font-weight: 600;
+        }
         .results-scroll {
           max-height: 560px;
           display: flex;
@@ -4008,6 +4327,13 @@ const App: React.FC = () => {
           }
           .result-row {
             grid-template-columns: minmax(0, 1fr);
+          }
+          .changes-header {
+            display: none;
+          }
+          .change-row {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 8px;
           }
           .result-occ {
             align-items: flex-start;
@@ -6275,7 +6601,7 @@ const App: React.FC = () => {
                           )}
                         </div>
                       )}
-                      {selectedRun && compareRun && diffSummary && (
+                      {selectedRun && diffBaselineRun && diffSummary && (
                         <div
                           style={{
                             paddingTop: "10px",
@@ -6287,8 +6613,9 @@ const App: React.FC = () => {
                           }}
                         >
                           <span style={{ color: "var(--muted)" }}>
-                            Compared to {formatRelative(compareRun.started_at)}{" "}
-                            · {formatDate(compareRun.started_at)}
+                            Compared to{" "}
+                            {formatRelative(diffBaselineRun.started_at)} ·{" "}
+                            {formatDate(diffBaselineRun.started_at)}
                           </span>
                           <div
                             style={{
@@ -6299,14 +6626,27 @@ const App: React.FC = () => {
                               fontWeight: 600,
                             }}
                           >
-                            <span>New issues {diffSummary.addedIssues}</span>
-                            <span>Fixed {diffSummary.removedIssues}</span>
+                            <span>New issues {diffSummary.newIssues}</span>
+                            <span>Fixed {diffSummary.fixedIssues}</span>
                             <span>Changed {diffSummary.changed}</span>
-                            <span>Unchanged {diffSummary.unchanged}</span>
+                            <span>
+                              Outstanding issues {diffSummary.outstandingIssues}
+                            </span>
+                            {!diffIssuesOnly && (
+                              <span>OK {diffOkTotal}</span>
+                            )}
+                            {!diffIssuesOnly && (
+                              <span>Added {diffSummary.added}</span>
+                            )}
+                            {!diffIssuesOnly && (
+                              <span>Removed {diffSummary.removed}</span>
+                            )}
                           </div>
                           {!hasDiffChanges && (
                             <span style={{ color: "var(--muted)" }}>
-                              No issue changes since last run.
+                              {diffIssuesOnly
+                                ? "No issue changes since last run."
+                                : "No changes since last run."}
                             </span>
                           )}
                         </div>
@@ -6333,7 +6673,22 @@ const App: React.FC = () => {
                         <div className="results-summary__top">
                           {!isSelectedRunInProgress && (
                             <div className="results-summary__stats">
-                              {resultsLoading ? (
+                              {resultsView === "changes" ? (
+                                diffLoading ? (
+                                  <div
+                                    className="skeleton"
+                                    style={{ height: "16px", width: "240px" }}
+                                  />
+                                ) : diffBaselineRun ? (
+                                  <>
+                                    Comparing to{" "}
+                                    {formatRelative(diffBaselineRun.started_at)}{" "}
+                                    · {formatDate(diffBaselineRun.started_at)}
+                                  </>
+                                ) : (
+                                  "No previous scan to compare yet."
+                                )
+                              ) : resultsLoading ? (
                                 <div
                                   className="skeleton"
                                   style={{ height: "16px", width: "260px" }}
@@ -6376,7 +6731,20 @@ const App: React.FC = () => {
                         </div>
                         <div className="results-summary__controls">
                           <div className="results-tabs">
-                            {(
+                            <button
+                              className={`tab-pill ${resultsView === "results" ? "active" : ""}`}
+                              onClick={() => setResultsView("results")}
+                            >
+                              Results
+                            </button>
+                            <button
+                              className={`tab-pill ${resultsView === "changes" ? "active" : ""}`}
+                              onClick={() => setResultsView("changes")}
+                            >
+                              Changes
+                            </button>
+                            {resultsView === "results" &&
+                              ((
                               [
                                 "all",
                                 "broken",
@@ -6399,244 +6767,331 @@ const App: React.FC = () => {
                                       ? "Ignored"
                                       : tab[0].toUpperCase() + tab.slice(1)}
                               </button>
-                            ))}
+                            )))}
                           </div>
                           <div className="results-controls">
-                            <div
-                              className="filter-dropdown"
-                              ref={filterDropdownRef}
-                            >
-                              <button
-                                onClick={() => setFiltersOpen((prev) => !prev)}
-                                className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
-                              >
-                                Filters {filtersOpen ? "▴" : "▾"}
-                              </button>
-                              {filtersOpen && (
-                                <div className="filter-dropdown__panel">
-                                  <div className="filter-row">
-                                    {(
-                                      [
-                                        "all",
-                                        "http_error",
-                                        "no_response",
-                                      ] as const
-                                    ).map((group) => (
-                                      <button
-                                        key={group}
-                                        onClick={() => setStatusGroup(group)}
-                                        className={`tab-pill ${statusGroup === group ? "active" : ""}`}
-                                      >
-                                        {group === "all"
-                                          ? "All responses"
-                                          : group === "http_error"
-                                            ? "HTTP response"
-                                            : "No response"}
-                                      </button>
-                                    ))}
-                                  </div>
-                                  <div className="filter-row">
-                                    {["401/403/429", "404", "5xx"].map(
-                                      (key) => (
-                                        <button
-                                          key={key}
-                                          onClick={() =>
-                                            toggleStatusFilter(key)
-                                          }
-                                          className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
-                                        >
-                                          {key}
-                                        </button>
-                                      ),
-                                    )}
-                                    <button
-                                      onClick={() =>
-                                        toggleStatusFilter("no_response")
-                                      }
-                                      className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
-                                    >
-                                      No response
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        setMinOccurrencesOnly((prev) => !prev)
-                                      }
-                                      className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
-                                    >
-                                      Occurrences &gt; 1
-                                    </button>
-                                    <button
-                                      onClick={() =>
-                                        setShowIgnored((prev) => !prev)
-                                      }
-                                      className={`tab-pill ${showIgnored ? "active" : ""}`}
-                                    >
-                                      {showIgnored
-                                        ? "Showing ignored"
-                                        : "Show ignored"}
-                                    </button>
-                                  </div>
-                                  <div className="filter-row">
-                                    <button
-                                      onClick={() => {
-                                        setStatusFilters({});
-                                        setMinOccurrencesOnly(false);
-                                        setSearchQuery("");
-                                        setActiveTab("all");
-                                        setStatusGroup("all");
-                                        setShowIgnored(false);
-                                      }}
-                                      className="tab-pill"
-                                    >
-                                      Reset filters
-                                    </button>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                            <input
-                              ref={searchInputRef}
-                              value={searchQuery}
-                              onChange={(e) => setSearchQuery(e.target.value)}
-                              placeholder="Search links"
-                              style={{ width: "200px" }}
-                            />
-                            <select
-                              value={sortOption}
-                              onChange={(e) =>
-                                setSortOption(
-                                  e.target.value as typeof sortOption,
-                                )
-                              }
-                            >
-                              <option value="severity">Severity</option>
-                              <option value="occ_desc">Most occurrences</option>
-                              <option value="status_desc">Status code</option>
-                              <option value="recent">Recently seen</option>
-                            </select>
-                            {isSelectedRunInProgress && (
-                              <span
-                                style={{
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                Updating…
-                              </span>
-                            )}
-                            <button
-                              onClick={() => setHistoryOpen(true)}
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                cursor: "pointer",
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              History
-                            </button>
-                            <div
-                              ref={exportMenuRef}
-                              style={{ position: "relative" }}
-                            >
-                              <button
-                                onClick={() =>
-                                  setExportMenuOpen((prev) => !prev)
-                                }
-                                disabled={exportDisabled}
-                                style={{
-                                  padding: "6px 10px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  cursor: exportDisabled
-                                    ? "not-allowed"
-                                    : "pointer",
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                Export
-                              </button>
-                              {exportMenuOpen && !exportDisabled && (
+                            {resultsView === "results" ? (
+                              <>
                                 <div
-                                  className="export-menu"
-                                  style={{
-                                    position: "absolute",
-                                    right: 0,
-                                    top: "calc(100% + 6px)",
-                                    background: "var(--panel)",
-                                    border: "1px solid var(--border)",
-                                    borderRadius: "12px",
-                                    boxShadow: "var(--shadow)",
-                                    padding: "6px",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "4px",
-                                    minWidth: "180px",
-                                    zIndex: 30,
-                                  }}
+                                  className="filter-dropdown"
+                                  ref={filterDropdownRef}
                                 >
                                   <button
-                                    onClick={() => triggerExport("csv")}
-                                    disabled={exportLinksDisabled}
-                                    style={{
-                                      padding: "8px 10px",
-                                      borderRadius: "10px",
-                                      border: "1px solid transparent",
-                                      background: "transparent",
-                                      textAlign: "left",
-                                      cursor: exportLinksDisabled
-                                        ? "not-allowed"
-                                        : "pointer",
-                                      color: "var(--text)",
-                                    }}
+                                    onClick={() =>
+                                      setFiltersOpen((prev) => !prev)
+                                    }
+                                    className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
                                   >
-                                    Export CSV (current view)
+                                    Filters {filtersOpen ? "▴" : "▾"}
                                   </button>
-                                  <button
-                                    onClick={() => triggerExport("json")}
-                                    disabled={exportLinksDisabled}
-                                    style={{
-                                      padding: "8px 10px",
-                                      borderRadius: "10px",
-                                      border: "1px solid transparent",
-                                      background: "transparent",
-                                      textAlign: "left",
-                                      cursor: exportLinksDisabled
-                                        ? "not-allowed"
-                                        : "pointer",
-                                      color: "var(--text)",
-                                    }}
-                                  >
-                                    Export JSON (current view)
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      if (!selectedRunId) return;
-                                      openReport(selectedRunId);
-                                      setExportMenuOpen(false);
-                                    }}
-                                    style={{
-                                      padding: "8px 10px",
-                                      borderRadius: "10px",
-                                      border: "1px solid transparent",
-                                      background: "transparent",
-                                      textAlign: "left",
-                                      cursor: "pointer",
-                                      color: "var(--text)",
-                                    }}
-                                  >
-                                    Open Report
-                                  </button>
+                                  {filtersOpen && (
+                                    <div className="filter-dropdown__panel">
+                                      <div className="filter-row">
+                                        {(
+                                          [
+                                            "all",
+                                            "http_error",
+                                            "no_response",
+                                          ] as const
+                                        ).map((group) => (
+                                          <button
+                                            key={group}
+                                            onClick={() =>
+                                              setStatusGroup(group)
+                                            }
+                                            className={`tab-pill ${statusGroup === group ? "active" : ""}`}
+                                          >
+                                            {group === "all"
+                                              ? "All responses"
+                                              : group === "http_error"
+                                                ? "HTTP response"
+                                                : "No response"}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      <div className="filter-row">
+                                        {["401/403/429", "404", "5xx"].map(
+                                          (key) => (
+                                            <button
+                                              key={key}
+                                              onClick={() =>
+                                                toggleStatusFilter(key)
+                                              }
+                                              className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
+                                            >
+                                              {key}
+                                            </button>
+                                          ),
+                                        )}
+                                        <button
+                                          onClick={() =>
+                                            toggleStatusFilter("no_response")
+                                          }
+                                          className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
+                                        >
+                                          No response
+                                        </button>
+                                        <button
+                                          onClick={() =>
+                                            setMinOccurrencesOnly(
+                                              (prev) => !prev,
+                                            )
+                                          }
+                                          className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
+                                        >
+                                          Occurrences &gt; 1
+                                        </button>
+                                        <button
+                                          onClick={() =>
+                                            setShowIgnored((prev) => !prev)
+                                          }
+                                          className={`tab-pill ${showIgnored ? "active" : ""}`}
+                                        >
+                                          {showIgnored
+                                            ? "Showing ignored"
+                                            : "Show ignored"}
+                                        </button>
+                                      </div>
+                                      <div className="filter-row">
+                                        <button
+                                          onClick={() => {
+                                            setStatusFilters({});
+                                            setMinOccurrencesOnly(false);
+                                            setSearchQuery("");
+                                            setActiveTab("all");
+                                            setStatusGroup("all");
+                                            setShowIgnored(false);
+                                          }}
+                                          className="tab-pill"
+                                        >
+                                          Reset filters
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                                <input
+                                  ref={searchInputRef}
+                                  value={searchQuery}
+                                  onChange={(e) =>
+                                    setSearchQuery(e.target.value)
+                                  }
+                                  placeholder="Search links"
+                                  style={{ width: "200px" }}
+                                />
+                                <select
+                                  value={sortOption}
+                                  onChange={(e) =>
+                                    setSortOption(
+                                      e.target.value as typeof sortOption,
+                                    )
+                                  }
+                                >
+                                  <option value="severity">Severity</option>
+                                  <option value="occ_desc">
+                                    Most occurrences
+                                  </option>
+                                  <option value="status_desc">
+                                    Status code
+                                  </option>
+                                  <option value="recent">Recently seen</option>
+                                </select>
+                                {isSelectedRunInProgress && (
+                                  <span
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    Updating…
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => setHistoryOpen(true)}
+                                  style={{
+                                    padding: "6px 10px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  History
+                                </button>
+                                <div
+                                  ref={exportMenuRef}
+                                  style={{ position: "relative" }}
+                                >
+                                  <button
+                                    onClick={() =>
+                                      setExportMenuOpen((prev) => !prev)
+                                    }
+                                    disabled={exportDisabled}
+                                    style={{
+                                      padding: "6px 10px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: exportDisabled
+                                        ? "not-allowed"
+                                        : "pointer",
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Export
+                                  </button>
+                                  {exportMenuOpen && !exportDisabled && (
+                                    <div
+                                      className="export-menu"
+                                      style={{
+                                        position: "absolute",
+                                        right: 0,
+                                        top: "calc(100% + 6px)",
+                                        background: "var(--panel)",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: "12px",
+                                        boxShadow: "var(--shadow)",
+                                        padding: "6px",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        minWidth: "180px",
+                                        zIndex: 30,
+                                      }}
+                                    >
+                                      <button
+                                        onClick={() => triggerExport("csv")}
+                                        disabled={exportLinksDisabled}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: exportLinksDisabled
+                                            ? "not-allowed"
+                                            : "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Export CSV (current view)
+                                      </button>
+                                      <button
+                                        onClick={() => triggerExport("json")}
+                                        disabled={exportLinksDisabled}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: exportLinksDisabled
+                                            ? "not-allowed"
+                                            : "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Export JSON (current view)
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          if (!selectedRunId) return;
+                                          openReport(selectedRunId);
+                                          setExportMenuOpen(false);
+                                        }}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Open Report
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() =>
+                                    setDiffIssuesOnly((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${diffIssuesOnly ? "active" : ""}`}
+                                >
+                                  Issues only
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setIncludeUnchanged((prev) => !prev);
+                                    setUnchangedOnly(false);
+                                  }}
+                                  className={`tab-pill ${includeUnchanged ? "active" : ""}`}
+                                >
+                                  Include unchanged
+                                </button>
+                                <select
+                                  value={diffExportFilter}
+                                  onChange={(e) =>
+                                    setDiffExportFilter(
+                                      e.target.value as typeof diffExportFilter,
+                                    )
+                                  }
+                                  disabled={unchangedOnly}
+                                  title={
+                                    unchangedOnly
+                                      ? "Filters disabled in outstanding-only view"
+                                      : undefined
+                                  }
+                                >
+                                  <option value="all">All changes</option>
+                                  <option value="new_issue">New issues only</option>
+                                  <option value="fixed">Fixed only</option>
+                                  <option value="changed">Changed only</option>
+                                  <option value="added">Added only</option>
+                                  <option value="removed">Removed only</option>
+                                </select>
+                                <button
+                                  onClick={exportDiffCsv}
+                                  style={{
+                                    padding: "6px 10px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Export CSV
+                                </button>
+                                <button
+                                  onClick={() => setHistoryOpen(true)}
+                                  style={{
+                                    padding: "6px 10px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  History
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -6648,195 +7103,127 @@ const App: React.FC = () => {
                       <div style={{ minWidth: 0 }}>
                         <div className="results-title">
                           <div>
-                            <div className="results-title__label">Results</div>
+                            <div className="results-title__label">
+                              {resultsView === "changes" ? "Changes" : "Results"}
+                            </div>
                             <div className="results-title__meta">
-                              Showing {resultsTitleCount} link
+                              Showing {resultsTitleCount}{" "}
+                              {resultsView === "changes" ? "change" : "link"}
                               {resultsTitleCount === 1 ? "" : "s"}
                             </div>
                           </div>
                         </div>
                         <div className="results-table">
                           <div className="results-scroll">
-                            <div
-                              className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
-                            >
-                              {activeTab === "ignored" ? (
-                                <div>Ignored links</div>
-                              ) : (
-                                <>
-                                  <div>Link</div>
-                                  <div>Status</div>
-                                  <div>Hits</div>
-                                  <div>Actions</div>
-                                </>
-                              )}
-                            </div>
-                            {activeTab !== "ignored" && (
+                            {resultsView === "changes" ? (
                               <>
-                                {(activeTab === "broken" ||
-                                  activeTab === "blocked") && (
-                                  <div
-                                    style={{
-                                      display: "flex",
-                                      justifyContent: "space-between",
-                                      alignItems: "center",
-                                      gap: "8px",
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        fontSize: "12px",
-                                        fontWeight: 600,
-                                      }}
-                                    >
-                                      {activeTab === "broken"
-                                        ? "Broken links"
-                                        : "Blocked links"}
-                                    </div>
-                                    <button
-                                      onClick={() =>
-                                        triggerExport("csv", activeTab)
-                                      }
-                                      disabled={!selectedRunId}
-                                      style={{
-                                        padding: "4px 8px",
-                                        borderRadius: "999px",
-                                        border: "1px solid var(--border)",
-                                        background: "var(--panel)",
-                                        fontSize: "11px",
-                                        cursor: !selectedRunId
-                                          ? "not-allowed"
-                                          : "pointer",
-                                      }}
-                                    >
-                                      Export CSV
-                                    </button>
-                                  </div>
-                                )}
-                                {resultsError && (
+                                <div
+                                  className="changes-summary"
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "8px",
+                                    padding: "12px 16px 0",
+                                  }}
+                                >
+                                  {diffSummary && (
+                                    <>
+                                      <span className="summary-chip">
+                                        New issues {diffSummary.newIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Fixed {diffSummary.fixedIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Changed {diffSummary.changed}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Outstanding issues{" "}
+                                        {diffSummary.outstandingIssues}
+                                      </span>
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          OK {diffOkTotal}
+                                        </span>
+                                      )}
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          Added {diffSummary.added}
+                                        </span>
+                                      )}
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          Removed {diffSummary.removed}
+                                        </span>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                                <div className="results-header changes-header">
+                                  <div>Link</div>
+                                  <div>Change</div>
+                                  <div>Baseline → Current</div>
+                                  <div>Source pages</div>
+                                </div>
+                                {diffError && (
                                   <div
                                     style={{
                                       padding: "10px 12px",
                                       borderRadius: "10px",
                                       border: "1px solid var(--border)",
                                       color: "var(--warning)",
+                                      margin: "12px 16px",
                                     }}
                                   >
-                                    {resultsError}
+                                    {diffError}
                                   </div>
                                 )}
-                                {resultsLoading &&
-                                  Array.from({ length: 6 }).map((_, idx) => (
+                                {diffLoading &&
+                                  Array.from({ length: 5 }).map((_, idx) => (
                                     <div key={idx} className="skeleton" />
                                   ))}
-                                {!resultsLoading &&
-                                  filteredResults.length === 0 &&
-                                  results.length > 0 && (
-                                    <div
-                                      style={{
-                                        padding: "20px",
-                                        borderRadius: "12px",
-                                        border: "1px dashed var(--border)",
-                                        textAlign: "center",
-                                        color: "var(--muted)",
-                                      }}
-                                    >
-                                      <div style={{ marginBottom: "8px" }}>
-                                        No results match these filters.
-                                      </div>
-                                      <button
-                                        onClick={() => {
-                                          setStatusFilters({});
-                                          setMinOccurrencesOnly(false);
-                                          setSearchQuery("");
-                                          setActiveTab("all");
-                                          setStatusGroup("all");
-                                          setShowIgnored(false);
-                                        }}
-                                        style={{
-                                          padding: "6px 10px",
-                                          borderRadius: "999px",
-                                          border: "1px solid var(--border)",
-                                          background: "var(--panel)",
-                                          fontSize: "12px",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        Clear filters
-                                      </button>
+                                {!diffLoading && !diffBaselineRun && (
+                                  <div
+                                    style={{
+                                      padding: "20px",
+                                      borderRadius: "12px",
+                                      border: "1px dashed var(--border)",
+                                      textAlign: "center",
+                                      color: "var(--muted)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    <div style={{ marginBottom: "8px" }}>
+                                      No previous scan to compare yet. Run
+                                      another scan to see changes over time.
                                     </div>
-                                  )}
-                                {!resultsLoading &&
-                                  filteredResults.length === 0 &&
-                                  results.length === 0 && (
-                                    <div
-                                      style={{
-                                        padding: "20px",
-                                        borderRadius: "12px",
-                                        border: "1px dashed var(--border)",
-                                        textAlign: "center",
-                                        color: "var(--muted)",
-                                      }}
-                                    >
-                                      <div style={{ marginBottom: "8px" }}>
-                                        No results yet. Run a scan to populate
-                                        this list.
-                                      </div>
+                                    {selectedSiteId && (
                                       <button
                                         onClick={handleRunScan}
-                                        disabled={
-                                          !selectedSiteId || triggeringScan
-                                        }
+                                        disabled={triggeringScan}
                                         style={{
                                           padding: "6px 10px",
                                           borderRadius: "999px",
                                           border: "1px solid var(--border)",
                                           background: "var(--panel)",
                                           fontSize: "12px",
-                                          cursor:
-                                            !selectedSiteId || triggeringScan
-                                              ? "not-allowed"
-                                              : "pointer",
+                                          cursor: triggeringScan
+                                            ? "not-allowed"
+                                            : "pointer",
                                         }}
                                       >
                                         {triggeringScan
                                           ? "Starting..."
-                                          : "Run scan"}
+                                          : "Run a scan"}
                                       </button>
-                                    </div>
-                                  )}
-                                {renderLinkRows(filteredResults, (row) => {
-                                  if (row.classification === "blocked")
-                                    return blockedTheme;
-                                  if (row.classification === "ok")
-                                    return okTheme;
-                                  if (row.classification === "no_response")
-                                    return noResponseTheme;
-                                  return brokenTheme;
-                                })}
-                              </>
-                            )}
-
-                            {activeTab === "ignored" && (
-                              <>
-                                {ignoredError && (
-                                  <div
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: "10px",
-                                      border: "1px solid var(--border)",
-                                      color: "var(--warning)",
-                                    }}
-                                  >
-                                    {ignoredError}
+                                    )}
                                   </div>
                                 )}
-                                {ignoredLoading &&
-                                  Array.from({ length: 6 }).map((_, idx) => (
-                                    <div key={idx} className="skeleton" />
-                                  ))}
-                                {!ignoredLoading &&
-                                  ignoredResults.length === 0 && (
+                                {!diffLoading &&
+                                  diffBaselineRun &&
+                                  diffChangeItems.length === 0 &&
+                                  (!includeUnchanged ||
+                                    diffUnchangedItems.length === 0) && (
                                     <div
                                       style={{
                                         padding: "20px",
@@ -6844,177 +7231,463 @@ const App: React.FC = () => {
                                         border: "1px dashed var(--border)",
                                         textAlign: "center",
                                         color: "var(--muted)",
+                                        margin: "12px 16px",
                                       }}
                                     >
-                                      No ignored links yet.
-                                    </div>
-                                  )}
-                                {ignoredResults.map((row) => {
-                                  const isOpen = !!ignoredOccurrences[row.id];
-                                  return (
-                                    <div
-                                      key={row.id}
-                                      className="result-row ignored-row"
-                                      style={{
-                                        borderRadius: "10px",
-                                        border: "1px solid var(--border)",
-                                        background: "var(--panel-elev)",
-                                        display: "flex",
-                                        flexDirection: "column",
-                                      }}
-                                    >
-                                      <div
-                                        style={{
-                                          padding: "8px 10px",
-                                          display: "flex",
-                                          gap: "8px",
-                                          alignItems: "flex-start",
-                                        }}
-                                      >
-                                        <button
-                                          onClick={() =>
-                                            selectedRunId &&
-                                            toggleIgnoredOccurrences(
-                                              row.id,
-                                              selectedRunId,
-                                            )
-                                          }
-                                          style={{
-                                            background: "transparent",
-                                            border: "none",
-                                            cursor: "pointer",
-                                            fontSize: "16px",
-                                          }}
-                                        >
-                                          {isOpen ? "▼" : "▶"}
-                                        </button>
-                                        <div style={{ flex: 1, minWidth: 0 }}>
-                                          <div
-                                            style={{
-                                              display: "flex",
-                                              gap: "8px",
-                                              alignItems: "center",
-                                              flexWrap: "wrap",
-                                              marginBottom: "6px",
-                                            }}
-                                          >
-                                            <span
+                                      <div style={{ marginBottom: "8px" }}>
+                                        No changes match this view.
+                                      </div>
+                                      {diffIssuesOnly &&
+                                        !includeUnchanged &&
+                                        (diffSummary?.outstandingIssues ?? 0) >
+                                          0 && (
+                                          <>
+                                            <div style={{ marginBottom: "8px" }}>
+                                              No new issue changes since the last
+                                              scan. You still have{" "}
+                                              {diffSummary?.outstandingIssues ??
+                                                0}{" "}
+                                              outstanding issues.
+                                            </div>
+                                            <button
+                                              onClick={() => {
+                                                setIncludeUnchanged(true);
+                                                setUnchangedOnly(true);
+                                                setUnchangedOffset(0);
+                                              }}
                                               style={{
-                                                fontSize: "11px",
-                                                padding: "2px 6px",
+                                                padding: "6px 10px",
                                                 borderRadius: "999px",
-                                                background: "var(--chip-bg)",
-                                                color: "var(--chip-text)",
+                                                border: "1px solid var(--border)",
+                                                background: "var(--panel)",
+                                                fontSize: "12px",
+                                                cursor: "pointer",
                                               }}
                                             >
-                                              Ignored
-                                            </span>
-                                            {row.rule_type &&
-                                              row.rule_pattern && (
+                                              Show outstanding issues
+                                            </button>
+                                          </>
+                                        )}
+                                    </div>
+                                  )}
+                                {diffChangeItems.map(renderDiffRow)}
+                                {includeUnchanged && (
+                                  <div
+                                    style={{
+                                      padding: "8px 16px 0",
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: "8px",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <span>
+                                      Outstanding (unchanged){" "}
+                                      {diffIssuesOnly
+                                        ? diffSummary?.outstandingIssues ?? 0
+                                        : diffSummary?.outstandingTotal ?? 0}
+                                    </span>
+                                    {diffMeta && (
+                                      <span>
+                                        Showing {diffMeta.unchangedReturned}{" "}
+                                        of{" "}
+                                        {diffIssuesOnly
+                                          ? diffSummary?.outstandingIssues ?? 0
+                                          : diffSummary?.outstandingTotal ?? 0}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                {includeUnchanged && diffUnchangedItems.length === 0 && (
+                                  <div
+                                    style={{
+                                      padding: "20px",
+                                      borderRadius: "12px",
+                                      border: "1px dashed var(--border)",
+                                      textAlign: "center",
+                                      color: "var(--muted)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    No unchanged items in this slice.
+                                  </div>
+                                )}
+                                {includeUnchanged &&
+                                  diffUnchangedItems.map(renderDiffRow)}
+                              </>
+                            ) : (
+                              <>
+                                <div
+                                  className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
+                                >
+                                  {activeTab === "ignored" ? (
+                                    <div>Ignored links</div>
+                                  ) : (
+                                    <>
+                                      <div>Link</div>
+                                      <div>Status</div>
+                                      <div>Hits</div>
+                                      <div>Actions</div>
+                                    </>
+                                  )}
+                                </div>
+                                {activeTab !== "ignored" && (
+                                  <>
+                                    {(activeTab === "broken" ||
+                                      activeTab === "blocked") && (
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          justifyContent: "space-between",
+                                          alignItems: "center",
+                                          gap: "8px",
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            fontSize: "12px",
+                                            fontWeight: 600,
+                                          }}
+                                        >
+                                          {activeTab === "broken"
+                                            ? "Broken links"
+                                            : "Blocked links"}
+                                        </div>
+                                        <button
+                                          onClick={() =>
+                                            triggerExport("csv", activeTab)
+                                          }
+                                          disabled={!selectedRunId}
+                                          style={{
+                                            padding: "4px 8px",
+                                            borderRadius: "999px",
+                                            border:
+                                              "1px solid var(--border)",
+                                            background: "var(--panel)",
+                                            fontSize: "11px",
+                                            cursor: !selectedRunId
+                                              ? "not-allowed"
+                                              : "pointer",
+                                          }}
+                                        >
+                                          Export CSV
+                                        </button>
+                                      </div>
+                                    )}
+                                    {resultsError && (
+                                      <div
+                                        style={{
+                                          padding: "10px 12px",
+                                          borderRadius: "10px",
+                                          border: "1px solid var(--border)",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {resultsError}
+                                      </div>
+                                    )}
+                                    {resultsLoading &&
+                                      Array.from({ length: 6 }).map(
+                                        (_, idx) => (
+                                          <div key={idx} className="skeleton" />
+                                        ),
+                                      )}
+                                    {!resultsLoading &&
+                                      filteredResults.length === 0 &&
+                                      results.length > 0 && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            No results match these filters.
+                                          </div>
+                                          <button
+                                            onClick={() => {
+                                              setStatusFilters({});
+                                              setMinOccurrencesOnly(false);
+                                              setSearchQuery("");
+                                              setActiveTab("all");
+                                              setStatusGroup("all");
+                                              setShowIgnored(false);
+                                            }}
+                                            style={{
+                                              padding: "6px 10px",
+                                              borderRadius: "999px",
+                                              border:
+                                                "1px solid var(--border)",
+                                              background: "var(--panel)",
+                                              fontSize: "12px",
+                                              cursor: "pointer",
+                                            }}
+                                          >
+                                            Clear filters
+                                          </button>
+                                        </div>
+                                      )}
+                                    {!resultsLoading &&
+                                      filteredResults.length === 0 &&
+                                      results.length === 0 && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            No results yet. Run a scan to
+                                            populate this list.
+                                          </div>
+                                          <button
+                                            onClick={handleRunScan}
+                                            disabled={
+                                              !selectedSiteId || triggeringScan
+                                            }
+                                            style={{
+                                              padding: "6px 10px",
+                                              borderRadius: "999px",
+                                              border:
+                                                "1px solid var(--border)",
+                                              background: "var(--panel)",
+                                              fontSize: "12px",
+                                              cursor:
+                                                !selectedSiteId ||
+                                                triggeringScan
+                                                  ? "not-allowed"
+                                                  : "pointer",
+                                            }}
+                                          >
+                                            {triggeringScan
+                                              ? "Starting..."
+                                              : "Run scan"}
+                                          </button>
+                                        </div>
+                                      )}
+                                    {renderLinkRows(filteredResults, (row) => {
+                                      if (row.classification === "blocked")
+                                        return blockedTheme;
+                                      if (row.classification === "ok")
+                                        return okTheme;
+                                      if (row.classification === "no_response")
+                                        return noResponseTheme;
+                                      return brokenTheme;
+                                    })}
+                                  </>
+                                )}
+
+                                {activeTab === "ignored" && (
+                                  <>
+                                    {ignoredError && (
+                                      <div
+                                        style={{
+                                          padding: "10px 12px",
+                                          borderRadius: "10px",
+                                          border: "1px solid var(--border)",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {ignoredError}
+                                      </div>
+                                    )}
+                                    {ignoredLoading &&
+                                      Array.from({ length: 6 }).map(
+                                        (_, idx) => (
+                                          <div key={idx} className="skeleton" />
+                                        ),
+                                      )}
+                                    {!ignoredLoading &&
+                                      ignoredResults.length === 0 && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          No ignored links yet.
+                                        </div>
+                                      )}
+                                    {ignoredResults.map((row) => {
+                                      const isOpen = !!ignoredOccurrences[row.id];
+                                      return (
+                                        <div
+                                          key={row.id}
+                                          className="result-row ignored-row"
+                                          style={{
+                                            borderRadius: "10px",
+                                            border: "1px solid var(--border)",
+                                            background: "var(--panel-elev)",
+                                            display: "flex",
+                                            flexDirection: "column",
+                                          }}
+                                        >
+                                          <div
+                                            style={{
+                                              padding: "8px 10px",
+                                              display: "flex",
+                                              gap: "8px",
+                                              alignItems: "flex-start",
+                                            }}
+                                          >
+                                            <button
+                                              onClick={() =>
+                                                selectedRunId &&
+                                                toggleIgnoredOccurrences(
+                                                  row.id,
+                                                  selectedRunId,
+                                                )
+                                              }
+                                              style={{
+                                                background: "transparent",
+                                                border: "none",
+                                                cursor: "pointer",
+                                                fontSize: "16px",
+                                              }}
+                                            >
+                                              {isOpen ? "▼" : "▶"}
+                                            </button>
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                              <div
+                                                style={{
+                                                  display: "flex",
+                                                  gap: "8px",
+                                                  alignItems: "center",
+                                                  flexWrap: "wrap",
+                                                  marginBottom: "6px",
+                                                }}
+                                              >
                                                 <span
                                                   style={{
                                                     fontSize: "11px",
                                                     padding: "2px 6px",
                                                     borderRadius: "999px",
-                                                    background: "var(--panel)",
-                                                    color: "var(--muted)",
-                                                    border:
-                                                      "1px solid var(--border)",
+                                                    background: "var(--chip-bg)",
+                                                    color: "var(--chip-text)",
                                                   }}
                                                 >
-                                                  {row.rule_type}:{" "}
-                                                  {row.rule_pattern}
+                                                  Ignored
                                                 </span>
+                                                {row.rule_type &&
+                                                  row.rule_pattern && (
+                                                    <span
+                                                      style={{
+                                                        fontSize: "11px",
+                                                        padding: "2px 6px",
+                                                        borderRadius: "999px",
+                                                        background:
+                                                          "var(--panel)",
+                                                        color: "var(--muted)",
+                                                        border:
+                                                          "1px solid var(--border)",
+                                                      }}
+                                                    >
+                                                      {row.rule_type}:{" "}
+                                                      {row.rule_pattern}
+                                                    </span>
+                                                  )}
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  {row.status_code ??
+                                                    "No HTTP response"}
+                                                </span>
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  {row.occurrence_count}x
+                                                </span>
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontSize: "12px",
+                                                  color: "var(--text)",
+                                                  overflowWrap: "anywhere",
+                                                  wordBreak: "break-word",
+                                                  whiteSpace: "normal",
+                                                }}
+                                                title={row.link_url}
+                                              >
+                                                {row.link_url}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          {isOpen && (
+                                            <div
+                                              className="expand-panel"
+                                              style={{
+                                                padding: "10px 12px",
+                                                margin: "0 12px 12px 34px",
+                                                border: "1px solid var(--border)",
+                                                borderRadius: "10px",
+                                                background: "var(--panel)",
+                                                boxShadow: "var(--soft-shadow)",
+                                              }}
+                                            >
+                                              {ignoredOccLoading[row.id] && (
+                                                <div
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  Loading…
+                                                </div>
                                               )}
-                                            <span
-                                              style={{
-                                                fontSize: "11px",
-                                                color: "var(--muted)",
-                                              }}
-                                            >
-                                              {row.status_code ??
-                                                "No HTTP response"}
-                                            </span>
-                                            <span
-                                              style={{
-                                                fontSize: "11px",
-                                                color: "var(--muted)",
-                                              }}
-                                            >
-                                              {row.occurrence_count}x
-                                            </span>
-                                          </div>
-                                          <div
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--text)",
-                                              overflowWrap: "anywhere",
-                                              wordBreak: "break-word",
-                                              whiteSpace: "normal",
-                                            }}
-                                            title={row.link_url}
-                                          >
-                                            {row.link_url}
-                                          </div>
-                                        </div>
-                                      </div>
-                                      {isOpen && (
-                                        <div
-                                          className="expand-panel"
-                                          style={{
-                                            padding: "10px 12px",
-                                            margin: "0 12px 12px 34px",
-                                            border: "1px solid var(--border)",
-                                            borderRadius: "10px",
-                                            background: "var(--panel)",
-                                            boxShadow: "var(--soft-shadow)",
-                                          }}
-                                        >
-                                          {ignoredOccLoading[row.id] && (
-                                            <div
-                                              style={{
-                                                fontSize: "12px",
-                                                color: "var(--muted)",
-                                              }}
-                                            >
-                                              Loading…
+                                              {ignoredOccError[row.id] && (
+                                                <div
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--warning)",
+                                                  }}
+                                                >
+                                                  {ignoredOccError[row.id]}
+                                                </div>
+                                              )}
+                                              {(
+                                                ignoredOccurrences[row.id] ?? []
+                                              ).map((occ) => (
+                                                <div
+                                                  key={occ.id}
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--muted)",
+                                                    overflowWrap: "anywhere",
+                                                  }}
+                                                >
+                                                  {occ.source_page}
+                                                </div>
+                                              ))}
                                             </div>
                                           )}
-                                          {ignoredOccError[row.id] && (
-                                            <div
-                                              style={{
-                                                fontSize: "12px",
-                                                color: "var(--warning)",
-                                              }}
-                                            >
-                                              {ignoredOccError[row.id]}
-                                            </div>
-                                          )}
-                                          {(
-                                            ignoredOccurrences[row.id] ?? []
-                                          ).map((occ) => (
-                                            <div
-                                              key={occ.id}
-                                              style={{
-                                                fontSize: "12px",
-                                                color: "var(--muted)",
-                                                overflowWrap: "anywhere",
-                                              }}
-                                            >
-                                              {occ.source_page}
-                                            </div>
-                                          ))}
                                         </div>
-                                      )}
-                                    </div>
-                                  );
-                                })}
+                                      );
+                                    })}
+                                  </>
+                                )}
                               </>
                             )}
                           </div>
                         </div>
 
-                        {!isSelectedRunInProgress && (
+                        {!isSelectedRunInProgress && resultsView === "results" && (
                           <div
                             style={{
                               marginTop: "12px",
@@ -7184,6 +7857,98 @@ const App: React.FC = () => {
                                   ? "Loading..."
                                   : "Load More Results"}
                               </button>
+                            )}
+                          </div>
+                        )}
+                        {!isSelectedRunInProgress && resultsView === "changes" && (
+                          <div
+                            style={{
+                              marginTop: "12px",
+                              display: "flex",
+                              gap: "12px",
+                              flexWrap: "wrap",
+                              justifyContent: "center",
+                            }}
+                          >
+                            {!unchangedOnly && diffQuery.hasNextPage && (
+                              <button
+                                onClick={() => diffQuery.fetchNextPage()}
+                                disabled={diffQuery.isFetchingNextPage}
+                                style={{
+                                  padding: "10px 18px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--accent)",
+                                  background: "var(--accent)",
+                                  color: "white",
+                                  cursor: diffQuery.isFetchingNextPage
+                                    ? "default"
+                                    : "pointer",
+                                  opacity: diffQuery.isFetchingNextPage ? 0.6 : 1,
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {diffQuery.isFetchingNextPage
+                                  ? "Loading..."
+                                  : "Load more changes"}
+                              </button>
+                            )}
+                            {includeUnchanged && (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <button
+                                  onClick={() =>
+                                    setUnchangedOffset((prev) =>
+                                      Math.max(0, prev - unchangedLimit),
+                                    )
+                                  }
+                                  disabled={!canPrevUnchanged}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: canPrevUnchanged
+                                      ? "pointer"
+                                      : "not-allowed",
+                                    opacity: canPrevUnchanged ? 1 : 0.6,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Prev outstanding
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    setUnchangedOffset(
+                                      (prev) => prev + unchangedLimit,
+                                    )
+                                  }
+                                  disabled={!canNextUnchanged}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: canNextUnchanged
+                                      ? "pointer"
+                                      : "not-allowed",
+                                    opacity: canNextUnchanged ? 1 : 0.6,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Next outstanding
+                                </button>
+                              </div>
                             )}
                           </div>
                         )}
@@ -7952,9 +8717,14 @@ const App: React.FC = () => {
                           >
                             View
                           </button>
-                          {selectedRunId && run.id !== selectedRunId && (
+                          {selectedRunId &&
+                            run.id !== selectedRunId &&
+                            run.status === "completed" && (
                             <button
-                              onClick={() => setCompareRunId(run.id)}
+                              onClick={() => {
+                                setCompareRunId(run.id);
+                                setResultsView("changes");
+                              }}
                               style={{
                                 padding: "4px 6px",
                                 borderRadius: "6px",

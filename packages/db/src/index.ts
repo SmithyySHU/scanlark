@@ -53,6 +53,20 @@ export {
 export type { ScanLinkMinimalRow, ScanRunHistoryRow } from "./scanRunsHistory";
 
 export {
+  getBaselineRunForDiff,
+  getCompletedRunForSite,
+  getScanDiff,
+} from "./scanDiff";
+export type {
+  ScanDiffChangeType,
+  ScanDiffItem,
+  ScanDiffMeta,
+  ScanDiffRun,
+  ScanDiffSide,
+  ScanDiffSummary,
+} from "./scanDiff";
+
+export {
   getResultsForScanRun,
   getResultsForScanRunForUser,
   getResultsSummaryForScanRun,

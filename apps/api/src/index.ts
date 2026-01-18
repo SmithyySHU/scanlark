@@ -19,6 +19,8 @@ import {
   deleteSiteForUser,
   enqueueScanJob,
   getDiffBetweenRunsForUser,
+  getBaselineRunForDiff,
+  getCompletedRunForSite,
   getJobForScanRun,
   getLatestScanForSiteForUser,
   getOccurrencesForScanLinkForUser,
@@ -32,6 +34,7 @@ import {
   getScanLinksForExportForUser,
   getScanLinksForRunForUser,
   getScanLinksSummaryForUser,
+  getScanDiff,
   getScanRunByIdForUser,
   getScanRunById,
   getSiteByIdForUser,
@@ -89,6 +92,13 @@ const EXPORT_SORT_OPTIONS = new Set([
   "status_asc",
   "status_desc",
   "recent",
+]);
+const DIFF_CHANGE_TYPES = new Set([
+  "new_issue",
+  "fixed",
+  "changed",
+  "added",
+  "removed",
 ]);
 const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
 const NOTIFY_ON_OPTIONS = new Set(["always", "issues", "never"]);
@@ -246,6 +256,32 @@ async function requireScanRunForUser(
 
 function parseShowIgnored(value: unknown): boolean {
   return value === "true" || value === "1";
+}
+
+function parseBooleanParam(value: unknown, defaultValue: boolean): boolean {
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  return defaultValue;
+}
+
+function parseDiffChangeTypes(value: unknown): string[] | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const filtered = parts.filter((part) => DIFF_CHANGE_TYPES.has(part));
+  return filtered.length > 0 ? filtered : [];
+}
+
+function parseExportScope(value: unknown): "all" | "page" {
+  if (value === "page") return "page";
+  return "all";
+}
+
+function parseUnchangedScope(value: unknown): "issues" | "ok" | "all" {
+  if (value === "issues" || value === "ok") return value;
+  return "all";
 }
 
 function csvEscape(value: unknown): string {
@@ -648,6 +684,177 @@ app.get("/sites/:siteId/scan-runs", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/scan-runs", err);
     return sendInternalError(res, "Failed to fetch scan runs", err);
+  }
+});
+
+// Diff between a scan run and previous completed run for the same site
+app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
+  const siteId = req.params.siteId;
+  const scanRunId = req.params.scanRunId;
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
+  const includeUnchangedRaw = parseBooleanParam(
+    req.query.includeUnchanged,
+    false,
+  );
+  const unchangedOnly = parseBooleanParam(req.query.unchangedOnly, false);
+  const unchangedScope = parseUnchangedScope(req.query.unchangedScope);
+  const unchangedLimitRaw = req.query.unchangedLimit;
+  const unchangedOffsetRaw = req.query.unchangedOffset;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const unchangedLimit = unchangedLimitRaw ? Number(unchangedLimitRaw) : 50;
+  const unchangedOffset = unchangedOffsetRaw ? Number(unchangedOffsetRaw) : 0;
+  const includeUnchanged = includeUnchangedRaw || unchangedOnly;
+  const effectiveUnchangedScope = issuesOnly ? "issues" : unchangedScope;
+
+  if (changeTypes && changeTypes.length === 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_change_types",
+      "changeTypes must include valid change types",
+    );
+  }
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  if (Number.isNaN(unchangedLimit) || unchangedLimit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_unchanged_limit",
+      "unchangedLimit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(unchangedOffset) || unchangedOffset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_unchanged_offset",
+      "unchangedOffset must be 0 or greater",
+    );
+  }
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    if (run.site_id !== siteId) {
+      return sendNotFound(res);
+    }
+
+    if (baselineRaw && baselineRaw !== "prev" && baselineRaw === scanRunId) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, scanRunId);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const serializeRun = (row: {
+      id: string;
+      started_at: Date;
+      finished_at: Date | null;
+    }) => ({
+      id: row.id,
+      started_at: row.started_at.toISOString(),
+      finished_at: row.finished_at ? row.finished_at.toISOString() : null,
+    });
+
+    if (!baselineRun) {
+      return res.json({
+        siteId,
+        currentRun: serializeRun(run),
+        baselineRun: null,
+        summary: {
+          newIssues: 0,
+          fixedIssues: 0,
+          changed: 0,
+          outstandingIssues: 0,
+          outstandingOk: 0,
+          outstandingTotal: 0,
+          removed: 0,
+          added: 0,
+        },
+        meta: {
+          includeUnchanged,
+          unchangedOnly,
+          unchangedScope: effectiveUnchangedScope,
+          unchangedLimit,
+          unchangedOffset,
+          unchangedReturned: 0,
+          changesReturned: 0,
+        },
+        items: [],
+      });
+    }
+
+    await applyIgnoreRulesForScanRun(scanRunId);
+    await applyIgnoreRulesForScanRun(baselineRun.id);
+
+    const diff = await getScanDiff(scanRunId, baselineRun.id, {
+      issuesOnly,
+      limit,
+      offset,
+      changeTypes,
+      includeUnchanged,
+      unchangedOnly,
+      unchangedScope,
+      unchangedLimit,
+      unchangedOffset,
+    });
+
+    return res.json({
+      siteId,
+      currentRun: serializeRun(run),
+      baselineRun: serializeRun(baselineRun),
+      summary: diff.summary,
+      meta: diff.meta,
+      items: diff.items,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/scan-runs/:scanRunId/diff", err);
+    return sendInternalError(res, "Failed to compute scan diff", err);
   }
 });
 
@@ -1185,6 +1392,174 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/links/export.json", err);
     return sendInternalError(res, "Failed to export links as JSON", err);
+  }
+});
+
+// CSV export for diff results
+app.get("/sites/:siteId/scan-runs/:scanRunId/diff.csv", async (req, res) => {
+  const siteId = req.params.siteId;
+  const scanRunId = req.params.scanRunId;
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const exportScope = parseExportScope(req.query.exportScope);
+  const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (changeTypes && changeTypes.length === 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_change_types",
+      "changeTypes must include valid change types",
+    );
+  }
+
+  if (exportScope === "page") {
+    if (Number.isNaN(limit) || limit <= 0) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_limit",
+        "limit must be a positive number",
+      );
+    }
+
+    if (Number.isNaN(offset) || offset < 0) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_offset",
+        "offset must be 0 or greater",
+      );
+    }
+  }
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    if (run.site_id !== siteId) {
+      return sendNotFound(res);
+    }
+
+    if (baselineRaw && baselineRaw !== "prev" && baselineRaw === scanRunId) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, scanRunId);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const baselineId = baselineRun?.id ?? "no-baseline";
+    const filename = `scanlark-diff-${siteId}-${scanRunId}-vs-${baselineId}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const headers = [
+      "change_type",
+      "link_url",
+      "baseline_classification",
+      "baseline_status_code",
+      "baseline_error_message",
+      "baseline_source_pages",
+      "current_classification",
+      "current_status_code",
+      "current_error_message",
+      "current_source_pages",
+      "site_id",
+      "current_run_id",
+      "baseline_run_id",
+    ];
+
+    if (!baselineRun) {
+      return res.status(200).send(`${headers.join(",")}\n`);
+    }
+
+    await applyIgnoreRulesForScanRun(scanRunId);
+    await applyIgnoreRulesForScanRun(baselineRun.id);
+
+    const pageLimit = exportScope === "page" ? limit : 2000;
+    let pageOffset = exportScope === "page" ? offset : 0;
+    const items: Array<{
+      link_url: string;
+      change_type: string;
+      current: {
+        classification: string;
+        status_code: number | null;
+        error_message: string | null;
+        source_pages: string[];
+      } | null;
+      baseline: {
+        classification: string;
+        status_code: number | null;
+        error_message: string | null;
+        source_pages: string[];
+      } | null;
+    }> = [];
+
+    while (true) {
+      const diff = await getScanDiff(scanRunId, baselineRun.id, {
+        issuesOnly,
+        limit: pageLimit,
+        offset: pageOffset,
+        changeTypes: changeTypes ?? null,
+      });
+      items.push(...diff.items);
+      if (exportScope === "page" || diff.items.length < pageLimit) break;
+      pageOffset += pageLimit;
+    }
+
+    const rows = items.map((item) => {
+      const baseline = item.baseline;
+      const current = item.current;
+      const baselinePages = baseline?.source_pages ?? [];
+      const currentPages = current?.source_pages ?? [];
+      return [
+        csvEscape(item.change_type),
+        csvEscape(item.link_url),
+        csvEscape(baseline?.classification ?? ""),
+        csvEscape(baseline?.status_code ?? ""),
+        csvEscape(baseline?.error_message ?? ""),
+        csvEscape(baselinePages.join(" | ")),
+        csvEscape(current?.classification ?? ""),
+        csvEscape(current?.status_code ?? ""),
+        csvEscape(current?.error_message ?? ""),
+        csvEscape(currentPages.join(" | ")),
+        csvEscape(siteId),
+        csvEscape(scanRunId),
+        csvEscape(baselineRun.id),
+      ].join(",");
+    });
+
+    return res.status(200).send(`${headers.join(",")}\n${rows.join("\n")}`);
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /sites/:siteId/scan-runs/:scanRunId/diff.csv",
+      err,
+    );
+    return sendInternalError(res, "Failed to export scan diff", err);
   }
 });
 
