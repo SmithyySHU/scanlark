@@ -1,5 +1,6 @@
 import fetchUrl from "./fetchUrl";
-import extractLinks from "./extractLinks";
+import extractPageData from "./extractPageData";
+import runSiteChecks from "./runSiteChecks";
 import validateLink from "./validateLink";
 import { classifyStatus } from "./classifyStatus";
 import { normaliseLink } from "./normaliseLink";
@@ -31,6 +32,7 @@ import {
   touchScanRun,
   updateScanRunProgress,
   upsertIgnoredLink,
+  upsertScanPageCheck,
   upsertScanLink,
 } from "@scanlark/db";
 
@@ -717,7 +719,29 @@ export async function runScanForSite(
     );
     if (!html) return;
 
-    const rawLinks = extractLinks(html);
+    const pageData = extractPageData(html);
+    const rawLinks = pageData.links;
+    try {
+      await limitInsert(() =>
+        upsertScanPageCheck({
+          scanRunId: actualScanRunId,
+          siteId,
+          pageUrl,
+          title: pageData.seo.title,
+          metaDescription: pageData.seo.metaDescription,
+          h1Count: pageData.seo.h1Count,
+          robotsMeta: pageData.seo.robotsMeta,
+          robotsNoindex: pageData.seo.robotsNoindex,
+          canonicalCount: pageData.seo.canonicalCount,
+          canonicalHref: pageData.seo.canonicalHref,
+        }),
+      );
+    } catch (err) {
+      console.error(
+        `[DB Error] Failed to persist page facts for ${pageUrl}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
     if (rawLinks.length > MAX_LINKS_PER_PAGE) {
       console.log(
         `[Scan] Link extraction limit page=${pageUrl} extracted=${rawLinks.length} used=${MAX_LINKS_PER_PAGE}`,
@@ -969,6 +993,12 @@ export async function runScanForSite(
     });
 
     try {
+      await runSiteChecks({
+        scanRunId: actualScanRunId,
+        siteId,
+        startUrl,
+        signal: cancelController.signal,
+      });
       await applyIgnoreRulesForScanRun(actualScanRunId, { force: true });
       const issueResult = await replaceIssuesForScanRun(actualScanRunId);
       console.log(

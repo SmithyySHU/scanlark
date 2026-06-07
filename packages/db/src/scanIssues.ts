@@ -17,7 +17,25 @@ export type ScanIssueType =
   | "broken_link"
   | "blocked_link"
   | "no_response"
-  | "ignored_safety_skip";
+  | "ignored_safety_skip"
+  | "missing_title"
+  | "empty_title"
+  | "duplicate_title"
+  | "missing_meta_description"
+  | "empty_meta_description"
+  | "missing_h1"
+  | "multiple_h1"
+  | "noindex_detected"
+  | "canonical_multiple"
+  | "robots_missing"
+  | "robots_unreachable"
+  | "robots_blocks_all"
+  | "robots_no_sitemap_reference"
+  | "sitemap_missing"
+  | "sitemap_unreachable"
+  | "sitemap_invalid"
+  | "sitemap_empty"
+  | "sitemap_url_broken";
 
 export interface ScanIssue {
   id: string;
@@ -54,6 +72,28 @@ type IgnoredIssueCandidate = {
   source_url: string | null;
   rule_type: string | null;
   rule_pattern: string | null;
+};
+
+type SeoPageCheckCandidate = {
+  page_url: string;
+  title: string | null;
+  meta_description: string | null;
+  h1_count: number;
+  robots_meta: string | null;
+  robots_noindex: boolean;
+  canonical_count: number;
+  canonical_href: string | null;
+};
+
+type SiteCheckCandidate = {
+  check_type: "robots_txt" | "sitemap_xml" | "sitemap_index_xml";
+  target_url: string;
+  status_code: number | null;
+  ok: boolean;
+  error_message: string | null;
+  content_type: string | null;
+  content_size_bytes: number | null;
+  facts_json: Record<string, unknown>;
 };
 
 type StoredIssueInput = Omit<
@@ -187,6 +227,86 @@ function buildIgnoredSafetyIssue(
   };
 }
 
+function buildSeoIssue(
+  scanRunId: string,
+  siteId: string,
+  row: SeoPageCheckCandidate,
+  issueType: ScanIssueType,
+  title: string,
+  description: string,
+  severity: ScanIssueSeverity,
+  extraEvidence?: Record<string, unknown>,
+): StoredIssueInput {
+  return {
+    scan_run_id: scanRunId,
+    site_id: siteId,
+    category: "seo_basic",
+    severity,
+    status: "open",
+    issue_type: issueType,
+    affected_url: row.page_url,
+    source_url: null,
+    title,
+    description,
+    evidence_json: {
+      title: row.title,
+      meta_description: row.meta_description,
+      h1_count: row.h1_count,
+      robots_meta: row.robots_meta,
+      canonical_count: row.canonical_count,
+      canonical_href: row.canonical_href,
+      ...extraEvidence,
+    },
+  };
+}
+
+function buildSiteIssue(
+  scanRunId: string,
+  siteId: string,
+  category: "robots" | "sitemap",
+  issueType: ScanIssueType,
+  severity: ScanIssueSeverity,
+  affectedUrl: string,
+  title: string,
+  description: string,
+  evidence: Record<string, unknown>,
+): StoredIssueInput {
+  return {
+    scan_run_id: scanRunId,
+    site_id: siteId,
+    category,
+    severity,
+    status: "open",
+    issue_type: issueType,
+    affected_url: affectedUrl,
+    source_url: null,
+    title,
+    description,
+    evidence_json: evidence,
+  };
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function asBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asObjectArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item),
+  );
+}
+
 async function insertIssues(
   client: Awaited<ReturnType<typeof ensureConnected>>,
   issues: StoredIssueInput[],
@@ -308,6 +428,382 @@ export async function replaceIssuesForScanRun(
       [scanRunId],
     );
 
+    const seoPageChecksRes = await client.query<SeoPageCheckCandidate>(
+      `
+        SELECT
+          page_url,
+          title,
+          meta_description,
+          h1_count,
+          robots_meta,
+          robots_noindex,
+          canonical_count,
+          canonical_href
+        FROM scan_page_checks
+        WHERE scan_run_id = $1
+      `,
+      [scanRunId],
+    );
+
+    const siteChecksRes = await client.query<SiteCheckCandidate>(
+      `
+        SELECT
+          check_type,
+          target_url,
+          status_code,
+          ok,
+          error_message,
+          content_type,
+          content_size_bytes,
+          facts_json
+        FROM scan_site_checks
+        WHERE scan_run_id = $1
+      `,
+      [scanRunId],
+    );
+
+    const duplicateTitleMap = new Map<string, SeoPageCheckCandidate[]>();
+    for (const row of seoPageChecksRes.rows) {
+      const normalizedTitle = row.title?.trim().toLowerCase() ?? "";
+      if (!normalizedTitle) continue;
+      const matches = duplicateTitleMap.get(normalizedTitle) ?? [];
+      matches.push(row);
+      duplicateTitleMap.set(normalizedTitle, matches);
+    }
+
+    const seoIssues: StoredIssueInput[] = [];
+    for (const row of seoPageChecksRes.rows) {
+      if (row.title === null) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "missing_title",
+            "Missing title tag",
+            "This page does not include a title tag.",
+            "high",
+          ),
+        );
+      } else if (row.title === "") {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "empty_title",
+            "Empty title tag",
+            "This page includes a title tag, but it is empty.",
+            "high",
+          ),
+        );
+      } else {
+        const duplicatePages =
+          duplicateTitleMap.get(row.title.trim().toLowerCase()) ?? [];
+        if (duplicatePages.length > 1) {
+          seoIssues.push(
+            buildSeoIssue(
+              scanRunId,
+              run.site_id,
+              row,
+              "duplicate_title",
+              "Duplicate title tag",
+              "This page shares its title with other crawled pages in this scan.",
+              "medium",
+              {
+                duplicate_count: duplicatePages.length,
+                duplicate_page_urls: duplicatePages
+                  .map((page) => page.page_url)
+                  .slice(0, 10),
+              },
+            ),
+          );
+        }
+      }
+
+      if (row.meta_description === null) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "missing_meta_description",
+            "Missing meta description",
+            "This page does not include a meta description tag.",
+            "low",
+          ),
+        );
+      } else if (row.meta_description === "") {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "empty_meta_description",
+            "Empty meta description",
+            "This page includes a meta description tag, but it is empty.",
+            "low",
+          ),
+        );
+      }
+
+      if (row.h1_count === 0) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "missing_h1",
+            "Missing H1 heading",
+            "This page does not include an H1 heading.",
+            "medium",
+          ),
+        );
+      } else if (row.h1_count > 1) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "multiple_h1",
+            "Multiple H1 headings",
+            "This page includes more than one H1 heading.",
+            "low",
+          ),
+        );
+      }
+
+      if (row.robots_noindex) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "noindex_detected",
+            "Noindex detected",
+            "This page includes a robots noindex directive.",
+            "info",
+          ),
+        );
+      }
+
+      if (row.canonical_count > 1) {
+        seoIssues.push(
+          buildSeoIssue(
+            scanRunId,
+            run.site_id,
+            row,
+            "canonical_multiple",
+            "Multiple canonical tags",
+            "This page includes more than one canonical link tag.",
+            "low",
+          ),
+        );
+      }
+    }
+
+    const siteIssues: StoredIssueInput[] = [];
+    const robotsCheck = siteChecksRes.rows.find(
+      (row) => row.check_type === "robots_txt",
+    );
+    const robotsSitemapReferences = asStringArray(
+      robotsCheck?.facts_json?.sitemap_references,
+    );
+
+    if (robotsCheck) {
+      const blocksAll = asBoolean(robotsCheck.facts_json?.blocks_all);
+
+      if (!robotsCheck.ok) {
+        const robotsSeverity: ScanIssueSeverity =
+          robotsCheck.status_code === 404 ? "low" : "medium";
+        siteIssues.push(
+          buildSiteIssue(
+            scanRunId,
+            run.site_id,
+            "robots",
+            robotsCheck.status_code === 404
+              ? "robots_missing"
+              : "robots_unreachable",
+            robotsSeverity,
+            robotsCheck.target_url,
+            robotsCheck.status_code === 404
+              ? "robots.txt missing"
+              : "robots.txt unreachable",
+            robotsCheck.status_code === 404
+              ? "The site did not return a public robots.txt file during this scan."
+              : "Scanlark could not fetch robots.txt during this scan.",
+            {
+              status_code: robotsCheck.status_code,
+              error_message: robotsCheck.error_message,
+            },
+          ),
+        );
+      } else {
+        if (blocksAll) {
+          siteIssues.push(
+            buildSiteIssue(
+              scanRunId,
+              run.site_id,
+              "robots",
+              "robots_blocks_all",
+              "high",
+              robotsCheck.target_url,
+              "robots.txt blocks all crawlers",
+              "The robots.txt wildcard block disallows the entire site.",
+              {
+                status_code: robotsCheck.status_code,
+                blocks_all: true,
+                sitemap_references: robotsSitemapReferences,
+              },
+            ),
+          );
+        }
+
+        if (robotsSitemapReferences.length === 0) {
+          siteIssues.push(
+            buildSiteIssue(
+              scanRunId,
+              run.site_id,
+              "robots",
+              "robots_no_sitemap_reference",
+              "low",
+              robotsCheck.target_url,
+              "robots.txt has no sitemap reference",
+              "The robots.txt file does not advertise a sitemap URL.",
+              {
+                status_code: robotsCheck.status_code,
+                sitemap_references: robotsSitemapReferences,
+              },
+            ),
+          );
+        }
+      }
+    }
+
+    const sitemapChecks = siteChecksRes.rows.filter(
+      (row) =>
+        row.check_type === "sitemap_xml" || row.check_type === "sitemap_index_xml",
+    );
+    const authoritativeSitemapChecks =
+      robotsSitemapReferences.length > 0
+        ? sitemapChecks.filter((row) =>
+            robotsSitemapReferences.includes(row.target_url),
+          )
+        : sitemapChecks;
+    const anySitemapSuccess = sitemapChecks.some((row) => row.ok);
+
+    for (const row of sitemapChecks) {
+      const parsedUrlCount = asNumber(row.facts_json?.parsed_url_count) ?? 0;
+      const checkedUrlCount = asNumber(row.facts_json?.checked_url_count) ?? 0;
+      const brokenEntries = asObjectArray(row.facts_json?.broken_entries);
+
+      if (!row.ok) {
+        if (row.status_code !== 404) {
+          siteIssues.push(
+            buildSiteIssue(
+              scanRunId,
+              run.site_id,
+              "sitemap",
+              row.error_message === "invalid_xml"
+                ? "sitemap_invalid"
+                : "sitemap_unreachable",
+              "medium",
+              row.target_url,
+              row.error_message === "invalid_xml"
+                ? "Invalid sitemap XML"
+                : "Sitemap unreachable",
+              row.error_message === "invalid_xml"
+                ? "This sitemap URL responded, but the XML was not valid for sitemap parsing."
+                : "Scanlark could not fetch this sitemap URL during the scan.",
+              {
+                status_code: row.status_code,
+                error_message: row.error_message,
+                content_type: row.content_type,
+                content_size_bytes: row.content_size_bytes,
+              },
+            ),
+          );
+        }
+        continue;
+      }
+
+      if (parsedUrlCount === 0) {
+        siteIssues.push(
+          buildSiteIssue(
+            scanRunId,
+            run.site_id,
+            "sitemap",
+            "sitemap_empty",
+            "low",
+            row.target_url,
+            "Empty sitemap",
+            "This sitemap was reachable but did not contain any URLs.",
+            {
+              status_code: row.status_code,
+              parsed_url_count: parsedUrlCount,
+              checked_url_count: checkedUrlCount,
+            },
+          ),
+        );
+      }
+
+      for (const entry of brokenEntries) {
+        const entryUrl =
+          typeof entry.url === "string" && entry.url ? entry.url : row.target_url;
+        siteIssues.push(
+          buildSiteIssue(
+            scanRunId,
+            run.site_id,
+            "sitemap",
+            "sitemap_url_broken",
+            "low",
+            entryUrl,
+            "Broken sitemap URL",
+            "A sampled URL from this sitemap did not return a healthy response during the scan.",
+            {
+              sitemap_url: row.target_url,
+              status_code:
+                typeof entry.status_code === "number" ? entry.status_code : null,
+              error_message:
+                typeof entry.error_message === "string"
+                  ? entry.error_message
+                  : null,
+              final_url:
+                typeof entry.final_url === "string" ? entry.final_url : null,
+              redirect_count:
+                typeof entry.redirect_count === "number"
+                  ? entry.redirect_count
+                  : null,
+              checked_url_count: checkedUrlCount,
+            },
+          ),
+        );
+      }
+    }
+
+    if (!anySitemapSuccess) {
+      const fallbackTarget =
+        authoritativeSitemapChecks[0]?.target_url ??
+        sitemapChecks[0]?.target_url ??
+        `${new URL(run.start_url).origin}/sitemap.xml`;
+      siteIssues.push(
+        buildSiteIssue(
+          scanRunId,
+          run.site_id,
+          "sitemap",
+          "sitemap_missing",
+          "low",
+          fallbackTarget,
+          "Sitemap missing",
+          "No usable sitemap was found from the default sitemap URLs or robots.txt references.",
+          {
+            checked_sitemap_urls: sitemapChecks.map((row) => row.target_url),
+            referenced_sitemap_urls: robotsSitemapReferences,
+          },
+        ),
+      );
+    }
+
     const issues: StoredIssueInput[] = [
       ...linkRes.rows.map((row) =>
         buildLinkIssue(scanRunId, run.site_id, run.start_url, row),
@@ -315,6 +811,8 @@ export async function replaceIssuesForScanRun(
       ...ignoredRes.rows.map((row) =>
         buildIgnoredSafetyIssue(scanRunId, run.site_id, row),
       ),
+      ...seoIssues,
+      ...siteIssues,
     ];
 
     await insertIssues(client, issues);

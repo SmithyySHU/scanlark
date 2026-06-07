@@ -134,6 +134,16 @@ export type {
   ScanIssuesSummary,
 } from "./scanIssues";
 
+export { upsertScanPageCheck } from "./scanPageChecks";
+export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
+
+export { upsertScanSiteCheck } from "./scanSiteChecks";
+export type {
+  ScanSiteCheckInput,
+  ScanSiteCheckRow,
+  ScanSiteCheckType,
+} from "./scanSiteChecks";
+
 export {
   deleteLinkNoteForSiteForUser,
   getLinkNoteForSiteByUrlForUser,
