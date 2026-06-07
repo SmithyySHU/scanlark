@@ -239,26 +239,6 @@ interface RecheckScanLinkResponse {
   scanLink: ScanLink;
 }
 
-interface ReportLinkRow {
-  link_url: string;
-  classification: LinkClassification;
-  status_code: number | null;
-  error_message: string | null;
-  occurrence_count: number;
-  last_seen_at: string;
-}
-
-interface ScanReportResponse {
-  scanRun: ScanRunSummary;
-  summary: {
-    byClassification: Record<string, number>;
-    byStatusCode: Record<string, number>;
-  };
-  topBroken: ReportLinkRow[];
-  topBlocked: ReportLinkRow[];
-  generatedAt: string;
-}
-
 interface IgnoredLinkRow {
   id: string;
   scan_run_id: string;
@@ -299,6 +279,94 @@ interface IgnoredOccurrencesResponse {
   totalMatching: number;
   occurrences: ScanLinkOccurrence[];
 }
+
+type ReportSectionKey = "broken" | "blocked" | "no_response";
+
+type ReportLinkSectionState = {
+  links: ScanLink[];
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
+type ReportIgnoredSectionState = {
+  links: IgnoredLinkRow[];
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
+type ReportSummaryCounts = {
+  ok: number;
+  broken: number;
+  blocked: number;
+  no_response: number;
+};
+
+type ReportStatusCodeGroups = {
+  notFound: number;
+  blocked: number;
+  serverError: number;
+  noResponse: number;
+  otherHttp: number;
+};
+
+type IssueSeverity = "critical" | "high" | "medium" | "low" | "info";
+type IssueStatus = "open" | "resolved";
+type IssueCategory =
+  | "link_integrity"
+  | "seo_basic"
+  | "ssl_https"
+  | "security_header"
+  | "sitemap"
+  | "robots"
+  | "performance_basic";
+type IssueType =
+  | "broken_link"
+  | "blocked_link"
+  | "no_response"
+  | "ignored_safety_skip";
+
+interface ScanIssue {
+  id: string;
+  scan_run_id: string;
+  site_id: string;
+  category: IssueCategory;
+  severity: IssueSeverity;
+  status: IssueStatus;
+  issue_type: IssueType;
+  affected_url: string;
+  source_url: string | null;
+  title: string;
+  description: string;
+  evidence_json: Record<string, unknown>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+}
+
+interface ScanIssuesResponse {
+  scanRunId: string;
+  summary: {
+    total: number;
+    bySeverity: Record<IssueSeverity, number>;
+    byIssueType: Record<string, number>;
+  };
+  countReturned: number;
+  totalMatching: number;
+  issues: ScanIssue[];
+}
+
+type ReportIssuesState = {
+  issues: ScanIssue[];
+  summary: ScanIssuesResponse["summary"] | null;
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
 
 type ScanDiffChangeType =
   | "new_issue"
@@ -396,6 +464,34 @@ const SAMPLE_SITE_URL = "https://example.com";
 const SAMPLE_SITE_NAME = "Sample site";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
+const EMPTY_REPORT_SECTION: ReportLinkSectionState = {
+  links: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
+const EMPTY_REPORT_SECTIONS: Record<ReportSectionKey, ReportLinkSectionState> =
+  {
+    broken: { ...EMPTY_REPORT_SECTION },
+    blocked: { ...EMPTY_REPORT_SECTION },
+    no_response: { ...EMPTY_REPORT_SECTION },
+  };
+const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
+  links: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
+const EMPTY_REPORT_ISSUES_STATE: ReportIssuesState = {
+  issues: [],
+  summary: null,
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -418,6 +514,232 @@ function progressPercent(checked: number, total: number) {
   if (!total) return "0%";
   const pct = Math.min(100, Math.max(0, (checked / total) * 100));
   return `${pct.toFixed(0)}%`;
+}
+
+function summarizeReportClassifications(
+  rows: ScanLinksSummaryRow[],
+): ReportSummaryCounts {
+  return rows.reduce<ReportSummaryCounts>(
+    (acc, row) => {
+      acc[row.classification] += row.count;
+      return acc;
+    },
+    { ok: 0, broken: 0, blocked: 0, no_response: 0 },
+  );
+}
+
+function summarizeReportStatusCodes(
+  rows: ScanLinksSummaryRow[],
+): ReportStatusCodeGroups {
+  return rows.reduce<ReportStatusCodeGroups>(
+    (acc, row) => {
+      if (row.status_code == null) {
+        acc.noResponse += row.count;
+        return acc;
+      }
+      if (row.status_code === 404 || row.status_code === 410) {
+        acc.notFound += row.count;
+        return acc;
+      }
+      if (
+        row.status_code === 401 ||
+        row.status_code === 403 ||
+        row.status_code === 429
+      ) {
+        acc.blocked += row.count;
+        return acc;
+      }
+      if (row.status_code >= 500) {
+        acc.serverError += row.count;
+        return acc;
+      }
+      acc.otherHttp += row.count;
+      return acc;
+    },
+    {
+      notFound: 0,
+      blocked: 0,
+      serverError: 0,
+      noResponse: 0,
+      otherHttp: 0,
+    },
+  );
+}
+
+function getIgnoredRowSummary(row: IgnoredLinkRow) {
+  if (row.error_message?.startsWith("crawl_skipped:")) {
+    return "Skipped by crawler safety rule";
+  }
+  if (row.rule_type) {
+    if (row.rule_type === "exact") return "Ignored by exact rule";
+    return "Ignored by rule";
+  }
+  return "Ignored";
+}
+
+function formatIssueSeverity(value: IssueSeverity) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function issueSeverityTone(value: IssueSeverity) {
+  if (value === "critical" || value === "high") return "var(--danger)";
+  if (value === "medium") return "var(--warning)";
+  if (value === "low") return "var(--accent)";
+  return "var(--muted)";
+}
+
+type ScoreBand = "Excellent" | "Good" | "Needs attention" | "Poor" | "Critical";
+
+type ReportScoreCard = {
+  score: number | null;
+  band: ScoreBand | null;
+  detail: string;
+};
+
+type ReportScores = {
+  overall: ReportScoreCard;
+  linkIntegrity: ReportScoreCard;
+  summary: string;
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getScoreBand(score: number): ScoreBand {
+  if (score >= 90) return "Excellent";
+  if (score >= 75) return "Good";
+  if (score >= 50) return "Needs attention";
+  if (score >= 25) return "Poor";
+  return "Critical";
+}
+
+function getScoreBandTone(score: number | null) {
+  if (score == null) return "var(--muted)";
+  if (score >= 90) return "var(--success)";
+  if (score >= 75) return "var(--accent)";
+  if (score >= 55) return "var(--warning)";
+  return "var(--danger)";
+}
+
+function buildScoreSummarySentence(
+  score: number | null,
+  severityCounts: Record<IssueSeverity, number>,
+) {
+  if (score == null) {
+    return "This score will be calculated when enough scan data is available.";
+  }
+
+  if ((severityCounts.critical ?? 0) > 0 || (severityCounts.high ?? 0) > 0) {
+    if (score >= 75) {
+      return "This scan found some high-impact link issues, but overall integrity is still holding up.";
+    }
+    if (score >= 25) {
+      return "This scan found high-impact link issues that need attention.";
+    }
+    return "This scan found severe link-integrity problems that need urgent attention.";
+  }
+
+  if ((severityCounts.medium ?? 0) > 0) {
+    if (score >= 75) {
+      return "This scan found a few moderate link issues, but overall integrity remains solid.";
+    }
+    return "This scan found multiple link issues that should be reviewed.";
+  }
+
+  if ((severityCounts.low ?? 0) > 0 || (severityCounts.info ?? 0) > 0) {
+    return "This scan is mostly healthy, with minor issues or intentional safety skips recorded.";
+  }
+
+  return "This scan did not generate any link-integrity issues.";
+}
+
+function calculateReportScores(
+  run: ScanRunSummary | null,
+  issueSummary: ScanIssuesResponse["summary"] | null,
+): ReportScores {
+  const severityCounts: Record<IssueSeverity, number> = {
+    critical: issueSummary?.bySeverity.critical ?? 0,
+    high: issueSummary?.bySeverity.high ?? 0,
+    medium: issueSummary?.bySeverity.medium ?? 0,
+    low: issueSummary?.bySeverity.low ?? 0,
+    info: issueSummary?.bySeverity.info ?? 0,
+  };
+
+  if (!run) {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      summary: "This score will be calculated when enough scan data is available.",
+    };
+  }
+
+  if (run.status === "queued" || run.status === "in_progress") {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      summary: "This score will be calculated when enough scan data is available.",
+    };
+  }
+
+  const checkedLinks = run.checked_links ?? 0;
+  if (checkedLinks <= 0) {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Not available",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Not available",
+      },
+      summary: "This score is not available because this run did not record checked links.",
+    };
+  }
+
+  const totalPenalty = clamp(
+    Math.min(70, severityCounts.critical * 25) +
+      Math.min(40, severityCounts.high * 12) +
+      Math.min(30, severityCounts.medium * 6) +
+      Math.min(15, severityCounts.low * 1),
+    0,
+    100,
+  );
+  const score = clamp(Math.round(100 - totalPenalty), 0, 100);
+  const band = getScoreBand(score);
+  const summary = buildScoreSummarySentence(score, severityCounts);
+
+  return {
+    overall: {
+      score,
+      band,
+      detail: "Currently based on link integrity findings from this scan",
+    },
+    linkIntegrity: {
+      score,
+      band,
+      detail: "Currently based on link integrity findings from this scan",
+    },
+    summary,
+  };
 }
 
 function formatRelative(value: string | null | undefined) {
@@ -791,6 +1113,10 @@ function safeHost(url: string) {
   }
 }
 
+function trimDisplayHost(hostname: string) {
+  return hostname.replace(/^www\./i, "");
+}
+
 function buildAppUrl(
   pathname: string,
   params?: Record<string, string | null | undefined>,
@@ -845,6 +1171,21 @@ function getSummaryCount(
   return rows
     .filter((row) => row.classification === classification)
     .reduce((sum, row) => sum + row.count, 0);
+}
+
+function createEmptyReportSections(): Record<
+  ReportSectionKey,
+  ReportLinkSectionState
+> {
+  return {
+    broken: { ...EMPTY_REPORT_SECTION, links: [] },
+    blocked: { ...EMPTY_REPORT_SECTION, links: [] },
+    no_response: { ...EMPTY_REPORT_SECTION, links: [] },
+  };
+}
+
+function createEmptyReportIgnoredSection(): ReportIgnoredSectionState {
+  return { ...EMPTY_REPORT_IGNORED_SECTION, links: [] };
 }
 
 type LoadHistoryOpts = {
@@ -925,7 +1266,27 @@ const App: React.FC = () => {
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
   );
-  const [reportData, setReportData] = useState<ScanReportResponse | null>(null);
+  const [reportRunData, setReportRunData] = useState<ScanRunSummary | null>(
+    null,
+  );
+  const [reportSummaryRows, setReportSummaryRows] = useState<
+    ScanLinksSummaryRow[]
+  >([]);
+  const [reportIgnoredTotal, setReportIgnoredTotal] = useState<number | null>(
+    null,
+  );
+  const [reportSections, setReportSections] = useState<
+    Record<ReportSectionKey, ReportLinkSectionState>
+  >(EMPTY_REPORT_SECTIONS);
+  const [reportIgnoredSection, setReportIgnoredSection] =
+    useState<ReportIgnoredSectionState>(EMPTY_REPORT_IGNORED_SECTION);
+  const [reportIssues, setReportIssues] = useState<ReportIssuesState>(
+    EMPTY_REPORT_ISSUES_STATE,
+  );
+  const [reportSectionsLoaded, setReportSectionsLoaded] = useState(false);
+  const [reportLastLoadedAt, setReportLastLoadedAt] = useState<number | null>(
+    null,
+  );
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -1171,10 +1532,310 @@ const App: React.FC = () => {
     return history.length > 0 ? history[0] : null;
   }, [history, pinnedRunId]);
 
+  const resetReportSections = useCallback(() => {
+    setReportSections(createEmptyReportSections());
+    setReportIgnoredSection(createEmptyReportIgnoredSection());
+    setReportIssues(EMPTY_REPORT_ISSUES_STATE);
+    setReportSectionsLoaded(false);
+  }, []);
+
+  const fetchReportScanLinksPage = useCallback(
+    async (
+      runId: string,
+      classification: LinkClassification,
+      offset: number,
+    ): Promise<ScanLinksResponse> => {
+      const res = await apiFetch(
+        buildScanLinksUrl(runId, classification, offset, "all", false),
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(
+          `Failed to load ${formatClassification(classification).toLowerCase()} links: ${res.status}`,
+        );
+      }
+      return (await res.json()) as ScanLinksResponse;
+    },
+    [apiFetch],
+  );
+
+  const loadReportOverview = useCallback(
+    async (scanRunId: string) => {
+      const [runRes, summaryRes, ignoredRes] = await Promise.all([
+        apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
+          cache: "no-store",
+        }),
+        apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
+          { cache: "no-store" },
+        ),
+        apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), { cache: "no-store" }),
+      ]);
+
+      if (!runRes.ok) {
+        if (runRes.status === 404) {
+          throw new Error("Report not found for this scan run");
+        }
+        if (runRes.status === 401) {
+          throw new Error("You do not have access to this scan report");
+        }
+        const text = await runRes.text().catch(() => "");
+        throw new Error(
+          `Failed to load scan run: ${runRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      if (!summaryRes.ok) {
+        throw new Error(`Failed to load link summary: ${summaryRes.status}`);
+      }
+      if (!ignoredRes.ok) {
+        throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
+      }
+
+      const run = (await runRes.json()) as ScanRunSummary;
+      const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
+      const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+
+      setReportRunData(run);
+      setReportSummaryRows(summaryData.summary ?? []);
+      setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
+      setReportLastLoadedAt(Date.now());
+
+      return run;
+    },
+    [apiFetch],
+  );
+
+  const loadInitialReportSections = useCallback(
+    async (scanRunId: string) => {
+      setReportSectionsLoaded(false);
+      setReportSections((prev) => ({
+        broken: { ...prev.broken, loading: true, error: null },
+        blocked: { ...prev.blocked, loading: true, error: null },
+        no_response: { ...prev.no_response, loading: true, error: null },
+      }));
+      setReportIgnoredSection((prev) => ({
+        ...prev,
+        loading: true,
+        error: null,
+      }));
+
+      const sectionEntries: Array<[ReportSectionKey, LinkClassification]> = [
+        ["broken", "broken"],
+        ["blocked", "blocked"],
+        ["no_response", "no_response"],
+      ];
+
+      const sectionResults = await Promise.all(
+        sectionEntries.map(async ([key, classification]) => {
+          try {
+            const data = await fetchReportScanLinksPage(
+              scanRunId,
+              classification,
+              0,
+            );
+            return { key, data, error: null as string | null };
+          } catch (err: unknown) {
+            return {
+              key,
+              data: null,
+              error: getErrorMessage(err, "Failed to load report section"),
+            };
+          }
+        }),
+      );
+
+      setReportSections(() => {
+        const next = createEmptyReportSections();
+        sectionResults.forEach(({ key, data, error }) => {
+          next[key] = {
+            links: data?.links ?? [],
+            offset: data?.countReturned ?? 0,
+            hasMore: data ? data.countReturned < data.totalMatching : false,
+            loading: false,
+            error,
+          };
+        });
+        return next;
+      });
+
+      try {
+        const ignoredRes = await apiFetch(
+          buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
+          {
+            cache: "no-store",
+          },
+        );
+        if (!ignoredRes.ok) {
+          throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
+        }
+        const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+        setReportIgnoredSection({
+          links: ignoredData.links ?? [],
+          offset: ignoredData.countReturned,
+          hasMore: ignoredData.countReturned < ignoredData.totalMatching,
+          loading: false,
+          error: null,
+        });
+      } catch (err: unknown) {
+        setReportIgnoredSection((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load ignored links"),
+        }));
+      }
+      setReportSectionsLoaded(true);
+    },
+    [apiFetch, fetchReportScanLinksPage],
+  );
+
+  const loadInitialReportIssues = useCallback(
+    async (scanRunId: string) => {
+      setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load issues: ${res.status}`);
+        }
+        const data = (await res.json()) as ScanIssuesResponse;
+        setReportIssues({
+          issues: data.issues ?? [],
+          summary: data.summary,
+          offset: data.countReturned,
+          hasMore: data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        });
+      } catch (err: unknown) {
+        setReportIssues((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load issues"),
+        }));
+      }
+    },
+    [apiFetch],
+  );
+
+  const loadMoreReportIssues = useCallback(
+    async (scanRunId: string) => {
+      if (reportIssues.loading || !reportIssues.hasMore) return;
+      setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load issues: ${res.status}`);
+        }
+        const data = (await res.json()) as ScanIssuesResponse;
+        setReportIssues((prev) => ({
+          issues: [...prev.issues, ...(data.issues ?? [])],
+          summary: prev.summary ?? data.summary,
+          offset: prev.offset + data.countReturned,
+          hasMore: prev.offset + data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        }));
+      } catch (err: unknown) {
+        setReportIssues((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load more issues"),
+        }));
+      }
+    },
+    [apiFetch, reportIssues],
+  );
+
+  const loadMoreReportSection = useCallback(
+    async (scanRunId: string, section: ReportSectionKey) => {
+      const current = reportSections[section];
+      if (current.loading || !current.hasMore) return;
+      setReportSections((prev) => ({
+        ...prev,
+        [section]: { ...prev[section], loading: true, error: null },
+      }));
+      try {
+        const data = await fetchReportScanLinksPage(
+          scanRunId,
+          section,
+          current.offset,
+        );
+        setReportSections((prev) => ({
+          ...prev,
+          [section]: {
+            links: [...prev[section].links, ...(data.links ?? [])],
+            offset: prev[section].offset + data.countReturned,
+            hasMore:
+              prev[section].offset + data.countReturned < data.totalMatching,
+            loading: false,
+            error: null,
+          },
+        }));
+      } catch (err: unknown) {
+        setReportSections((prev) => ({
+          ...prev,
+          [section]: {
+            ...prev[section],
+            loading: false,
+            error: getErrorMessage(err, "Failed to load more results"),
+          },
+        }));
+      }
+    },
+    [fetchReportScanLinksPage, reportSections],
+  );
+
+  const loadMoreReportIgnored = useCallback(
+    async (scanRunId: string) => {
+      if (reportIgnoredSection.loading || !reportIgnoredSection.hasMore) return;
+      setReportIgnoredSection((prev) => ({
+        ...prev,
+        loading: true,
+        error: null,
+      }));
+      try {
+        const res = await apiFetch(
+          buildIgnoredLinksUrl(
+            scanRunId,
+            reportIgnoredSection.offset,
+            LINKS_PAGE_SIZE,
+          ),
+          { cache: "no-store" },
+        );
+        if (!res.ok)
+          throw new Error(`Failed to load ignored links: ${res.status}`);
+        const data = (await res.json()) as IgnoredLinksResponse;
+        setReportIgnoredSection((prev) => ({
+          links: [...prev.links, ...(data.links ?? [])],
+          offset: prev.offset + data.countReturned,
+          hasMore: prev.offset + data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        }));
+      } catch (err: unknown) {
+        setReportIgnoredSection((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load more ignored links"),
+        }));
+      }
+    },
+    [apiFetch, reportIgnoredSection],
+  );
+
   useEffect(() => {
     if (viewMode !== "report") return;
     if (!reportScanRunId) {
-      setReportData(null);
+      setReportRunData(null);
+      setReportSummaryRows([]);
+      setReportIgnoredTotal(null);
+      setReportLastLoadedAt(null);
+      resetReportSections();
       setReportError("Missing scan run id");
       return;
     }
@@ -1183,22 +1844,8 @@ const App: React.FC = () => {
       setReportLoading(true);
       setReportError(null);
       try {
-        const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/report`,
-          {
-            cache: "no-store",
-          },
-        );
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(
-            `Report failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-          );
-        }
-        const data = (await res.json()) as ScanReportResponse;
-        if (!cancelled) {
-          setReportData(data);
-        }
+        resetReportSections();
+        await loadReportOverview(reportScanRunId);
       } catch (err) {
         if (!cancelled) {
           setReportError(getErrorMessage(err, "Failed to load report"));
@@ -1211,7 +1858,55 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [reportScanRunId, viewMode]);
+  }, [loadReportOverview, reportScanRunId, resetReportSections, viewMode]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "report" ||
+      !reportScanRunId ||
+      !isInProgress(reportRunData?.status)
+    ) {
+      return;
+    }
+    const id = window.setTimeout(() => {
+      void loadReportOverview(reportScanRunId).catch((err) => {
+        setReportError(getErrorMessage(err, "Failed to refresh report"));
+      });
+    }, 3000);
+    return () => window.clearTimeout(id);
+  }, [
+    loadReportOverview,
+    reportRunData?.checked_links,
+    reportRunData?.status,
+    reportRunData?.total_links,
+    reportRunData?.updated_at,
+    reportScanRunId,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "report" ||
+      !reportScanRunId ||
+      reportRunData?.status !== "completed" ||
+      reportSectionsLoaded
+    ) {
+      return;
+    }
+    void Promise.all([
+      loadInitialReportSections(reportScanRunId),
+      loadInitialReportIssues(reportScanRunId),
+    ]).catch((err) => {
+      setReportError(getErrorMessage(err, "Failed to load report sections"));
+    });
+  }, [
+    loadInitialReportIssues,
+    loadInitialReportSections,
+    reportRunData?.status,
+    reportScanRunId,
+    reportSectionsLoaded,
+    viewMode,
+  ]);
 
   const visibleResults = useMemo(
     () => (showIgnored ? results : results.filter((row) => !row.ignored)),
@@ -1894,12 +2589,12 @@ const App: React.FC = () => {
   };
 
   const reportView = viewMode === "report";
-  const reportRun = reportData?.scanRun ?? null;
-  const reportSite = reportRun
-    ? (sites.find((site) => site.id === reportRun.site_id)?.url ??
-      reportRun.site_id)
-    : null;
-  const reportSummary = reportData?.summary.byClassification ?? {};
+  const reportRun = reportRunData;
+  const reportSummary = summarizeReportClassifications(reportSummaryRows);
+  const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
+  const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
+  const reportIssueSummary = reportIssues.summary;
+  const reportScores = calculateReportScores(reportRun, reportIssueSummary);
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -1911,6 +2606,325 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+
+  const formatReportUrlLabel = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      const trimmedHost = trimDisplayHost(parsed.hostname);
+      const search = parsed.search
+        ? parsed.search.length > 48
+          ? `${parsed.search.slice(0, 48)}…`
+          : parsed.search
+        : "";
+      const pathWithQuery = `${parsed.pathname || "/"}${search}`;
+      const isInternal = reportHost != null && parsed.hostname === reportHost;
+
+      if (isInternal) {
+        return pathWithQuery || "/";
+      }
+
+      if (!pathWithQuery || pathWithQuery === "/") {
+        return trimmedHost;
+      }
+
+      return `${trimmedHost}${pathWithQuery}`;
+    } catch {
+      return url.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+    }
+  };
+
+  const formatIssueSupportText = (description: string) => {
+    if (description.length <= 84) return description;
+    return `${description.slice(0, 84).trimEnd()}…`;
+  };
+
+  const renderReportUrlCell = (
+    url: string | null,
+    options?: {
+      copyLabel?: string;
+      openLabel?: string;
+      emptyLabel?: string;
+    },
+  ) => {
+    if (!url) {
+      return options?.emptyLabel ?? "-";
+    }
+
+    return (
+      <div className="report-url-cell">
+        <span className="report-url-text" title={url}>
+          {formatReportUrlLabel(url)}
+        </span>
+        <div className="report-url-actions">
+          <button
+            type="button"
+            className="report-url-action"
+            onClick={() =>
+              void copyToClipboard(
+                url,
+                undefined,
+                options?.copyLabel ?? "Copied full URL",
+              )
+            }
+            title="Copy full URL"
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            className="report-url-action"
+            onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+            title="Open URL"
+          >
+            Open
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderReportLinkSection = (
+    title: string,
+    sectionKey: ReportSectionKey,
+    count: number,
+  ) => {
+    const section = reportSections[sectionKey];
+    return (
+      <div className="report-card">
+        <div className="report-table-title">
+          {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+        </div>
+        {section.error && (
+          <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+            {section.error}
+          </div>
+        )}
+        <div className="report-table-wrap">
+          <table className="report-table report-links-table">
+            <thead>
+              <tr>
+                <th>Link</th>
+                <th>Status</th>
+                <th>Result</th>
+                <th>Occurrences</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {section.loading && section.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    Loading…
+                  </td>
+                </tr>
+              ) : section.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    No links in this section for this scan.
+                  </td>
+                </tr>
+              ) : (
+                section.links.map((row) => (
+                  <tr key={row.id}>
+                    <td>{renderReportUrlCell(row.link_url)}</td>
+                    <td>{row.status_code ?? "-"}</td>
+                    <td>
+                      {row.error_message ??
+                        formatClassification(row.classification)}
+                    </td>
+                    <td>{row.occurrence_count}</td>
+                    <td>{formatDate(row.last_seen_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        {section.hasMore && (
+          <button
+            className="report-button"
+            onClick={() =>
+              reportScanRunId &&
+              void loadMoreReportSection(reportScanRunId, sectionKey)
+            }
+            disabled={section.loading || !reportScanRunId}
+          >
+            {section.loading ? "Loading..." : "Load more"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderReportIgnoredSection = () => (
+    <div className="report-card">
+      <div className="report-table-title">
+        Ignored / skipped links{" "}
+        <span style={{ color: "var(--muted)" }}>
+          ({reportIgnoredTotal ?? 0})
+        </span>
+      </div>
+      {reportIgnoredSection.error && (
+        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+          {reportIgnoredSection.error}
+        </div>
+      )}
+      <div className="report-table-wrap">
+        <table className="report-table report-links-table">
+          <thead>
+            <tr>
+              <th>Link</th>
+              <th>Status</th>
+              <th>Reason</th>
+              <th>Occurrences</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reportIgnoredSection.loading &&
+            reportIgnoredSection.links.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="report-empty">
+                  Loading…
+                </td>
+              </tr>
+            ) : reportIgnoredSection.links.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="report-empty">
+                  No ignored or skipped links were recorded for this scan.
+                </td>
+              </tr>
+            ) : (
+              reportIgnoredSection.links.map((row) => (
+                <tr key={row.id}>
+                  <td>{renderReportUrlCell(row.link_url)}</td>
+                  <td>{row.status_code ?? "-"}</td>
+                  <td>
+                    <div>{getIgnoredRowSummary(row)}</div>
+                    <div style={{ color: "var(--muted)", fontSize: "12px" }}>
+                      {row.error_message ??
+                        row.rule_pattern ??
+                        row.rule_type ??
+                        "No reason recorded"}
+                    </div>
+                  </td>
+                  <td>{row.occurrence_count}</td>
+                  <td>{formatDate(row.last_seen_at)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {reportIgnoredSection.hasMore && (
+        <button
+          className="report-button"
+          onClick={() =>
+            reportScanRunId && void loadMoreReportIgnored(reportScanRunId)
+          }
+          disabled={reportIgnoredSection.loading || !reportScanRunId}
+        >
+          {reportIgnoredSection.loading ? "Loading..." : "Load more"}
+        </button>
+      )}
+    </div>
+  );
+
+  const renderReportIssuesSection = () => (
+    <div className="report-card">
+      <div className="report-table-title">
+        Issues{" "}
+        <span style={{ color: "var(--muted)" }}>
+          ({reportIssueSummary?.total ?? reportIssues.issues.length})
+        </span>
+      </div>
+      {reportIssues.error && (
+        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+          {reportIssues.error}
+        </div>
+      )}
+      <div className="report-table-wrap">
+        <table className="report-table report-issues-table">
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Title</th>
+              <th>Affected URL</th>
+              <th>Source URL</th>
+              <th>Status</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reportIssues.loading && reportIssues.issues.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="report-empty">
+                  Loading…
+                </td>
+              </tr>
+            ) : reportIssues.issues.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="report-empty">
+                  No issues were generated for this scan.
+                </td>
+              </tr>
+            ) : (
+              reportIssues.issues.map((issue) => (
+                <tr key={issue.id}>
+                  <td>
+                    <span
+                      className="status-chip subtle"
+                      style={{
+                        background: issueSeverityTone(issue.severity),
+                        color:
+                          issue.severity === "info" ? "var(--text)" : "white",
+                        borderColor: "transparent",
+                      }}
+                    >
+                      {formatIssueSeverity(issue.severity)}
+                    </span>
+                  </td>
+                  <td>
+                    <div>{issue.title}</div>
+                    <div
+                      className="report-issue-support"
+                      title={issue.description}
+                    >
+                      {formatIssueSupportText(issue.description)}
+                    </div>
+                  </td>
+                  <td>
+                    {renderReportUrlCell(issue.affected_url, {
+                      copyLabel: "Copied affected URL",
+                    })}
+                  </td>
+                  <td>
+                    {renderReportUrlCell(issue.source_url, {
+                      copyLabel: "Copied source URL",
+                    })}
+                  </td>
+                  <td>{issue.status}</td>
+                  <td>{formatDate(issue.last_seen_at)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {reportIssues.hasMore && (
+        <button
+          className="report-button"
+          onClick={() =>
+            reportScanRunId && void loadMoreReportIssues(reportScanRunId)
+          }
+          disabled={reportIssues.loading || !reportScanRunId}
+        >
+          {reportIssues.loading ? "Loading..." : "Load more"}
+        </button>
+      )}
+    </div>
+  );
+
   const resultsTitleCount =
     resultsView === "changes"
       ? diffChangeItems.length +
@@ -2407,7 +3421,11 @@ const App: React.FC = () => {
     setHistory([]);
     setResults([]);
     setIgnoredResults([]);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setSelectedRunId(null);
     selectedRunIdRef.current = null;
     setActiveRunId(null);
@@ -3889,7 +4907,11 @@ const App: React.FC = () => {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
     setReportScanRunId(scanRunId);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setReportError(null);
     setViewMode("report");
   }
@@ -3898,7 +4920,11 @@ const App: React.FC = () => {
     const url = buildAppUrl("/");
     window.history.pushState({}, "", url);
     setReportScanRunId(null);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setReportError(null);
     setViewMode("dashboard");
   }
@@ -6242,10 +7268,24 @@ const App: React.FC = () => {
           flex-direction: column;
           gap: 6px;
         }
+        .report-score-card {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
         .report-metric {
           font-size: 22px;
           font-weight: 700;
           color: var(--text);
+        }
+        .report-score-subtitle {
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.4;
+        }
+        .report-score-band {
+          font-size: 12px;
+          font-weight: 600;
         }
         .report-table-grid {
           display: grid;
@@ -6282,6 +7322,94 @@ const App: React.FC = () => {
         .report-table td {
           overflow-wrap: anywhere;
           word-break: break-word;
+        }
+        .report-links-table th:nth-child(1),
+        .report-links-table td:nth-child(1) {
+          width: 48%;
+        }
+        .report-links-table th:nth-child(2),
+        .report-links-table td:nth-child(2) {
+          width: 10%;
+        }
+        .report-links-table th:nth-child(4),
+        .report-links-table td:nth-child(4) {
+          width: 12%;
+        }
+        .report-links-table th:nth-child(5),
+        .report-links-table td:nth-child(5) {
+          width: 18%;
+        }
+        .report-issues-table th:nth-child(1),
+        .report-issues-table td:nth-child(1) {
+          width: 9%;
+        }
+        .report-issues-table th:nth-child(2),
+        .report-issues-table td:nth-child(2) {
+          width: 20%;
+        }
+        .report-issues-table th:nth-child(3),
+        .report-issues-table td:nth-child(3) {
+          width: 27%;
+        }
+        .report-issues-table th:nth-child(4),
+        .report-issues-table td:nth-child(4) {
+          width: 22%;
+        }
+        .report-issues-table th:nth-child(5),
+        .report-issues-table td:nth-child(5) {
+          width: 8%;
+        }
+        .report-issues-table th:nth-child(6),
+        .report-issues-table td:nth-child(6) {
+          width: 14%;
+        }
+        .report-url-cell {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          max-width: 100%;
+        }
+        .report-url-text {
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow-wrap: normal;
+          word-break: normal;
+        }
+        .report-url-actions {
+          display: flex;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+        .report-url-action {
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--muted);
+          border-radius: 999px;
+          padding: 2px 7px;
+          font-size: 11px;
+          line-height: 1.2;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .report-url-action:hover {
+          border-color: var(--accent);
+          color: var(--text);
+        }
+        .report-table td .report-url-cell,
+        .report-table td .report-url-text {
+          overflow-wrap: normal;
+          word-break: normal;
+        }
+        .report-issue-support {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .report-empty {
           padding: 12px;
@@ -6492,8 +7620,10 @@ const App: React.FC = () => {
 
             <div className="report-card report-meta">
               <div className="report-meta-item">
-                <div className="report-label">Site</div>
-                <div className="report-value">{reportSite ?? "-"}</div>
+                <div className="report-label">Scan run</div>
+                <div className="report-value">
+                  {reportRun?.id ?? reportScanRunId ?? "-"}
+                </div>
               </div>
               <div className="report-meta-item">
                 <div className="report-label">Start URL</div>
@@ -6502,8 +7632,8 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="report-meta-item">
-                <div className="report-label">Status</div>
-                <div className="report-value">{reportRun?.status ?? "-"}</div>
+                <div className="report-label">Host</div>
+                <div className="report-value">{reportHost ?? "-"}</div>
               </div>
               <div className="report-meta-item">
                 <div className="report-label">Started</div>
@@ -6526,9 +7656,13 @@ const App: React.FC = () => {
                   )}
                 </div>
               </div>
+              <div className="report-meta-item">
+                <div className="report-label">Status</div>
+                <div className="report-value">{reportRun?.status ?? "-"}</div>
+              </div>
             </div>
 
-            {reportLoading && (
+            {reportLoading && !reportRun && (
               <div
                 className="report-card"
                 style={{ fontSize: "13px", color: "var(--muted)" }}
@@ -6545,115 +7679,261 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {!reportLoading && reportData && (
+            {reportRun?.error_message && (
+              <div
+                className="report-card"
+                style={{ fontSize: "13px", color: "var(--warning)" }}
+              >
+                Failure reason: {reportRun.error_message}
+              </div>
+            )}
+
+            {reportRun && (
               <>
                 <div className="report-summary-grid">
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Broken</div>
-                    <div className="report-metric">
-                      {reportSummary.broken ?? 0}
+                  <div className="report-card report-score-card">
+                    <div className="report-label">Overall Health Score</div>
+                    <div
+                      className="report-metric"
+                      style={{
+                        color: getScoreBandTone(reportScores.overall.score),
+                      }}
+                    >
+                      {reportScores.overall.score == null
+                        ? reportScores.overall.detail
+                        : `${reportScores.overall.score}%`}
+                    </div>
+                    {reportScores.overall.band && (
+                      <div
+                        className="report-score-band"
+                        style={{
+                          color: getScoreBandTone(reportScores.overall.score),
+                        }}
+                      >
+                        {reportScores.overall.band}
+                      </div>
+                    )}
+                    <div className="report-score-subtitle">
+                      {reportScores.overall.detail}
+                    </div>
+                  </div>
+                  <div className="report-card report-score-card">
+                    <div className="report-label">Link Integrity Score</div>
+                    <div
+                      className="report-metric"
+                      style={{
+                        color: getScoreBandTone(
+                          reportScores.linkIntegrity.score,
+                        ),
+                      }}
+                    >
+                      {reportScores.linkIntegrity.score == null
+                        ? reportScores.linkIntegrity.detail
+                        : `${reportScores.linkIntegrity.score}%`}
+                    </div>
+                    {reportScores.linkIntegrity.band && (
+                      <div
+                        className="report-score-band"
+                        style={{
+                          color: getScoreBandTone(
+                            reportScores.linkIntegrity.score,
+                          ),
+                        }}
+                      >
+                        {reportScores.linkIntegrity.band}
+                      </div>
+                    )}
+                    <div className="report-score-subtitle">
+                      {reportScores.linkIntegrity.detail}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Blocked</div>
+                    <div className="report-label">Total issues</div>
                     <div className="report-metric">
-                      {reportSummary.blocked ?? 0}
+                      {reportIssueSummary?.total ?? 0}
                     </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">High</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.high ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Medium</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.medium ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Low</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.low ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Info</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.info ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Links checked</div>
+                    <div className="report-metric">
+                      {reportRun.checked_links}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Broken</div>
+                    <div className="report-metric">{reportSummary.broken}</div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Blocked</div>
+                    <div className="report-metric">{reportSummary.blocked}</div>
                   </div>
                   <div className="report-card report-summary-card">
                     <div className="report-label">No response</div>
                     <div className="report-metric">
-                      {reportSummary.no_response ?? 0}
+                      {reportSummary.no_response}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Timeout</div>
+                    <div className="report-label">Ignored / skipped</div>
                     <div className="report-metric">
-                      {reportSummary.timeout ?? 0}
+                      {reportIgnoredTotal ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
                     <div className="report-label">OK</div>
-                    <div className="report-metric">{reportSummary.ok ?? 0}</div>
+                    <div className="report-metric">{reportSummary.ok}</div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Pages crawled</div>
+                    <div className="report-metric">Not tracked</div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Limits hit</div>
+                    <div className="report-metric">Not tracked</div>
                   </div>
                 </div>
 
-                <div className="report-table-grid">
-                  <div className="report-card">
-                    <div className="report-table-title">Top broken links</div>
-                    <div className="report-table-wrap">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Link</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                            <th>Occurrences</th>
-                            <th>Last seen</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportData.topBroken.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="report-empty">
-                                No broken links found.
-                              </td>
-                            </tr>
-                          ) : (
-                            reportData.topBroken.map((row) => (
-                              <tr key={`${row.link_url}-${row.last_seen_at}`}>
-                                <td>{row.link_url}</td>
-                                <td>{row.status_code ?? "-"}</td>
-                                <td>{row.error_message ?? "-"}</td>
-                                <td>{row.occurrence_count}</td>
-                                <td>{formatDate(row.last_seen_at)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
+                <div className="report-card report-score-subtitle">
+                  {reportScores.summary}
+                </div>
 
-                  <div className="report-card">
-                    <div className="report-table-title">Top blocked links</div>
-                    <div className="report-table-wrap">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Link</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                            <th>Occurrences</th>
-                            <th>Last seen</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportData.topBlocked.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="report-empty">
-                                No blocked links found.
-                              </td>
-                            </tr>
-                          ) : (
-                            reportData.topBlocked.map((row) => (
-                              <tr key={`${row.link_url}-${row.last_seen_at}`}>
-                                <td>{row.link_url}</td>
-                                <td>{row.status_code ?? "-"}</td>
-                                <td>{row.error_message ?? "-"}</td>
-                                <td>{row.occurrence_count}</td>
-                                <td>{formatDate(row.last_seen_at)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
+                {isInProgress(reportRun.status) && (
+                  <div
+                    className="report-card"
+                    style={{ display: "grid", gap: "12px" }}
+                  >
+                    <div style={{ fontWeight: 600 }}>
+                      Waiting for this scan to finish
                     </div>
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      This report stays focused on this exact run and will
+                      refresh as progress arrives.
+                    </div>
+                    <ScanProgressBar
+                      status={reportRun.status}
+                      totalLinks={reportRun.total_links}
+                      checkedLinks={reportRun.checked_links}
+                      brokenLinks={reportSummary.broken}
+                      blockedLinks={reportSummary.blocked}
+                      noResponseLinks={reportSummary.no_response}
+                      lastUpdateAt={reportLastLoadedAt}
+                    />
+                  </div>
+                )}
+
+                <div
+                  className="report-card"
+                  style={{ display: "grid", gap: "10px" }}
+                >
+                  <div className="report-table-title">
+                    Technical diagnostics
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "12px",
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                    }}
+                  >
+                    <span>Raw status {reportRun.status}</span>
+                    <span>Site id {reportRun.site_id}</span>
+                    <span>
+                      Checked {reportRun.checked_links} /{" "}
+                      {reportRun.total_links}
+                    </span>
+                    <span>404/410 {reportStatusGroups.notFound}</span>
+                    <span>401/403/429 {reportStatusGroups.blocked}</span>
+                    <span>5xx {reportStatusGroups.serverError}</span>
+                    <span>No response {reportStatusGroups.noResponse}</span>
+                    <span>Other HTTP {reportStatusGroups.otherHttp}</span>
+                    <span>
+                      Refreshed{" "}
+                      {reportLastLoadedAt
+                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                        : "-"}
+                    </span>
                   </div>
                 </div>
+
+                {reportRun.status === "completed" && (
+                  <>
+                    {renderReportIssuesSection()}
+
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "Broken links",
+                        "broken",
+                        reportSummary.broken,
+                      )}
+                      {renderReportLinkSection(
+                        "Blocked links",
+                        "blocked",
+                        reportSummary.blocked,
+                      )}
+                    </div>
+
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "No response links",
+                        "no_response",
+                        reportSummary.no_response,
+                      )}
+                      {renderReportIgnoredSection()}
+                    </div>
+
+                    <div className="report-card">
+                      <div className="report-table-title">OK links</div>
+                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+                        {reportSummary.ok} OK links were recorded in this scan.
+                        Phase 1A keeps OK links as a summary-only count.
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {reportRun.status !== "completed" &&
+                  !isInProgress(reportRun.status) && (
+                    <div
+                      className="report-card"
+                      style={{ fontSize: "13px", color: "var(--muted)" }}
+                    >
+                      This scan did not complete, so Scanlark is only showing
+                      the exact run status and any data captured before it
+                      stopped.
+                    </div>
+                  )}
 
                 <div className="report-footer">
-                  Generated {formatDate(reportData.generatedAt)}
+                  Last refreshed{" "}
+                  {reportLastLoadedAt
+                    ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                    : "-"}
                 </div>
               </>
             )}
@@ -8083,6 +9363,14 @@ const App: React.FC = () => {
                             >
                               {selectedRun.status.replace("_", " ")}
                             </span>
+                            {selectedRun.status === "completed" && (
+                              <button
+                                onClick={() => openReport(selectedRun.id)}
+                                className="report-button"
+                              >
+                                View report
+                              </button>
+                            )}
                             {(canRetryRun || canRescan) && (
                               <button
                                 onClick={() => {
@@ -11521,6 +12809,24 @@ const App: React.FC = () => {
                           >
                             View
                           </button>
+                          {run.status === "completed" && (
+                            <button
+                              onClick={() => {
+                                openReport(run.id);
+                                setHistoryOpen(false);
+                              }}
+                              style={{
+                                padding: "4px 6px",
+                                borderRadius: "6px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                fontSize: "11px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              View report
+                            </button>
+                          )}
                           {selectedRunId &&
                             run.id !== selectedRunId &&
                             run.status === "completed" && (
