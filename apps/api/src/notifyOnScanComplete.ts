@@ -262,17 +262,24 @@ export async function notifyIfNeeded(
 
   if (run.status === "failed") {
     const subject = `Scanlark: ${site.url} — scan failed`;
+    const appLink = APP_URL;
+    const errorMessage = run.error_message ?? "Unknown error";
     const html = `
-      <p><strong>Scan failed</strong> for ${site.url}</p>
-      <p>Started: ${run.started_at.toISOString()}</p>
-      <p>Error: ${run.error_message ?? "Unknown error"}</p>
-      <p><a href="${APP_URL}">View in dashboard</a></p>
+      <p><strong>Scan failed</strong> for ${escapeHtml(site.url)}</p>
+      <p>Started: ${escapeHtml(run.started_at.toISOString())}</p>
+      <p>Error: ${escapeHtml(errorMessage)}</p>
+      <p><a href="${escapeHtml(appLink)}">View in dashboard</a></p>
     `;
     await sendEmail({
       to: toEmail,
       subject,
       html,
-      text: html.replace(/<[^>]+>/g, "").trim(),
+      text: [
+        `Scan failed for ${site.url}`,
+        `Started: ${run.started_at.toISOString()}`,
+        `Error: ${errorMessage}`,
+        `View in dashboard: ${appLink}`,
+      ].join("\n"),
       userId,
       siteId: run.site_id,
       scanRunId: run.id,

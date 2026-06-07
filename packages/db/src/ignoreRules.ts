@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { validateSafeRegexPattern } from "./validation";
 
 export type IgnoreRuleType =
   | "contains"
@@ -28,6 +29,15 @@ const IGNORE_RULE_PRIORITY: Record<IgnoreRuleType, number> = {
   status_code: 5,
   classification: 6,
 };
+
+function compileSafeRuleRegex(pattern: string): RegExp | null {
+  if (validateSafeRegexPattern(pattern) !== null) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
 
 export function sortIgnoreRules(rules: IgnoreRule[]): IgnoreRule[] {
   return [...rules].sort((a, b) => {
@@ -237,10 +247,8 @@ export function findMatchingIgnoreRule(
     if (rule.rule_type === "contains" && linkUrl.includes(rule.pattern))
       return rule;
     if (rule.rule_type === "regex") {
-      try {
-        const regex = new RegExp(rule.pattern);
-        if (regex.test(linkUrl)) return rule;
-      } catch {}
+      const regex = compileSafeRuleRegex(rule.pattern);
+      if (regex?.test(linkUrl)) return rule;
     }
     if (rule.rule_type === "status_code") {
       const code = Number(rule.pattern);
@@ -256,6 +264,10 @@ export async function createIgnoreRule(
   ruleType: IgnoreRuleType,
   pattern: string,
 ): Promise<IgnoreRule> {
+  if (ruleType === "regex") {
+    const error = validateSafeRegexPattern(pattern);
+    if (error) throw new Error(error);
+  }
   const client = await ensureConnected();
   const res = await client.query<IgnoreRule>(
     `
@@ -303,12 +315,8 @@ export function matchesIgnoreRules(
       return true;
     }
     if (rule.rule_type === "regex") {
-      try {
-        const regex = new RegExp(rule.pattern);
-        if (regex.test(input.url)) return true;
-      } catch {
-        // Invalid regex should not crash or match.
-      }
+      const regex = compileSafeRuleRegex(rule.pattern);
+      if (regex?.test(input.url)) return true;
     }
     if (rule.rule_type === "status_code") {
       const code = Number(rule.pattern);

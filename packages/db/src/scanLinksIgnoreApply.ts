@@ -2,6 +2,16 @@ import { createHash } from "crypto";
 import { ensureConnected } from "./client";
 import { sortIgnoreRules } from "./ignoreRules";
 import type { IgnoreRule } from "./ignoreRules";
+import { validateSafeRegexPattern } from "./validation";
+
+function compileSafeRuleRegex(pattern: string): RegExp | null {
+  if (validateSafeRegexPattern(pattern) !== null) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
 
 function hashRules(rules: IgnoreRule[]): string {
   const stable = sortIgnoreRules(rules).map((r) => ({
@@ -165,13 +175,7 @@ export async function applyIgnoreRulesForScanRun(
         const ids: string[] = [];
         const regex =
           rule.rule_type === "regex"
-            ? (() => {
-                try {
-                  return new RegExp(rule.pattern);
-                } catch {
-                  return null;
-                }
-              })()
+            ? compileSafeRuleRegex(rule.pattern)
             : null;
         if (rule.rule_type === "regex" && !regex) continue;
         for (const row of candidates.rows) {

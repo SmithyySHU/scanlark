@@ -48,6 +48,7 @@ import {
   getTimeoutCountForRunForUser,
   getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
+  isValidEmailAddress,
   getLinkNoteForSiteByUrlForUser,
   getIgnoreRuleByIdForUser,
   listIgnoreRulesForUser,
@@ -65,6 +66,7 @@ import {
   updateSiteScheduleForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
+  validateSafeRegexPattern,
 } from "@scanlark/db";
 import validateLink from "../../../packages/crawler/src/validateLink";
 import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
@@ -129,10 +131,6 @@ function isValidTimeUtc(value: string) {
   if (hours < 0 || hours > 23) return false;
   if (minutes < 0 || minutes > 59) return false;
   return true;
-}
-
-function isValidEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 type ExportSortOption =
@@ -217,11 +215,7 @@ function validateIgnoreRulePattern(
   pattern: string,
 ): string | null {
   if (ruleType === "regex") {
-    try {
-      new RegExp(pattern);
-    } catch (err: unknown) {
-      return err instanceof Error ? err.message : "Invalid regex pattern";
-    }
+    return validateSafeRegexPattern(pattern);
   }
   return null;
 }
@@ -521,7 +515,7 @@ async function handlePatchNotificationSettings(
     if (email != null && typeof email !== "string") {
       return sendApiError(res, 400, "invalid_email", "email must be a string");
     }
-    if (email && !isValidEmail(email)) {
+    if (email && !isValidEmailAddress(email)) {
       return sendApiError(res, 400, "invalid_email", "email is invalid");
     }
     patch.notifyEmail = email ?? null;

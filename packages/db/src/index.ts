@@ -164,6 +164,8 @@ export {
 } from "./ignoreRules";
 export type { IgnoreRule, IgnoreRuleType } from "./ignoreRules";
 
+export { isValidEmailAddress, validateSafeRegexPattern } from "./validation";
+
 export {
   insertIgnoredOccurrence,
   listIgnoredLinksForRun,

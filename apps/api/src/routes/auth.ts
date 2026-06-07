@@ -1,12 +1,8 @@
 import express from "express";
 import type { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
-import { createUser, verifyUser } from "@scanlark/db";
+import { createUser, isValidEmailAddress, verifyUser } from "@scanlark/db";
 import { clearSession, setSession } from "../auth";
-
-function isValidEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
 
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
@@ -28,7 +24,7 @@ export function mountAuthRoutes(app: express.Application) {
       typeof req.body?.password === "string" ? req.body.password : "";
     const email = normalizeEmail(emailRaw);
 
-    if (!email || !isValidEmail(email)) {
+    if (!email || !isValidEmailAddress(email)) {
       return res
         .status(400)
         .json({ error: "invalid_email", message: "Email is invalid" });
@@ -62,7 +58,7 @@ export function mountAuthRoutes(app: express.Application) {
       typeof req.body?.password === "string" ? req.body.password : "";
     const email = normalizeEmail(emailRaw);
 
-    if (!email || !isValidEmail(email)) {
+    if (!email || !isValidEmailAddress(email)) {
       return res
         .status(400)
         .json({ error: "invalid_email", message: "Email is invalid" });

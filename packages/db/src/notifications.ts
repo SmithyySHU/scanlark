@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { isValidEmailAddress } from "./validation";
 
 export type NotificationMode =
   | "new_issues_only"
@@ -114,7 +115,7 @@ export async function updateSiteNotificationSettings(
   if (
     next.notifyEnabled &&
     normalizedNotifyOn !== "never" &&
-    (!next.notifyEmail || !isValidEmail(next.notifyEmail))
+    (!next.notifyEmail || !isValidEmailAddress(next.notifyEmail))
   ) {
     throw new Error("invalid_notify_email");
   }
@@ -163,7 +164,7 @@ export async function updateSiteNotificationSettingsForUser(
   if (
     next.notifyEnabled &&
     normalizedNotifyOn !== "never" &&
-    (!next.notifyEmail || !isValidEmail(next.notifyEmail))
+    (!next.notifyEmail || !isValidEmailAddress(next.notifyEmail))
   ) {
     throw new Error("invalid_notify_email");
   }
@@ -198,10 +199,6 @@ export async function updateSiteNotificationSettingsForUser(
     notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
   };
-}
-
-function isValidEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 export async function recordNotificationEvent(
