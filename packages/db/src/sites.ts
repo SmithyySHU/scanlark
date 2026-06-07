@@ -6,9 +6,10 @@ export interface DbSiteRow {
   url: string;
   created_at: Date;
   schedule_enabled: boolean;
-  schedule_frequency: "daily" | "weekly";
+  schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: Date | null;
   last_scheduled_at: Date | null;
   notify_enabled: boolean;
@@ -19,6 +20,7 @@ export interface DbSiteRow {
   notify_include_blocked: boolean;
   notify_include_broken: boolean;
   last_notified_scan_run_id: string | null;
+  summary_enabled: boolean;
 }
 
 export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
@@ -34,6 +36,7 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
            schedule_frequency,
            schedule_time_utc,
            schedule_day_of_week,
+           schedule_day_of_month,
            next_scheduled_at,
            last_scheduled_at,
            notify_enabled,
@@ -43,7 +46,8 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
-           last_notified_scan_run_id
+           last_notified_scan_run_id,
+           summary_enabled
     FROM sites
     WHERE user_id = $1
     ORDER BY created_at DESC
@@ -71,6 +75,7 @@ export async function getAllSites(): Promise<DbSiteRow[]> {
            schedule_frequency,
            schedule_time_utc,
            schedule_day_of_week,
+           schedule_day_of_month,
            next_scheduled_at,
            last_scheduled_at,
            notify_enabled,
@@ -80,7 +85,8 @@ export async function getAllSites(): Promise<DbSiteRow[]> {
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
-           last_notified_scan_run_id
+           last_notified_scan_run_id,
+           summary_enabled
     FROM sites
     ORDER BY created_at DESC
     `,
@@ -102,6 +108,7 @@ export async function getSiteById(id: string): Promise<DbSiteRow | null> {
            schedule_frequency,
            schedule_time_utc,
            schedule_day_of_week,
+           schedule_day_of_month,
            next_scheduled_at,
            last_scheduled_at,
            notify_enabled,
@@ -111,7 +118,8 @@ export async function getSiteById(id: string): Promise<DbSiteRow | null> {
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
-           last_notified_scan_run_id
+           last_notified_scan_run_id,
+           summary_enabled
     FROM sites
     WHERE id = $1
     `,
@@ -137,6 +145,7 @@ export async function getSiteByIdForUser(
            schedule_frequency,
            schedule_time_utc,
            schedule_day_of_week,
+           schedule_day_of_month,
            next_scheduled_at,
            last_scheduled_at,
            notify_enabled,
@@ -146,7 +155,8 @@ export async function getSiteByIdForUser(
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
-           last_notified_scan_run_id
+           last_notified_scan_run_id,
+           summary_enabled
     FROM sites
     WHERE id = $1 AND user_id = $2
     `,
@@ -181,6 +191,7 @@ export async function createSite(
               schedule_frequency,
               schedule_time_utc,
               schedule_day_of_week,
+              schedule_day_of_month,
               next_scheduled_at,
               last_scheduled_at,
               notify_enabled,
@@ -190,7 +201,8 @@ export async function createSite(
               notify_only_on_change,
               notify_include_blocked,
               notify_include_broken,
-              last_notified_scan_run_id
+              last_notified_scan_run_id,
+              summary_enabled
     `,
     [userId, url.trim(), 1],
   );

@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { emitScanEvent } from "./events";
 
 export type ScanJobStatus =
   | "queued"
@@ -22,6 +23,174 @@ export type ScanJobRow = {
   updated_at: Date;
 };
 
+type ScanRunEventRow = {
+  id: string;
+  site_id: string;
+  status: "queued";
+  started_at: Date;
+  finished_at: Date | null;
+  notified_at: Date | null;
+  error_message: string | null;
+  updated_at: Date;
+  start_url: string;
+  total_links: number;
+  checked_links: number;
+  broken_links: number;
+  user_id: string;
+};
+
+export type ActiveSiteScan = {
+  jobId: string | null;
+  scanRunId: string | null;
+  jobStatus: "queued" | "running" | null;
+  scanStatus: "queued" | "in_progress" | null;
+};
+
+export type EnqueueIfIdleResult =
+  | {
+      created: true;
+      scanRunId: string;
+      jobId: string;
+    }
+  | {
+      created: false;
+      active: ActiveSiteScan | null;
+    };
+
+function toIso(value: Date | null) {
+  return value ? value.toISOString() : null;
+}
+
+async function emitScanStarted(row: ScanRunEventRow) {
+  await emitScanEvent({
+    type: "scan_started",
+    user_id: row.user_id,
+    site_id: row.site_id,
+    scan_run_id: row.id,
+    status: row.status,
+    started_at: toIso(row.started_at),
+    finished_at: toIso(row.finished_at),
+    updated_at: toIso(row.updated_at),
+    start_url: row.start_url,
+    total_links: row.total_links,
+    checked_links: row.checked_links,
+    broken_links: row.broken_links,
+    error_message: row.error_message,
+  });
+}
+
+async function getActiveSiteScanTx(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  siteId: string,
+): Promise<ActiveSiteScan | null> {
+  const activeJobRes = await client.query<{
+    job_id: string;
+    job_status: "queued" | "running";
+    scan_run_id: string | null;
+    scan_status: "queued" | "in_progress" | null;
+  }>(
+    `
+      SELECT
+        j.id AS job_id,
+        j.status AS job_status,
+        j.scan_run_id,
+        r.status AS scan_status
+      FROM scan_jobs j
+      LEFT JOIN scan_runs r ON r.id = j.scan_run_id
+      WHERE j.site_id = $1
+        AND j.status IN ('queued', 'running')
+        AND (
+          j.status <> 'running'
+          OR j.lock_expires_at IS NULL
+          OR j.lock_expires_at > NOW()
+        )
+      ORDER BY
+        CASE WHEN j.status = 'running' THEN 0 ELSE 1 END,
+        j.created_at ASC
+      LIMIT 1
+      FOR UPDATE OF j SKIP LOCKED
+    `,
+    [siteId],
+  );
+  const activeJob = activeJobRes.rows[0];
+  if (activeJob) {
+    return {
+      jobId: activeJob.job_id,
+      scanRunId: activeJob.scan_run_id,
+      jobStatus: activeJob.job_status,
+      scanStatus: activeJob.scan_status,
+    };
+  }
+
+  const activeRunRes = await client.query<{
+    scan_run_id: string;
+    scan_status: "queued" | "in_progress";
+  }>(
+    `
+      SELECT id AS scan_run_id, status AS scan_status
+      FROM scan_runs
+      WHERE site_id = $1
+        AND status IN ('queued', 'in_progress')
+      ORDER BY started_at DESC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    `,
+    [siteId],
+  );
+  const activeRun = activeRunRes.rows[0];
+  if (!activeRun) return null;
+  return {
+    jobId: null,
+    scanRunId: activeRun.scan_run_id,
+    jobStatus: null,
+    scanStatus: activeRun.scan_status,
+  };
+}
+
+async function insertQueuedScanRunTx(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  siteId: string,
+  startUrl: string,
+): Promise<ScanRunEventRow> {
+  const res = await client.query<ScanRunEventRow>(
+    `
+      WITH inserted AS (
+        INSERT INTO scan_runs (site_id, start_url, status)
+        VALUES ($1, $2, 'queued')
+        RETURNING
+          id,
+          site_id,
+          status,
+          started_at,
+          finished_at,
+          notified_at,
+          error_message,
+          updated_at,
+          start_url,
+          total_links,
+          checked_links,
+          broken_links
+      )
+      SELECT inserted.*, s.user_id
+      FROM inserted
+      JOIN sites s ON s.id = inserted.site_id
+    `,
+    [siteId, startUrl],
+  );
+  const row = res.rows[0];
+  if (!row) {
+    throw new Error("scan_run_create_failed");
+  }
+  return row;
+}
+
+export async function getActiveSiteScan(
+  siteId: string,
+): Promise<ActiveSiteScan | null> {
+  const client = await ensureConnected();
+  return getActiveSiteScanTx(client, siteId);
+}
+
 export async function enqueueScanJob(params: {
   scanRunId?: string | null;
   siteId: string;
@@ -37,6 +206,146 @@ export async function enqueueScanJob(params: {
     [params.scanRunId ?? null, params.siteId, params.runAt ?? null],
   );
   return res.rows[0].id;
+}
+
+export async function enqueueManualScanIfIdle(params: {
+  siteId: string;
+  startUrl: string;
+}): Promise<EnqueueIfIdleResult> {
+  const client = await ensureConnected();
+  let scanRunRow: ScanRunEventRow | null = null;
+  let jobId: string | null = null;
+
+  await client.query("BEGIN");
+  try {
+    const siteRes = await client.query(
+      `
+        SELECT id
+        FROM sites
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [params.siteId],
+    );
+    if ((siteRes.rowCount ?? 0) === 0) {
+      await client.query("ROLLBACK");
+      throw new Error("site_not_found");
+    }
+
+    const active = await getActiveSiteScanTx(client, params.siteId);
+    if (active) {
+      await client.query("ROLLBACK");
+      return { created: false, active };
+    }
+
+    scanRunRow = await insertQueuedScanRunTx(
+      client,
+      params.siteId,
+      params.startUrl,
+    );
+    const jobRes = await client.query<{ id: string }>(
+      `
+        INSERT INTO scan_jobs (scan_run_id, site_id, status, run_at)
+        VALUES ($1, $2, 'queued', NOW())
+        RETURNING id
+      `,
+      [scanRunRow.id, params.siteId],
+    );
+    jobId = jobRes.rows[0]?.id ?? null;
+    if (!jobId) {
+      throw new Error("scan_job_create_failed");
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+
+  if (!scanRunRow || !jobId) {
+    return { created: false, active: null };
+  }
+  await emitScanStarted(scanRunRow);
+  return {
+    created: true,
+    scanRunId: scanRunRow.id,
+    jobId,
+  };
+}
+
+export async function enqueueExistingScanRunIfIdle(params: {
+  scanRunId: string;
+  siteId: string;
+}): Promise<EnqueueIfIdleResult> {
+  const client = await ensureConnected();
+  let jobId: string | null = null;
+
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      `
+        SELECT id
+        FROM sites
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [params.siteId],
+    );
+
+    const runRes = await client.query<{
+      id: string;
+      site_id: string;
+      status: string;
+    }>(
+      `
+        SELECT id, site_id, status
+        FROM scan_runs
+        WHERE id = $1 AND site_id = $2
+        FOR UPDATE
+      `,
+      [params.scanRunId, params.siteId],
+    );
+    if ((runRes.rowCount ?? 0) === 0) {
+      await client.query("ROLLBACK");
+      throw new Error("scan_run_not_found");
+    }
+
+    const active = await getActiveSiteScanTx(client, params.siteId);
+    if (
+      active &&
+      (active.scanRunId !== params.scanRunId || active.jobStatus !== null)
+    ) {
+      await client.query("ROLLBACK");
+      return { created: false, active };
+    }
+
+    if (active?.jobStatus && active.scanRunId === params.scanRunId) {
+      await client.query("ROLLBACK");
+      return { created: false, active };
+    }
+
+    const jobRes = await client.query<{ id: string }>(
+      `
+        INSERT INTO scan_jobs (scan_run_id, site_id, status, run_at)
+        VALUES ($1, $2, 'queued', NOW())
+        RETURNING id
+      `,
+      [params.scanRunId, params.siteId],
+    );
+    jobId = jobRes.rows[0]?.id ?? null;
+    if (!jobId) {
+      throw new Error("scan_job_create_failed");
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+
+  return {
+    created: true,
+    scanRunId: params.scanRunId,
+    jobId: jobId as string,
+  };
 }
 
 export async function claimNextScanJob(params: {
@@ -55,6 +364,7 @@ export async function claimNextScanJob(params: {
             SELECT 1
             FROM scan_jobs active_jobs
             WHERE active_jobs.site_id = scan_jobs.site_id
+              AND active_jobs.id <> scan_jobs.id
               AND active_jobs.status = 'running'
               AND (
                 active_jobs.lock_expires_at IS NULL
@@ -223,22 +533,35 @@ export async function requeueExpiredScanJobs(): Promise<ScanJobRow[]> {
   return res.rows;
 }
 
-export async function hasActiveJobForSite(siteId: string): Promise<boolean> {
+export async function recoverStaleQueuedScanJobs(params?: {
+  olderThanMinutes?: number;
+}): Promise<ScanJobRow[]> {
   const client = await ensureConnected();
-  const res = await client.query(
+  const olderThanMinutes = params?.olderThanMinutes ?? 15;
+  const res = await client.query<ScanJobRow>(
     `
-      SELECT 1
-      FROM scan_jobs
-      WHERE site_id = $1
-        AND status IN ('queued', 'running')
-        AND (
-          status <> 'running'
-          OR lock_expires_at IS NULL
-          OR lock_expires_at > NOW()
-        )
-      LIMIT 1
+      UPDATE scan_jobs j
+      SET status = 'cancelled',
+          locked_at = NULL,
+          lock_expires_at = NULL,
+          last_error = CASE
+            WHEN j.last_error IS NULL THEN 'stale_queued_job_cancelled'
+            ELSE j.last_error || E'\\nstale_queued_job_cancelled'
+          END,
+          updated_at = NOW()
+      FROM scan_runs r
+      WHERE j.scan_run_id = r.id
+        AND j.status = 'queued'
+        AND j.created_at < NOW() - ($1 * INTERVAL '1 minute')
+        AND r.status IN ('completed', 'failed', 'cancelled')
+      RETURNING j.*
     `,
-    [siteId],
+    [olderThanMinutes],
   );
-  return (res.rowCount ?? 0) > 0;
+  return res.rows;
+}
+
+export async function hasActiveJobForSite(siteId: string): Promise<boolean> {
+  const active = await getActiveSiteScan(siteId);
+  return active?.jobStatus === "queued" || active?.jobStatus === "running";
 }

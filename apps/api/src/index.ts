@@ -18,10 +18,10 @@ import {
   cancelScanRun,
   createSiteForUser,
   createIgnoreRule,
-  createScanRun,
   deleteIgnoreRule,
   deleteSiteForUser,
-  enqueueScanJob,
+  enqueueExistingScanRunIfIdle,
+  enqueueManualScanIfIdle,
   getDiffBetweenRunsForUser,
   getBaselineRunForDiff,
   getCompletedRunForSite,
@@ -46,6 +46,7 @@ import {
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
+  getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
   getTimeoutCountForRunForUser,
@@ -63,6 +64,7 @@ import {
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
+  setScanRunIssueGenerationStatus,
   setScanRunStatus,
   deleteLinkNoteForSiteForUser,
   updateLinkNoteForSiteForUser,
@@ -115,7 +117,7 @@ const DIFF_CHANGE_TYPES = new Set<ScanDiffChangeType>([
   "added",
   "removed",
 ]);
-const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
+const SCHEDULE_FREQUENCIES = new Set(["manual", "daily", "weekly", "monthly"]);
 const NOTIFY_ON_OPTIONS = new Set([
   "always",
   "issues",
@@ -251,6 +253,20 @@ function parseIssueCategory(value: unknown): ScanIssueCategory | null {
 function normalizeNotifyOn(value: string): string {
   if (value === "issues") return "issues_exist";
   return value;
+}
+
+async function rebuildIssuesForRun(scanRunId: string) {
+  await setScanRunIssueGenerationStatus(scanRunId, "pending");
+  try {
+    const result = await replaceIssuesForScanRun(scanRunId);
+    await setScanRunIssueGenerationStatus(scanRunId, "completed", null);
+    return result;
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "issue_generation_failed";
+    await setScanRunIssueGenerationStatus(scanRunId, "failed", message);
+    throw err;
+  }
 }
 
 function validateIgnoreRulePattern(
@@ -460,7 +476,7 @@ app.get("/sites/:siteId/schedule", async (req, res) => {
 
 app.put("/sites/:siteId/schedule", async (req, res) => {
   const siteId = req.params.siteId;
-  const { enabled, frequency, timeUtc, dayOfWeek } = req.body ?? {};
+  const { enabled, frequency, timeUtc, dayOfWeek, dayOfMonth } = req.body ?? {};
 
   if (typeof enabled !== "boolean") {
     return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
@@ -476,8 +492,23 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
   if (typeof timeUtc !== "string" || !isValidTimeUtc(timeUtc)) {
     return sendApiError(res, 400, "invalid_time", "timeUtc must be HH:MM");
   }
-  const frequencyValue = frequency === "daily" ? "daily" : "weekly";
+  const frequencyValue =
+    frequency === "manual" ||
+    frequency === "daily" ||
+    frequency === "weekly" ||
+    frequency === "monthly"
+      ? frequency
+      : "weekly";
   let resolvedDay: number | null = null;
+  let resolvedDayOfMonth: number | null = null;
+  if (enabled && frequencyValue === "manual") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_frequency",
+      "manual frequency cannot be enabled",
+    );
+  }
   if (frequencyValue === "weekly") {
     if (typeof dayOfWeek !== "number" || dayOfWeek < 0 || dayOfWeek > 6) {
       return sendApiError(
@@ -488,6 +519,22 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
       );
     }
     resolvedDay = dayOfWeek;
+  }
+  if (frequencyValue === "monthly") {
+    if (
+      typeof dayOfMonth !== "number" ||
+      !Number.isInteger(dayOfMonth) ||
+      dayOfMonth < 1 ||
+      dayOfMonth > 31
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_day_of_month",
+        "dayOfMonth must be 1-31 for monthly schedules",
+      );
+    }
+    resolvedDayOfMonth = dayOfMonth;
   }
 
   try {
@@ -500,6 +547,7 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
       scheduleFrequency: frequencyValue,
       scheduleTimeUtc: timeUtc,
       scheduleDayOfWeek: resolvedDay,
+      scheduleDayOfMonth: resolvedDayOfMonth,
     });
     res.json({ siteId, ...schedule });
   } catch (err: unknown) {
@@ -534,13 +582,15 @@ async function handlePatchNotificationSettings(
   res: express.Response,
 ) {
   const siteId = req.params.siteId;
-  const { enabled, email, notifyOn, includeCsv } = req.body ?? {};
+  const { enabled, email, notifyOn, includeCsv, summaryEnabled } =
+    req.body ?? {};
 
   const patch: {
     notifyEnabled?: boolean;
     notifyEmail?: string | null;
     notifyOn?: "always" | "issues_exist" | "new_issues_only" | "never";
     notifyIncludeCsv?: boolean;
+    summaryEnabled?: boolean;
   } = {};
 
   if (enabled !== undefined) {
@@ -588,6 +638,17 @@ async function handlePatchNotificationSettings(
       );
     }
     patch.notifyIncludeCsv = includeCsv;
+  }
+  if (summaryEnabled !== undefined) {
+    if (typeof summaryEnabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_summary_enabled",
+        "summaryEnabled must be boolean",
+      );
+    }
+    patch.summaryEnabled = summaryEnabled;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -1278,6 +1339,38 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
   }
 });
 
+app.post("/scan-runs/:scanRunId/rebuild-issues", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+
+    if (run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_scan_status",
+        "Only completed scan runs can rebuild issues",
+      );
+    }
+
+    const rebuild = await rebuildIssuesForRun(scanRunId);
+    const refreshed = await getScanRunByIdForUser(req.user!.id, scanRunId);
+    if (!refreshed) return sendNotFound(res);
+
+    return res.json({
+      scanRunId,
+      issueCount: rebuild.issueCount,
+      scanRun: serializeScanRun(refreshed),
+    });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/rebuild-issues", err);
+    return sendInternalError(res, "Failed to rebuild scan issues", err);
+  }
+});
+
 app.get("/scan-runs/:scanRunId/issues", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const limitRaw = req.query.limit;
@@ -1326,7 +1419,23 @@ app.get("/scan-runs/:scanRunId/issues", async (req, res) => {
       summary: issues.summary,
       countReturned: issues.countReturned,
       totalMatching: issues.totalMatching,
+      resolvedCount: issues.resolvedCount,
       issues: issues.issues.map((issue) => ({
+        ...issue,
+        first_seen_at:
+          issue.first_seen_at instanceof Date
+            ? issue.first_seen_at.toISOString()
+            : issue.first_seen_at,
+        last_seen_at:
+          issue.last_seen_at instanceof Date
+            ? issue.last_seen_at.toISOString()
+            : issue.last_seen_at,
+        resolved_at:
+          issue.resolved_at instanceof Date
+            ? issue.resolved_at.toISOString()
+            : issue.resolved_at,
+      })),
+      resolvedIssues: issues.resolvedIssues.map((issue) => ({
         ...issue,
         first_seen_at:
           issue.first_seen_at instanceof Date
@@ -1456,15 +1565,26 @@ app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
         "Scan run must be failed or cancelled to retry",
       );
     }
-    const jobId = await enqueueScanJob({
+    const enqueueResult = await enqueueExistingScanRunIfIdle({
       scanRunId,
       siteId: run.site_id,
     });
+    if (!enqueueResult.created) {
+      return res.status(409).json({
+        error: "active_scan_exists",
+        message: "This site already has queued or running scan work",
+        active: enqueueResult.active,
+      });
+    }
     await setScanRunStatus(scanRunId, "queued", {
       errorMessage: null,
       clearFinishedAt: true,
     });
-    return res.json({ scanRunId, jobId, status: "queued" });
+    return res.json({
+      scanRunId,
+      jobId: enqueueResult.jobId,
+      status: "queued",
+    });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/retry", err);
     return sendInternalError(res, "Failed to retry scan run", err);
@@ -1508,14 +1628,22 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const site = await requireSiteForUser(req, res, siteId);
-    if (!site) return;
-    const scanRunId = await createScanRun(siteId, body.startUrl);
-    const jobId = await enqueueScanJob({ scanRunId, siteId });
+    if (!(await requireSiteForUser(req, res, siteId))) return;
+    const enqueueResult = await enqueueManualScanIfIdle({
+      siteId,
+      startUrl: body.startUrl,
+    });
+    if (!enqueueResult.created) {
+      return res.status(409).json({
+        error: "active_scan_exists",
+        message: "This site already has queued or running scan work",
+        active: enqueueResult.active,
+      });
+    }
 
     res.status(201).json({
-      scanRunId,
-      jobId,
+      scanRunId: enqueueResult.scanRunId,
+      jobId: enqueueResult.jobId,
       siteId,
       startUrl: body.startUrl,
     });
@@ -1625,6 +1753,32 @@ app.get("/scan-runs/:scanRunId/links/summary", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/links/summary", err);
     return sendInternalError(res, "Failed to fetch link summary", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/technical-diagnostics", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const diagnostics = await getScanTechnicalDiagnosticsForUser(
+      userId,
+      scanRunId,
+    );
+    res.json({
+      ...diagnostics,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /scan-runs/:scanRunId/technical-diagnostics",
+      err,
+    );
+    return sendInternalError(res, "Failed to fetch technical diagnostics", err);
   }
 });
 
@@ -2771,7 +2925,7 @@ app.post(
             });
           }
         }
-        await replaceIssuesForScanRun(scanRunId);
+        await rebuildIssuesForRun(scanRunId);
         return res.json({ scanRunId, link_url: linkUrl, ignored: true });
       }
 
@@ -2798,7 +2952,7 @@ app.post(
         linkUrl,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, rule });
     } catch (err: unknown) {
       console.error(
@@ -2866,7 +3020,7 @@ app.post(
             sourcePage: first.source_page,
           });
         }
-        await replaceIssuesForScanRun(scanRunId);
+        await rebuildIssuesForRun(scanRunId);
         return res.json({ scanRunId, link_url: link.link_url, ignored: true });
       }
 
@@ -2893,7 +3047,7 @@ app.post(
         link.link_url,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, rule });
     } catch (err: unknown) {
       console.error(
@@ -2935,7 +3089,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, linkUrl, false, {
         source: "none",
       });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, ignored: false });
     } catch (err: unknown) {
       console.error(
@@ -2954,7 +3108,7 @@ app.post("/scan-runs/:scanRunId/reapply-ignore", async (req, res) => {
     const runCheck = await requireScanRunForUser(req, res, scanRunId);
     if (!runCheck) return;
     const result = await applyIgnoreRulesForScanRun(scanRunId, { force });
-    await replaceIssuesForScanRun(scanRunId);
+    await rebuildIssuesForRun(scanRunId);
     res.json({ scanRunId, ...result });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/reapply-ignore", err);
@@ -2989,7 +3143,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, link.link_url, false, {
         source: "none",
       });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, ignored: false });
     } catch (err: unknown) {
       console.error(

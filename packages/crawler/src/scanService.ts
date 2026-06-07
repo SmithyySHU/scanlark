@@ -26,8 +26,10 @@ import {
   insertIgnoredOccurrence,
   insertScanLinkOccurrence,
   insertScanResult,
+  listScanSiteCheckTypesForRun,
   listIgnoreRules,
   replaceIssuesForScanRun,
+  setScanRunIssueGenerationStatus,
   setScanRunStatus,
   touchScanRun,
   updateScanRunProgress,
@@ -42,6 +44,18 @@ export interface ScanExecutionSummary {
   checkedLinks: number;
   brokenLinks: number;
   ignoredLinks: number;
+}
+
+async function verifyExpectedSiteChecks(scanRunId: string): Promise<void> {
+  const checkTypes = new Set(await listScanSiteCheckTypesForRun(scanRunId));
+  if (
+    checkTypes.has("security_headers_https_root") &&
+    !checkTypes.has("performance_basic_https_root")
+  ) {
+    throw new Error(
+      "site_checks_incomplete: performance_basic_https_root missing after security_headers_https_root",
+    );
+  }
 }
 
 /**
@@ -993,20 +1007,30 @@ export async function runScanForSite(
     });
 
     try {
+      await setScanRunIssueGenerationStatus(actualScanRunId, "pending");
       await runSiteChecks({
         scanRunId: actualScanRunId,
         siteId,
         startUrl,
         signal: cancelController.signal,
       });
+      await verifyExpectedSiteChecks(actualScanRunId);
       await applyIgnoreRulesForScanRun(actualScanRunId, { force: true });
       const issueResult = await replaceIssuesForScanRun(actualScanRunId);
+      await setScanRunIssueGenerationStatus(actualScanRunId, "completed", null);
       console.log(
         `[Scan] Issues generated run=${actualScanRunId} count=${issueResult.issueCount}`,
       );
     } catch (issueErr) {
+      const issueMessage =
+        issueErr instanceof Error ? issueErr.message : "issue_generation_failed";
+      await setScanRunIssueGenerationStatus(
+        actualScanRunId,
+        "failed",
+        issueMessage,
+      );
       console.warn(
-        `[Scan] Issue generation failed run=${actualScanRunId}`,
+        `[Scan] Issue generation failed run=${actualScanRunId} error=${issueMessage}`,
         issueErr,
       );
     }

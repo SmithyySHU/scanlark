@@ -28,6 +28,9 @@ export interface ScanRunRow {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  trigger_type: "manual" | "scheduled";
+  issue_generation_status: "pending" | "completed" | "failed";
+  issue_generation_error: string | null;
 }
 
 type ScanRunProgressFields = {
@@ -104,6 +107,9 @@ export async function updateScanRunProgress(
         r.total_links,
         r.checked_links,
         r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error,
         s.user_id
     `,
     [scanRunId, totalLinks, checkedLinks, brokenLinks],
@@ -117,13 +123,15 @@ export async function updateScanRunProgress(
 export async function createScanRun(
   siteId: string,
   startUrl: string,
+  options?: { triggerType?: "manual" | "scheduled" },
 ): Promise<string> {
   const client = await ensureConnected();
+  const triggerType = options?.triggerType ?? "manual";
   const res = await client.query<ScanRunEventRow>(
     `
       WITH inserted AS (
-        INSERT INTO scan_runs (site_id, start_url, status)
-        VALUES ($1, $2, 'queued')
+        INSERT INTO scan_runs (site_id, start_url, status, trigger_type)
+        VALUES ($1, $2, 'queued', $3)
         RETURNING
           id,
           site_id,
@@ -136,13 +144,16 @@ export async function createScanRun(
           start_url,
           total_links,
           checked_links,
-          broken_links
+          broken_links,
+          trigger_type,
+          issue_generation_status,
+          issue_generation_error
       )
       SELECT inserted.*, s.user_id
       FROM inserted
       JOIN sites s ON s.id = inserted.site_id
     `,
-    [siteId, startUrl],
+    [siteId, startUrl, triggerType],
   );
   const row = res.rows[0];
   if (row) {
@@ -185,6 +196,9 @@ export async function completeScanRun(
         r.total_links,
         r.checked_links,
         r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error,
         s.user_id
     `,
     [scanRunId, status, totalLinks, checkedLinks, brokenLinks],
@@ -221,6 +235,9 @@ export async function cancelScanRun(scanRunId: string): Promise<void> {
         r.total_links,
         r.checked_links,
         r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error,
         s.user_id
     `,
     [scanRunId],
@@ -275,6 +292,9 @@ export async function setScanRunStatus(
         r.total_links,
         r.checked_links,
         r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error,
         s.user_id
     `,
     [scanRunId, status, errorMessage, setFinishedAt, clearFinishedAt],
@@ -312,6 +332,24 @@ export async function touchScanRun(scanRunId: string): Promise<void> {
   ]);
 }
 
+export async function setScanRunIssueGenerationStatus(
+  scanRunId: string,
+  issueGenerationStatus: "pending" | "completed" | "failed",
+  issueGenerationError?: string | null,
+): Promise<void> {
+  const client = await ensureConnected();
+  await client.query(
+    `
+      UPDATE scan_runs
+      SET issue_generation_status = $2,
+          issue_generation_error = $3,
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [scanRunId, issueGenerationStatus, issueGenerationError ?? null],
+  );
+}
+
 export async function getLatestScanForSite(
   siteId: string,
 ): Promise<ScanRunRow | null> {
@@ -330,7 +368,10 @@ export async function getLatestScanForSite(
       start_url,
       total_links,
       checked_links,
-      broken_links
+      broken_links,
+      trigger_type,
+      issue_generation_status,
+      issue_generation_error
     FROM scan_runs
     WHERE site_id = $1
     ORDER BY started_at DESC

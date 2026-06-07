@@ -13,6 +13,7 @@ export type { DbSiteRow } from "./sites";
 
 export {
   computeNextScheduledAt,
+  enqueueScheduledScanIfDue,
   getDueSites,
   getSiteSchedule,
   getSiteScheduleForUser,
@@ -39,6 +40,7 @@ export {
   completeScanRun,
   createScanRun,
   getScanRunStatus,
+  setScanRunIssueGenerationStatus,
   touchScanRun,
   setScanRunStatus,
   updateScanRunProgress,
@@ -126,8 +128,10 @@ export {
   replaceIssuesForScanRun,
 } from "./scanIssues";
 export type {
+  ResolvedScanIssue,
   ScanIssue,
   ScanIssueCategory,
+  ScanIssueChangeStatus,
   ScanIssueSeverity,
   ScanIssueStatus,
   ScanIssueType,
@@ -137,12 +141,15 @@ export type {
 export { upsertScanPageCheck } from "./scanPageChecks";
 export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
 
-export { upsertScanSiteCheck } from "./scanSiteChecks";
+export { listScanSiteCheckTypesForRun, upsertScanSiteCheck } from "./scanSiteChecks";
 export type {
   ScanSiteCheckInput,
   ScanSiteCheckRow,
   ScanSiteCheckType,
 } from "./scanSiteChecks";
+
+export { getScanTechnicalDiagnosticsForUser } from "./scanTechnicalDiagnostics";
+export type { ScanTechnicalDiagnosticsSummary } from "./scanTechnicalDiagnostics";
 
 export {
   deleteLinkNoteForSiteForUser,
@@ -161,11 +168,15 @@ export {
   cancelScanJob,
   claimNextScanJob,
   completeScanJob,
+  enqueueExistingScanRunIfIdle,
   enqueueScanJob,
+  enqueueManualScanIfIdle,
   extendScanJobLease,
   failScanJob,
+  getActiveSiteScan,
   getJobForScanRun,
   hasActiveJobForSite,
+  recoverStaleQueuedScanJobs,
   requeueExpiredScanJobs,
   setScanJobRunId,
 } from "./scanJobs";
@@ -201,6 +212,7 @@ export type { IgnoredLinkRow, IgnoredOccurrenceRow } from "./ignoredLinks";
 
 export {
   getLinkCountsForRun,
+  getIssueNotificationDigestForRun,
   getNewLinksSinceLastNotified,
   getPreviousCompletedRunId,
   getSiteNotificationSettings,
@@ -209,11 +221,13 @@ export {
   hasNotificationEvent,
   markScanRunNotified,
   recordNotificationEvent,
+  tryRecordNotificationEvent,
   setLastNotifiedScanRunId,
   updateSiteNotificationSettings,
   updateSiteNotificationSettingsForUser,
 } from "./notifications";
 export type {
+  IssueNotificationDigest,
   LinkDeltaRow,
   NotificationEventKind,
   NotificationSettings,

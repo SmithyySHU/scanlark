@@ -46,15 +46,17 @@ interface Site {
   url: string;
   created_at: string;
   schedule_enabled: boolean;
-  schedule_frequency: "daily" | "weekly";
+  schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: string | null;
   last_scheduled_at: string | null;
   notify_enabled: boolean;
   notify_email: string | null;
   notify_on: NotifyOnOption;
   notify_include_csv: boolean;
+  summary_enabled: boolean;
   last_notified_scan_run_id: string | null;
 }
 
@@ -82,6 +84,8 @@ interface ScanRunSummary {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  issue_generation_status?: "pending" | "completed" | "failed";
+  issue_generation_error?: string | null;
 }
 
 interface ScanHistoryResponse {
@@ -268,8 +272,75 @@ interface Phase0Diagnostics {
   blocked: number | null;
   noResponse: number | null;
   ignoredSkipped: number | null;
+  seoBasic: {
+    pageChecksCount: number | null;
+    issueCount: number | null;
+  } | null;
+  robots: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    blocksAll: boolean | null;
+    sitemapReferencesCount: number | null;
+  } | null;
+  sitemap: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    parsedUrlCount: number | null;
+    sampledBrokenEntryCount: number | null;
+  } | null;
+  sslHttps: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    httpsAvailable: boolean | null;
+    httpRedirectsToHttps: boolean | null;
+    tlsAuthorized: boolean | null;
+    hostnameMatches: boolean | null;
+    daysUntilExpiry: number | null;
+    expiringSoon: boolean | null;
+  } | null;
+  securityHeader: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    hasHsts: boolean | null;
+    hasCsp: boolean | null;
+    hasFrameAncestors: boolean | null;
+    hasXFrameOptions: boolean | null;
+    hasXContentTypeOptions: boolean | null;
+    hasReferrerPolicy: boolean | null;
+    hasPermissionsPolicy: boolean | null;
+    cookiesSetCount: number | null;
+    cookiesMissingSecureCount: number | null;
+    cookiesMissingHttpOnlyCount: number | null;
+    cookiesMissingSameSiteCount: number | null;
+  } | null;
+  performanceBasic: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    responseTimeMs: number | null;
+    htmlSizeBytes: number | null;
+    imageCount: number | null;
+    scriptCount: number | null;
+    stylesheetCount: number | null;
+    assetCount: number | null;
+  } | null;
   error: string | null;
   loadedAt: number | null;
+}
+
+interface ScanTechnicalDiagnosticsResponse {
+  scanRunId: string;
+  seoBasic: NonNullable<Phase0Diagnostics["seoBasic"]>;
+  robots: NonNullable<Phase0Diagnostics["robots"]>;
+  sitemap: NonNullable<Phase0Diagnostics["sitemap"]>;
+  sslHttps: NonNullable<Phase0Diagnostics["sslHttps"]>;
+  securityHeader: NonNullable<Phase0Diagnostics["securityHeader"]>;
+  performanceBasic: NonNullable<Phase0Diagnostics["performanceBasic"]>;
+  loadedAt: string;
 }
 
 interface IgnoredOccurrencesResponse {
@@ -315,6 +386,7 @@ type ReportStatusCodeGroups = {
 
 type IssueSeverity = "critical" | "high" | "medium" | "low" | "info";
 type IssueStatus = "open" | "resolved";
+type IssueChangeStatus = "new" | "existing" | "resolved";
 type IssueCategory =
   | "link_integrity"
   | "seo_basic"
@@ -336,7 +408,37 @@ type IssueType =
   | "missing_h1"
   | "multiple_h1"
   | "noindex_detected"
-  | "canonical_multiple";
+  | "canonical_multiple"
+  | "robots_missing"
+  | "robots_unreachable"
+  | "robots_blocks_all"
+  | "robots_no_sitemap_reference"
+  | "sitemap_missing"
+  | "sitemap_unreachable"
+  | "sitemap_invalid"
+  | "sitemap_empty"
+  | "sitemap_url_broken"
+  | "https_unavailable"
+  | "http_not_redirecting_to_https"
+  | "ssl_certificate_expired"
+  | "ssl_certificate_expiring_soon"
+  | "ssl_certificate_hostname_mismatch"
+  | "ssl_certificate_invalid"
+  | "hsts_missing"
+  | "csp_missing"
+  | "frame_ancestors_missing"
+  | "x_frame_options_missing"
+  | "x_content_type_options_missing"
+  | "referrer_policy_missing"
+  | "permissions_policy_missing"
+  | "set_cookie_missing_secure"
+  | "set_cookie_missing_httponly"
+  | "set_cookie_missing_samesite"
+  | "homepage_response_slow"
+  | "homepage_html_too_large"
+  | "homepage_asset_count_high"
+  | "homepage_image_count_high"
+  | "homepage_script_count_high";
 
 interface ScanIssue {
   id: string;
@@ -351,9 +453,29 @@ interface ScanIssue {
   title: string;
   description: string;
   evidence_json: Record<string, unknown>;
+  change_status: Exclude<IssueChangeStatus, "resolved"> | null;
   first_seen_at: string;
   last_seen_at: string;
   resolved_at: string | null;
+}
+
+interface ResolvedScanIssue {
+  id: string;
+  site_id: string;
+  category: IssueCategory;
+  severity: IssueSeverity;
+  issue_type: IssueType;
+  affected_url: string;
+  source_url: string | null;
+  title: string;
+  description: string;
+  evidence_json: Record<string, unknown>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string;
+  resolved_scan_run_id: string;
+  change_status: "resolved";
+  status: "resolved";
 }
 
 interface ScanIssuesResponse {
@@ -362,14 +484,19 @@ interface ScanIssuesResponse {
     total: number;
     bySeverity: Record<IssueSeverity, number>;
     byIssueType: Record<string, number>;
+    byChangeStatus: Record<IssueChangeStatus, number>;
   };
   countReturned: number;
   totalMatching: number;
+  resolvedCount: number;
   issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
 }
 
 type ReportIssuesState = {
   issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
+  resolvedCount: number;
   summary: ScanIssuesResponse["summary"] | null;
   summariesByCategory: Partial<
     Record<IssueCategory, ScanIssuesResponse["summary"]>
@@ -387,7 +514,8 @@ type ReportIssueFilter =
   | "low"
   | "info"
   | "link_integrity"
-  | "seo_basic";
+  | "seo_basic"
+  | "performance_basic";
 
 type ScanDiffChangeType =
   | "new_issue"
@@ -465,9 +593,10 @@ type ScheduleEventPayload = {
   user_id: string;
   site_id: string;
   schedule_enabled: boolean;
-  schedule_frequency: "daily" | "weekly";
+  schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: string | null;
   last_scheduled_at: string | null;
 };
@@ -509,6 +638,8 @@ const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
 };
 const EMPTY_REPORT_ISSUES_STATE: ReportIssuesState = {
   issues: [],
+  resolvedIssues: [],
+  resolvedCount: 0,
   summary: null,
   summariesByCategory: {},
   offset: 0,
@@ -528,6 +659,7 @@ const REPORT_ISSUE_FILTERS: Array<{
   { key: "info", label: "Info" },
   { key: "link_integrity", label: "Link integrity" },
   { key: "seo_basic", label: "SEO basics" },
+  { key: "performance_basic", label: "Performance" },
 ];
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
@@ -638,6 +770,11 @@ function combineIssueSummaries(
       info: 0,
     },
     byIssueType: {},
+    byChangeStatus: {
+      new: 0,
+      existing: 0,
+      resolved: 0,
+    },
   };
 
   for (const summary of summaries) {
@@ -648,6 +785,9 @@ function combineIssueSummaries(
     combined.bySeverity.medium += summary.bySeverity.medium ?? 0;
     combined.bySeverity.low += summary.bySeverity.low ?? 0;
     combined.bySeverity.info += summary.bySeverity.info ?? 0;
+    combined.byChangeStatus.new += summary.byChangeStatus.new ?? 0;
+    combined.byChangeStatus.existing += summary.byChangeStatus.existing ?? 0;
+    combined.byChangeStatus.resolved += summary.byChangeStatus.resolved ?? 0;
     for (const [issueType, count] of Object.entries(
       summary.byIssueType ?? {},
     )) {
@@ -659,12 +799,21 @@ function combineIssueSummaries(
   return combined;
 }
 
+function formatIssueChangeStatus(value: IssueChangeStatus) {
+  if (value === "new") return "New";
+  if (value === "existing") return "Existing";
+  return "Resolved";
+}
+
 function formatIssueCategoryLabel(category: IssueCategory) {
   if (category === "seo_basic") return "SEO basic";
   if (category === "link_integrity") return "Link integrity";
+  if (category === "ssl_https") return "SSL / HTTPS";
+  if (category === "security_header") return "Security headers";
   if (category === "robots") return "Robots";
   if (category === "sitemap") return "Sitemap";
-  return category.replace(/_/g, " ");
+  if (category === "performance_basic") return "Performance";
+  return String(category).replace(/_/g, " ");
 }
 
 function matchesReportIssueFilter(
@@ -865,8 +1014,7 @@ function calculateReportScores(
     overall: {
       score: overallComputed.score,
       band: overallComputed.band,
-      detail:
-        "Currently based on link integrity and SEO basic findings from this scan",
+      detail: "Currently based on issue findings from this scan",
     },
     linkIntegrity: {
       score: linkComputed.score,
@@ -939,12 +1087,14 @@ function parseTimeUtc(timeUtc: string) {
 }
 
 function buildUtcScheduleAnchor(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
   const parsed = parseTimeUtc(timeUtc);
   if (!parsed) return null;
+  if (frequency === "manual") return null;
   const now = new Date();
   const base = new Date(
     Date.UTC(
@@ -958,38 +1108,88 @@ function buildUtcScheduleAnchor(
     ),
   );
   if (frequency === "daily") {
-    if (base.getTime() < now.getTime()) {
+    if (base.getTime() <= now.getTime()) {
       base.setUTCDate(base.getUTCDate() + 1);
     }
     return base;
   }
-  const targetDay = dayOfWeek ?? 1;
-  const diff = (targetDay - base.getUTCDay() + 7) % 7;
-  base.setUTCDate(base.getUTCDate() + diff);
-  if (base.getTime() < now.getTime()) {
-    base.setUTCDate(base.getUTCDate() + 7);
+
+  if (frequency === "weekly") {
+    const targetDay = dayOfWeek ?? 1;
+    const diff = (targetDay - base.getUTCDay() + 7) % 7;
+    base.setUTCDate(base.getUTCDate() + diff);
+    if (base.getTime() <= now.getTime()) {
+      base.setUTCDate(base.getUTCDate() + 7);
+    }
+    return base;
   }
-  return base;
+
+  const targetDayOfMonth = dayOfMonth ?? 1;
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  const clampDay = (candidateYear: number, candidateMonth: number) =>
+    Math.min(
+      targetDayOfMonth,
+      new Date(Date.UTC(candidateYear, candidateMonth + 1, 0)).getUTCDate(),
+    );
+  let candidate = new Date(
+    Date.UTC(
+      year,
+      month,
+      clampDay(year, month),
+      parsed.hours,
+      parsed.minutes,
+      0,
+      0,
+    ),
+  );
+  if (candidate.getTime() <= now.getTime()) {
+    const nextMonth = month === 11 ? 0 : month + 1;
+    const nextYear = month === 11 ? year + 1 : year;
+    candidate = new Date(
+      Date.UTC(
+        nextYear,
+        nextMonth,
+        clampDay(nextYear, nextMonth),
+        parsed.hours,
+        parsed.minutes,
+        0,
+        0,
+      ),
+    );
+  }
+  return candidate;
 }
 
 function formatScheduleUtcLabel(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
+  if (frequency === "manual") return "Manual only";
   if (frequency === "weekly") {
     const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
     return `${dayLabel} ${timeUtc}`;
+  }
+  if (frequency === "monthly") {
+    return `Day ${dayOfMonth ?? 1} ${timeUtc}`;
   }
   return timeUtc;
 }
 
 function formatScheduleLocalLabel(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
-  const anchor = buildUtcScheduleAnchor(frequency, timeUtc, dayOfWeek);
+  const anchor = buildUtcScheduleAnchor(
+    frequency,
+    timeUtc,
+    dayOfWeek,
+    dayOfMonth,
+  );
   if (!anchor) return "-";
   return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
@@ -1027,26 +1227,34 @@ function formatDuration(
 
 function formatScheduleSummary(
   isEnabled: boolean,
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
   nextScheduledAt: string | null,
 ) {
-  if (!isEnabled) return "Auto-scan: Off";
-  const dayLabel =
-    frequency === "weekly"
-      ? (WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon")
-      : "Daily";
+  if (!isEnabled && frequency === "manual") return "Auto-scan: Manual only";
+  if (!isEnabled) return `Auto-scan: Paused (${frequency})`;
   const nextLabel = formatDate(nextScheduledAt);
   const localTimeZone = getLocalTimeZone();
-  const localLabel = formatScheduleLocalLabel(frequency, timeUtc, dayOfWeek);
+  const localLabel = formatScheduleLocalLabel(
+    frequency,
+    timeUtc,
+    dayOfWeek,
+    dayOfMonth,
+  );
   const localSuffix =
     localTimeZone && localTimeZone !== "UTC"
       ? ` / ${localLabel} (${localTimeZone})`
       : "";
-  return `Auto-scan: ${frequency === "weekly" ? "Weekly" : "Daily"} ${
-    frequency === "weekly" ? dayLabel : ""
-  } ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`.replace("  ", " ");
+  if (frequency === "weekly") {
+    const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
+    return `Auto-scan: Weekly ${dayLabel} ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
+  }
+  if (frequency === "monthly") {
+    return `Auto-scan: Monthly day ${dayOfMonth ?? 1} ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
+  }
+  return `Auto-scan: Daily ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
 }
 
 function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
@@ -1426,6 +1634,7 @@ const App: React.FC = () => {
   const [reportVisibleIssueCount, setReportVisibleIssueCount] = useState(
     REPORT_INITIAL_VISIBLE_ROWS,
   );
+  const [reportResolvedExpanded, setReportResolvedExpanded] = useState(false);
   const [reportVisibleSectionCounts, setReportVisibleSectionCounts] = useState<
     Record<ReportSectionKey, number>
   >({
@@ -1440,6 +1649,8 @@ const App: React.FC = () => {
   const [reportLastLoadedAt, setReportLastLoadedAt] = useState<number | null>(
     null,
   );
+  const [reportTechnicalDiagnostics, setReportTechnicalDiagnostics] =
+    useState<Phase0Diagnostics | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -1546,16 +1757,18 @@ const App: React.FC = () => {
   const [ignoreRulesError, setIgnoreRulesError] = useState<string | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState<
-    "daily" | "weekly"
-  >("weekly");
+    "manual" | "daily" | "weekly" | "monthly"
+  >("manual");
   const [scheduleTimeUtc, setScheduleTimeUtc] = useState("02:00");
   const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState(1);
+  const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState(1);
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("new_issues_only");
   const [notifyIncludeCsv, setNotifyIncludeCsv] = useState(false);
+  const [summaryEnabled, setSummaryEnabled] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
   const [notifySaving, setNotifySaving] = useState(false);
   const [notifyTestSending, setNotifyTestSending] = useState(false);
@@ -1689,9 +1902,11 @@ const App: React.FC = () => {
     setReportSections(createEmptyReportSections());
     setReportIgnoredSection(createEmptyReportIgnoredSection());
     setReportIssues(EMPTY_REPORT_ISSUES_STATE);
+    setReportTechnicalDiagnostics(null);
     setReportFilteredIssueStates({});
     setReportIssueFilter("all");
     setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
+    setReportResolvedExpanded(false);
     setReportVisibleSectionCounts({
       broken: REPORT_INITIAL_VISIBLE_ROWS,
       blocked: REPORT_INITIAL_VISIBLE_ROWS,
@@ -1723,7 +1938,7 @@ const App: React.FC = () => {
 
   const loadReportOverview = useCallback(
     async (scanRunId: string) => {
-      const [runRes, summaryRes, ignoredRes] = await Promise.all([
+      const [runRes, summaryRes, ignoredRes, diagnosticsRes] = await Promise.all([
         apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
           cache: "no-store",
         }),
@@ -1732,6 +1947,10 @@ const App: React.FC = () => {
           { cache: "no-store" },
         ),
         apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), { cache: "no-store" }),
+        apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/technical-diagnostics`,
+          { cache: "no-store" },
+        ),
       ]);
 
       if (!runRes.ok) {
@@ -1752,15 +1971,40 @@ const App: React.FC = () => {
       if (!ignoredRes.ok) {
         throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
       }
+      if (!diagnosticsRes.ok) {
+        throw new Error(
+          `Failed to load technical diagnostics: ${diagnosticsRes.status}`,
+        );
+      }
 
       const run = (await runRes.json()) as ScanRunSummary;
       const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
       const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+      const diagnosticsData =
+        (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
 
       setReportRunData(run);
       setReportSummaryRows(summaryData.summary ?? []);
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
+      setReportTechnicalDiagnostics({
+        scanRunId,
+        ok: null,
+        broken: null,
+        blocked: null,
+        noResponse: null,
+        ignoredSkipped: null,
+        seoBasic: diagnosticsData.seoBasic,
+        robots: diagnosticsData.robots,
+        sitemap: diagnosticsData.sitemap,
+        sslHttps: diagnosticsData.sslHttps,
+        securityHeader: diagnosticsData.securityHeader,
+        performanceBasic: diagnosticsData.performanceBasic,
+        error: null,
+        loadedAt: diagnosticsData.loadedAt
+          ? new Date(diagnosticsData.loadedAt).getTime()
+          : Date.now(),
+      });
 
       return run;
     },
@@ -1854,7 +2098,7 @@ const App: React.FC = () => {
     async (scanRunId: string) => {
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
-        const [allRes, linkRes, seoRes] = await Promise.all([
+        const [allRes, linkRes, seoRes, performanceRes] = await Promise.all([
           apiFetch(
             `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
             { cache: "no-store" },
@@ -1865,6 +2109,10 @@ const App: React.FC = () => {
           ),
           apiFetch(
             `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=seo_basic&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=performance_basic&limit=1&offset=0`,
             { cache: "no-store" },
           ),
         ]);
@@ -1879,15 +2127,25 @@ const App: React.FC = () => {
         if (!seoRes.ok) {
           throw new Error(`Failed to load SEO issue summary: ${seoRes.status}`);
         }
+        if (!performanceRes.ok) {
+          throw new Error(
+            `Failed to load performance issue summary: ${performanceRes.status}`,
+          );
+        }
         const data = (await allRes.json()) as ScanIssuesResponse;
         const linkData = (await linkRes.json()) as ScanIssuesResponse;
         const seoData = (await seoRes.json()) as ScanIssuesResponse;
+        const performanceData =
+          (await performanceRes.json()) as ScanIssuesResponse;
         setReportIssues({
           issues: data.issues ?? [],
+          resolvedIssues: data.resolvedIssues ?? [],
+          resolvedCount: data.resolvedCount ?? 0,
           summary: data.summary,
           summariesByCategory: {
             link_integrity: linkData.summary,
             seo_basic: seoData.summary,
+            performance_basic: performanceData.summary,
           },
           offset: data.countReturned,
           hasMore: data.countReturned < data.totalMatching,
@@ -1922,7 +2180,11 @@ const App: React.FC = () => {
         filter === "info"
       ) {
         params.set("severity", filter);
-      } else if (filter === "link_integrity" || filter === "seo_basic") {
+      } else if (
+        filter === "link_integrity" ||
+        filter === "seo_basic" ||
+        filter === "performance_basic"
+      ) {
         params.set("category", filter);
       }
       return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?${params.toString()}`;
@@ -1960,6 +2222,9 @@ const App: React.FC = () => {
               issues: isInitial
                 ? (data.issues ?? [])
                 : [...existing.issues, ...(data.issues ?? [])],
+              resolvedIssues: isInitial ? (data.resolvedIssues ?? []) : existing.resolvedIssues,
+              resolvedCount:
+                data.resolvedCount ?? existing.resolvedCount ?? 0,
               summary: data.summary,
               offset: isInitial
                 ? data.countReturned
@@ -2002,6 +2267,11 @@ const App: React.FC = () => {
         setReportIssues((prev) => ({
           ...prev,
           issues: [...prev.issues, ...(data.issues ?? [])],
+          resolvedIssues:
+            prev.resolvedIssues.length > 0
+              ? prev.resolvedIssues
+              : (data.resolvedIssues ?? []),
+          resolvedCount: data.resolvedCount ?? prev.resolvedCount,
           summary: prev.summary ?? data.summary,
           offset: prev.offset + data.countReturned,
           hasMore: prev.offset + data.countReturned < data.totalMatching,
@@ -2918,7 +3188,11 @@ const App: React.FC = () => {
     ) {
       return reportIssueSummary?.bySeverity[filter] ?? 0;
     }
-    if (filter === "link_integrity" || filter === "seo_basic") {
+    if (
+      filter === "link_integrity" ||
+      filter === "seo_basic" ||
+      filter === "performance_basic"
+    ) {
       return reportIssues.summariesByCategory[filter]?.total ?? 0;
     }
     return displayedIssueRows.length;
@@ -2971,6 +3245,121 @@ const App: React.FC = () => {
   const formatIssueSupportText = (description: string) => {
     if (description.length <= 84) return description;
     return `${description.slice(0, 84).trimEnd()}…`;
+  };
+
+  const formatSeoDiagnostics = (
+    diagnostics: Phase0Diagnostics["seoBasic"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.pageChecksCount == null) {
+      return "2A SEO basics not recorded";
+    }
+    if (diagnostics.pageChecksCount === 0) {
+      return "2A SEO basics recorded 0 pages";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2A SEO basics checked ${diagnostics.pageChecksCount} pages, ${diagnostics.issueCount} findings`;
+    }
+    return `2A SEO basics checked ${diagnostics.pageChecksCount} pages, positive result`;
+  };
+
+  const formatRobotsDiagnostics = (
+    diagnostics: Phase0Diagnostics["robots"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+      return "2B Robots not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2B Robots checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    if (diagnostics.blocksAll) {
+      return "2B Robots checked, blocks-all detected";
+    }
+    return `2B Robots checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSitemapDiagnostics = (
+    diagnostics: Phase0Diagnostics["sitemap"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+      return "2B Sitemap not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2B Sitemap checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    return `2B Sitemap checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSslDiagnostics = (
+    diagnostics: Phase0Diagnostics["sslHttps"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+      return "2C SSL / HTTPS not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2C SSL / HTTPS checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.httpsAvailable) parts.push("HTTPS ok");
+    if (diagnostics.httpRedirectsToHttps) parts.push("HTTP→HTTPS ok");
+    if (diagnostics.tlsAuthorized && diagnostics.hostnameMatches) {
+      parts.push("TLS ok");
+    }
+    if (diagnostics.daysUntilExpiry != null) {
+      parts.push(`cert ${diagnostics.daysUntilExpiry}d left`);
+    }
+    return parts.length > 0
+      ? `2C SSL / HTTPS positive result: ${parts.join(", ")}`
+      : `2C SSL / HTTPS checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSecurityHeaderDiagnostics = (
+    diagnostics: Phase0Diagnostics["securityHeader"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+      return "2D Security headers not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2D Security headers checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.hasHsts) parts.push("HSTS ok");
+    if (diagnostics.hasCsp) parts.push("CSP ok");
+    if (diagnostics.hasFrameAncestors || diagnostics.hasXFrameOptions) {
+      parts.push("frame protection ok");
+    }
+    if (diagnostics.hasXContentTypeOptions) parts.push("XCTO ok");
+    if (diagnostics.hasReferrerPolicy) parts.push("Referrer-Policy ok");
+    if (diagnostics.hasPermissionsPolicy) parts.push("Permissions-Policy ok");
+    if ((diagnostics.cookiesSetCount ?? 0) > 0) {
+      parts.push(`cookies ${diagnostics.cookiesSetCount}`);
+    }
+    return parts.length > 0
+      ? `2D Security headers positive result: ${parts.join(", ")}`
+      : `2D Security headers checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatPerformanceDiagnostics = (
+    diagnostics: Phase0Diagnostics["performanceBasic"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+      return "2E Performance not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2E Performance checked root, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.responseTimeMs != null) {
+      parts.push(`${diagnostics.responseTimeMs}ms`);
+    }
+    if (diagnostics.htmlSizeBytes != null) {
+      parts.push(`${Math.round(diagnostics.htmlSizeBytes / 1024)}KB HTML`);
+    }
+    if (diagnostics.assetCount != null) {
+      parts.push(`${diagnostics.assetCount} assets`);
+    }
+    return parts.length > 0
+      ? `2E Performance positive result: ${parts.join(", ")}`
+      : `2E Performance checked root, positive result`;
   };
 
   const handleShowMoreReportIssues = () => {
@@ -3243,6 +3632,11 @@ const App: React.FC = () => {
           ({reportIssueSummary?.total ?? reportIssues.issues.length})
         </span>
       </div>
+      <div className="report-table-meta" style={{ marginBottom: "8px" }}>
+        New {reportIssueSummary?.byChangeStatus.new ?? 0} • Existing{" "}
+        {reportIssueSummary?.byChangeStatus.existing ?? 0} • Resolved{" "}
+        {reportIssueSummary?.byChangeStatus.resolved ?? reportIssues.resolvedCount}
+      </div>
       <div className="report-filter-row">
         {REPORT_ISSUE_FILTERS.map((filter) => (
           <button
@@ -3297,7 +3691,11 @@ const App: React.FC = () => {
             ) : displayedIssueRows.length === 0 ? (
               <tr>
                 <td colSpan={6} className="report-empty">
-                  No issues match this filter for this scan.
+                  {reportRun?.issue_generation_status === "failed"
+                    ? "Issue generation failed for this scan. Raw scan evidence is still available below."
+                    : reportRun?.issue_generation_status === "pending"
+                      ? "Issue generation is still pending for this completed scan."
+                      : "No issues match this filter for this scan."}
                 </td>
               </tr>
             ) : (
@@ -3347,7 +3745,23 @@ const App: React.FC = () => {
                       copyLabel: "Copied source URL",
                     })}
                   </td>
-                  <td>{issue.status}</td>
+                  <td>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "6px",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span>{issue.status}</span>
+                      {issue.change_status && (
+                        <span className="report-issue-category">
+                          {formatIssueChangeStatus(issue.change_status)}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td>{formatDate(issue.last_seen_at)}</td>
                 </tr>
               ))
@@ -3369,6 +3783,101 @@ const App: React.FC = () => {
         >
           {activeFilteredIssueState.loading ? "Loading..." : "Show more"}
         </button>
+      )}
+      {reportIssues.resolvedCount > 0 && (
+        <details
+          className="report-resolved-section"
+          open={reportResolvedExpanded}
+          onToggle={(event) =>
+            setReportResolvedExpanded(
+              (event.currentTarget as HTMLDetailsElement).open,
+            )
+          }
+        >
+          <summary>
+            Resolved in this scan ({reportIssues.resolvedCount})
+          </summary>
+          <div className="report-table-wrap" style={{ marginTop: "10px" }}>
+            <table className="report-table report-issues-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Title</th>
+                  <th>Affected URL</th>
+                  <th>Source URL</th>
+                  <th>Status</th>
+                  <th>Resolved</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportIssues.resolvedIssues.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="report-empty">
+                      No resolved issue rows were returned for this scan.
+                    </td>
+                  </tr>
+                ) : (
+                  reportIssues.resolvedIssues.map((issue) => (
+                    <tr key={`resolved:${issue.id}`}>
+                      <td>
+                        <span
+                          className="status-chip subtle"
+                          style={{
+                            background: issueSeverityTone(issue.severity),
+                            color:
+                              issue.severity === "info"
+                                ? "var(--text)"
+                                : "white",
+                            borderColor: "transparent",
+                          }}
+                        >
+                          {formatIssueSeverity(issue.severity)}
+                        </span>
+                      </td>
+                      <td>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "6px",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <span>{issue.title}</span>
+                          <span className="report-issue-category">
+                            {formatIssueCategoryLabel(issue.category)}
+                          </span>
+                        </div>
+                        <div
+                          className="report-issue-support"
+                          title={issue.description}
+                        >
+                          {formatIssueSupportText(issue.description)}
+                        </div>
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.affected_url, {
+                          copyLabel: "Copied affected URL",
+                        })}
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.source_url, {
+                          copyLabel: "Copied source URL",
+                        })}
+                      </td>
+                      <td>
+                        <span className="report-issue-category">
+                          {formatIssueChangeStatus(issue.change_status)}
+                        </span>
+                      </td>
+                      <td>{formatDate(issue.resolved_at)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </details>
       )}
     </div>
   );
@@ -3540,6 +4049,7 @@ const App: React.FC = () => {
               schedule_frequency: payload.schedule_frequency,
               schedule_time_utc: payload.schedule_time_utc,
               schedule_day_of_week: payload.schedule_day_of_week,
+              schedule_day_of_month: payload.schedule_day_of_month,
               next_scheduled_at: payload.next_scheduled_at,
               last_scheduled_at: payload.last_scheduled_at,
             }
@@ -4499,9 +5009,10 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!selectedSite) return;
     setScheduleEnabled(selectedSite.schedule_enabled ?? false);
-    setScheduleFrequency(selectedSite.schedule_frequency ?? "weekly");
+    setScheduleFrequency(selectedSite.schedule_frequency ?? "manual");
     setScheduleTimeUtc(normalizeTimeInput(selectedSite.schedule_time_utc));
     setScheduleDayOfWeek(selectedSite.schedule_day_of_week ?? 1);
+    setScheduleDayOfMonth(selectedSite.schedule_day_of_month ?? 1);
     setScheduleError(null);
   }, [selectedSite]);
 
@@ -4511,6 +5022,7 @@ const App: React.FC = () => {
       setNotifyEmail("");
       setNotifyOn("new_issues_only");
       setNotifyIncludeCsv(false);
+      setSummaryEnabled(false);
       setNotifyError(null);
       return;
     }
@@ -4562,8 +5074,10 @@ const App: React.FC = () => {
       setPhase0DiagnosticsLoading(true);
       let summaryRows: ScanLinksSummaryRow[] = [];
       let ignoredSkipped = 0;
+      let technicalDiagnostics: ScanTechnicalDiagnosticsResponse | null = null;
       let summaryLoaded = false;
       let ignoredLoaded = false;
+      let technicalLoaded = false;
       const errors: string[] = [];
 
       try {
@@ -4599,6 +5113,24 @@ const App: React.FC = () => {
         errors.push(getErrorMessage(err, "ignored summary failed"));
       }
 
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(
+            selectedRunId,
+          )}/technical-diagnostics`,
+          { cache: "no-store" },
+        );
+        if (res.ok) {
+          technicalDiagnostics =
+            (await res.json()) as ScanTechnicalDiagnosticsResponse;
+          technicalLoaded = true;
+        } else {
+          errors.push(`technical diagnostics ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "technical diagnostics failed"));
+      }
+
       if (cancelled) return;
 
       const ok = getSummaryCount(summaryRows, "ok");
@@ -4612,8 +5144,21 @@ const App: React.FC = () => {
           ? getSummaryCount(summaryRows, "no_response")
           : null,
         ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
+        seoBasic: technicalLoaded ? technicalDiagnostics?.seoBasic ?? null : null,
+        robots: technicalLoaded ? technicalDiagnostics?.robots ?? null : null,
+        sitemap: technicalLoaded ? technicalDiagnostics?.sitemap ?? null : null,
+        sslHttps: technicalLoaded ? technicalDiagnostics?.sslHttps ?? null : null,
+        securityHeader: technicalLoaded
+          ? technicalDiagnostics?.securityHeader ?? null
+          : null,
+        performanceBasic: technicalLoaded
+          ? technicalDiagnostics?.performanceBasic ?? null
+          : null,
         error: errors.length > 0 ? errors.join("; ") : null,
-        loadedAt: Date.now(),
+        loadedAt:
+          technicalLoaded && technicalDiagnostics?.loadedAt
+            ? new Date(technicalDiagnostics.loadedAt).getTime()
+            : Date.now(),
       });
       setPhase0DiagnosticsLoading(false);
     };
@@ -4942,6 +5487,8 @@ const App: React.FC = () => {
             timeUtc: scheduleTimeUtc,
             dayOfWeek:
               scheduleFrequency === "weekly" ? scheduleDayOfWeek : null,
+            dayOfMonth:
+              scheduleFrequency === "monthly" ? scheduleDayOfMonth : null,
           }),
         },
       );
@@ -4955,9 +5502,10 @@ const App: React.FC = () => {
 
       const data = (await res.json()) as {
         scheduleEnabled: boolean;
-        scheduleFrequency: "daily" | "weekly";
+        scheduleFrequency: "manual" | "daily" | "weekly" | "monthly";
         scheduleTimeUtc: string;
         scheduleDayOfWeek: number | null;
+        scheduleDayOfMonth: number | null;
         nextScheduledAt: string | null;
         lastScheduledAt: string | null;
       };
@@ -4971,6 +5519,7 @@ const App: React.FC = () => {
                 schedule_frequency: data.scheduleFrequency,
                 schedule_time_utc: data.scheduleTimeUtc,
                 schedule_day_of_week: data.scheduleDayOfWeek,
+                schedule_day_of_month: data.scheduleDayOfMonth,
                 next_scheduled_at: data.nextScheduledAt,
                 last_scheduled_at: data.lastScheduledAt,
               }
@@ -5009,11 +5558,13 @@ const App: React.FC = () => {
         notifyEmail: string | null;
         notifyOn: NotifyOnOption;
         notifyIncludeCsv: boolean;
+        summaryEnabled: boolean;
       };
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
       setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
+      setSummaryEnabled(data.summaryEnabled);
     } catch (err: unknown) {
       setNotifyError(
         getErrorMessage(err, "Failed to load notification settings"),
@@ -5044,6 +5595,7 @@ const App: React.FC = () => {
             email: notifyEmail.trim() || null,
             notifyOn,
             includeCsv: notifyIncludeCsv,
+            summaryEnabled,
           }),
         },
       );
@@ -5060,12 +5612,14 @@ const App: React.FC = () => {
         notifyEmail: string | null;
         notifyOn: NotifyOnOption;
         notifyIncludeCsv: boolean;
+        summaryEnabled: boolean;
       };
 
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
       setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
+      setSummaryEnabled(data.summaryEnabled);
 
       setSites((prev) =>
         prev.map((site) =>
@@ -5076,6 +5630,7 @@ const App: React.FC = () => {
                 notify_email: data.notifyEmail,
                 notify_on: normalizeNotifyOn(data.notifyOn),
                 notify_include_csv: data.notifyIncludeCsv,
+                summary_enabled: data.summaryEnabled,
               }
             : site,
         ),
@@ -8356,6 +8911,37 @@ const App: React.FC = () => {
                     <span>No response {reportStatusGroups.noResponse}</span>
                     <span>Other HTTP {reportStatusGroups.otherHttp}</span>
                     <span>
+                      Issue generation{" "}
+                      {reportRun.issue_generation_status ?? "pending"}
+                    </span>
+                    {reportRun.issue_generation_error && (
+                      <span title={reportRun.issue_generation_error}>
+                        Issue generation error {reportRun.issue_generation_error}
+                      </span>
+                    )}
+                    <span>
+                      {formatSeoDiagnostics(reportTechnicalDiagnostics?.seoBasic)}
+                    </span>
+                    <span>
+                      {formatRobotsDiagnostics(reportTechnicalDiagnostics?.robots)}
+                    </span>
+                    <span>
+                      {formatSitemapDiagnostics(reportTechnicalDiagnostics?.sitemap)}
+                    </span>
+                    <span>
+                      {formatSslDiagnostics(reportTechnicalDiagnostics?.sslHttps)}
+                    </span>
+                    <span>
+                      {formatSecurityHeaderDiagnostics(
+                        reportTechnicalDiagnostics?.securityHeader,
+                      )}
+                    </span>
+                    <span>
+                      {formatPerformanceDiagnostics(
+                        reportTechnicalDiagnostics?.performanceBasic,
+                      )}
+                    </span>
+                    <span>
                       Refreshed{" "}
                       {reportLastLoadedAt
                         ? formatDate(new Date(reportLastLoadedAt).toISOString())
@@ -8366,6 +8952,41 @@ const App: React.FC = () => {
 
                 {reportRun.status === "completed" && (
                   <>
+                    {reportRun.issue_generation_status !== "completed" && (
+                      <div
+                        className="report-card"
+                        style={{
+                          display: "grid",
+                          gap: "8px",
+                          borderColor:
+                            reportRun.issue_generation_status === "failed"
+                              ? "var(--warning)"
+                              : "var(--border)",
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          {reportRun.issue_generation_status === "failed"
+                            ? "Issue generation failed"
+                            : "Issue generation pending"}
+                        </div>
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Scan completed, but issue generation{" "}
+                          {reportRun.issue_generation_status === "failed"
+                            ? "failed"
+                            : "has not finished yet"}
+                          . Raw scan evidence is still available.
+                        </div>
+                        {reportRun.issue_generation_error && (
+                          <div
+                            style={{ fontSize: "12px", color: "var(--warning)" }}
+                          >
+                            {reportRun.issue_generation_error}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {renderReportIssuesSection()}
 
                     <div className="report-table-grid">
@@ -8971,10 +9592,15 @@ const App: React.FC = () => {
                             <span>Auto-scan</span>
                             <input
                               type="checkbox"
-                              checked={scheduleEnabled}
+                              checked={
+                                scheduleFrequency === "manual"
+                                  ? false
+                                  : scheduleEnabled
+                              }
                               onChange={(e) =>
                                 setScheduleEnabled(e.target.checked)
                               }
+                              disabled={scheduleFrequency === "manual"}
                             />
                           </label>
                           <div
@@ -8993,11 +9619,17 @@ const App: React.FC = () => {
                               Frequency
                               <select
                                 value={scheduleFrequency}
-                                onChange={(e) =>
-                                  setScheduleFrequency(
-                                    e.target.value as "daily" | "weekly",
-                                  )
-                                }
+                                onChange={(e) => {
+                                  const nextFrequency = e.target.value as
+                                    | "manual"
+                                    | "daily"
+                                    | "weekly"
+                                    | "monthly";
+                                  setScheduleFrequency(nextFrequency);
+                                  if (nextFrequency === "manual") {
+                                    setScheduleEnabled(false);
+                                  }
+                                }}
                                 style={{
                                   marginTop: "6px",
                                   width: "100%",
@@ -9008,8 +9640,10 @@ const App: React.FC = () => {
                                   color: "var(--text)",
                                 }}
                               >
+                                <option value="manual">Manual</option>
                                 <option value="daily">Daily</option>
                                 <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
                               </select>
                             </label>
                             {scheduleFrequency === "weekly" && (
@@ -9045,6 +9679,39 @@ const App: React.FC = () => {
                                 </select>
                               </label>
                             )}
+                            {scheduleFrequency === "monthly" && (
+                              <label
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                Day of month (UTC)
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={31}
+                                  value={scheduleDayOfMonth}
+                                  onChange={(e) =>
+                                    setScheduleDayOfMonth(
+                                      Math.min(
+                                        31,
+                                        Math.max(1, Number(e.target.value) || 1),
+                                      ),
+                                    )
+                                  }
+                                  style={{
+                                    marginTop: "6px",
+                                    width: "100%",
+                                    padding: "6px 8px",
+                                    borderRadius: "10px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                  }}
+                                />
+                              </label>
+                            )}
                             <label
                               style={{
                                 fontSize: "12px",
@@ -9078,6 +9745,7 @@ const App: React.FC = () => {
                               scheduleFrequency,
                               scheduleTimeUtc,
                               scheduleDayOfWeek,
+                              scheduleDayOfMonth,
                             )}
                           </div>
                           {showLocalTimeZone && (
@@ -9092,6 +9760,7 @@ const App: React.FC = () => {
                                 scheduleFrequency,
                                 scheduleTimeUtc,
                                 scheduleDayOfWeek,
+                                scheduleDayOfMonth,
                               )}{" "}
                               ({localTimeZone})
                             </div>
@@ -9274,6 +9943,25 @@ const App: React.FC = () => {
                               disabled={notifyLoading}
                             />
                             Include CSV attachment (coming soon)
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={summaryEnabled}
+                              onChange={(e) =>
+                                setSummaryEnabled(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Weekly summary
                           </label>
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
@@ -9599,6 +10287,7 @@ const App: React.FC = () => {
                               scheduleFrequency,
                               scheduleTimeUtc,
                               scheduleDayOfWeek,
+                              scheduleDayOfMonth,
                               selectedSite.next_scheduled_at,
                             )
                           : "Auto-scan: —"}
@@ -9919,7 +10608,7 @@ const App: React.FC = () => {
                           <span
                             style={{ fontWeight: 600, color: "var(--text)" }}
                           >
-                            Phase 0 diagnostics
+                            Technical diagnostics
                           </span>
                           <span>
                             Status {selectedRun.status.replace("_", " ")}
@@ -9948,6 +10637,36 @@ const App: React.FC = () => {
                           <span>No response {phase0NoResponseCount}</span>
                           <span>
                             Ignored/skipped {phase0IgnoredSkippedCount}
+                          </span>
+                          <span>
+                            {formatSeoDiagnostics(
+                              currentPhase0Diagnostics?.seoBasic,
+                            )}
+                          </span>
+                          <span>
+                            {formatRobotsDiagnostics(
+                              currentPhase0Diagnostics?.robots,
+                            )}
+                          </span>
+                          <span>
+                            {formatSitemapDiagnostics(
+                              currentPhase0Diagnostics?.sitemap,
+                            )}
+                          </span>
+                          <span>
+                            {formatSslDiagnostics(
+                              currentPhase0Diagnostics?.sslHttps,
+                            )}
+                          </span>
+                          <span>
+                            {formatSecurityHeaderDiagnostics(
+                              currentPhase0Diagnostics?.securityHeader,
+                            )}
+                          </span>
+                          <span>
+                            {formatPerformanceDiagnostics(
+                              currentPhase0Diagnostics?.performanceBasic,
+                            )}
                           </span>
                           <span>Limits hit not tracked</span>
                           {phase0DiagnosticsLoading && (
@@ -12361,10 +13080,15 @@ const App: React.FC = () => {
                           <span>Auto-scan enabled</span>
                           <input
                             type="checkbox"
-                            checked={scheduleEnabled}
+                            checked={
+                              scheduleFrequency === "manual"
+                                ? false
+                                : scheduleEnabled
+                            }
                             onChange={(event) =>
                               setScheduleEnabled(event.target.checked)
                             }
+                            disabled={scheduleFrequency === "manual"}
                           />
                         </label>
                         <div
@@ -12380,11 +13104,17 @@ const App: React.FC = () => {
                             Frequency
                             <select
                               value={scheduleFrequency}
-                              onChange={(event) =>
-                                setScheduleFrequency(
-                                  event.target.value as "daily" | "weekly",
-                                )
-                              }
+                              onChange={(event) => {
+                                const nextFrequency = event.target.value as
+                                  | "manual"
+                                  | "daily"
+                                  | "weekly"
+                                  | "monthly";
+                                setScheduleFrequency(nextFrequency);
+                                if (nextFrequency === "manual") {
+                                  setScheduleEnabled(false);
+                                }
+                              }}
                               style={{
                                 marginTop: "6px",
                                 width: "100%",
@@ -12395,8 +13125,10 @@ const App: React.FC = () => {
                                 color: "var(--text)",
                               }}
                             >
+                              <option value="manual">Manual</option>
                               <option value="daily">Daily</option>
                               <option value="weekly">Weekly</option>
+                              <option value="monthly">Monthly</option>
                             </select>
                           </label>
                           {scheduleFrequency === "weekly" && (
@@ -12434,6 +13166,42 @@ const App: React.FC = () => {
                               </select>
                             </label>
                           )}
+                          {scheduleFrequency === "monthly" && (
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Day of month (UTC)
+                              <input
+                                type="number"
+                                min={1}
+                                max={31}
+                                value={scheduleDayOfMonth}
+                                onChange={(event) =>
+                                  setScheduleDayOfMonth(
+                                    Math.min(
+                                      31,
+                                      Math.max(
+                                        1,
+                                        Number(event.target.value) || 1,
+                                      ),
+                                    ),
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              />
+                            </label>
+                          )}
                           <label
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
@@ -12464,6 +13232,7 @@ const App: React.FC = () => {
                             scheduleFrequency,
                             scheduleTimeUtc,
                             scheduleDayOfWeek,
+                            scheduleDayOfMonth,
                           )}
                         </div>
                         {showLocalTimeZone && (
@@ -12475,6 +13244,7 @@ const App: React.FC = () => {
                               scheduleFrequency,
                               scheduleTimeUtc,
                               scheduleDayOfWeek,
+                              scheduleDayOfMonth,
                             )}{" "}
                             ({localTimeZone})
                           </div>
@@ -12587,6 +13357,24 @@ const App: React.FC = () => {
                             <option value="always">Always</option>
                             <option value="never">Never</option>
                           </select>
+                        </label>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Weekly summary</span>
+                          <input
+                            type="checkbox"
+                            checked={summaryEnabled}
+                            onChange={(event) =>
+                              setSummaryEnabled(event.target.checked)
+                            }
+                          />
                         </label>
                         <div
                           style={{

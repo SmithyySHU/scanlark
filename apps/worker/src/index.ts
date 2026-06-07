@@ -5,16 +5,14 @@ import {
   claimNextScanJob,
   completeScanJob,
   createScanRun,
-  enqueueScanJob,
+  enqueueScheduledScanIfDue,
   extendScanJobLease,
   failScanJob,
   getDueSites,
-  getLatestScanForSite,
   getJobForScanRun,
   getScanRunById,
   getSiteById,
-  hasActiveJobForSite,
-  markSiteScheduled,
+  recoverStaleQueuedScanJobs,
   requeueExpiredScanJobs,
   setScanRunStatus,
   setScanJobRunId,
@@ -26,10 +24,10 @@ dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 const workerId = `${os.hostname()}-${process.pid}`;
 const IDLE_WAIT_MS = 1200;
 const SCHEDULE_TICK_MS = 60000;
-const SCHEDULE_COOLDOWN_MS = 60000;
 const CLAIM_LEASE_SECONDS = 120;
 const LEASE_HEARTBEAT_MS = 30000;
 const REAPER_TICK_MS = 120000;
+const STALE_QUEUED_JOB_MINUTES = 15;
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
@@ -68,7 +66,9 @@ async function processJob() {
       }
       return true;
     }
-    scanRunId = await createScanRun(site.id, site.url);
+    scanRunId = await createScanRun(site.id, site.url, {
+      triggerType: "scheduled",
+    });
     await setScanJobRunId(job.id, scanRunId);
     run = await getScanRunById(scanRunId);
   }
@@ -216,6 +216,12 @@ async function reapLoop() {
         `attempts=${job.attempts}/${job.max_attempts}`,
       );
     }
+    const staleQueued = await recoverStaleQueuedScanJobs({
+      olderThanMinutes: STALE_QUEUED_JOB_MINUTES,
+    });
+    for (const job of staleQueued) {
+      logJobEvent("stale-queued-recovered", job);
+    }
     await sleep(REAPER_TICK_MS);
   }
 }
@@ -227,33 +233,19 @@ async function schedulerTick() {
   let skipped = 0;
 
   for (const site of dueSites) {
-    if (
-      site.last_scheduled_at &&
-      now.getTime() - site.last_scheduled_at.getTime() < SCHEDULE_COOLDOWN_MS
-    ) {
-      skipped += 1;
+    const result = await enqueueScheduledScanIfDue(site.id, now);
+    if (result.created) {
+      enqueued += 1;
+      console.log(
+        `[scheduler] enqueued site=${site.id} run=${result.scanRunId} next=${result.nextScheduledAt?.toISOString() ?? "none"}`,
+      );
       continue;
     }
 
-    const latestRun = await getLatestScanForSite(site.id);
-    if (
-      latestRun &&
-      (latestRun.status === "queued" || latestRun.status === "in_progress")
-    ) {
-      skipped += 1;
-      continue;
-    }
-
-    const hasActiveJob = await hasActiveJobForSite(site.id);
-    if (hasActiveJob) {
-      skipped += 1;
-      continue;
-    }
-
-    const scanRunId = await createScanRun(site.id, site.url);
-    await enqueueScanJob({ scanRunId, siteId: site.id });
-    await markSiteScheduled(site.id, now);
-    enqueued += 1;
+    skipped += 1;
+    console.log(
+      `[scheduler] skipped site=${site.id} reason=${result.reason}${result.active?.scanRunId ? ` activeRun=${result.active.scanRunId}` : ""}${result.active?.jobId ? ` activeJob=${result.active.jobId}` : ""}`,
+    );
   }
 
   console.log(

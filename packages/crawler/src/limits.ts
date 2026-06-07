@@ -20,6 +20,10 @@ export const MAX_SITEMAP_URLS_CHECKED = 25;
 
 export const MAX_SITEMAP_FILE_BYTES = 1_000_000;
 
+export const MAX_PERFORMANCE_ROOT_HTML_BYTES = 1_000_000;
+
+export const SSL_CERT_EXPIRING_SOON_DAYS = 30;
+
 export const MAX_SCAN_DURATION_MS = 5 * 60 * 1000;
 
 export const PAGE_CRAWL_CONCURRENCY = 3;

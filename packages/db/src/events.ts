@@ -8,7 +8,7 @@ type ScanStatus =
   | "completed"
   | "failed"
   | "cancelled";
-type ScheduleFrequency = "daily" | "weekly";
+type ScheduleFrequency = "manual" | "daily" | "weekly" | "monthly";
 
 export type ScanEventPayload = {
   type: "scan_started" | "scan_progress" | "scan_completed" | "scan_failed";
@@ -34,6 +34,7 @@ export type ScheduleEventPayload = {
   schedule_frequency: ScheduleFrequency;
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: string | null;
   last_scheduled_at: string | null;
 };

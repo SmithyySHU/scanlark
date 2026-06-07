@@ -3,7 +3,12 @@ import { ensureConnected } from "./client";
 export type ScanSiteCheckType =
   | "robots_txt"
   | "sitemap_xml"
-  | "sitemap_index_xml";
+  | "sitemap_index_xml"
+  | "https_root"
+  | "http_root"
+  | "tls_certificate"
+  | "security_headers_https_root"
+  | "performance_basic_https_root";
 
 export interface ScanSiteCheckInput {
   scanRunId: string;
@@ -21,6 +26,21 @@ export interface ScanSiteCheckInput {
 export interface ScanSiteCheckRow extends ScanSiteCheckInput {
   id: string;
   checkedAt: Date;
+}
+
+export async function listScanSiteCheckTypesForRun(
+  scanRunId: string,
+): Promise<ScanSiteCheckType[]> {
+  const client = await ensureConnected();
+  const res = await client.query<{ check_type: ScanSiteCheckType }>(
+    `
+      SELECT check_type
+      FROM scan_site_checks
+      WHERE scan_run_id = $1
+    `,
+    [scanRunId],
+  );
+  return res.rows.map((row) => row.check_type);
 }
 
 export async function upsertScanSiteCheck(

@@ -14,6 +14,9 @@ export type SerializedScanRun = {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  trigger_type: "manual" | "scheduled";
+  issue_generation_status: "pending" | "completed" | "failed";
+  issue_generation_error: string | null;
 };
 
 export function serializeScanRun(run: ScanRunInput): SerializedScanRun {
@@ -38,5 +41,8 @@ export function serializeScanRun(run: ScanRunInput): SerializedScanRun {
     total_links: run.total_links,
     checked_links: run.checked_links,
     broken_links: run.broken_links,
+    trigger_type: run.trigger_type,
+    issue_generation_status: run.issue_generation_status,
+    issue_generation_error: run.issue_generation_error ?? null,
   };
 }
