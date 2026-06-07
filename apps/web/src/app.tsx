@@ -239,26 +239,6 @@ interface RecheckScanLinkResponse {
   scanLink: ScanLink;
 }
 
-interface ReportLinkRow {
-  link_url: string;
-  classification: LinkClassification;
-  status_code: number | null;
-  error_message: string | null;
-  occurrence_count: number;
-  last_seen_at: string;
-}
-
-interface ScanReportResponse {
-  scanRun: ScanRunSummary;
-  summary: {
-    byClassification: Record<string, number>;
-    byStatusCode: Record<string, number>;
-  };
-  topBroken: ReportLinkRow[];
-  topBlocked: ReportLinkRow[];
-  generatedAt: string;
-}
-
 interface IgnoredLinkRow {
   id: string;
   scan_run_id: string;
@@ -299,6 +279,39 @@ interface IgnoredOccurrencesResponse {
   totalMatching: number;
   occurrences: ScanLinkOccurrence[];
 }
+
+type ReportSectionKey = "broken" | "blocked" | "no_response";
+
+type ReportLinkSectionState = {
+  links: ScanLink[];
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
+type ReportIgnoredSectionState = {
+  links: IgnoredLinkRow[];
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
+type ReportSummaryCounts = {
+  ok: number;
+  broken: number;
+  blocked: number;
+  no_response: number;
+};
+
+type ReportStatusCodeGroups = {
+  notFound: number;
+  blocked: number;
+  serverError: number;
+  noResponse: number;
+  otherHttp: number;
+};
 
 type ScanDiffChangeType =
   | "new_issue"
@@ -396,6 +409,26 @@ const SAMPLE_SITE_URL = "https://example.com";
 const SAMPLE_SITE_NAME = "Sample site";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
+const EMPTY_REPORT_SECTION: ReportLinkSectionState = {
+  links: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
+const EMPTY_REPORT_SECTIONS: Record<ReportSectionKey, ReportLinkSectionState> =
+  {
+    broken: { ...EMPTY_REPORT_SECTION },
+    blocked: { ...EMPTY_REPORT_SECTION },
+    no_response: { ...EMPTY_REPORT_SECTION },
+  };
+const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
+  links: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -418,6 +451,67 @@ function progressPercent(checked: number, total: number) {
   if (!total) return "0%";
   const pct = Math.min(100, Math.max(0, (checked / total) * 100));
   return `${pct.toFixed(0)}%`;
+}
+
+function summarizeReportClassifications(
+  rows: ScanLinksSummaryRow[],
+): ReportSummaryCounts {
+  return rows.reduce<ReportSummaryCounts>(
+    (acc, row) => {
+      acc[row.classification] += row.count;
+      return acc;
+    },
+    { ok: 0, broken: 0, blocked: 0, no_response: 0 },
+  );
+}
+
+function summarizeReportStatusCodes(
+  rows: ScanLinksSummaryRow[],
+): ReportStatusCodeGroups {
+  return rows.reduce<ReportStatusCodeGroups>(
+    (acc, row) => {
+      if (row.status_code == null) {
+        acc.noResponse += row.count;
+        return acc;
+      }
+      if (row.status_code === 404 || row.status_code === 410) {
+        acc.notFound += row.count;
+        return acc;
+      }
+      if (
+        row.status_code === 401 ||
+        row.status_code === 403 ||
+        row.status_code === 429
+      ) {
+        acc.blocked += row.count;
+        return acc;
+      }
+      if (row.status_code >= 500) {
+        acc.serverError += row.count;
+        return acc;
+      }
+      acc.otherHttp += row.count;
+      return acc;
+    },
+    {
+      notFound: 0,
+      blocked: 0,
+      serverError: 0,
+      noResponse: 0,
+      otherHttp: 0,
+    },
+  );
+}
+
+function getIgnoredRowSummary(row: IgnoredLinkRow) {
+  if (row.error_message?.startsWith("crawl_skipped:")) {
+    return "Skipped by crawler safety rule";
+  }
+  if (row.rule_type) {
+    if (row.rule_type === "exact") return "Ignored by exact rule";
+    return "Ignored by rule";
+  }
+  return "Ignored";
 }
 
 function formatRelative(value: string | null | undefined) {
@@ -847,6 +941,21 @@ function getSummaryCount(
     .reduce((sum, row) => sum + row.count, 0);
 }
 
+function createEmptyReportSections(): Record<
+  ReportSectionKey,
+  ReportLinkSectionState
+> {
+  return {
+    broken: { ...EMPTY_REPORT_SECTION, links: [] },
+    blocked: { ...EMPTY_REPORT_SECTION, links: [] },
+    no_response: { ...EMPTY_REPORT_SECTION, links: [] },
+  };
+}
+
+function createEmptyReportIgnoredSection(): ReportIgnoredSectionState {
+  return { ...EMPTY_REPORT_IGNORED_SECTION, links: [] };
+}
+
 type LoadHistoryOpts = {
   preserveSelection?: boolean;
   skipResultsWhileInProgress?: boolean;
@@ -925,7 +1034,24 @@ const App: React.FC = () => {
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
   );
-  const [reportData, setReportData] = useState<ScanReportResponse | null>(null);
+  const [reportRunData, setReportRunData] = useState<ScanRunSummary | null>(
+    null,
+  );
+  const [reportSummaryRows, setReportSummaryRows] = useState<
+    ScanLinksSummaryRow[]
+  >([]);
+  const [reportIgnoredTotal, setReportIgnoredTotal] = useState<number | null>(
+    null,
+  );
+  const [reportSections, setReportSections] = useState<
+    Record<ReportSectionKey, ReportLinkSectionState>
+  >(EMPTY_REPORT_SECTIONS);
+  const [reportIgnoredSection, setReportIgnoredSection] =
+    useState<ReportIgnoredSectionState>(EMPTY_REPORT_IGNORED_SECTION);
+  const [reportSectionsLoaded, setReportSectionsLoaded] = useState(false);
+  const [reportLastLoadedAt, setReportLastLoadedAt] = useState<number | null>(
+    null,
+  );
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
@@ -1171,10 +1297,246 @@ const App: React.FC = () => {
     return history.length > 0 ? history[0] : null;
   }, [history, pinnedRunId]);
 
+  const resetReportSections = useCallback(() => {
+    setReportSections(createEmptyReportSections());
+    setReportIgnoredSection(createEmptyReportIgnoredSection());
+    setReportSectionsLoaded(false);
+  }, []);
+
+  const fetchReportScanLinksPage = useCallback(
+    async (
+      runId: string,
+      classification: LinkClassification,
+      offset: number,
+    ): Promise<ScanLinksResponse> => {
+      const res = await apiFetch(
+        buildScanLinksUrl(runId, classification, offset, "all", false),
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(
+          `Failed to load ${formatClassification(classification).toLowerCase()} links: ${res.status}`,
+        );
+      }
+      return (await res.json()) as ScanLinksResponse;
+    },
+    [apiFetch],
+  );
+
+  const loadReportOverview = useCallback(
+    async (scanRunId: string) => {
+      const [runRes, summaryRes, ignoredRes] = await Promise.all([
+        apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
+          cache: "no-store",
+        }),
+        apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
+          { cache: "no-store" },
+        ),
+        apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), { cache: "no-store" }),
+      ]);
+
+      if (!runRes.ok) {
+        if (runRes.status === 404) {
+          throw new Error("Report not found for this scan run");
+        }
+        if (runRes.status === 401) {
+          throw new Error("You do not have access to this scan report");
+        }
+        const text = await runRes.text().catch(() => "");
+        throw new Error(
+          `Failed to load scan run: ${runRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      if (!summaryRes.ok) {
+        throw new Error(`Failed to load link summary: ${summaryRes.status}`);
+      }
+      if (!ignoredRes.ok) {
+        throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
+      }
+
+      const run = (await runRes.json()) as ScanRunSummary;
+      const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
+      const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+
+      setReportRunData(run);
+      setReportSummaryRows(summaryData.summary ?? []);
+      setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
+      setReportLastLoadedAt(Date.now());
+
+      return run;
+    },
+    [apiFetch],
+  );
+
+  const loadInitialReportSections = useCallback(
+    async (scanRunId: string) => {
+      setReportSectionsLoaded(false);
+      setReportSections((prev) => ({
+        broken: { ...prev.broken, loading: true, error: null },
+        blocked: { ...prev.blocked, loading: true, error: null },
+        no_response: { ...prev.no_response, loading: true, error: null },
+      }));
+      setReportIgnoredSection((prev) => ({
+        ...prev,
+        loading: true,
+        error: null,
+      }));
+
+      const sectionEntries: Array<[ReportSectionKey, LinkClassification]> = [
+        ["broken", "broken"],
+        ["blocked", "blocked"],
+        ["no_response", "no_response"],
+      ];
+
+      const sectionResults = await Promise.all(
+        sectionEntries.map(async ([key, classification]) => {
+          try {
+            const data = await fetchReportScanLinksPage(
+              scanRunId,
+              classification,
+              0,
+            );
+            return { key, data, error: null as string | null };
+          } catch (err: unknown) {
+            return {
+              key,
+              data: null,
+              error: getErrorMessage(err, "Failed to load report section"),
+            };
+          }
+        }),
+      );
+
+      setReportSections(() => {
+        const next = createEmptyReportSections();
+        sectionResults.forEach(({ key, data, error }) => {
+          next[key] = {
+            links: data?.links ?? [],
+            offset: data?.countReturned ?? 0,
+            hasMore: data ? data.countReturned < data.totalMatching : false,
+            loading: false,
+            error,
+          };
+        });
+        return next;
+      });
+
+      try {
+        const ignoredRes = await apiFetch(
+          buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
+          {
+            cache: "no-store",
+          },
+        );
+        if (!ignoredRes.ok) {
+          throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
+        }
+        const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+        setReportIgnoredSection({
+          links: ignoredData.links ?? [],
+          offset: ignoredData.countReturned,
+          hasMore: ignoredData.countReturned < ignoredData.totalMatching,
+          loading: false,
+          error: null,
+        });
+      } catch (err: unknown) {
+        setReportIgnoredSection((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load ignored links"),
+        }));
+      }
+      setReportSectionsLoaded(true);
+    },
+    [apiFetch, fetchReportScanLinksPage],
+  );
+
+  const loadMoreReportSection = useCallback(
+    async (scanRunId: string, section: ReportSectionKey) => {
+      const current = reportSections[section];
+      if (current.loading || !current.hasMore) return;
+      setReportSections((prev) => ({
+        ...prev,
+        [section]: { ...prev[section], loading: true, error: null },
+      }));
+      try {
+        const data = await fetchReportScanLinksPage(
+          scanRunId,
+          section,
+          current.offset,
+        );
+        setReportSections((prev) => ({
+          ...prev,
+          [section]: {
+            links: [...prev[section].links, ...(data.links ?? [])],
+            offset: prev[section].offset + data.countReturned,
+            hasMore:
+              prev[section].offset + data.countReturned < data.totalMatching,
+            loading: false,
+            error: null,
+          },
+        }));
+      } catch (err: unknown) {
+        setReportSections((prev) => ({
+          ...prev,
+          [section]: {
+            ...prev[section],
+            loading: false,
+            error: getErrorMessage(err, "Failed to load more results"),
+          },
+        }));
+      }
+    },
+    [fetchReportScanLinksPage, reportSections],
+  );
+
+  const loadMoreReportIgnored = useCallback(
+    async (scanRunId: string) => {
+      if (reportIgnoredSection.loading || !reportIgnoredSection.hasMore) return;
+      setReportIgnoredSection((prev) => ({
+        ...prev,
+        loading: true,
+        error: null,
+      }));
+      try {
+        const res = await apiFetch(
+          buildIgnoredLinksUrl(
+            scanRunId,
+            reportIgnoredSection.offset,
+            LINKS_PAGE_SIZE,
+          ),
+          { cache: "no-store" },
+        );
+        if (!res.ok)
+          throw new Error(`Failed to load ignored links: ${res.status}`);
+        const data = (await res.json()) as IgnoredLinksResponse;
+        setReportIgnoredSection((prev) => ({
+          links: [...prev.links, ...(data.links ?? [])],
+          offset: prev.offset + data.countReturned,
+          hasMore: prev.offset + data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        }));
+      } catch (err: unknown) {
+        setReportIgnoredSection((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load more ignored links"),
+        }));
+      }
+    },
+    [apiFetch, reportIgnoredSection],
+  );
+
   useEffect(() => {
     if (viewMode !== "report") return;
     if (!reportScanRunId) {
-      setReportData(null);
+      setReportRunData(null);
+      setReportSummaryRows([]);
+      setReportIgnoredTotal(null);
+      setReportLastLoadedAt(null);
+      resetReportSections();
       setReportError("Missing scan run id");
       return;
     }
@@ -1183,22 +1545,8 @@ const App: React.FC = () => {
       setReportLoading(true);
       setReportError(null);
       try {
-        const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/report`,
-          {
-            cache: "no-store",
-          },
-        );
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          throw new Error(
-            `Report failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-          );
-        }
-        const data = (await res.json()) as ScanReportResponse;
-        if (!cancelled) {
-          setReportData(data);
-        }
+        resetReportSections();
+        await loadReportOverview(reportScanRunId);
       } catch (err) {
         if (!cancelled) {
           setReportError(getErrorMessage(err, "Failed to load report"));
@@ -1211,7 +1559,51 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [reportScanRunId, viewMode]);
+  }, [loadReportOverview, reportScanRunId, resetReportSections, viewMode]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "report" ||
+      !reportScanRunId ||
+      !isInProgress(reportRunData?.status)
+    ) {
+      return;
+    }
+    const id = window.setTimeout(() => {
+      void loadReportOverview(reportScanRunId).catch((err) => {
+        setReportError(getErrorMessage(err, "Failed to refresh report"));
+      });
+    }, 3000);
+    return () => window.clearTimeout(id);
+  }, [
+    loadReportOverview,
+    reportRunData?.checked_links,
+    reportRunData?.status,
+    reportRunData?.total_links,
+    reportRunData?.updated_at,
+    reportScanRunId,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "report" ||
+      !reportScanRunId ||
+      reportRunData?.status !== "completed" ||
+      reportSectionsLoaded
+    ) {
+      return;
+    }
+    void loadInitialReportSections(reportScanRunId).catch((err) => {
+      setReportError(getErrorMessage(err, "Failed to load report sections"));
+    });
+  }, [
+    loadInitialReportSections,
+    reportRunData?.status,
+    reportScanRunId,
+    reportSectionsLoaded,
+    viewMode,
+  ]);
 
   const visibleResults = useMemo(
     () => (showIgnored ? results : results.filter((row) => !row.ignored)),
@@ -1894,12 +2286,10 @@ const App: React.FC = () => {
   };
 
   const reportView = viewMode === "report";
-  const reportRun = reportData?.scanRun ?? null;
-  const reportSite = reportRun
-    ? (sites.find((site) => site.id === reportRun.site_id)?.url ??
-      reportRun.site_id)
-    : null;
-  const reportSummary = reportData?.summary.byClassification ?? {};
+  const reportRun = reportRunData;
+  const reportSummary = summarizeReportClassifications(reportSummaryRows);
+  const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
+  const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -1911,6 +2301,154 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+
+  const renderReportLinkSection = (
+    title: string,
+    sectionKey: ReportSectionKey,
+    count: number,
+  ) => {
+    const section = reportSections[sectionKey];
+    return (
+      <div className="report-card">
+        <div className="report-table-title">
+          {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+        </div>
+        {section.error && (
+          <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+            {section.error}
+          </div>
+        )}
+        <div className="report-table-wrap">
+          <table className="report-table">
+            <thead>
+              <tr>
+                <th>Link</th>
+                <th>Status</th>
+                <th>Result</th>
+                <th>Occurrences</th>
+                <th>Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {section.loading && section.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    Loading…
+                  </td>
+                </tr>
+              ) : section.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    No links in this section for this scan.
+                  </td>
+                </tr>
+              ) : (
+                section.links.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.link_url}</td>
+                    <td>{row.status_code ?? "-"}</td>
+                    <td>
+                      {row.error_message ??
+                        formatClassification(row.classification)}
+                    </td>
+                    <td>{row.occurrence_count}</td>
+                    <td>{formatDate(row.last_seen_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        {section.hasMore && (
+          <button
+            className="report-button"
+            onClick={() =>
+              reportScanRunId &&
+              void loadMoreReportSection(reportScanRunId, sectionKey)
+            }
+            disabled={section.loading || !reportScanRunId}
+          >
+            {section.loading ? "Loading..." : "Load more"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderReportIgnoredSection = () => (
+    <div className="report-card">
+      <div className="report-table-title">
+        Ignored / skipped links{" "}
+        <span style={{ color: "var(--muted)" }}>
+          ({reportIgnoredTotal ?? 0})
+        </span>
+      </div>
+      {reportIgnoredSection.error && (
+        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+          {reportIgnoredSection.error}
+        </div>
+      )}
+      <div className="report-table-wrap">
+        <table className="report-table">
+          <thead>
+            <tr>
+              <th>Link</th>
+              <th>Status</th>
+              <th>Reason</th>
+              <th>Occurrences</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reportIgnoredSection.loading &&
+            reportIgnoredSection.links.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="report-empty">
+                  Loading…
+                </td>
+              </tr>
+            ) : reportIgnoredSection.links.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="report-empty">
+                  No ignored or skipped links were recorded for this scan.
+                </td>
+              </tr>
+            ) : (
+              reportIgnoredSection.links.map((row) => (
+                <tr key={row.id}>
+                  <td>{row.link_url}</td>
+                  <td>{row.status_code ?? "-"}</td>
+                  <td>
+                    <div>{getIgnoredRowSummary(row)}</div>
+                    <div style={{ color: "var(--muted)", fontSize: "12px" }}>
+                      {row.error_message ??
+                        row.rule_pattern ??
+                        row.rule_type ??
+                        "No reason recorded"}
+                    </div>
+                  </td>
+                  <td>{row.occurrence_count}</td>
+                  <td>{formatDate(row.last_seen_at)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {reportIgnoredSection.hasMore && (
+        <button
+          className="report-button"
+          onClick={() =>
+            reportScanRunId && void loadMoreReportIgnored(reportScanRunId)
+          }
+          disabled={reportIgnoredSection.loading || !reportScanRunId}
+        >
+          {reportIgnoredSection.loading ? "Loading..." : "Load more"}
+        </button>
+      )}
+    </div>
+  );
+
   const resultsTitleCount =
     resultsView === "changes"
       ? diffChangeItems.length +
@@ -2407,7 +2945,11 @@ const App: React.FC = () => {
     setHistory([]);
     setResults([]);
     setIgnoredResults([]);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setSelectedRunId(null);
     selectedRunIdRef.current = null;
     setActiveRunId(null);
@@ -3889,7 +4431,11 @@ const App: React.FC = () => {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
     setReportScanRunId(scanRunId);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setReportError(null);
     setViewMode("report");
   }
@@ -3898,7 +4444,11 @@ const App: React.FC = () => {
     const url = buildAppUrl("/");
     window.history.pushState({}, "", url);
     setReportScanRunId(null);
-    setReportData(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
     setReportError(null);
     setViewMode("dashboard");
   }
@@ -6492,8 +7042,10 @@ const App: React.FC = () => {
 
             <div className="report-card report-meta">
               <div className="report-meta-item">
-                <div className="report-label">Site</div>
-                <div className="report-value">{reportSite ?? "-"}</div>
+                <div className="report-label">Scan run</div>
+                <div className="report-value">
+                  {reportRun?.id ?? reportScanRunId ?? "-"}
+                </div>
               </div>
               <div className="report-meta-item">
                 <div className="report-label">Start URL</div>
@@ -6502,8 +7054,8 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="report-meta-item">
-                <div className="report-label">Status</div>
-                <div className="report-value">{reportRun?.status ?? "-"}</div>
+                <div className="report-label">Host</div>
+                <div className="report-value">{reportHost ?? "-"}</div>
               </div>
               <div className="report-meta-item">
                 <div className="report-label">Started</div>
@@ -6526,9 +7078,13 @@ const App: React.FC = () => {
                   )}
                 </div>
               </div>
+              <div className="report-meta-item">
+                <div className="report-label">Status</div>
+                <div className="report-value">{reportRun?.status ?? "-"}</div>
+              </div>
             </div>
 
-            {reportLoading && (
+            {reportLoading && !reportRun && (
               <div
                 className="report-card"
                 style={{ fontSize: "13px", color: "var(--muted)" }}
@@ -6545,115 +7101,169 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {!reportLoading && reportData && (
+            {reportRun?.error_message && (
+              <div
+                className="report-card"
+                style={{ fontSize: "13px", color: "var(--warning)" }}
+              >
+                Failure reason: {reportRun.error_message}
+              </div>
+            )}
+
+            {reportRun && (
               <>
                 <div className="report-summary-grid">
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Broken</div>
+                    <div className="report-label">Links checked</div>
                     <div className="report-metric">
-                      {reportSummary.broken ?? 0}
+                      {reportRun.checked_links}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
+                    <div className="report-label">Broken</div>
+                    <div className="report-metric">{reportSummary.broken}</div>
+                  </div>
+                  <div className="report-card report-summary-card">
                     <div className="report-label">Blocked</div>
-                    <div className="report-metric">
-                      {reportSummary.blocked ?? 0}
-                    </div>
+                    <div className="report-metric">{reportSummary.blocked}</div>
                   </div>
                   <div className="report-card report-summary-card">
                     <div className="report-label">No response</div>
                     <div className="report-metric">
-                      {reportSummary.no_response ?? 0}
+                      {reportSummary.no_response}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Timeout</div>
+                    <div className="report-label">Ignored / skipped</div>
                     <div className="report-metric">
-                      {reportSummary.timeout ?? 0}
+                      {reportIgnoredTotal ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
                     <div className="report-label">OK</div>
-                    <div className="report-metric">{reportSummary.ok ?? 0}</div>
+                    <div className="report-metric">{reportSummary.ok}</div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Pages crawled</div>
+                    <div className="report-metric">Not tracked</div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Limits hit</div>
+                    <div className="report-metric">Not tracked</div>
                   </div>
                 </div>
 
-                <div className="report-table-grid">
-                  <div className="report-card">
-                    <div className="report-table-title">Top broken links</div>
-                    <div className="report-table-wrap">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Link</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                            <th>Occurrences</th>
-                            <th>Last seen</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportData.topBroken.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="report-empty">
-                                No broken links found.
-                              </td>
-                            </tr>
-                          ) : (
-                            reportData.topBroken.map((row) => (
-                              <tr key={`${row.link_url}-${row.last_seen_at}`}>
-                                <td>{row.link_url}</td>
-                                <td>{row.status_code ?? "-"}</td>
-                                <td>{row.error_message ?? "-"}</td>
-                                <td>{row.occurrence_count}</td>
-                                <td>{formatDate(row.last_seen_at)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
+                {isInProgress(reportRun.status) && (
+                  <div
+                    className="report-card"
+                    style={{ display: "grid", gap: "12px" }}
+                  >
+                    <div style={{ fontWeight: 600 }}>
+                      Waiting for this scan to finish
                     </div>
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      This report stays focused on this exact run and will
+                      refresh as progress arrives.
+                    </div>
+                    <ScanProgressBar
+                      status={reportRun.status}
+                      totalLinks={reportRun.total_links}
+                      checkedLinks={reportRun.checked_links}
+                      brokenLinks={reportSummary.broken}
+                      blockedLinks={reportSummary.blocked}
+                      noResponseLinks={reportSummary.no_response}
+                      lastUpdateAt={reportLastLoadedAt}
+                    />
                   </div>
+                )}
 
-                  <div className="report-card">
-                    <div className="report-table-title">Top blocked links</div>
-                    <div className="report-table-wrap">
-                      <table className="report-table">
-                        <thead>
-                          <tr>
-                            <th>Link</th>
-                            <th>Status</th>
-                            <th>Error</th>
-                            <th>Occurrences</th>
-                            <th>Last seen</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {reportData.topBlocked.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="report-empty">
-                                No blocked links found.
-                              </td>
-                            </tr>
-                          ) : (
-                            reportData.topBlocked.map((row) => (
-                              <tr key={`${row.link_url}-${row.last_seen_at}`}>
-                                <td>{row.link_url}</td>
-                                <td>{row.status_code ?? "-"}</td>
-                                <td>{row.error_message ?? "-"}</td>
-                                <td>{row.occurrence_count}</td>
-                                <td>{formatDate(row.last_seen_at)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                <div
+                  className="report-card"
+                  style={{ display: "grid", gap: "10px" }}
+                >
+                  <div className="report-table-title">
+                    Technical diagnostics
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "12px",
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                    }}
+                  >
+                    <span>Raw status {reportRun.status}</span>
+                    <span>Site id {reportRun.site_id}</span>
+                    <span>
+                      Checked {reportRun.checked_links} /{" "}
+                      {reportRun.total_links}
+                    </span>
+                    <span>404/410 {reportStatusGroups.notFound}</span>
+                    <span>401/403/429 {reportStatusGroups.blocked}</span>
+                    <span>5xx {reportStatusGroups.serverError}</span>
+                    <span>No response {reportStatusGroups.noResponse}</span>
+                    <span>Other HTTP {reportStatusGroups.otherHttp}</span>
+                    <span>
+                      Refreshed{" "}
+                      {reportLastLoadedAt
+                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                        : "-"}
+                    </span>
                   </div>
                 </div>
+
+                {reportRun.status === "completed" && (
+                  <>
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "Broken links",
+                        "broken",
+                        reportSummary.broken,
+                      )}
+                      {renderReportLinkSection(
+                        "Blocked links",
+                        "blocked",
+                        reportSummary.blocked,
+                      )}
+                    </div>
+
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "No response links",
+                        "no_response",
+                        reportSummary.no_response,
+                      )}
+                      {renderReportIgnoredSection()}
+                    </div>
+
+                    <div className="report-card">
+                      <div className="report-table-title">OK links</div>
+                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+                        {reportSummary.ok} OK links were recorded in this scan.
+                        Phase 1A keeps OK links as a summary-only count.
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {reportRun.status !== "completed" &&
+                  !isInProgress(reportRun.status) && (
+                    <div
+                      className="report-card"
+                      style={{ fontSize: "13px", color: "var(--muted)" }}
+                    >
+                      This scan did not complete, so Scanlark is only showing
+                      the exact run status and any data captured before it
+                      stopped.
+                    </div>
+                  )}
 
                 <div className="report-footer">
-                  Generated {formatDate(reportData.generatedAt)}
+                  Last refreshed{" "}
+                  {reportLastLoadedAt
+                    ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                    : "-"}
                 </div>
               </>
             )}
@@ -8083,6 +8693,14 @@ const App: React.FC = () => {
                             >
                               {selectedRun.status.replace("_", " ")}
                             </span>
+                            {selectedRun.status === "completed" && (
+                              <button
+                                onClick={() => openReport(selectedRun.id)}
+                                className="report-button"
+                              >
+                                View report
+                              </button>
+                            )}
                             {(canRetryRun || canRescan) && (
                               <button
                                 onClick={() => {
@@ -11521,6 +12139,24 @@ const App: React.FC = () => {
                           >
                             View
                           </button>
+                          {run.status === "completed" && (
+                            <button
+                              onClick={() => {
+                                openReport(run.id);
+                                setHistoryOpen(false);
+                              }}
+                              style={{
+                                padding: "4px 6px",
+                                borderRadius: "6px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                fontSize: "11px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              View report
+                            </button>
+                          )}
                           {selectedRunId &&
                             run.id !== selectedRunId &&
                             run.status === "completed" && (
