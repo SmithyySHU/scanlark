@@ -313,6 +313,61 @@ type ReportStatusCodeGroups = {
   otherHttp: number;
 };
 
+type IssueSeverity = "critical" | "high" | "medium" | "low" | "info";
+type IssueStatus = "open" | "resolved";
+type IssueCategory =
+  | "link_integrity"
+  | "seo_basic"
+  | "ssl_https"
+  | "security_header"
+  | "sitemap"
+  | "robots"
+  | "performance_basic";
+type IssueType =
+  | "broken_link"
+  | "blocked_link"
+  | "no_response"
+  | "ignored_safety_skip";
+
+interface ScanIssue {
+  id: string;
+  scan_run_id: string;
+  site_id: string;
+  category: IssueCategory;
+  severity: IssueSeverity;
+  status: IssueStatus;
+  issue_type: IssueType;
+  affected_url: string;
+  source_url: string | null;
+  title: string;
+  description: string;
+  evidence_json: Record<string, unknown>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+}
+
+interface ScanIssuesResponse {
+  scanRunId: string;
+  summary: {
+    total: number;
+    bySeverity: Record<IssueSeverity, number>;
+    byIssueType: Record<string, number>;
+  };
+  countReturned: number;
+  totalMatching: number;
+  issues: ScanIssue[];
+}
+
+type ReportIssuesState = {
+  issues: ScanIssue[];
+  summary: ScanIssuesResponse["summary"] | null;
+  offset: number;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+};
+
 type ScanDiffChangeType =
   | "new_issue"
   | "fixed"
@@ -429,6 +484,14 @@ const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
   loading: false,
   error: null,
 };
+const EMPTY_REPORT_ISSUES_STATE: ReportIssuesState = {
+  issues: [],
+  summary: null,
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  error: null,
+};
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -512,6 +575,171 @@ function getIgnoredRowSummary(row: IgnoredLinkRow) {
     return "Ignored by rule";
   }
   return "Ignored";
+}
+
+function formatIssueSeverity(value: IssueSeverity) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function issueSeverityTone(value: IssueSeverity) {
+  if (value === "critical" || value === "high") return "var(--danger)";
+  if (value === "medium") return "var(--warning)";
+  if (value === "low") return "var(--accent)";
+  return "var(--muted)";
+}
+
+type ScoreBand = "Excellent" | "Good" | "Needs attention" | "Poor" | "Critical";
+
+type ReportScoreCard = {
+  score: number | null;
+  band: ScoreBand | null;
+  detail: string;
+};
+
+type ReportScores = {
+  overall: ReportScoreCard;
+  linkIntegrity: ReportScoreCard;
+  summary: string;
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getScoreBand(score: number): ScoreBand {
+  if (score >= 90) return "Excellent";
+  if (score >= 75) return "Good";
+  if (score >= 50) return "Needs attention";
+  if (score >= 25) return "Poor";
+  return "Critical";
+}
+
+function getScoreBandTone(score: number | null) {
+  if (score == null) return "var(--muted)";
+  if (score >= 90) return "var(--success)";
+  if (score >= 75) return "var(--accent)";
+  if (score >= 55) return "var(--warning)";
+  return "var(--danger)";
+}
+
+function buildScoreSummarySentence(
+  score: number | null,
+  severityCounts: Record<IssueSeverity, number>,
+) {
+  if (score == null) {
+    return "This score will be calculated when enough scan data is available.";
+  }
+
+  if ((severityCounts.critical ?? 0) > 0 || (severityCounts.high ?? 0) > 0) {
+    if (score >= 75) {
+      return "This scan found some high-impact link issues, but overall integrity is still holding up.";
+    }
+    if (score >= 25) {
+      return "This scan found high-impact link issues that need attention.";
+    }
+    return "This scan found severe link-integrity problems that need urgent attention.";
+  }
+
+  if ((severityCounts.medium ?? 0) > 0) {
+    if (score >= 75) {
+      return "This scan found a few moderate link issues, but overall integrity remains solid.";
+    }
+    return "This scan found multiple link issues that should be reviewed.";
+  }
+
+  if ((severityCounts.low ?? 0) > 0 || (severityCounts.info ?? 0) > 0) {
+    return "This scan is mostly healthy, with minor issues or intentional safety skips recorded.";
+  }
+
+  return "This scan did not generate any link-integrity issues.";
+}
+
+function calculateReportScores(
+  run: ScanRunSummary | null,
+  issueSummary: ScanIssuesResponse["summary"] | null,
+): ReportScores {
+  const severityCounts: Record<IssueSeverity, number> = {
+    critical: issueSummary?.bySeverity.critical ?? 0,
+    high: issueSummary?.bySeverity.high ?? 0,
+    medium: issueSummary?.bySeverity.medium ?? 0,
+    low: issueSummary?.bySeverity.low ?? 0,
+    info: issueSummary?.bySeverity.info ?? 0,
+  };
+
+  if (!run) {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      summary: "This score will be calculated when enough scan data is available.",
+    };
+  }
+
+  if (run.status === "queued" || run.status === "in_progress") {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Calculating after scan completes",
+      },
+      summary: "This score will be calculated when enough scan data is available.",
+    };
+  }
+
+  const checkedLinks = run.checked_links ?? 0;
+  if (checkedLinks <= 0) {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Not available",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Not available",
+      },
+      summary: "This score is not available because this run did not record checked links.",
+    };
+  }
+
+  const totalPenalty = clamp(
+    Math.min(70, severityCounts.critical * 25) +
+      Math.min(40, severityCounts.high * 12) +
+      Math.min(30, severityCounts.medium * 6) +
+      Math.min(15, severityCounts.low * 1),
+    0,
+    100,
+  );
+  const score = clamp(Math.round(100 - totalPenalty), 0, 100);
+  const band = getScoreBand(score);
+  const summary = buildScoreSummarySentence(score, severityCounts);
+
+  return {
+    overall: {
+      score,
+      band,
+      detail: "Currently based on link integrity findings from this scan",
+    },
+    linkIntegrity: {
+      score,
+      band,
+      detail: "Currently based on link integrity findings from this scan",
+    },
+    summary,
+  };
 }
 
 function formatRelative(value: string | null | undefined) {
@@ -885,6 +1113,10 @@ function safeHost(url: string) {
   }
 }
 
+function trimDisplayHost(hostname: string) {
+  return hostname.replace(/^www\./i, "");
+}
+
 function buildAppUrl(
   pathname: string,
   params?: Record<string, string | null | undefined>,
@@ -1048,6 +1280,9 @@ const App: React.FC = () => {
   >(EMPTY_REPORT_SECTIONS);
   const [reportIgnoredSection, setReportIgnoredSection] =
     useState<ReportIgnoredSectionState>(EMPTY_REPORT_IGNORED_SECTION);
+  const [reportIssues, setReportIssues] = useState<ReportIssuesState>(
+    EMPTY_REPORT_ISSUES_STATE,
+  );
   const [reportSectionsLoaded, setReportSectionsLoaded] = useState(false);
   const [reportLastLoadedAt, setReportLastLoadedAt] = useState<number | null>(
     null,
@@ -1300,6 +1535,7 @@ const App: React.FC = () => {
   const resetReportSections = useCallback(() => {
     setReportSections(createEmptyReportSections());
     setReportIgnoredSection(createEmptyReportIgnoredSection());
+    setReportIssues(EMPTY_REPORT_ISSUES_STATE);
     setReportSectionsLoaded(false);
   }, []);
 
@@ -1452,6 +1688,69 @@ const App: React.FC = () => {
     [apiFetch, fetchReportScanLinksPage],
   );
 
+  const loadInitialReportIssues = useCallback(
+    async (scanRunId: string) => {
+      setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load issues: ${res.status}`);
+        }
+        const data = (await res.json()) as ScanIssuesResponse;
+        setReportIssues({
+          issues: data.issues ?? [],
+          summary: data.summary,
+          offset: data.countReturned,
+          hasMore: data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        });
+      } catch (err: unknown) {
+        setReportIssues((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load issues"),
+        }));
+      }
+    },
+    [apiFetch],
+  );
+
+  const loadMoreReportIssues = useCallback(
+    async (scanRunId: string) => {
+      if (reportIssues.loading || !reportIssues.hasMore) return;
+      setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load issues: ${res.status}`);
+        }
+        const data = (await res.json()) as ScanIssuesResponse;
+        setReportIssues((prev) => ({
+          issues: [...prev.issues, ...(data.issues ?? [])],
+          summary: prev.summary ?? data.summary,
+          offset: prev.offset + data.countReturned,
+          hasMore: prev.offset + data.countReturned < data.totalMatching,
+          loading: false,
+          error: null,
+        }));
+      } catch (err: unknown) {
+        setReportIssues((prev) => ({
+          ...prev,
+          loading: false,
+          error: getErrorMessage(err, "Failed to load more issues"),
+        }));
+      }
+    },
+    [apiFetch, reportIssues],
+  );
+
   const loadMoreReportSection = useCallback(
     async (scanRunId: string, section: ReportSectionKey) => {
       const current = reportSections[section];
@@ -1594,10 +1893,14 @@ const App: React.FC = () => {
     ) {
       return;
     }
-    void loadInitialReportSections(reportScanRunId).catch((err) => {
+    void Promise.all([
+      loadInitialReportSections(reportScanRunId),
+      loadInitialReportIssues(reportScanRunId),
+    ]).catch((err) => {
       setReportError(getErrorMessage(err, "Failed to load report sections"));
     });
   }, [
+    loadInitialReportIssues,
     loadInitialReportSections,
     reportRunData?.status,
     reportScanRunId,
@@ -2290,6 +2593,8 @@ const App: React.FC = () => {
   const reportSummary = summarizeReportClassifications(reportSummaryRows);
   const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
   const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
+  const reportIssueSummary = reportIssues.summary;
+  const reportScores = calculateReportScores(reportRun, reportIssueSummary);
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -2301,6 +2606,82 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+
+  const formatReportUrlLabel = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      const trimmedHost = trimDisplayHost(parsed.hostname);
+      const search = parsed.search
+        ? parsed.search.length > 48
+          ? `${parsed.search.slice(0, 48)}…`
+          : parsed.search
+        : "";
+      const pathWithQuery = `${parsed.pathname || "/"}${search}`;
+      const isInternal = reportHost != null && parsed.hostname === reportHost;
+
+      if (isInternal) {
+        return pathWithQuery || "/";
+      }
+
+      if (!pathWithQuery || pathWithQuery === "/") {
+        return trimmedHost;
+      }
+
+      return `${trimmedHost}${pathWithQuery}`;
+    } catch {
+      return url.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+    }
+  };
+
+  const formatIssueSupportText = (description: string) => {
+    if (description.length <= 84) return description;
+    return `${description.slice(0, 84).trimEnd()}…`;
+  };
+
+  const renderReportUrlCell = (
+    url: string | null,
+    options?: {
+      copyLabel?: string;
+      openLabel?: string;
+      emptyLabel?: string;
+    },
+  ) => {
+    if (!url) {
+      return options?.emptyLabel ?? "-";
+    }
+
+    return (
+      <div className="report-url-cell">
+        <span className="report-url-text" title={url}>
+          {formatReportUrlLabel(url)}
+        </span>
+        <div className="report-url-actions">
+          <button
+            type="button"
+            className="report-url-action"
+            onClick={() =>
+              void copyToClipboard(
+                url,
+                undefined,
+                options?.copyLabel ?? "Copied full URL",
+              )
+            }
+            title="Copy full URL"
+          >
+            Copy
+          </button>
+          <button
+            type="button"
+            className="report-url-action"
+            onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+            title="Open URL"
+          >
+            Open
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   const renderReportLinkSection = (
     title: string,
@@ -2319,7 +2700,7 @@ const App: React.FC = () => {
           </div>
         )}
         <div className="report-table-wrap">
-          <table className="report-table">
+          <table className="report-table report-links-table">
             <thead>
               <tr>
                 <th>Link</th>
@@ -2345,7 +2726,7 @@ const App: React.FC = () => {
               ) : (
                 section.links.map((row) => (
                   <tr key={row.id}>
-                    <td>{row.link_url}</td>
+                    <td>{renderReportUrlCell(row.link_url)}</td>
                     <td>{row.status_code ?? "-"}</td>
                     <td>
                       {row.error_message ??
@@ -2389,7 +2770,7 @@ const App: React.FC = () => {
         </div>
       )}
       <div className="report-table-wrap">
-        <table className="report-table">
+        <table className="report-table report-links-table">
           <thead>
             <tr>
               <th>Link</th>
@@ -2416,7 +2797,7 @@ const App: React.FC = () => {
             ) : (
               reportIgnoredSection.links.map((row) => (
                 <tr key={row.id}>
-                  <td>{row.link_url}</td>
+                  <td>{renderReportUrlCell(row.link_url)}</td>
                   <td>{row.status_code ?? "-"}</td>
                   <td>
                     <div>{getIgnoredRowSummary(row)}</div>
@@ -2444,6 +2825,101 @@ const App: React.FC = () => {
           disabled={reportIgnoredSection.loading || !reportScanRunId}
         >
           {reportIgnoredSection.loading ? "Loading..." : "Load more"}
+        </button>
+      )}
+    </div>
+  );
+
+  const renderReportIssuesSection = () => (
+    <div className="report-card">
+      <div className="report-table-title">
+        Issues{" "}
+        <span style={{ color: "var(--muted)" }}>
+          ({reportIssueSummary?.total ?? reportIssues.issues.length})
+        </span>
+      </div>
+      {reportIssues.error && (
+        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+          {reportIssues.error}
+        </div>
+      )}
+      <div className="report-table-wrap">
+        <table className="report-table report-issues-table">
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Title</th>
+              <th>Affected URL</th>
+              <th>Source URL</th>
+              <th>Status</th>
+              <th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {reportIssues.loading && reportIssues.issues.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="report-empty">
+                  Loading…
+                </td>
+              </tr>
+            ) : reportIssues.issues.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="report-empty">
+                  No issues were generated for this scan.
+                </td>
+              </tr>
+            ) : (
+              reportIssues.issues.map((issue) => (
+                <tr key={issue.id}>
+                  <td>
+                    <span
+                      className="status-chip subtle"
+                      style={{
+                        background: issueSeverityTone(issue.severity),
+                        color:
+                          issue.severity === "info" ? "var(--text)" : "white",
+                        borderColor: "transparent",
+                      }}
+                    >
+                      {formatIssueSeverity(issue.severity)}
+                    </span>
+                  </td>
+                  <td>
+                    <div>{issue.title}</div>
+                    <div
+                      className="report-issue-support"
+                      title={issue.description}
+                    >
+                      {formatIssueSupportText(issue.description)}
+                    </div>
+                  </td>
+                  <td>
+                    {renderReportUrlCell(issue.affected_url, {
+                      copyLabel: "Copied affected URL",
+                    })}
+                  </td>
+                  <td>
+                    {renderReportUrlCell(issue.source_url, {
+                      copyLabel: "Copied source URL",
+                    })}
+                  </td>
+                  <td>{issue.status}</td>
+                  <td>{formatDate(issue.last_seen_at)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      {reportIssues.hasMore && (
+        <button
+          className="report-button"
+          onClick={() =>
+            reportScanRunId && void loadMoreReportIssues(reportScanRunId)
+          }
+          disabled={reportIssues.loading || !reportScanRunId}
+        >
+          {reportIssues.loading ? "Loading..." : "Load more"}
         </button>
       )}
     </div>
@@ -6792,10 +7268,24 @@ const App: React.FC = () => {
           flex-direction: column;
           gap: 6px;
         }
+        .report-score-card {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
         .report-metric {
           font-size: 22px;
           font-weight: 700;
           color: var(--text);
+        }
+        .report-score-subtitle {
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.4;
+        }
+        .report-score-band {
+          font-size: 12px;
+          font-weight: 600;
         }
         .report-table-grid {
           display: grid;
@@ -6832,6 +7322,94 @@ const App: React.FC = () => {
         .report-table td {
           overflow-wrap: anywhere;
           word-break: break-word;
+        }
+        .report-links-table th:nth-child(1),
+        .report-links-table td:nth-child(1) {
+          width: 48%;
+        }
+        .report-links-table th:nth-child(2),
+        .report-links-table td:nth-child(2) {
+          width: 10%;
+        }
+        .report-links-table th:nth-child(4),
+        .report-links-table td:nth-child(4) {
+          width: 12%;
+        }
+        .report-links-table th:nth-child(5),
+        .report-links-table td:nth-child(5) {
+          width: 18%;
+        }
+        .report-issues-table th:nth-child(1),
+        .report-issues-table td:nth-child(1) {
+          width: 9%;
+        }
+        .report-issues-table th:nth-child(2),
+        .report-issues-table td:nth-child(2) {
+          width: 20%;
+        }
+        .report-issues-table th:nth-child(3),
+        .report-issues-table td:nth-child(3) {
+          width: 27%;
+        }
+        .report-issues-table th:nth-child(4),
+        .report-issues-table td:nth-child(4) {
+          width: 22%;
+        }
+        .report-issues-table th:nth-child(5),
+        .report-issues-table td:nth-child(5) {
+          width: 8%;
+        }
+        .report-issues-table th:nth-child(6),
+        .report-issues-table td:nth-child(6) {
+          width: 14%;
+        }
+        .report-url-cell {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          max-width: 100%;
+        }
+        .report-url-text {
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+          overflow-wrap: normal;
+          word-break: normal;
+        }
+        .report-url-actions {
+          display: flex;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+        .report-url-action {
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--muted);
+          border-radius: 999px;
+          padding: 2px 7px;
+          font-size: 11px;
+          line-height: 1.2;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .report-url-action:hover {
+          border-color: var(--accent);
+          color: var(--text);
+        }
+        .report-table td .report-url-cell,
+        .report-table td .report-url-text {
+          overflow-wrap: normal;
+          word-break: normal;
+        }
+        .report-issue-support {
+          font-size: 12px;
+          color: var(--muted);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .report-empty {
           padding: 12px;
@@ -7113,6 +7691,92 @@ const App: React.FC = () => {
             {reportRun && (
               <>
                 <div className="report-summary-grid">
+                  <div className="report-card report-score-card">
+                    <div className="report-label">Overall Health Score</div>
+                    <div
+                      className="report-metric"
+                      style={{
+                        color: getScoreBandTone(reportScores.overall.score),
+                      }}
+                    >
+                      {reportScores.overall.score == null
+                        ? reportScores.overall.detail
+                        : `${reportScores.overall.score}%`}
+                    </div>
+                    {reportScores.overall.band && (
+                      <div
+                        className="report-score-band"
+                        style={{
+                          color: getScoreBandTone(reportScores.overall.score),
+                        }}
+                      >
+                        {reportScores.overall.band}
+                      </div>
+                    )}
+                    <div className="report-score-subtitle">
+                      {reportScores.overall.detail}
+                    </div>
+                  </div>
+                  <div className="report-card report-score-card">
+                    <div className="report-label">Link Integrity Score</div>
+                    <div
+                      className="report-metric"
+                      style={{
+                        color: getScoreBandTone(
+                          reportScores.linkIntegrity.score,
+                        ),
+                      }}
+                    >
+                      {reportScores.linkIntegrity.score == null
+                        ? reportScores.linkIntegrity.detail
+                        : `${reportScores.linkIntegrity.score}%`}
+                    </div>
+                    {reportScores.linkIntegrity.band && (
+                      <div
+                        className="report-score-band"
+                        style={{
+                          color: getScoreBandTone(
+                            reportScores.linkIntegrity.score,
+                          ),
+                        }}
+                      >
+                        {reportScores.linkIntegrity.band}
+                      </div>
+                    )}
+                    <div className="report-score-subtitle">
+                      {reportScores.linkIntegrity.detail}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Total issues</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.total ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">High</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.high ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Medium</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.medium ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Low</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.low ?? 0}
+                    </div>
+                  </div>
+                  <div className="report-card report-summary-card">
+                    <div className="report-label">Info</div>
+                    <div className="report-metric">
+                      {reportIssueSummary?.bySeverity.info ?? 0}
+                    </div>
+                  </div>
                   <div className="report-card report-summary-card">
                     <div className="report-label">Links checked</div>
                     <div className="report-metric">
@@ -7151,6 +7815,10 @@ const App: React.FC = () => {
                     <div className="report-label">Limits hit</div>
                     <div className="report-metric">Not tracked</div>
                   </div>
+                </div>
+
+                <div className="report-card report-score-subtitle">
+                  {reportScores.summary}
                 </div>
 
                 {isInProgress(reportRun.status) && (
@@ -7215,6 +7883,8 @@ const App: React.FC = () => {
 
                 {reportRun.status === "completed" && (
                   <>
+                    {renderReportIssuesSection()}
+
                     <div className="report-table-grid">
                       {renderReportLinkSection(
                         "Broken links",

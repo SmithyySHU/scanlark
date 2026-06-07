@@ -122,6 +122,19 @@ export type {
 export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
 
 export {
+  listIssuesForScanRunForUser,
+  replaceIssuesForScanRun,
+} from "./scanIssues";
+export type {
+  ScanIssue,
+  ScanIssueCategory,
+  ScanIssueSeverity,
+  ScanIssueStatus,
+  ScanIssueType,
+  ScanIssuesSummary,
+} from "./scanIssues";
+
+export {
   deleteLinkNoteForSiteForUser,
   getLinkNoteForSiteByUrlForUser,
   listLinkNotesForSiteForUser,

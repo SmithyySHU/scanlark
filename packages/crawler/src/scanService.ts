@@ -17,6 +17,7 @@ import {
 } from "./limits";
 import type { IgnoreRule } from "@scanlark/db";
 import {
+  applyIgnoreRulesForScanRun,
   completeScanRun,
   createScanRun,
   findMatchingIgnoreRule,
@@ -25,6 +26,7 @@ import {
   insertScanLinkOccurrence,
   insertScanResult,
   listIgnoreRules,
+  replaceIssuesForScanRun,
   setScanRunStatus,
   touchScanRun,
   updateScanRunProgress,
@@ -965,6 +967,19 @@ export async function runScanForSite(
       checkedLinks: checkedUnique,
       brokenLinks: brokenUnique,
     });
+
+    try {
+      await applyIgnoreRulesForScanRun(actualScanRunId, { force: true });
+      const issueResult = await replaceIssuesForScanRun(actualScanRunId);
+      console.log(
+        `[Scan] Issues generated run=${actualScanRunId} count=${issueResult.issueCount}`,
+      );
+    } catch (issueErr) {
+      console.warn(
+        `[Scan] Issue generation failed run=${actualScanRunId}`,
+        issueErr,
+      );
+    }
 
     return {
       scanRunId: actualScanRunId,

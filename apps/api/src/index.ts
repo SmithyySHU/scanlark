@@ -6,6 +6,9 @@ import type {
   ExportClassification,
   IgnoreRuleType,
   LinkClassification,
+  ScanIssueCategory,
+  ScanIssueSeverity,
+  ScanIssueStatus,
   ScanDiffChangeType,
   ScanLinkOccurrenceRow,
 } from "@scanlark/db";
@@ -55,7 +58,9 @@ import {
   listIgnoreRulesForSiteForUser,
   listIgnoredLinksForRunForUser,
   listIgnoredOccurrencesForUser,
+  listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
   setScanRunStatus,
@@ -119,6 +124,23 @@ const NOTIFY_ON_OPTIONS = new Set([
   "never",
 ]);
 const LINK_NOTE_STATUSES = new Set(["open", "snoozed", "resolved", "all"]);
+const ISSUE_CATEGORIES = new Set<ScanIssueCategory>([
+  "link_integrity",
+  "seo_basic",
+  "ssl_https",
+  "security_header",
+  "sitemap",
+  "robots",
+  "performance_basic",
+]);
+const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "info",
+]);
+const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
@@ -203,6 +225,27 @@ function parseLinkNoteStatus(
   return LINK_NOTE_STATUSES.has(value)
     ? (value as "open" | "snoozed" | "resolved" | "all")
     : fallback;
+}
+
+function parseIssueStatus(value: unknown): ScanIssueStatus | null {
+  if (typeof value !== "string") return null;
+  return ISSUE_STATUSES.has(value as ScanIssueStatus)
+    ? (value as ScanIssueStatus)
+    : null;
+}
+
+function parseIssueSeverity(value: unknown): ScanIssueSeverity | null {
+  if (typeof value !== "string") return null;
+  return ISSUE_SEVERITIES.has(value as ScanIssueSeverity)
+    ? (value as ScanIssueSeverity)
+    : null;
+}
+
+function parseIssueCategory(value: unknown): ScanIssueCategory | null {
+  if (typeof value !== "string") return null;
+  return ISSUE_CATEGORIES.has(value as ScanIssueCategory)
+    ? (value as ScanIssueCategory)
+    : null;
 }
 
 function normalizeNotifyOn(value: string): string {
@@ -1232,6 +1275,76 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId", err);
     return sendInternalError(res, "Failed to fetch scan run", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/issues", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const status = parseIssueStatus(req.query.status);
+  const severity = parseIssueSeverity(req.query.severity);
+  const category = parseIssueCategory(req.query.category);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const issues = await listIssuesForScanRunForUser(userId, scanRunId, {
+      status,
+      severity,
+      category,
+      limit,
+      offset,
+    });
+
+    res.json({
+      scanRunId,
+      summary: issues.summary,
+      countReturned: issues.countReturned,
+      totalMatching: issues.totalMatching,
+      issues: issues.issues.map((issue) => ({
+        ...issue,
+        first_seen_at:
+          issue.first_seen_at instanceof Date
+            ? issue.first_seen_at.toISOString()
+            : issue.first_seen_at,
+        last_seen_at:
+          issue.last_seen_at instanceof Date
+            ? issue.last_seen_at.toISOString()
+            : issue.last_seen_at,
+        resolved_at:
+          issue.resolved_at instanceof Date
+            ? issue.resolved_at.toISOString()
+            : issue.resolved_at,
+      })),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/issues", err);
+    return sendInternalError(res, "Failed to fetch scan issues", err);
   }
 });
 
@@ -2658,6 +2771,7 @@ app.post(
             });
           }
         }
+        await replaceIssuesForScanRun(scanRunId);
         return res.json({ scanRunId, link_url: linkUrl, ignored: true });
       }
 
@@ -2684,6 +2798,7 @@ app.post(
         linkUrl,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
+      await replaceIssuesForScanRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, rule });
     } catch (err: unknown) {
       console.error(
@@ -2751,6 +2866,7 @@ app.post(
             sourcePage: first.source_page,
           });
         }
+        await replaceIssuesForScanRun(scanRunId);
         return res.json({ scanRunId, link_url: link.link_url, ignored: true });
       }
 
@@ -2777,6 +2893,7 @@ app.post(
         link.link_url,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
+      await replaceIssuesForScanRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, rule });
     } catch (err: unknown) {
       console.error(
@@ -2818,6 +2935,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, linkUrl, false, {
         source: "none",
       });
+      await replaceIssuesForScanRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, ignored: false });
     } catch (err: unknown) {
       console.error(
@@ -2836,6 +2954,7 @@ app.post("/scan-runs/:scanRunId/reapply-ignore", async (req, res) => {
     const runCheck = await requireScanRunForUser(req, res, scanRunId);
     if (!runCheck) return;
     const result = await applyIgnoreRulesForScanRun(scanRunId, { force });
+    await replaceIssuesForScanRun(scanRunId);
     res.json({ scanRunId, ...result });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/reapply-ignore", err);
@@ -2870,6 +2989,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, link.link_url, false, {
         source: "none",
       });
+      await replaceIssuesForScanRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, ignored: false });
     } catch (err: unknown) {
       console.error(
