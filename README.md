@@ -61,8 +61,8 @@ Scanlark aims to make link monitoring a background task that runs automatically 
 ---
 
 ## Project structure
-
-```txt
+```
+txt
 apps/
   api/        # REST API + event endpoints
   worker/     # queue worker + scheduler tick
