@@ -139,6 +139,7 @@ export {
   claimNextScanJob,
   completeScanJob,
   enqueueScanJob,
+  extendScanJobLease,
   failScanJob,
   getJobForScanRun,
   hasActiveJobForSite,

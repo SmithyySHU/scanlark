@@ -281,6 +281,17 @@ interface IgnoredLinksResponse {
   links: IgnoredLinkRow[];
 }
 
+interface Phase0Diagnostics {
+  scanRunId: string;
+  ok: number | null;
+  broken: number | null;
+  blocked: number | null;
+  noResponse: number | null;
+  ignoredSkipped: number | null;
+  error: string | null;
+  loadedAt: number | null;
+}
+
 interface IgnoredOccurrencesResponse {
   scanRunId: string;
   ignoredLinkId: string;
@@ -827,6 +838,15 @@ function buildIgnoredLinksUrl(
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/ignored?limit=${limit}&offset=${offset}`;
 }
 
+function getSummaryCount(
+  rows: ScanLinksSummaryRow[],
+  classification: LinkClassification,
+) {
+  return rows
+    .filter((row) => row.classification === classification)
+    .reduce((sum, row) => sum + row.count, 0);
+}
+
 type LoadHistoryOpts = {
   preserveSelection?: boolean;
   skipResultsWhileInProgress?: boolean;
@@ -934,6 +954,10 @@ const App: React.FC = () => {
   const [ignoredOccError, setIgnoredOccError] = useState<
     Record<string, string | null>
   >({});
+  const [phase0Diagnostics, setPhase0Diagnostics] =
+    useState<Phase0Diagnostics | null>(null);
+  const [phase0DiagnosticsLoading, setPhase0DiagnosticsLoading] =
+    useState(false);
 
   const [occurrencesByLinkId, setOccurrencesByLinkId] = useState<
     Record<string, ScanLinkOccurrence[]>
@@ -1204,6 +1228,24 @@ const App: React.FC = () => {
     [visibleResults],
   );
 
+  const noResponseResults = useMemo(
+    () => visibleResults.filter((r) => r.classification === "no_response"),
+    [visibleResults],
+  );
+
+  const currentPhase0Diagnostics =
+    phase0Diagnostics?.scanRunId === selectedRunId ? phase0Diagnostics : null;
+  const phase0BrokenCount =
+    currentPhase0Diagnostics?.broken ??
+    selectedRun?.broken_links ??
+    brokenResults.length;
+  const phase0BlockedCount =
+    currentPhase0Diagnostics?.blocked ?? blockedResults.length;
+  const phase0NoResponseCount =
+    currentPhase0Diagnostics?.noResponse ?? noResponseResults.length;
+  const phase0IgnoredSkippedCount =
+    currentPhase0Diagnostics?.ignoredSkipped ?? ignoredResults.length;
+
   const filteredResults = useMemo(() => {
     const source =
       activeTab === "broken"
@@ -1213,9 +1255,7 @@ const App: React.FC = () => {
           : activeTab === "ok"
             ? visibleResults.filter((row) => row.classification === "ok")
             : activeTab === "no_response"
-              ? visibleResults.filter(
-                  (row) => row.classification === "no_response",
-                )
+              ? noResponseResults
               : visibleResults;
     const query = searchQuery.trim().toLowerCase();
     const activeStatusFilters = Object.keys(statusFilters).filter(
@@ -1267,6 +1307,7 @@ const App: React.FC = () => {
     activeTab,
     brokenResults,
     blockedResults,
+    noResponseResults,
     visibleResults,
     searchQuery,
     statusFilters,
@@ -1482,9 +1523,15 @@ const App: React.FC = () => {
   const canNextUnchanged =
     includeUnchanged && unchangedOffset + unchangedLimit < outstandingTotal;
 
-  const fixQueueBaseline = compareRunId ?? "prev";
   const fixQueueRunId =
     selectedRun?.status === "completed" ? selectedRun.id : null;
+  const fixQueueBaseline =
+    compareRunId && compareRunId !== fixQueueRunId ? compareRunId : "prev";
+  const fixQueueQueryEnabled = !!selectedSiteId && !!fixQueueRunId;
+  const fixQueueUnavailableReason =
+    selectedRun && selectedRun.status !== "completed"
+      ? "Fix queue is available after this scan completes."
+      : null;
   const fixQueueQuery = useQuery<FixQueueResponse, Error>({
     queryKey: [
       "fixQueue",
@@ -1498,7 +1545,7 @@ const App: React.FC = () => {
       fixQueueLimit,
       fixQueueOffset,
     ],
-    enabled: !!selectedSiteId,
+    enabled: fixQueueQueryEnabled,
     queryFn: async () => {
       const params = new URLSearchParams({
         baseline: fixQueueBaseline,
@@ -3040,10 +3087,19 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!selectedRunId) {
       setDiffOkTotal(0);
+      setPhase0Diagnostics(null);
+      setPhase0DiagnosticsLoading(false);
       return;
     }
     let cancelled = false;
     const loadSummary = async () => {
+      setPhase0DiagnosticsLoading(true);
+      let summaryRows: ScanLinksSummaryRow[] = [];
+      let ignoredSkipped = 0;
+      let summaryLoaded = false;
+      let ignoredLoaded = false;
+      const errors: string[] = [];
+
       try {
         const res = await apiFetch(
           `${API_BASE}/scan-runs/${encodeURIComponent(
@@ -3051,20 +3107,62 @@ const App: React.FC = () => {
           )}/links/summary`,
           { cache: "no-store" },
         );
-        if (!res.ok) return;
-        const data: ScanLinksSummaryResponse = await res.json();
-        if (cancelled) return;
-        const okRow = data.summary.find((row) => row.classification === "ok");
-        setDiffOkTotal(okRow?.count ?? 0);
-      } catch {
-        if (!cancelled) setDiffOkTotal(0);
+        if (res.ok) {
+          const data: ScanLinksSummaryResponse = await res.json();
+          summaryRows = data.summary ?? [];
+          summaryLoaded = true;
+        } else {
+          errors.push(`links summary ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "links summary failed"));
       }
+
+      try {
+        const res = await apiFetch(buildIgnoredLinksUrl(selectedRunId, 0, 1), {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const data: IgnoredLinksResponse = await res.json();
+          ignoredSkipped = data.totalMatching ?? 0;
+          ignoredLoaded = true;
+        } else {
+          errors.push(`ignored summary ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "ignored summary failed"));
+      }
+
+      if (cancelled) return;
+
+      const ok = getSummaryCount(summaryRows, "ok");
+      setDiffOkTotal(ok);
+      setPhase0Diagnostics({
+        scanRunId: selectedRunId,
+        ok: summaryLoaded ? ok : null,
+        broken: summaryLoaded ? getSummaryCount(summaryRows, "broken") : null,
+        blocked: summaryLoaded ? getSummaryCount(summaryRows, "blocked") : null,
+        noResponse: summaryLoaded
+          ? getSummaryCount(summaryRows, "no_response")
+          : null,
+        ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
+        error: errors.length > 0 ? errors.join("; ") : null,
+        loadedAt: Date.now(),
+      });
+      setPhase0DiagnosticsLoading(false);
     };
     void loadSummary();
     return () => {
       cancelled = true;
     };
-  }, [selectedRunId]);
+  }, [
+    selectedRunId,
+    selectedRun?.updated_at,
+    selectedRun?.status,
+    selectedRun?.checked_links,
+    selectedRun?.total_links,
+    selectedRun?.broken_links,
+  ]);
 
   async function refreshSelectedRun(runId: string) {
     try {
@@ -4342,14 +4440,24 @@ const App: React.FC = () => {
     if (run.status === "completed") {
       const canUseResults =
         run.id === selectedRunIdRef.current && results.length > 0;
-      const blockedCount = canUseResults ? blockedResults.length : 0;
-      const noResponseCount = canUseResults
-        ? visibleResults.filter((row) => row.classification === "no_response")
-            .length
-        : 0;
+      const canUseDiagnostics =
+        run.id === selectedRunIdRef.current &&
+        currentPhase0Diagnostics != null;
+      const blockedCount = canUseDiagnostics
+        ? phase0BlockedCount
+        : canUseResults
+          ? blockedResults.length
+          : 0;
+      const noResponseCount = canUseDiagnostics
+        ? phase0NoResponseCount
+        : canUseResults
+          ? noResponseResults.length
+          : 0;
       const checked = run.checked_links ?? 0;
       const total = run.total_links ?? 0;
-      const broken = run.broken_links ?? 0;
+      const broken = canUseDiagnostics
+        ? phase0BrokenCount
+        : (run.broken_links ?? 0);
       const message = `Scan complete: ${checked}/${total} checked • ${broken} broken • ${blockedCount} blocked • ${noResponseCount} no response`;
       pushToast(message, "success", {
         label: "View results",
@@ -7903,13 +8011,9 @@ const App: React.FC = () => {
                             }
                             totalLinks={selectedRun.total_links}
                             checkedLinks={selectedRun.checked_links}
-                            brokenLinks={selectedRun.broken_links}
-                            blockedLinks={blockedResults.length}
-                            noResponseLinks={
-                              visibleResults.filter(
-                                (row) => row.classification === "no_response",
-                              ).length
-                            }
+                            brokenLinks={phase0BrokenCount}
+                            blockedLinks={phase0BlockedCount}
+                            noResponseLinks={phase0NoResponseCount}
                             lastUpdateAt={lastProgressAt ?? null}
                           />
                         </div>
@@ -8030,6 +8134,73 @@ const App: React.FC = () => {
                           )}
                         </div>
                       )}
+                      {selectedRun && (
+                        <div
+                          style={{
+                            paddingTop: "10px",
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "12px",
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                            Phase 0 diagnostics
+                          </span>
+                          <span>
+                            Status {selectedRun.status.replace("_", " ")}
+                          </span>
+                          <span>Started {formatDate(selectedRun.started_at)}</span>
+                          <span>
+                            Finished {formatDate(selectedRun.finished_at ?? null)}
+                          </span>
+                          <span>
+                            Duration{" "}
+                            {formatDuration(
+                              selectedRun.started_at,
+                              selectedRun.finished_at,
+                            )}
+                          </span>
+                          <span>Pages crawled not tracked</span>
+                          <span>
+                            Links checked {selectedRun.checked_links}/
+                            {selectedRun.total_links}
+                          </span>
+                          <span>
+                            Broken{" "}
+                            {phase0BrokenCount}
+                          </span>
+                          <span>Blocked {phase0BlockedCount}</span>
+                          <span>No response {phase0NoResponseCount}</span>
+                          <span>
+                            Ignored/skipped {phase0IgnoredSkippedCount}
+                          </span>
+                          <span>Limits hit not tracked</span>
+                          {phase0DiagnosticsLoading && <span>Refreshing...</span>}
+                          {currentPhase0Diagnostics?.loadedAt && (
+                            <span>
+                              Diagnostics{" "}
+                              {formatRelative(
+                                new Date(
+                                  currentPhase0Diagnostics.loadedAt,
+                                ).toISOString(),
+                              )}
+                            </span>
+                          )}
+                          {selectedRun.error_message && (
+                            <span style={{ color: "var(--warning)" }}>
+                              Failure reason {selectedRun.error_message}
+                            </span>
+                          )}
+                          {currentPhase0Diagnostics?.error && (
+                            <span style={{ color: "var(--warning)" }}>
+                              Diagnostics error {currentPhase0Diagnostics.error}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {selectedRun && diffBaselineRun && diffSummary && (
                         <div
                           style={{
@@ -8116,7 +8287,9 @@ const App: React.FC = () => {
                                   "No previous scan to compare yet."
                                 )
                               ) : resultsView === "fix_queue" ? (
-                                fixQueueSummary ? (
+                                fixQueueUnavailableReason ? (
+                                  fixQueueUnavailableReason
+                                ) : fixQueueSummary ? (
                                   <>
                                     New {fixQueueSummary.newIssues} •
                                     Outstanding{" "}
@@ -8140,14 +8313,10 @@ const App: React.FC = () => {
                                 <>
                                   Checked {selectedRun?.checked_links ?? 0} /{" "}
                                   {selectedRun?.total_links ?? 0} • Broken{" "}
-                                  {selectedRun?.broken_links ?? 0} • Blocked{" "}
-                                  {blockedResults.length} • No response{" "}
-                                  {
-                                    visibleResults.filter(
-                                      (row) =>
-                                        row.classification === "no_response",
-                                    ).length
-                                  }
+                                  {phase0BrokenCount} • Blocked{" "}
+                                  {phase0BlockedCount} • No response{" "}
+                                  {phase0NoResponseCount} • Ignored/skipped{" "}
+                                  {phase0IgnoredSkippedCount}
                                 </>
                               )}
                             </div>
@@ -8621,11 +8790,26 @@ const App: React.FC = () => {
                                     {fixQueueError}
                                   </div>
                                 )}
+                                {fixQueueUnavailableReason && (
+                                  <div
+                                    style={{
+                                      padding: "20px",
+                                      borderRadius: "12px",
+                                      border: "1px dashed var(--border)",
+                                      textAlign: "center",
+                                      color: "var(--muted)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    {fixQueueUnavailableReason}
+                                  </div>
+                                )}
                                 {fixQueueLoading &&
                                   Array.from({ length: 5 }).map((_, idx) => (
                                     <div key={idx} className="skeleton" />
                                   ))}
-                                {!fixQueueLoading &&
+                                {!fixQueueUnavailableReason &&
+                                  !fixQueueLoading &&
                                   fixQueueItems.length === 0 && (
                                     <div
                                       style={{
@@ -9246,7 +9430,13 @@ const App: React.FC = () => {
                                                     color: "var(--chip-text)",
                                                   }}
                                                 >
-                                                  Ignored
+                                                  {row.rule_type
+                                                    ? "Ignored by rule"
+                                                    : row.error_message?.startsWith(
+                                                          "crawl_skipped:",
+                                                        )
+                                                      ? "Intentionally skipped"
+                                                      : "Ignored"}
                                                 </span>
                                                 {row.rule_type &&
                                                   row.rule_pattern && (
@@ -10245,9 +10435,9 @@ const App: React.FC = () => {
                               status={selectedRun.status}
                               totalLinks={selectedRun.total_links}
                               checkedLinks={selectedRun.checked_links}
-                              brokenLinks={selectedRun.broken_links}
-                              blockedLinks={0}
-                              noResponseLinks={0}
+                              brokenLinks={phase0BrokenCount}
+                              blockedLinks={phase0BlockedCount}
+                              noResponseLinks={phase0NoResponseCount}
                               lastUpdateAt={lastProgressAt ?? null}
                             />
                             <div
@@ -10308,26 +10498,20 @@ const App: React.FC = () => {
                           }}
                         >
                           <span className="summary-chip">
-                            Broken {selectedRun?.broken_links ?? 0}
+                            Broken {phase0BrokenCount}
                           </span>
                           <span className="summary-chip">
-                            Blocked {blockedResults.length}
+                            Blocked {phase0BlockedCount}
                           </span>
                           <span className="summary-chip">
-                            No response{" "}
-                            {
-                              visibleResults.filter(
-                                (row) => row.classification === "no_response",
-                              ).length
-                            }
+                            No response {phase0NoResponseCount}
                           </span>
                           <span className="summary-chip">
                             OK{" "}
-                            {
+                            {currentPhase0Diagnostics?.ok ??
                               visibleResults.filter(
                                 (row) => row.classification === "ok",
-                              ).length
-                            }
+                              ).length}
                           </span>
                         </div>
                         <div

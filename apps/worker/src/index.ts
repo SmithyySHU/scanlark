@@ -6,6 +6,7 @@ import {
   completeScanJob,
   createScanRun,
   enqueueScanJob,
+  extendScanJobLease,
   failScanJob,
   getDueSites,
   getLatestScanForSite,
@@ -27,6 +28,7 @@ const IDLE_WAIT_MS = 1200;
 const SCHEDULE_TICK_MS = 60000;
 const SCHEDULE_COOLDOWN_MS = 60000;
 const CLAIM_LEASE_SECONDS = 120;
+const LEASE_HEARTBEAT_MS = 30000;
 const REAPER_TICK_MS = 120000;
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
@@ -84,6 +86,17 @@ async function processJob() {
     clearFinishedAt: true,
   });
   logJobEvent("started", { ...job, scan_run_id: run.id });
+
+  const leaseHeartbeat = setInterval(() => {
+    void extendScanJobLease(job.id, {
+      leaseSeconds: CLAIM_LEASE_SECONDS,
+    }).catch((err) => {
+      console.warn(
+        `[worker ${workerId}] lease heartbeat failed job=${job.id}`,
+        err,
+      );
+    });
+  }, LEASE_HEARTBEAT_MS);
 
   try {
     await runScanForSite(run.site_id, run.start_url, run.id);
@@ -150,6 +163,7 @@ async function processJob() {
     }
     return true;
   } finally {
+    clearInterval(leaseHeartbeat);
     const latestJob = await getJobForScanRun(run.id);
     if (latestJob?.status === "cancelled") {
       await setScanRunStatus(run.id, "cancelled", {

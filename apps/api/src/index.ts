@@ -6,6 +6,7 @@ import type {
   ExportClassification,
   IgnoreRuleType,
   LinkClassification,
+  ScanDiffChangeType,
   ScanLinkOccurrenceRow,
 } from "@scanlark/db";
 import {
@@ -100,7 +101,7 @@ const EXPORT_SORT_OPTIONS = new Set([
   "status_desc",
   "recent",
 ]);
-const DIFF_CHANGE_TYPES = new Set([
+const DIFF_CHANGE_TYPES = new Set<ScanDiffChangeType>([
   "new_issue",
   "fixed",
   "changed",
@@ -307,13 +308,15 @@ function parseBooleanParam(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
-function parseDiffChangeTypes(value: unknown): string[] | null {
+function parseDiffChangeTypes(value: unknown): ScanDiffChangeType[] | null {
   if (typeof value !== "string" || value.trim().length === 0) return null;
   const parts = value
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
-  const filtered = parts.filter((part) => DIFF_CHANGE_TYPES.has(part));
+  const filtered = parts.filter((part): part is ScanDiffChangeType =>
+    DIFF_CHANGE_TYPES.has(part as ScanDiffChangeType),
+  );
   return filtered.length > 0 ? filtered : [];
 }
 
@@ -1926,6 +1929,9 @@ app.get("/scan-runs/:scanRunId/diff", async (req, res) => {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
     const diff = await getDiffBetweenRunsForUser(userId, scanRunId, compareTo);
+    if (!diff) {
+      return sendNotFound(res);
+    }
     const serializeRow = (row: { last_seen_at: Date }) => ({
       ...row,
       last_seen_at:

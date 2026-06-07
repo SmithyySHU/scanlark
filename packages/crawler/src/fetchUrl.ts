@@ -1,8 +1,11 @@
-import { HTML_FETCH_TIMEOUT_MS, HTML_USER_AGENT } from "./limits";
+import {
+  HTML_FETCH_TIMEOUT_MS,
+  MAX_REDIRECTS,
+  SCANLARK_USER_AGENT,
+} from "./limits";
 import { lookup } from "dns/promises";
 
 const ALLOWED_PROTOCOLS = new Set<string>(["http:", "https:"]);
-const MAX_REDIRECTS = 5;
 const LOG_LIMIT_PER_HOST = 3;
 const loggedErrorsByHost = new Map<string, number>();
 
@@ -83,7 +86,7 @@ async function ensureSafeDestination(hostname: string): Promise<void> {
 
 const ALLOWED_PORTS = new Set<number>([80, 443]); // http/https defaults
 
-async function validateCrawlTarget(rawUrl: string): Promise<URL> {
+export async function validateCrawlTarget(rawUrl: string): Promise<URL> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -133,10 +136,8 @@ export default async function fetchUrl(
   rawUrl: string,
   options?: FetchUrlOptions,
 ): Promise<string | null> {
-  const initialUrl = (await validateCrawlTarget(rawUrl)).toString();
-
   const timeoutMs = options?.timeoutMs ?? HTML_FETCH_TIMEOUT_MS;
-  const userAgent = options?.userAgent ?? HTML_USER_AGENT;
+  const userAgent = options?.userAgent ?? SCANLARK_USER_AGENT;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -151,6 +152,7 @@ export default async function fetchUrl(
   }
 
   try {
+    const initialUrl = (await validateCrawlTarget(rawUrl)).toString();
     let currentUrl = initialUrl;
     let res: Response | null = null;
 

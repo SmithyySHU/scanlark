@@ -368,7 +368,7 @@ export async function getFixQueueForRuns(args: {
       ${baseCte},
       filtered AS (
         SELECT
-          link_url,
+          j.link_url,
           CASE
             WHEN $5::boolean = true AND change_type = 'new_issue' AND cur_is_issue THEN 'new_issue'
             WHEN $6::boolean = true AND unchanged AND cur_is_issue THEN 'outstanding_issue'
@@ -426,7 +426,7 @@ export async function getFixQueueForRuns(args: {
       ${baseCte},
       filtered AS (
         SELECT
-          link_url,
+          j.link_url,
           CASE
             WHEN $5::boolean = true AND change_type = 'new_issue' AND cur_is_issue THEN 'new_issue'
             WHEN $6::boolean = true AND unchanged AND cur_is_issue THEN 'outstanding_issue'

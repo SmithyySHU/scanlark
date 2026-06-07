@@ -1,10 +1,25 @@
+import { validateCrawlTarget } from "./fetchUrl";
+import {
+  MAX_REDIRECTS,
+  REQUEST_TIMEOUT_MS,
+  SCANLARK_USER_AGENT,
+} from "./limits";
+
 export type LinkCheckResult =
-  | { ok: true; status: number; headers: Record<string, string> }
+  | {
+      ok: true;
+      status: number;
+      headers: Record<string, string>;
+      finalUrl: string;
+      redirectCount: number;
+    }
   | {
       ok: false;
       status: number | null;
       error: string;
       headers?: Record<string, string>;
+      finalUrl?: string;
+      redirectCount?: number;
     };
 
 function normalizeHeaders(headers: Headers): Record<string, string> {
@@ -36,6 +51,14 @@ function classifyFetchError(
   if (code && code.startsWith("ERR_TLS")) return "tls";
   if (message.includes("tls") || message.includes("ssl")) return "tls";
   if (
+    message.includes("refusing to crawl") ||
+    message.includes("disallowed protocol") ||
+    message.includes("disallowed port") ||
+    message.includes("invalid url")
+  ) {
+    return "unsafe_destination";
+  }
+  if (
     code === "ECONNRESET" ||
     code === "ECONNREFUSED" ||
     code === "EPIPE" ||
@@ -50,9 +73,8 @@ export default async function validateLink(
   url: string,
   options?: ValidateLinkOptions,
 ): Promise<LinkCheckResult> {
-  const timeoutMs = options?.timeoutMs ?? 12_000;
-  const userAgent =
-    options?.userAgent ?? "ScanlarkBot/0.1 (+https://scanlark.dev)";
+  const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const userAgent = options?.userAgent ?? SCANLARK_USER_AGENT;
 
   const controller = new AbortController();
   let timedOut = false;
@@ -77,36 +99,92 @@ export default async function validateLink(
     }
   }
 
-  try {
-    // HEAD first (cheaper). Some servers reject HEAD → fallback to GET.
-    let res = await fetch(url, {
-      method: "HEAD",
-      signal: controller.signal,
-      redirect: "follow",
-      headers: { "user-agent": userAgent },
-    });
+  const fetchWithRedirects = async (
+    method: "HEAD" | "GET",
+    rawUrl: string,
+  ) => {
+    let currentUrl = (await validateCrawlTarget(rawUrl)).toString();
+    let redirectCount = 0;
 
-    if (res.status === 405 || res.status === 403) {
-      // 405: method not allowed, 403: sometimes blocks HEAD specifically
-      res = await fetch(url, {
-        method: "GET",
+    for (let i = 0; i <= MAX_REDIRECTS; i++) {
+      const res = await fetch(currentUrl, {
+        method,
         signal: controller.signal,
-        redirect: "follow",
-        headers: {
-          "user-agent": userAgent,
-          accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-        },
+        redirect: "manual",
+        headers:
+          method === "HEAD"
+            ? { "user-agent": userAgent }
+            : {
+                "user-agent": userAgent,
+                accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+              },
       });
+
+      if (res.status < 300 || res.status >= 400) {
+        return { res, finalUrl: currentUrl, redirectCount };
+      }
+
+      const location = res.headers.get("location");
+      if (!location) {
+        return { res, finalUrl: currentUrl, redirectCount };
+      }
+
+      if (i === MAX_REDIRECTS) {
+        return {
+          res: null,
+          finalUrl: currentUrl,
+          redirectCount,
+          error: "too_many_redirects",
+        };
+      }
+
+      const nextUrl = new URL(location, currentUrl).toString();
+      currentUrl = (await validateCrawlTarget(nextUrl)).toString();
+      redirectCount++;
     }
 
-    const normalizedHeaders = normalizeHeaders(res.headers);
-    return res.ok
-      ? { ok: true, status: res.status, headers: normalizedHeaders }
+    return {
+      res: null,
+      finalUrl: currentUrl,
+      redirectCount,
+      error: "too_many_redirects",
+    };
+  };
+
+  try {
+    // HEAD first (cheaper). Some servers reject HEAD, so fallback to GET.
+    let checked = await fetchWithRedirects("HEAD", url);
+
+    if (checked.res?.status === 405 || checked.res?.status === 403) {
+      checked = await fetchWithRedirects("GET", url);
+    }
+
+    if (!checked.res) {
+      return {
+        ok: false,
+        status: null,
+        error: checked.error ?? "request_failed",
+        finalUrl: checked.finalUrl,
+        redirectCount: checked.redirectCount,
+      };
+    }
+
+    const normalizedHeaders = normalizeHeaders(checked.res.headers);
+    return checked.res.ok
+      ? {
+          ok: true,
+          status: checked.res.status,
+          headers: normalizedHeaders,
+          finalUrl: checked.finalUrl,
+          redirectCount: checked.redirectCount,
+        }
       : {
           ok: false,
-          status: res.status,
-          error: `HTTP ${res.status}`,
+          status: checked.res.status,
+          error: `HTTP ${checked.res.status}`,
           headers: normalizedHeaders,
+          finalUrl: checked.finalUrl,
+          redirectCount: checked.redirectCount,
         };
   } catch (err: unknown) {
     const error = err instanceof Error ? err : null;

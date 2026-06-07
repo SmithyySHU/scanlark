@@ -40,6 +40,16 @@ export function normaliseLink(
 
     // Remove fragments so the same URL doesn't appear as multiple variants
     url.hash = "";
+    url.hostname = url.hostname.toLowerCase();
+    if (
+      (url.protocol === "https:" && url.port === "443") ||
+      (url.protocol === "http:" && url.port === "80")
+    ) {
+      url.port = "";
+    }
+    if (url.pathname.length > 1 && url.pathname.endsWith("/") && !url.search) {
+      url.pathname = url.pathname.replace(/\/+$/, "");
+    }
 
     return { kind: "http", url: url.toString() };
   } catch {

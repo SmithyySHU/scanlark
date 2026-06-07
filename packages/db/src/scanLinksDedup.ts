@@ -275,9 +275,9 @@ export async function getScanLinksForRunForUser(
   links: ScanLink[];
   countReturned: number;
   totalMatching: number;
-} | null> {
+}> {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return { links: [], countReturned: 0, totalMatching: 0 };
   return getScanLinksForRun(scanRunId, options);
 }
 
@@ -379,10 +379,10 @@ export async function getScanLinksSummaryForUser(
     classification: LinkClassification;
     status_code: number | null;
     count: number;
-  }> | null
+  }>
 > {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return [];
   return getScanLinksSummary(scanRunId);
 }
 
@@ -432,9 +432,9 @@ export async function getScanLinksForExportForUser(
   scanRunId: string,
   classification: ExportClassification = "all",
   limit = 5000,
-): Promise<ScanLinkExportRow[] | null> {
+): Promise<ScanLinkExportRow[]> {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return [];
   return getScanLinksForExport(scanRunId, classification, limit);
 }
 
@@ -572,9 +572,9 @@ export async function getScanLinksForExportFilteredForUser(
   userId: string,
   scanRunId: string,
   options: ExportFilterOptions,
-): Promise<ScanLinkExportRow[] | null> {
+): Promise<ScanLinkExportRow[]> {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return [];
   return getScanLinksForExportFiltered(scanRunId, options);
 }
 
@@ -635,9 +635,9 @@ export async function getTopLinksByClassificationForUser(
   scanRunId: string,
   classification: LinkClassification,
   limit: number,
-): Promise<ScanLinkExportRow[] | null> {
+): Promise<ScanLinkExportRow[]> {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return [];
   return getTopLinksByClassification(scanRunId, classification, limit);
 }
 
@@ -663,9 +663,9 @@ export async function getTimeoutCountForRun(
 export async function getTimeoutCountForRunForUser(
   userId: string,
   scanRunId: string,
-): Promise<number | null> {
+): Promise<number> {
   const owned = await isScanRunOwnedByUser(userId, scanRunId);
-  if (!owned) return null;
+  if (!owned) return 0;
   return getTimeoutCountForRun(scanRunId);
 }
 
@@ -891,8 +891,15 @@ export async function getOccurrencesForScanLinkForUser(
   userId: string,
   scanLinkId: string,
   options?: { limit?: number; offset?: number },
-): Promise<PaginatedOccurrences | null> {
+): Promise<PaginatedOccurrences> {
   const owned = await getScanLinkOwnership(userId, scanLinkId);
-  if (!owned) return null;
+  if (!owned) {
+    return {
+      scanLinkId,
+      countReturned: 0,
+      totalMatching: 0,
+      occurrences: [],
+    };
+  }
   return getOccurrencesForScanLink(scanLinkId, options);
 }

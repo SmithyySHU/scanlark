@@ -99,6 +99,27 @@ export async function completeScanJob(
   return res.rows[0] ?? null;
 }
 
+export async function extendScanJobLease(
+  jobId: string,
+  params: {
+    leaseSeconds: number;
+  },
+): Promise<ScanJobRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<ScanJobRow>(
+    `
+      UPDATE scan_jobs
+      SET lock_expires_at = NOW() + ($2 * INTERVAL '1 second'),
+          updated_at = NOW()
+      WHERE id = $1
+        AND status = 'running'
+      RETURNING *
+    `,
+    [jobId, params.leaseSeconds],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function failScanJob(
   jobId: string,
   error: string,

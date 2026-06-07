@@ -11,9 +11,18 @@ async function main(): Promise<void> {
   console.log(`Starting scan for site ${siteId}`);
   console.log(`Start URL: ${startUrl}`);
 
-  await runScanForSite(siteId, startUrl);
-
-  console.log("Scan completed.");
+  try {
+    const summary = await runScanForSite(siteId, startUrl);
+    console.log("Scan completed.");
+    console.log(`Summary: ${summary.totalLinks} links, ${summary.checkedLinks} checked, ${summary.brokenLinks} broken, ${summary.ignoredLinks} ignored`);
+  } catch (error) {
+    console.error("Scan failed:", error);
+    process.exit(1);
+  } finally {
+    // Ensure all pending handles are cleared so process can exit
+    // This handles any lingering timers or async operations
+    process.exit(0);
+  }
 }
 
 await main();
