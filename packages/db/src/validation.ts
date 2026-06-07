@@ -120,10 +120,7 @@ function isPotentiallyUnsafeRegex(pattern: string) {
       depth = Math.max(0, depth - 1);
       const next = pattern[index + 1];
       const groupIsRepeated =
-        next === "*" ||
-        next === "+" ||
-        next === "?" ||
-        next === "{";
+        next === "*" || next === "+" || next === "?" || next === "{";
       if (groupUsedQuantifier && groupIsRepeated) {
         return true;
       }

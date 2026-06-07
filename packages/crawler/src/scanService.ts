@@ -603,7 +603,12 @@ export async function runScanForSite(
   const insertOccurrence = async (sourcePage: string, linkUrl: string) => {
     if (cancelled) return;
     try {
-      const preRule = findMatchingIgnoreRule(siteId, linkUrl, null, ignoreRules);
+      const preRule = findMatchingIgnoreRule(
+        siteId,
+        linkUrl,
+        null,
+        ignoreRules,
+      );
       if (preRule && preRule.rule_type !== "status_code") {
         const ignored = await upsertIgnoredLink({
           scanRunId: actualScanRunId,

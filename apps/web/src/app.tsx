@@ -4441,8 +4441,7 @@ const App: React.FC = () => {
       const canUseResults =
         run.id === selectedRunIdRef.current && results.length > 0;
       const canUseDiagnostics =
-        run.id === selectedRunIdRef.current &&
-        currentPhase0Diagnostics != null;
+        run.id === selectedRunIdRef.current && currentPhase0Diagnostics != null;
       const blockedCount = canUseDiagnostics
         ? phase0BlockedCount
         : canUseResults
@@ -8146,15 +8145,20 @@ const App: React.FC = () => {
                             color: "var(--muted)",
                           }}
                         >
-                          <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                          <span
+                            style={{ fontWeight: 600, color: "var(--text)" }}
+                          >
                             Phase 0 diagnostics
                           </span>
                           <span>
                             Status {selectedRun.status.replace("_", " ")}
                           </span>
-                          <span>Started {formatDate(selectedRun.started_at)}</span>
                           <span>
-                            Finished {formatDate(selectedRun.finished_at ?? null)}
+                            Started {formatDate(selectedRun.started_at)}
+                          </span>
+                          <span>
+                            Finished{" "}
+                            {formatDate(selectedRun.finished_at ?? null)}
                           </span>
                           <span>
                             Duration{" "}
@@ -8168,17 +8172,16 @@ const App: React.FC = () => {
                             Links checked {selectedRun.checked_links}/
                             {selectedRun.total_links}
                           </span>
-                          <span>
-                            Broken{" "}
-                            {phase0BrokenCount}
-                          </span>
+                          <span>Broken {phase0BrokenCount}</span>
                           <span>Blocked {phase0BlockedCount}</span>
                           <span>No response {phase0NoResponseCount}</span>
                           <span>
                             Ignored/skipped {phase0IgnoredSkippedCount}
                           </span>
                           <span>Limits hit not tracked</span>
-                          {phase0DiagnosticsLoading && <span>Refreshing...</span>}
+                          {phase0DiagnosticsLoading && (
+                            <span>Refreshing...</span>
+                          )}
                           {currentPhase0Diagnostics?.loadedAt && (
                             <span>
                               Diagnostics{" "}

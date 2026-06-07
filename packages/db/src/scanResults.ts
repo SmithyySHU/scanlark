@@ -140,8 +140,7 @@ export async function getResultsForScanRunForUser(
   const offset = options?.offset ?? 0;
   const classification = options?.classification;
 
-  let whereClause =
-    "WHERE r.scan_run_id = $1 AND s.user_id = $2";
+  let whereClause = "WHERE r.scan_run_id = $1 AND s.user_id = $2";
   const params: Array<string | number> = [scanRunId, userId];
 
   if (classification) {

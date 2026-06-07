@@ -99,10 +99,7 @@ export default async function validateLink(
     }
   }
 
-  const fetchWithRedirects = async (
-    method: "HEAD" | "GET",
-    rawUrl: string,
-  ) => {
+  const fetchWithRedirects = async (method: "HEAD" | "GET", rawUrl: string) => {
     let currentUrl = (await validateCrawlTarget(rawUrl)).toString();
     let redirectCount = 0;
 

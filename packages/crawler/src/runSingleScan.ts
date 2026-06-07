@@ -14,7 +14,9 @@ async function main(): Promise<void> {
   try {
     const summary = await runScanForSite(siteId, startUrl);
     console.log("Scan completed.");
-    console.log(`Summary: ${summary.totalLinks} links, ${summary.checkedLinks} checked, ${summary.brokenLinks} broken, ${summary.ignoredLinks} ignored`);
+    console.log(
+      `Summary: ${summary.totalLinks} links, ${summary.checkedLinks} checked, ${summary.brokenLinks} broken, ${summary.ignoredLinks} ignored`,
+    );
   } catch (error) {
     console.error("Scan failed:", error);
     process.exit(1);

@@ -18,39 +18,44 @@ const authLimiter = rateLimit({
 });
 
 export function mountAuthRoutes(app: express.Application) {
-  app.post("/auth/register", authLimiter, async (req: Request, res: Response) => {
-    const emailRaw = typeof req.body?.email === "string" ? req.body.email : "";
-    const password =
-      typeof req.body?.password === "string" ? req.body.password : "";
-    const email = normalizeEmail(emailRaw);
+  app.post(
+    "/auth/register",
+    authLimiter,
+    async (req: Request, res: Response) => {
+      const emailRaw =
+        typeof req.body?.email === "string" ? req.body.email : "";
+      const password =
+        typeof req.body?.password === "string" ? req.body.password : "";
+      const email = normalizeEmail(emailRaw);
 
-    if (!email || !isValidEmailAddress(email)) {
-      return res
-        .status(400)
-        .json({ error: "invalid_email", message: "Email is invalid" });
-    }
-    if (!password || password.length < 8) {
-      return res.status(400).json({
-        error: "invalid_password",
-        message: "Password must be at least 8 characters",
-      });
-    }
-
-    try {
-      const user = await createUser(email, password);
-      await setSession(req, user.id);
-      return res.status(201).json({ id: user.id, email: user.email });
-    } catch (err: unknown) {
-      if (err instanceof Error && err.message === "email_exists") {
-        return res.status(409).json({
-          error: "email_exists",
-          message: "Email already registered",
+      if (!email || !isValidEmailAddress(email)) {
+        return res
+          .status(400)
+          .json({ error: "invalid_email", message: "Email is invalid" });
+      }
+      if (!password || password.length < 8) {
+        return res.status(400).json({
+          error: "invalid_password",
+          message: "Password must be at least 8 characters",
         });
       }
-      console.error("Register failed", err);
-      return res.status(500).json({ error: "register_failed" });
-    }
-  });
+
+      try {
+        const user = await createUser(email, password);
+        await setSession(req, user.id);
+        return res.status(201).json({ id: user.id, email: user.email });
+      } catch (err: unknown) {
+        if (err instanceof Error && err.message === "email_exists") {
+          return res.status(409).json({
+            error: "email_exists",
+            message: "Email already registered",
+          });
+        }
+        console.error("Register failed", err);
+        return res.status(500).json({ error: "register_failed" });
+      }
+    },
+  );
 
   app.post("/auth/login", authLimiter, async (req: Request, res: Response) => {
     const emailRaw = typeof req.body?.email === "string" ? req.body.email : "";
