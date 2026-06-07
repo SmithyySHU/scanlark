@@ -144,10 +144,5 @@ export function validateSafeRegexPattern(pattern: string): string | null {
   if (isPotentiallyUnsafeRegex(pattern)) {
     return "Regex pattern uses unsupported or unsafe constructs";
   }
-  try {
-    new RegExp(pattern);
-    return null;
-  } catch (err: unknown) {
-    return err instanceof Error ? err.message : "Invalid regex pattern";
-  }
+  return null;
 }
