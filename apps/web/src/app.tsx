@@ -1,7 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
-type ScanStatus = "in_progress" | "completed" | "failed" | "cancelled";
+type ScanStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 type LinkClassification = "ok" | "broken" | "blocked" | "no_response";
 type StatusGroup = "all" | "no_response" | "http_error";
 type ThemeMode = "dark" | "light";
@@ -19,12 +35,33 @@ type SortOption =
   | "status_asc"
   | "status_desc"
   | "recent";
+type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
+type LinkNoteStatus = "open" | "snoozed" | "resolved";
+type FixQueueStatusFilter = LinkNoteStatus | "all";
+type FixQueueView = "results" | "changes" | "fix_queue";
 
 interface Site {
   id: string;
   user_id: string;
   url: string;
   created_at: string;
+  schedule_enabled: boolean;
+  schedule_frequency: "daily" | "weekly";
+  schedule_time_utc: string;
+  schedule_day_of_week: number | null;
+  next_scheduled_at: string | null;
+  last_scheduled_at: string | null;
+  notify_enabled: boolean;
+  notify_email: string | null;
+  notify_on: NotifyOnOption;
+  notify_include_csv: boolean;
+  last_notified_scan_run_id: string | null;
+}
+
+interface AuthUser {
+  id: string;
+  email: string;
+  name?: string;
 }
 
 interface SitesResponse {
@@ -40,6 +77,7 @@ interface ScanRunSummary {
   started_at: string;
   finished_at: string | null;
   updated_at?: string | null;
+  error_message?: string | null;
   start_url: string;
   total_links: number;
   checked_links: number;
@@ -120,6 +158,62 @@ interface IgnoreRule {
   created_at: string;
 }
 
+interface LinkNote {
+  id: string;
+  user_id: string;
+  site_id: string;
+  link_url: string;
+  note: string;
+  status: LinkNoteStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+interface LinkNotesResponse {
+  siteId: string;
+  count: number;
+  notes: LinkNote[];
+}
+
+interface FixQueueItem {
+  link_url: string;
+  change_type: "new_issue" | "outstanding_issue";
+  classification: LinkClassification;
+  status_code: number | null;
+  error_message: string | null;
+  source_pages: string[];
+  ignored: boolean;
+  ignore_reason: string | null;
+  note: {
+    note: string;
+    status: LinkNoteStatus;
+    updated_at: string;
+  } | null;
+}
+
+interface FixQueueResponse {
+  siteId: string;
+  currentRun: {
+    id: string;
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+  baselineRun: {
+    id: string;
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+  summary: {
+    newIssues: number;
+    outstandingIssues: number;
+    totalQueueItems: number;
+    withNotesOpen: number;
+    snoozed: number;
+    resolved: number;
+  };
+  items: FixQueueItem[];
+}
+
 interface ScanLinksResponse {
   scanRunId: string;
   classification?: LinkClassification;
@@ -128,6 +222,21 @@ interface ScanLinksResponse {
   countReturned: number;
   totalMatching: number;
   links: ScanLink[];
+}
+
+interface ScanLinksSummaryRow {
+  classification: LinkClassification;
+  status_code: number | null;
+  count: number;
+}
+
+interface ScanLinksSummaryResponse {
+  scanRunId: string;
+  summary: ScanLinksSummaryRow[];
+}
+
+interface RecheckScanLinkResponse {
+  scanLink: ScanLink;
 }
 
 interface ReportLinkRow {
@@ -172,6 +281,17 @@ interface IgnoredLinksResponse {
   links: IgnoredLinkRow[];
 }
 
+interface Phase0Diagnostics {
+  scanRunId: string;
+  ok: number | null;
+  broken: number | null;
+  blocked: number | null;
+  noResponse: number | null;
+  ignoredSkipped: number | null;
+  error: string | null;
+  loadedAt: number | null;
+}
+
 interface IgnoredOccurrencesResponse {
   scanRunId: string;
   ignoredLinkId: string;
@@ -180,41 +300,105 @@ interface IgnoredOccurrencesResponse {
   occurrences: ScanLinkOccurrence[];
 }
 
-interface DiffLinkRow {
-  link_url: string;
+type ScanDiffChangeType =
+  | "new_issue"
+  | "fixed"
+  | "changed"
+  | "unchanged"
+  | "added"
+  | "removed";
+
+interface ScanDiffSide {
   classification: LinkClassification;
   status_code: number | null;
   error_message: string | null;
-  occurrence_count: number;
-  last_seen_at: string;
+  source_pages: string[];
 }
 
-interface DiffResponse {
-  scanRunId: string;
-  compareTo: string;
-  diff: {
-    added: DiffLinkRow[];
-    removed: DiffLinkRow[];
-    changed: Array<{ before: DiffLinkRow; after: DiffLinkRow }>;
-    unchangedCount: number;
-    totals: {
-      a: { broken: number; blocked: number; ok: number; no_response: number };
-      b: { broken: number; blocked: number; ok: number; no_response: number };
-    };
-  };
+interface ScanDiffItem {
+  link_url: string;
+  change_type: ScanDiffChangeType;
+  current: ScanDiffSide | null;
+  baseline: ScanDiffSide | null;
 }
+
+interface ScanDiffRun {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+interface ScanDiffResponse {
+  siteId: string;
+  currentRun: ScanDiffRun;
+  baselineRun: ScanDiffRun | null;
+  summary: {
+    newIssues: number;
+    fixedIssues: number;
+    changed: number;
+    outstandingIssues: number;
+    outstandingOk: number;
+    outstandingTotal: number;
+    removed: number;
+    added: number;
+  };
+  meta: {
+    includeUnchanged: boolean;
+    unchangedOnly: boolean;
+    unchangedScope: "issues" | "ok" | "all";
+    includeIgnored?: boolean;
+    unchangedLimit: number;
+    unchangedOffset: number;
+    unchangedReturned: number;
+    changesReturned: number;
+  };
+  items: ScanDiffItem[];
+}
+
+type ScanEventPayload = {
+  type: "scan_started" | "scan_progress" | "scan_completed" | "scan_failed";
+  user_id: string;
+  site_id: string;
+  scan_run_id: string;
+  status: ScanStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+  start_url?: string | null;
+  total_links: number;
+  checked_links: number;
+  broken_links: number;
+  error_message: string | null;
+};
+
+type ScheduleEventPayload = {
+  type: "schedule_updated";
+  user_id: string;
+  site_id: string;
+  schedule_enabled: boolean;
+  schedule_frequency: "daily" | "weekly";
+  schedule_time_utc: string;
+  schedule_day_of_week: number | null;
+  next_scheduled_at: string | null;
+  last_scheduled_at: string | null;
+};
+
+type SsePayload = ScanEventPayload | ScheduleEventPayload;
 
 const API_BASE = "http://localhost:3001";
-const POLL_MS = 1500;
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
-const DIFF_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const SAMPLE_SITE_URL = "https://example.com";
+const SAMPLE_SITE_NAME = "Sample site";
+const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
+const SITE_NAME_STORAGE_PREFIX = "site_names:";
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
-  return status === "in_progress";
+  return status === "in_progress" || status === "queued";
 }
 
 function formatDate(value: string | null) {
@@ -250,6 +434,123 @@ function formatRelative(value: string | null | undefined) {
   return `${diffHr}h ago`;
 }
 
+function normalizeTimeInput(value: string | null | undefined) {
+  if (!value) return "02:00";
+  if (value.length >= 5) return value.slice(0, 5);
+  return value;
+}
+
+function getLocalTimeZone() {
+  if (typeof Intl === "undefined") return "local";
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+}
+
+function formatUtcDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function formatLocalDateTime(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function parseTimeUtc(timeUtc: string) {
+  const [hours, minutes] = timeUtc.split(":").map((value) => Number(value));
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  return { hours, minutes };
+}
+
+function buildUtcScheduleAnchor(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  const parsed = parseTimeUtc(timeUtc);
+  if (!parsed) return null;
+  const now = new Date();
+  const base = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      parsed.hours,
+      parsed.minutes,
+      0,
+      0,
+    ),
+  );
+  if (frequency === "daily") {
+    if (base.getTime() < now.getTime()) {
+      base.setUTCDate(base.getUTCDate() + 1);
+    }
+    return base;
+  }
+  const targetDay = dayOfWeek ?? 1;
+  const diff = (targetDay - base.getUTCDay() + 7) % 7;
+  base.setUTCDate(base.getUTCDate() + diff);
+  if (base.getTime() < now.getTime()) {
+    base.setUTCDate(base.getUTCDate() + 7);
+  }
+  return base;
+}
+
+function formatScheduleUtcLabel(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  if (frequency === "weekly") {
+    const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
+    return `${dayLabel} ${timeUtc}`;
+  }
+  return timeUtc;
+}
+
+function formatScheduleLocalLabel(
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+) {
+  const anchor = buildUtcScheduleAnchor(frequency, timeUtc, dayOfWeek);
+  if (!anchor) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(anchor);
+}
+
+function runStatusTone(status: string | null | undefined) {
+  if (!status) return "neutral";
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "cancelled") return "danger";
+  if (status === "queued" || status === "in_progress" || status === "running")
+    return "warning";
+  return "neutral";
+}
+
 function formatDuration(
   start: string | null | undefined,
   end: string | null | undefined,
@@ -265,6 +566,81 @@ function formatDuration(
   const seconds = diffSec % 60;
   if (minutes === 0) return `${seconds}s`;
   return `${minutes}m ${seconds}s`;
+}
+
+function formatScheduleSummary(
+  isEnabled: boolean,
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+  nextScheduledAt: string | null,
+) {
+  if (!isEnabled) return "Auto-scan: Off";
+  const dayLabel =
+    frequency === "weekly"
+      ? (WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon")
+      : "Daily";
+  const nextLabel = formatDate(nextScheduledAt);
+  const localTimeZone = getLocalTimeZone();
+  const localLabel = formatScheduleLocalLabel(frequency, timeUtc, dayOfWeek);
+  const localSuffix =
+    localTimeZone && localTimeZone !== "UTC"
+      ? ` / ${localLabel} (${localTimeZone})`
+      : "";
+  return `Auto-scan: ${frequency === "weekly" ? "Weekly" : "Daily"} ${
+    frequency === "weekly" ? dayLabel : ""
+  } ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`.replace("  ", " ");
+}
+
+function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
+  if (!isEnabled || notifyOn === "never") return "Alerts: Disabled";
+  if (notifyOn === "new_issues_only") return "Alerts: Enabled (New issues)";
+  if (notifyOn === "issues_exist") return "Alerts: Enabled (Issues exist)";
+  return "Alerts: Enabled (Always)";
+}
+
+function normalizeNotifyOn(value: string): NotifyOnOption {
+  if (value === "issues") return "issues_exist";
+  if (value === "new_issues_only") return "new_issues_only";
+  if (value === "issues_exist") return "issues_exist";
+  if (value === "always") return "always";
+  return "never";
+}
+
+function normalizeSitesNotifyOn(sites: Site[]): Site[] {
+  return sites.map((site) => ({
+    ...site,
+    notify_on: normalizeNotifyOn(site.notify_on),
+  }));
+}
+
+function normalizeSiteNotifyOn(site: Site): Site {
+  return {
+    ...site,
+    notify_on: normalizeNotifyOn(site.notify_on),
+  };
+}
+
+function getStorageKey(prefix: string, userId: string) {
+  return `${prefix}${userId}`;
+}
+
+function loadStorageMap(key: string) {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch {}
+  return {};
+}
+
+function saveStorageMap(key: string, value: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
 }
 
 function getReportScanRunIdFromLocation() {
@@ -297,17 +673,106 @@ function statusTooltip(status: number | null) {
   return STATUS_TOOLTIPS[status] ?? "";
 }
 
-function statusCodeGroup(status: number | null) {
-  if (status == null) return "unknown";
-  if (status >= 500) return "5xx";
-  if (status === 404 || status === 410) return "404";
-  if (status === 401 || status === 403 || status === 429) return "401/403/429";
+function statusCodeGroup(
+  row: Pick<ScanLink, "status_code" | "classification">,
+) {
+  if (row.status_code == null) return "no_response";
+  if (row.status_code >= 500) return "5xx";
+  if (row.status_code === 404 || row.status_code === 410) return "404";
+  if (
+    row.status_code === 401 ||
+    row.status_code === 403 ||
+    row.status_code === 429
+  )
+    return "401/403/429";
   return "other";
 }
 
 function formatClassification(value: LinkClassification) {
-  if (value === "no_response") return "Timed out";
+  if (value === "no_response") return "No response";
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function changeTypeLabel(value: ScanDiffChangeType) {
+  if (value === "new_issue") return "New issue";
+  if (value === "fixed") return "Fixed";
+  if (value === "changed") return "Changed";
+  if (value === "unchanged") return "Unchanged";
+  if (value === "added") return "Added";
+  return "Removed";
+}
+
+function changeTypeTone(value: ScanDiffChangeType | "outstanding_issue") {
+  if (value === "new_issue") {
+    return { bg: "var(--danger)", text: "white" };
+  }
+  if (value === "outstanding_issue") {
+    return { bg: "var(--warning)", text: "var(--text)" };
+  }
+  if (value === "fixed") {
+    return { bg: "var(--success)", text: "white" };
+  }
+  if (value === "changed") {
+    return { bg: "var(--warning)", text: "var(--text)" };
+  }
+  if (value === "unchanged") {
+    return { bg: "var(--panel-elev)", text: "var(--muted)" };
+  }
+  if (value === "added") {
+    return { bg: "var(--accent)", text: "white" };
+  }
+  return { bg: "var(--panel-elev)", text: "var(--text)" };
+}
+
+function getWhyDetails(row: ScanLink) {
+  const status = row.status_code;
+  if (status === 401 || status === 403 || status === 429) {
+    return {
+      title: "Why this happened",
+      body: [
+        "Access controls or bot protection blocked the request.",
+        "Try with authenticated headers or a different User-Agent.",
+        "Rate limiting can clear after a cooldown window.",
+      ],
+    };
+  }
+  if (status === 404 || status === 410) {
+    return {
+      title: "Why this happened",
+      body: [
+        "The resource no longer exists or moved.",
+        "Update the link to the new destination or remove it.",
+        "Consider adding a redirect if this is your content.",
+      ],
+    };
+  }
+  if (status == null || row.classification === "no_response") {
+    return {
+      title: "Why this happened",
+      body: [
+        "The server did not respond in time or failed the request.",
+        "DNS, TLS/cert, firewall, or network issues can cause timeouts.",
+        "Retry later or from a different region to confirm.",
+      ],
+    };
+  }
+  if (status >= 500) {
+    return {
+      title: "Why this happened",
+      body: [
+        "The server returned an error response.",
+        "Check server logs or retry to confirm this is transient.",
+        "Consider alerting the owner if it persists.",
+      ],
+    };
+  }
+  return {
+    title: "Why this happened",
+    body: [
+      "The response indicates this link needs attention.",
+      "Review the source page for context and intended behavior.",
+    ],
+  };
 }
 
 function getSystemTheme(): ThemeMode {
@@ -359,12 +824,27 @@ function buildScanLinksUrl(
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/links?${params.toString()}`;
 }
 
+function getFilenameFromDisposition(header: string | null) {
+  if (!header) return null;
+  const match = header.match(/filename="([^"]+)"/i);
+  return match?.[1] ?? null;
+}
+
 function buildIgnoredLinksUrl(
   runId: string,
   offset: number,
   limit = LINKS_PAGE_SIZE,
 ) {
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/ignored?limit=${limit}&offset=${offset}`;
+}
+
+function getSummaryCount(
+  rows: ScanLinksSummaryRow[],
+  classification: LinkClassification,
+) {
+  return rows
+    .filter((row) => row.classification === classification)
+    .reduce((sum, row) => sum + row.count, 0);
 }
 
 type LoadHistoryOpts = {
@@ -374,23 +854,45 @@ type LoadHistoryOpts = {
 
 const App: React.FC = () => {
   const scansRef = useRef<HTMLDivElement | null>(null);
+  const queryClient = useQueryClient();
 
-  const pollHistoryRef = useRef<number | null>(null);
-  const pollRunRef = useRef<number | null>(null);
   const sseRef = useRef<EventSource | null>(null);
-  const sseRunIdRef = useRef<string | null>(null);
   const sseRetryTimerRef = useRef<number | null>(null);
-  const copyTimersRef = useRef<Map<string, number>>(new Map());
+  const sseFallbackTimerRef = useRef<number | null>(null);
+  const sseBackoffRef = useRef(1000);
   const runStatusRef = useRef<Map<string, ScanStatus>>(new Map());
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
   const hamburgerRef = useRef<HTMLButtonElement | null>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
+  const detailsDrawerRef = useRef<HTMLDivElement | null>(null);
+  const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
   const progressDismissRef = useRef<number | null>(null);
   const lastRunStatusRef = useRef<{
     id: string | null;
     status: ScanStatus | null;
   }>({ id: null, status: null });
+
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authWorking, setAuthWorking] = useState(false);
+
+  const apiFetch = useCallback(
+    async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const res = await fetch(input, { ...init, credentials: "include" });
+      if (res.status === 401) {
+        setAuthUser(null);
+      }
+      return res;
+    },
+    [setAuthUser],
+  );
 
   const selectedSiteIdRef = useRef<string | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
@@ -400,6 +902,14 @@ const App: React.FC = () => {
   const [sitesLoading, setSitesLoading] = useState(false);
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
+  const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(0);
+  const [onboardingSiteUrl, setOnboardingSiteUrl] = useState("");
+  const [onboardingSiteName, setOnboardingSiteName] = useState("");
+  const [onboardingWorking, setOnboardingWorking] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const [onboardingScanRequested, setOnboardingScanRequested] = useState(false);
 
   const [history, setHistory] = useState<ScanRunSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -444,6 +954,10 @@ const App: React.FC = () => {
   const [ignoredOccError, setIgnoredOccError] = useState<
     Record<string, string | null>
   >({});
+  const [phase0Diagnostics, setPhase0Diagnostics] =
+    useState<Phase0Diagnostics | null>(null);
+  const [phase0DiagnosticsLoading, setPhase0DiagnosticsLoading] =
+    useState(false);
 
   const [occurrencesByLinkId, setOccurrencesByLinkId] = useState<
     Record<string, ScanLinkOccurrence[]>
@@ -482,7 +996,6 @@ const App: React.FC = () => {
   const [progressPhase, setProgressPhase] = useState<
     "hidden" | "running" | "completed"
   >("hidden");
-  const [copyFeedback, setCopyFeedback] = useState<Record<string, boolean>>({});
   const [themePreference, setThemePreference] =
     useState<ThemePreference>("system");
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
@@ -503,42 +1016,84 @@ const App: React.FC = () => {
       id: string;
       message: string;
       tone?: "success" | "warning" | "info";
+      action?: { label: string; onClick: () => void };
     }>
   >([]);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [expandedRowIds, setExpandedRowIds] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsLinkId, setDetailsLinkId] = useState<string | null>(null);
+  const [recheckLoadingId, setRecheckLoadingId] = useState<string | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [addSiteOpen, setAddSiteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [ignoreRulesOpen, setIgnoreRulesOpen] = useState(false);
   const [ignoreRules, setIgnoreRules] = useState<IgnoreRule[]>([]);
   const [ignoreRulesLoading, setIgnoreRulesLoading] = useState(false);
   const [ignoreRulesError, setIgnoreRulesError] = useState<string | null>(null);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState<
+    "daily" | "weekly"
+  >("weekly");
+  const [scheduleTimeUtc, setScheduleTimeUtc] = useState("02:00");
+  const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState(1);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const [notifyEmail, setNotifyEmail] = useState("");
+  const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("new_issues_only");
+  const [notifyIncludeCsv, setNotifyIncludeCsv] = useState(false);
+  const [notifyLoading, setNotifyLoading] = useState(false);
+  const [notifySaving, setNotifySaving] = useState(false);
+  const [notifyTestSending, setNotifyTestSending] = useState(false);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
   const [newRuleType, setNewRuleType] =
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
   const [newRuleScope, setNewRuleScope] = useState<"site" | "global">("site");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const [diffData, setDiffData] = useState<DiffResponse["diff"] | null>(null);
-  const [diffTab, setDiffTab] = useState<"added" | "removed" | "changed">(
-    "added",
-  );
-  const [diffOpen, setDiffOpen] = useState(false);
-  const [diffOccurrences, setDiffOccurrences] = useState<
-    Record<string, ScanLinkOccurrence[]>
-  >({});
-  const [diffOccLoading, setDiffOccLoading] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [diffOccError, setDiffOccError] = useState<
-    Record<string, string | null>
+  const [resultsView, setResultsView] = useState<FixQueueView>("results");
+  const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
+  const [includeUnchanged, setIncludeUnchanged] = useState(false);
+  const [unchangedOnly, setUnchangedOnly] = useState(false);
+  const [unchangedOffset, setUnchangedOffset] = useState(0);
+  const [unchangedLimit] = useState(50);
+  const [diffOkTotal, setDiffOkTotal] = useState(0);
+  const [diffIncludeIgnored, setDiffIncludeIgnored] = useState(false);
+  const [diffExportFilter, setDiffExportFilter] = useState<
+    "all" | "new_issue" | "fixed" | "changed" | "added" | "removed"
+  >("all");
+  const [actionMenuOpenId, setActionMenuOpenId] = useState<string | null>(null);
+  const [noteModalOpen, setNoteModalOpen] = useState(false);
+  const [noteTargetUrl, setNoteTargetUrl] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteStatus, setNoteStatus] = useState<LinkNoteStatus>("open");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteDeleting, setNoteDeleting] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [fixQueueIncludeNew, setFixQueueIncludeNew] = useState(true);
+  const [fixQueueIncludeOutstanding, setFixQueueIncludeOutstanding] =
+    useState(true);
+  const [fixQueueIncludeIgnored, setFixQueueIncludeIgnored] = useState(false);
+  const [fixQueueStatus, setFixQueueStatus] =
+    useState<FixQueueStatusFilter>("open");
+  const [fixQueueOffset, setFixQueueOffset] = useState(0);
+  const [fixQueueLimit] = useState(50);
+  const [fixQueueExpanded, setFixQueueExpanded] = useState<
+    Record<string, boolean>
   >({});
   const [isNarrow, setIsNarrow] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const hasSites = sites.length > 0;
+  const localTimeZone = useMemo(() => getLocalTimeZone(), []);
+  const onboardingStorageKey = authUser
+    ? getStorageKey(ONBOARDING_STORAGE_PREFIX, authUser.id)
+    : null;
+  const siteNamesStorageKey = authUser
+    ? getStorageKey(SITE_NAME_STORAGE_PREFIX, authUser.id)
+    : null;
+  const showLocalTimeZone = localTimeZone && localTimeZone !== "UTC";
 
   useEffect(() => {
     selectedSiteIdRef.current = selectedSiteId;
@@ -551,6 +1106,15 @@ const App: React.FC = () => {
   useEffect(() => {
     activeRunIdRef.current = activeRunId;
   }, [activeRunId]);
+
+  useEffect(() => {
+    if (!siteNamesStorageKey) {
+      setSiteNameById({});
+      return;
+    }
+    const map = loadStorageMap(siteNamesStorageKey);
+    setSiteNameById(map as Record<string, string>);
+  }, [siteNamesStorageKey]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -574,6 +1138,29 @@ const App: React.FC = () => {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [exportMenuOpen]);
 
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (userMenuRef.current && !userMenuRef.current.contains(target)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [userMenuOpen]);
+
+  useEffect(() => {
+    if (!actionMenuOpenId) return;
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-action-menu]")) return;
+      setActionMenuOpenId(null);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [actionMenuOpenId]);
+
   const pinnedRunId = activeRunId ?? selectedRunId;
 
   const selectedRun = useMemo(() => {
@@ -596,7 +1183,7 @@ const App: React.FC = () => {
       setReportLoading(true);
       setReportError(null);
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/report`,
           {
             cache: "no-store",
@@ -641,6 +1228,24 @@ const App: React.FC = () => {
     [visibleResults],
   );
 
+  const noResponseResults = useMemo(
+    () => visibleResults.filter((r) => r.classification === "no_response"),
+    [visibleResults],
+  );
+
+  const currentPhase0Diagnostics =
+    phase0Diagnostics?.scanRunId === selectedRunId ? phase0Diagnostics : null;
+  const phase0BrokenCount =
+    currentPhase0Diagnostics?.broken ??
+    selectedRun?.broken_links ??
+    brokenResults.length;
+  const phase0BlockedCount =
+    currentPhase0Diagnostics?.blocked ?? blockedResults.length;
+  const phase0NoResponseCount =
+    currentPhase0Diagnostics?.noResponse ?? noResponseResults.length;
+  const phase0IgnoredSkippedCount =
+    currentPhase0Diagnostics?.ignoredSkipped ?? ignoredResults.length;
+
   const filteredResults = useMemo(() => {
     const source =
       activeTab === "broken"
@@ -650,9 +1255,7 @@ const App: React.FC = () => {
           : activeTab === "ok"
             ? visibleResults.filter((row) => row.classification === "ok")
             : activeTab === "no_response"
-              ? visibleResults.filter(
-                  (row) => row.classification === "no_response",
-                )
+              ? noResponseResults
               : visibleResults;
     const query = searchQuery.trim().toLowerCase();
     const activeStatusFilters = Object.keys(statusFilters).filter(
@@ -660,14 +1263,14 @@ const App: React.FC = () => {
     );
 
     let next = source.filter((row) => {
-      if (statusGroup === "no_response" && row.status_code != null)
+      if (statusGroup === "no_response" && row.classification !== "no_response")
         return false;
       if (statusGroup === "http_error" && row.status_code == null) return false;
       if (query && !row.link_url.toLowerCase().includes(query)) return false;
       if (minOccurrencesOnly && row.occurrence_count <= 1) return false;
       if (
         activeStatusFilters.length > 0 &&
-        !activeStatusFilters.includes(statusCodeGroup(row.status_code))
+        !activeStatusFilters.includes(statusCodeGroup(row))
       )
         return false;
       return true;
@@ -704,6 +1307,7 @@ const App: React.FC = () => {
     activeTab,
     brokenResults,
     blockedResults,
+    noResponseResults,
     visibleResults,
     searchQuery,
     statusFilters,
@@ -713,14 +1317,21 @@ const App: React.FC = () => {
   ]);
 
   const hasActiveFilters =
-    activeTab !== "all" ||
+    resultsView === "results" &&
+    (activeTab !== "all" ||
+      statusGroup !== "all" ||
+      showIgnored ||
+      searchQuery.trim().length > 0 ||
+      minOccurrencesOnly ||
+      Object.values(statusFilters).some(Boolean));
+  const hasSecondaryFilters =
     statusGroup !== "all" ||
     showIgnored ||
     searchQuery.trim().length > 0 ||
     minOccurrencesOnly ||
     Object.values(statusFilters).some(Boolean);
   const exportDisabled = !selectedRunId;
-  const exportLinksDisabled = !selectedRunId || activeTab === "ignored";
+  const exportLinksDisabled = !selectedRunId;
 
   const filteredSites = useMemo(() => {
     const query = siteSearch.trim().toLowerCase();
@@ -729,6 +1340,13 @@ const App: React.FC = () => {
   }, [sites, siteSearch]);
 
   const isSelectedRunInProgress = isInProgress(selectedRun?.status);
+  const isQueued = selectedRun?.status === "queued";
+  const isRunning = selectedRun?.status === "in_progress";
+  const canCancelRun = !!selectedRun && (isQueued || isRunning);
+  const canRetryRun =
+    !!selectedRun &&
+    (selectedRun.status === "failed" || selectedRun.status === "cancelled");
+  const canRescan = !!selectedRun && selectedRun.status === "completed";
   const showProgress = progressPhase !== "hidden" && !!selectedRun;
   const lastProgressAt = useMemo(() => {
     if (!selectedRun) return null;
@@ -755,7 +1373,10 @@ const App: React.FC = () => {
     const isSameRun = prev.id === selectedRun.id;
     const prevStatus = isSameRun ? prev.status : null;
 
-    if (selectedRun.status === "in_progress") {
+    if (
+      selectedRun.status === "in_progress" ||
+      selectedRun.status === "queued"
+    ) {
       setProgressPhase("running");
     } else if (
       selectedRun.status === "completed" &&
@@ -782,110 +1403,496 @@ const App: React.FC = () => {
     };
   }, [selectedRun?.id, selectedRun?.status]);
 
-  type DiffItem = {
-    key: string;
-    row: DiffLinkRow;
-    before: DiffLinkRow | null;
-    after: DiffLinkRow | null;
+  const linkNotesQuery = useQuery<LinkNotesResponse, Error>({
+    queryKey: ["linkNotes", selectedSiteId],
+    enabled: !!selectedSiteId,
+    queryFn: async () => {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/link-notes?status=all`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Link notes failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as LinkNotesResponse;
+    },
+  });
+  const linkNotes = linkNotesQuery.data?.notes ?? [];
+  const linkNotesByUrl = useMemo(() => {
+    const map = new Map<string, LinkNote>();
+    for (const note of linkNotes) {
+      map.set(note.link_url, note);
+    }
+    return map;
+  }, [linkNotes]);
+
+  const diffLimit = 200;
+  const diffBaseline = compareRunId ?? "prev";
+  const diffQueryEnabled = !!selectedSiteId && !!selectedRunId;
+  const unchangedScope = diffIssuesOnly ? "issues" : "all";
+  const diffQuery = useInfiniteQuery<ScanDiffResponse, Error>({
+    queryKey: [
+      "scanDiff",
+      selectedSiteId,
+      selectedRunId,
+      diffBaseline,
+      diffIssuesOnly,
+      includeUnchanged,
+      unchangedOnly,
+      diffExportFilter,
+      diffIncludeIgnored,
+      unchangedScope,
+      unchangedLimit,
+      unchangedOffset,
+    ],
+    enabled: diffQueryEnabled,
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const pageOffset = typeof pageParam === "number" ? pageParam : 0;
+      const includeUnchangedParam = includeUnchanged && pageOffset === 0;
+      const params = new URLSearchParams({
+        baseline: diffBaseline,
+        issuesOnly: diffIssuesOnly ? "true" : "false",
+        limit: String(diffLimit),
+        offset: String(pageOffset),
+        includeUnchanged: includeUnchangedParam ? "true" : "false",
+        unchangedOnly: unchangedOnly ? "true" : "false",
+        unchangedScope,
+        unchangedLimit: String(unchangedLimit),
+        unchangedOffset: String(unchangedOffset),
+        includeIgnored: diffIncludeIgnored ? "true" : "false",
+      });
+      if (!unchangedOnly && diffExportFilter !== "all") {
+        params.set("changeTypes", diffExportFilter);
+      }
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/scan-runs/${encodeURIComponent(
+          selectedRunId ?? "",
+        )}/diff?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Diff failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as ScanDiffResponse;
+    },
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.items.length < diffLimit
+        ? undefined
+        : allPages.length * diffLimit,
+  });
+
+  const diffPages = diffQuery.data?.pages ?? [];
+  const diffSummary = diffPages[0]?.summary ?? null;
+  const diffBaselineRun = diffPages[0]?.baselineRun ?? null;
+  const diffMeta = diffPages[0]?.meta ?? null;
+  const diffItems = diffPages.flatMap<ScanDiffItem>((page) => page.items);
+  const diffChangeItems = diffItems.filter(
+    (item) => item.change_type !== "unchanged",
+  );
+  const diffUnchangedItems = (diffPages[0]?.items ?? []).filter(
+    (item) => item.change_type === "unchanged",
+  );
+  const diffError = diffQuery.error
+    ? getErrorMessage(diffQuery.error, "Failed to load changes")
+    : null;
+  const diffLoading = diffQuery.isLoading;
+  const hasDiffChanges =
+    !!diffSummary &&
+    (diffSummary.newIssues > 0 ||
+      diffSummary.fixedIssues > 0 ||
+      diffSummary.changed > 0 ||
+      diffSummary.added > 0 ||
+      diffSummary.removed > 0);
+  const outstandingTotal = diffSummary
+    ? diffIssuesOnly
+      ? diffSummary.outstandingIssues
+      : diffSummary.outstandingTotal
+    : 0;
+  const canPrevUnchanged = includeUnchanged && unchangedOffset > 0;
+  const canNextUnchanged =
+    includeUnchanged && unchangedOffset + unchangedLimit < outstandingTotal;
+
+  const fixQueueRunId =
+    selectedRun?.status === "completed" ? selectedRun.id : null;
+  const fixQueueBaseline =
+    compareRunId && compareRunId !== fixQueueRunId ? compareRunId : "prev";
+  const fixQueueQueryEnabled = !!selectedSiteId && !!fixQueueRunId;
+  const fixQueueUnavailableReason =
+    selectedRun && selectedRun.status !== "completed"
+      ? "Fix queue is available after this scan completes."
+      : null;
+  const fixQueueQuery = useQuery<FixQueueResponse, Error>({
+    queryKey: [
+      "fixQueue",
+      selectedSiteId,
+      fixQueueRunId,
+      fixQueueBaseline,
+      fixQueueIncludeNew,
+      fixQueueIncludeOutstanding,
+      fixQueueIncludeIgnored,
+      fixQueueStatus,
+      fixQueueLimit,
+      fixQueueOffset,
+    ],
+    enabled: fixQueueQueryEnabled,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        baseline: fixQueueBaseline,
+        includeOutstanding: fixQueueIncludeOutstanding ? "true" : "false",
+        includeNew: fixQueueIncludeNew ? "true" : "false",
+        includeIgnored: fixQueueIncludeIgnored ? "true" : "false",
+        status: fixQueueStatus,
+        limit: String(fixQueueLimit),
+        offset: String(fixQueueOffset),
+      });
+      if (fixQueueRunId) {
+        params.set("runId", fixQueueRunId);
+      }
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId ?? "",
+        )}/fix-queue?${params.toString()}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Fix queue failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      return (await res.json()) as FixQueueResponse;
+    },
+  });
+  const fixQueueData = fixQueueQuery.data ?? null;
+  const fixQueueError = fixQueueQuery.error
+    ? getErrorMessage(fixQueueQuery.error, "Failed to load fix queue")
+    : null;
+  const fixQueueLoading = fixQueueQuery.isLoading;
+  const fixQueueItems = fixQueueData?.items ?? [];
+  const fixQueueSummary = fixQueueData?.summary ?? null;
+  const fixQueueHasPrev = fixQueueOffset > 0;
+  const fixQueueHasNext =
+    fixQueueSummary &&
+    fixQueueOffset + fixQueueLimit < fixQueueSummary.totalQueueItems;
+
+  useEffect(() => {
+    setFixQueueOffset(0);
+  }, [
+    fixQueueIncludeNew,
+    fixQueueIncludeOutstanding,
+    fixQueueIncludeIgnored,
+    fixQueueStatus,
+    selectedSiteId,
+    fixQueueRunId,
+    fixQueueBaseline,
+  ]);
+  const formatDiffSide = (side: ScanDiffSide | null) => {
+    if (!side) return "Missing";
+    const status = side.status_code == null ? "—" : side.status_code;
+    return `${formatClassification(side.classification)} · ${status}`;
+  };
+  const renderDiffRow = (item: ScanDiffItem) => {
+    const tone = changeTypeTone(item.change_type);
+    const baselineText = formatDiffSide(item.baseline);
+    const currentText = formatDiffSide(item.current);
+    const baselinePages: string[] = item.baseline?.source_pages ?? [];
+    const currentPages: string[] = item.current?.source_pages ?? [];
+    const note = linkNotesByUrl.get(item.link_url);
+    const hasNote = !!note;
+    const menuId = `diff:${item.change_type}:${item.link_url}`;
+    const menuOpen = actionMenuOpenId === menuId;
+    return (
+      <div
+        key={`${item.change_type}:${item.link_url}`}
+        className="change-row"
+        style={{
+          borderRadius: "12px",
+          border: "1px solid var(--border)",
+          background: "var(--panel-elev)",
+          margin: "10px 16px",
+          padding: "12px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            alignItems: "flex-start",
+          }}
+        >
+          <div
+            style={{
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+              flex: 1,
+            }}
+          >
+            <a
+              href={item.link_url}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                color: "var(--text)",
+                textDecoration: "none",
+                fontWeight: 600,
+              }}
+            >
+              {item.link_url}
+            </a>
+            {hasNote && (
+              <span
+                style={{
+                  marginLeft: "8px",
+                  fontSize: "11px",
+                  padding: "2px 6px",
+                  borderRadius: "999px",
+                  border: "1px solid var(--border)",
+                  color: "var(--muted)",
+                }}
+              >
+                Note
+              </span>
+            )}
+          </div>
+          <div style={{ position: "relative" }} data-action-menu>
+            <button
+              onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+              className="icon-button"
+              style={{
+                borderColor: "var(--border)",
+                color: "var(--muted)",
+                padding: "6px",
+              }}
+              aria-label="Open actions"
+              title="Actions"
+              data-no-drawer
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <div
+                className="action-menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  background: "var(--panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  boxShadow: "var(--shadow)",
+                  padding: "6px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                  minWidth: "220px",
+                  zIndex: 40,
+                }}
+              >
+                <button
+                  onClick={() => {
+                    void copyToClipboard(
+                      item.link_url,
+                      undefined,
+                      "Copied link URL",
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Copy Link URL
+                </button>
+                <button
+                  onClick={() => {
+                    window.open(item.link_url, "_blank", "noopener,noreferrer");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Link
+                </button>
+                <button
+                  onClick={() => {
+                    const source = currentPages[0];
+                    if (source) openSourcePage(source);
+                    else pushToast("No source page available", "warning");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Source Page
+                </button>
+                {currentPages.length > 1 && (
+                  <div
+                    style={{
+                      borderTop: "1px solid var(--border)",
+                      paddingTop: "6px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                    }}
+                  >
+                    {currentPages.map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => {
+                          openSourcePage(page);
+                          setActionMenuOpenId(null);
+                        }}
+                        style={{
+                          fontSize: "11px",
+                          textAlign: "left",
+                          color: "var(--muted)",
+                          background: "transparent",
+                          border: "1px solid transparent",
+                          padding: "4px 6px",
+                        }}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    void handleIgnoreLinkByUrl(item.link_url, selectedRunId);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Ignore this link
+                </button>
+                <button
+                  onClick={() => {
+                    openNoteModal(item.link_url);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  {hasNote ? "Edit Note" : "Add Note"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              padding: "4px 10px",
+              borderRadius: "999px",
+              background: tone.bg,
+              color: tone.text,
+              fontSize: "11px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.02em",
+            }}
+          >
+            {changeTypeLabel(item.change_type)}
+          </span>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+            fontSize: "12px",
+            color: "var(--muted)",
+          }}
+        >
+          <span>Baseline: {baselineText}</span>
+          <span>Current: {currentText}</span>
+        </div>
+        <div>
+          <details>
+            <summary
+              style={{
+                cursor: "pointer",
+                fontSize: "12px",
+                color: "var(--text)",
+              }}
+            >
+              Current {currentPages.length} • Baseline {baselinePages.length}
+            </summary>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                gap: "8px",
+                marginTop: "8px",
+                fontSize: "12px",
+                color: "var(--muted)",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--text)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Current
+                </div>
+                {currentPages.length === 0 && <div>—</div>}
+                {currentPages.map((page) => (
+                  <div
+                    key={`cur:${item.link_url}:${page}`}
+                    style={{ overflowWrap: "anywhere" }}
+                  >
+                    {page}
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--text)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Baseline
+                </div>
+                {baselinePages.length === 0 && <div>—</div>}
+                {baselinePages.map((page) => (
+                  <div
+                    key={`base:${item.link_url}:${page}`}
+                    style={{ overflowWrap: "anywhere" }}
+                  >
+                    {page}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+    );
   };
 
-  const issueDiff = useMemo(() => {
-    if (!diffData) return null;
-
-    const isIssue = (row: DiffLinkRow) => row.classification !== "ok";
-    const makeKey = (prefix: string, row: DiffLinkRow) =>
-      `${prefix}:${row.link_url}`;
-    const addUnique = (map: Map<string, DiffItem>, item: DiffItem) => {
-      if (!map.has(item.key)) map.set(item.key, item);
-    };
-
-    const addedMap = new Map<string, DiffItem>();
-    const removedMap = new Map<string, DiffItem>();
-    const changedMap = new Map<string, DiffItem>();
-
-    diffData.added.filter(isIssue).forEach((row) => {
-      addUnique(addedMap, {
-        key: makeKey("added", row),
-        row,
-        before: null,
-        after: null,
-      });
-    });
-    diffData.removed.filter(isIssue).forEach((row) => {
-      addUnique(removedMap, {
-        key: makeKey("removed", row),
-        row,
-        before: null,
-        after: null,
-      });
-    });
-
-    diffData.changed.forEach(({ before, after }) => {
-      const beforeIssue = isIssue(before);
-      const afterIssue = isIssue(after);
-      if (!beforeIssue && afterIssue) {
-        addUnique(addedMap, {
-          key: makeKey("added", after),
-          row: after,
-          before,
-          after,
-        });
-      } else if (beforeIssue && !afterIssue) {
-        addUnique(removedMap, {
-          key: makeKey("removed", before),
-          row: before,
-          before,
-          after,
-        });
-      } else if (beforeIssue && afterIssue) {
-        addUnique(changedMap, {
-          key: makeKey("changed", after),
-          row: after,
-          before,
-          after,
-        });
-      }
-    });
-
-    const added = Array.from(addedMap.values());
-    const removed = Array.from(removedMap.values());
-    const changed = Array.from(changedMap.values());
-    const totalIssues =
-      diffData.totals.a.broken +
-      diffData.totals.a.blocked +
-      diffData.totals.a.no_response;
-    const unchangedCount = Math.max(
-      0,
-      totalIssues - added.length - changed.length,
-    );
-
-    return { added, removed, changed, unchangedCount };
-  }, [diffData]);
-
-  const diffSummary = useMemo(() => {
-    if (!issueDiff) return null;
-    return {
-      addedIssues: issueDiff.added.length,
-      removedIssues: issueDiff.removed.length,
-      changed: issueDiff.changed.length,
-      unchanged: issueDiff.unchangedCount,
-    };
-  }, [issueDiff]);
-  const compareRun = useMemo(() => {
-    if (!compareRunId) return null;
-    return history.find((run) => run.id === compareRunId) ?? null;
-  }, [compareRunId, history]);
-  const hasDiffChanges =
-    !!issueDiff &&
-    (issueDiff.added.length > 0 ||
-      issueDiff.removed.length > 0 ||
-      issueDiff.changed.length > 0);
-  const diffItems = useMemo(() => {
-    if (!issueDiff) return [];
-    if (diffTab === "added") return issueDiff.added;
-    if (diffTab === "removed") return issueDiff.removed;
-    return issueDiff.changed;
-  }, [issueDiff, diffTab]);
   const reportView = viewMode === "report";
   const reportRun = reportData?.scanRun ?? null;
   const reportSite = reportRun
@@ -893,6 +1900,46 @@ const App: React.FC = () => {
       reportRun.site_id)
     : null;
   const reportSummary = reportData?.summary.byClassification ?? {};
+  const selectedLink = useMemo(
+    () => results.find((row) => row.id === detailsLinkId) ?? null,
+    [detailsLinkId, results],
+  );
+  const selectedSite = useMemo(
+    () => sites.find((site) => site.id === selectedSiteId) ?? null,
+    [sites, selectedSiteId],
+  );
+  const selectedSiteName = selectedSite
+    ? (siteNameById[selectedSite.id] ?? null)
+    : null;
+  const resultsTitleCount =
+    resultsView === "changes"
+      ? diffChangeItems.length +
+        (includeUnchanged ? diffUnchangedItems.length : 0)
+      : resultsView === "fix_queue"
+        ? (fixQueueSummary?.totalQueueItems ?? 0)
+        : activeTab === "ignored"
+          ? ignoredResults.length
+          : filteredResults.length;
+  const latestRunId = history[0]?.id ?? null;
+  const isLatestRun = !!selectedRun && selectedRun.id === latestRunId;
+  const runHeadingText = selectedRun
+    ? selectedRun.status === "queued" || selectedRun.status === "in_progress"
+      ? "Current scan"
+      : isLatestRun
+        ? "Last run"
+        : "Selected run"
+    : "Run summary";
+  const onboardingSteps = [
+    "Add your first site",
+    "Run your first scan",
+    "Review results",
+    "Set a schedule",
+    "Enable alerts",
+  ];
+  const onboardingStepIndex = Math.min(
+    onboardingStep,
+    onboardingSteps.length - 1,
+  );
 
   function markRunProgress(runId: string) {
     setLastProgressAtByRunId((prev) => ({
@@ -901,163 +1948,259 @@ const App: React.FC = () => {
     }));
   }
 
-  function stopPolling() {
-    if (pollHistoryRef.current) {
-      window.clearInterval(pollHistoryRef.current);
-      pollHistoryRef.current = null;
-    }
-    if (pollRunRef.current) {
-      window.clearInterval(pollRunRef.current);
-      pollRunRef.current = null;
-    }
-  }
-
-  function startPolling() {
-    if (sseRef.current) return;
-    stopPolling();
-
-    pollHistoryRef.current = window.setInterval(() => {
-      const siteId = selectedSiteIdRef.current;
-      if (!siteId) return;
-      if (activeRunIdRef.current) return;
-      void loadHistory(siteId, { preserveSelection: true });
-    }, POLL_MS);
-
-    pollRunRef.current = window.setInterval(() => {
-      const runId = activeRunIdRef.current ?? selectedRunIdRef.current;
-      if (!runId) {
-        return;
-      }
-      void refreshSelectedRun(runId);
-    }, POLL_MS);
-  }
-
-  function stopSse() {
+  function stopEventStream() {
     if (sseRetryTimerRef.current) {
       window.clearTimeout(sseRetryTimerRef.current);
       sseRetryTimerRef.current = null;
+    }
+    if (sseFallbackTimerRef.current) {
+      window.clearTimeout(sseFallbackTimerRef.current);
+      sseFallbackTimerRef.current = null;
     }
     if (sseRef.current) {
       sseRef.current.close();
       sseRef.current = null;
     }
-    sseRunIdRef.current = null;
   }
 
-  function scheduleSseRetry(scanRunId: string) {
-    if (sseRetryTimerRef.current) {
-      window.clearTimeout(sseRetryTimerRef.current);
+  async function syncStateOnce() {
+    const siteId = selectedSiteIdRef.current;
+    const runId = selectedRunIdRef.current;
+    if (siteId) {
+      void loadHistory(siteId, {
+        preserveSelection: true,
+        skipResultsWhileInProgress: true,
+      });
     }
-    sseRetryTimerRef.current = window.setTimeout(async () => {
-      if (
-        selectedRunIdRef.current !== scanRunId &&
-        activeRunIdRef.current !== scanRunId
-      )
-        return;
-      try {
-        const res = await fetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`,
-          {
-            cache: "no-store",
-          },
-        );
-        if (!res.ok) return;
-        const run: ScanRunSummary = await res.json();
-        setHistory((prev) => {
-          const idx = prev.findIndex((r) => r.id === run.id);
-          if (idx === -1) return [run, ...prev];
-          const copy = [...prev];
-          copy[idx] = run;
-          return copy;
-        });
-        if (isInProgress(run.status)) {
-          startSse(scanRunId);
-        }
-      } catch {}
-    }, 5000);
+    if (runId) {
+      void refreshSelectedRun(runId);
+    }
+    void refreshSites();
   }
 
-  function startSse(scanRunId: string) {
-    if (sseRef.current && sseRunIdRef.current === scanRunId) return;
-    stopSse();
-    stopPolling();
+  function scheduleFallbackSync() {
+    if (sseFallbackTimerRef.current) return;
+    sseFallbackTimerRef.current = window.setTimeout(() => {
+      sseFallbackTimerRef.current = null;
+      if (sseRef.current) return;
+      void syncStateOnce();
+    }, 8000);
+  }
 
-    const source = new EventSource(
-      `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/events`,
-    );
-    sseRef.current = source;
-    sseRunIdRef.current = scanRunId;
+  function scheduleSseReconnect() {
+    if (sseRetryTimerRef.current) return;
+    const backoff = sseBackoffRef.current;
+    const jitter = Math.floor(Math.random() * 400);
+    const delay = Math.min(30000, backoff + jitter);
+    sseBackoffRef.current = Math.min(30000, backoff * 2);
+    sseRetryTimerRef.current = window.setTimeout(() => {
+      sseRetryTimerRef.current = null;
+      if (authUser) {
+        startEventStream();
+      }
+    }, delay);
+  }
 
-    const handleScanRunUpdate = (run: ScanRunSummary) => {
+  function handleScanEvent(payload: ScanEventPayload) {
+    if (payload.site_id === selectedSiteIdRef.current) {
+      const runId = payload.scan_run_id;
       setHistory((prev) => {
-        const idx = prev.findIndex((r) => r.id === run.id);
-        if (idx === -1) return [run, ...prev];
+        const idx = prev.findIndex((r) => r.id === runId);
+        const next: ScanRunSummary = {
+          id: runId,
+          site_id: payload.site_id,
+          status: payload.status,
+          started_at: payload.started_at ?? new Date().toISOString(),
+          finished_at: payload.finished_at ?? null,
+          start_url:
+            payload.start_url ?? (idx >= 0 ? prev[idx].start_url : startUrl),
+          total_links: payload.total_links ?? 0,
+          checked_links: payload.checked_links ?? 0,
+          broken_links: payload.broken_links ?? 0,
+          error_message: payload.error_message ?? null,
+        };
+        if (idx === -1) return [next, ...prev];
         const copy = [...prev];
-        copy[idx] = run;
+        copy[idx] = { ...copy[idx], ...next };
         return copy;
       });
-      markRunProgress(run.id);
-      maybeNotifyRunStatus(run);
 
-      if (selectedRunIdRef.current !== run.id) {
-        setSelectedRunId(run.id);
-        selectedRunIdRef.current = run.id;
+      markRunProgress(runId);
+      maybeNotifyRunStatus({
+        id: runId,
+        site_id: payload.site_id,
+        status: payload.status,
+        started_at: payload.started_at ?? new Date().toISOString(),
+        finished_at: payload.finished_at ?? null,
+        start_url: payload.start_url ?? startUrl,
+        total_links: payload.total_links ?? 0,
+        checked_links: payload.checked_links ?? 0,
+        broken_links: payload.broken_links ?? 0,
+        error_message: payload.error_message ?? null,
+      });
+
+      if (payload.status === "queued" || payload.status === "in_progress") {
+        setActiveRunId(runId);
+        activeRunIdRef.current = runId;
+        setSelectedRunId(runId);
+        selectedRunIdRef.current = runId;
+      } else if (activeRunIdRef.current === runId) {
+        setActiveRunId(null);
+        activeRunIdRef.current = null;
       }
 
-      if (!isInProgress(run.status)) {
-        stopSse();
-        void refreshSelectedRun(run.id);
+      if (
+        payload.status !== "queued" &&
+        payload.status !== "in_progress" &&
+        selectedRunIdRef.current === runId
+      ) {
+        void refreshSelectedRun(runId);
+      }
+
+      if (payload.status === "completed" || payload.status === "failed") {
+        queryClient.invalidateQueries({
+          queryKey: ["scanDiff", payload.site_id],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", payload.site_id],
+        });
+      }
+    }
+  }
+
+  function handleScheduleEvent(payload: ScheduleEventPayload) {
+    setSites((prev) =>
+      prev.map((site) =>
+        site.id === payload.site_id
+          ? {
+              ...site,
+              schedule_enabled: payload.schedule_enabled,
+              schedule_frequency: payload.schedule_frequency,
+              schedule_time_utc: payload.schedule_time_utc,
+              schedule_day_of_week: payload.schedule_day_of_week,
+              next_scheduled_at: payload.next_scheduled_at,
+              last_scheduled_at: payload.last_scheduled_at,
+            }
+          : site,
+      ),
+    );
+  }
+
+  function startEventStream() {
+    if (sseRef.current) return;
+    if (!authUser) return;
+
+    const source = new EventSource(`${API_BASE}/events/stream`, {
+      withCredentials: true,
+    });
+    sseRef.current = source;
+
+    source.onopen = () => {
+      sseBackoffRef.current = 1000;
+      if (sseRetryTimerRef.current) {
+        window.clearTimeout(sseRetryTimerRef.current);
+        sseRetryTimerRef.current = null;
+      }
+      if (sseFallbackTimerRef.current) {
+        window.clearTimeout(sseFallbackTimerRef.current);
+        sseFallbackTimerRef.current = null;
       }
     };
 
     const handleMessage = (event: MessageEvent) => {
       try {
-        const data = JSON.parse(event.data) as Partial<ScanRunSummary> & {
-          scanRunId?: string;
-        };
-        if (data?.id) {
-          handleScanRunUpdate(data as ScanRunSummary);
+        const payload = JSON.parse(event.data) as SsePayload;
+        if (payload.type === "schedule_updated") {
+          handleScheduleEvent(payload);
           return;
         }
-        if (data?.scanRunId) {
-          setHistory((prev) => {
-            const idx = prev.findIndex((r) => r.id === data.scanRunId);
-            if (idx === -1) return prev;
-            const existing = prev[idx];
-            const updated: ScanRunSummary = {
-              ...existing,
-              ...data,
-              id: existing.id,
-              site_id: existing.site_id,
-            };
-            const copy = [...prev];
-            copy[idx] = updated;
-            return copy;
-          });
-          markRunProgress(data.scanRunId);
-        }
+        handleScanEvent(payload as ScanEventPayload);
       } catch {}
     };
 
-    source.addEventListener("scan_run", handleMessage as EventListener);
-    source.addEventListener("run", handleMessage as EventListener);
-    source.addEventListener("message", handleMessage as EventListener);
-    source.addEventListener("done", () => {
-      stopSse();
-      void refreshSelectedRun(scanRunId);
-    });
+    source.addEventListener("scan_started", handleMessage as EventListener);
+    source.addEventListener("scan_progress", handleMessage as EventListener);
+    source.addEventListener("scan_completed", handleMessage as EventListener);
+    source.addEventListener("scan_failed", handleMessage as EventListener);
+    source.addEventListener("schedule_updated", handleMessage as EventListener);
 
     source.onerror = () => {
       if (sseRef.current !== source) return;
-      stopSse();
-      startPolling();
-      scheduleSseRetry(scanRunId);
+      stopEventStream();
+      scheduleFallbackSync();
+      scheduleSseReconnect();
     };
   }
 
   useEffect(() => {
-    void loadSites();
+    void loadMe();
   }, []);
+
+  useEffect(() => {
+    if (authUser) {
+      void loadSites();
+    } else if (!authLoading) {
+      resetSessionState();
+    }
+  }, [authLoading, authUser]);
+
+  useEffect(() => {
+    if (!authUser || !onboardingStorageKey) return;
+    if (onboardingOpen) return;
+    if (authLoading || sitesLoading) return;
+    if (sites.length === 0) {
+      const stored = localStorage.getItem(onboardingStorageKey);
+      if (!stored) {
+        setOnboardingStep(0);
+        setOnboardingOpen(true);
+      }
+      return;
+    }
+    if (historyLoading) return;
+    if (history.length === 0) {
+      const stored = localStorage.getItem(onboardingStorageKey);
+      if (!stored) {
+        setOnboardingStep(1);
+        setOnboardingOpen(true);
+      }
+    }
+  }, [
+    authLoading,
+    authUser,
+    history.length,
+    historyLoading,
+    onboardingOpen,
+    onboardingStorageKey,
+    sites.length,
+    sitesLoading,
+  ]);
+
+  useEffect(() => {
+    if (authUser) {
+      startEventStream();
+    } else {
+      stopEventStream();
+    }
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!onboardingOpen || onboardingStep !== 1) return;
+    if (!onboardingScanRequested || !selectedRun) return;
+    if (selectedRun.status === "completed") {
+      setOnboardingStep(2);
+    }
+  }, [onboardingOpen, onboardingScanRequested, onboardingStep, selectedRun]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && authUser) {
+        void syncStateOnce();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibility);
+  }, [authUser]);
 
   useEffect(() => {
     const stored = localStorage.getItem(
@@ -1071,7 +2214,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("linksentry_pane_width");
+    const stored = localStorage.getItem("scanlark_pane_width");
     const value = stored ? Number(stored) : NaN;
     if (!Number.isNaN(value) && value >= 240 && value <= 520) {
       setPaneWidth(value);
@@ -1126,7 +2269,7 @@ const App: React.FC = () => {
   }, [isResizing]);
 
   useEffect(() => {
-    localStorage.setItem("linksentry_pane_width", String(paneWidth));
+    localStorage.setItem("scanlark_pane_width", String(paneWidth));
   }, [paneWidth]);
 
   useEffect(() => {
@@ -1141,11 +2284,29 @@ const App: React.FC = () => {
         event.preventDefault();
         searchInputRef.current.focus();
       }
+      if (event.key === "n" && !isTyping) {
+        if (!triggeringScan && selectedSiteId) {
+          event.preventDefault();
+          void handleRunScan();
+        }
+      }
+      if (event.key === "a" && !isTyping) {
+        event.preventDefault();
+        setAddSiteOpen(true);
+      }
+      if (event.key === "?" && !isTyping) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
       if (event.key === "Escape") {
         setIsDrawerOpen(false);
+        setDetailsOpen(false);
+        setDetailsLinkId(null);
         setIgnoreRulesOpen(false);
         setHistoryOpen(false);
         setFiltersOpen(false);
+        setAddSiteOpen(false);
+        setShortcutsOpen(false);
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -1186,33 +2347,204 @@ const App: React.FC = () => {
   }, [isDrawerOpen]);
 
   useEffect(() => {
-    const handleResize = () => setIsNarrow(window.innerWidth < 980);
+    if (!isDrawerOpen) return;
+    const id = window.requestAnimationFrame(() => {
+      drawerCloseRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [isDrawerOpen]);
+
+  useEffect(() => {
+    const handleResize = () => setIsNarrow(window.innerWidth < 1360);
     handleResize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
+    if (detailsOpen && detailsLinkId && !selectedLink) {
+      setDetailsOpen(false);
+    }
+  }, [detailsLinkId, detailsOpen, selectedLink]);
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    detailsCloseRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const drawer = detailsDrawerRef.current;
+      if (!drawer) return;
+      const focusables = Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [detailsOpen]);
+
+  useEffect(() => {
     return () => {
-      copyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      copyTimersRef.current.clear();
-      stopSse();
-      stopPolling();
+      stopEventStream();
     };
   }, []);
+
+  function resetSessionState() {
+    setSites([]);
+    setSelectedSiteId(null);
+    selectedSiteIdRef.current = null;
+    setHistory([]);
+    setResults([]);
+    setIgnoredResults([]);
+    setReportData(null);
+    setSelectedRunId(null);
+    selectedRunIdRef.current = null;
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
+    setSiteNameById({});
+    setOnboardingOpen(false);
+    setOnboardingStep(0);
+    setOnboardingSiteUrl("");
+    setOnboardingSiteName("");
+    setOnboardingWorking(false);
+    setOnboardingError(null);
+    setOnboardingScanRequested(false);
+  }
+
+  async function loadMe() {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const res = await apiFetch(`${API_BASE}/me`, {
+        cache: "no-store",
+      });
+      if (res.status === 401) {
+        setAuthUser(null);
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to fetch session: ${res.status}${
+            text ? ` - ${text.slice(0, 200)}` : ""
+          }`,
+        );
+      }
+      const data = (await res.json()) as AuthUser;
+      setAuthUser(data);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, "Failed to check session"));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleAuthSubmit() {
+    const email = authEmail.trim();
+    if (!email || !authPassword) {
+      setAuthError("Email and password are required.");
+      return;
+    }
+    setAuthWorking(true);
+    setAuthError(null);
+    try {
+      const endpoint = authMode === "login" ? "login" : "register";
+      const res = await apiFetch(`${API_BASE}/auth/${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: authPassword }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Auth failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as AuthUser;
+      setAuthUser(data);
+      setAuthPassword("");
+      setAuthError(null);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, "Failed to authenticate"));
+    } finally {
+      setAuthWorking(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await apiFetch(`${API_BASE}/auth/logout`, { method: "POST" });
+    } catch (err) {
+      console.error("Logout failed", err);
+    } finally {
+      setAuthUser(null);
+      resetSessionState();
+    }
+  }
+
+  function persistSiteName(siteId: string, name: string) {
+    if (!siteNamesStorageKey || !name.trim()) return;
+    setSiteNameById((prev) => {
+      const next = { ...prev, [siteId]: name.trim() };
+      saveStorageMap(siteNamesStorageKey, next);
+      return next;
+    });
+  }
+
+  function clearOnboardingState() {
+    if (!onboardingStorageKey || typeof window === "undefined") return;
+    window.localStorage.removeItem(onboardingStorageKey);
+  }
+
+  function completeOnboarding() {
+    if (onboardingStorageKey && typeof window !== "undefined") {
+      window.localStorage.setItem(
+        onboardingStorageKey,
+        new Date().toISOString(),
+      );
+    }
+    setOnboardingOpen(false);
+    setOnboardingStep(0);
+    setOnboardingScanRequested(false);
+    setOnboardingSiteUrl("");
+    setOnboardingSiteName("");
+    setOnboardingError(null);
+    setOnboardingWorking(false);
+  }
+
+  function openOnboarding(step = 0) {
+    setOnboardingError(null);
+    setOnboardingScanRequested(false);
+    setOnboardingStep(step);
+    setOnboardingOpen(true);
+  }
 
   async function loadSites() {
     setSitesLoading(true);
     setSitesError(null);
     try {
-      const res = await fetch(`${API_BASE}/sites`, { cache: "no-store" });
+      const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data: SitesResponse = await res.json();
 
-      setSites(data.sites);
+      const normalizedSites = normalizeSitesNotifyOn(data.sites);
+      setSites(normalizedSites);
 
-      if (data.sites.length > 0) {
-        const first = data.sites[0];
+      if (normalizedSites.length > 0) {
+        const first = normalizedSites[0];
         setSelectedSiteId(first.id);
         selectedSiteIdRef.current = first.id;
 
@@ -1251,6 +2583,47 @@ const App: React.FC = () => {
     }
   }
 
+  async function refreshSites() {
+    try {
+      const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data: SitesResponse = await res.json();
+      const normalizedSites = normalizeSitesNotifyOn(data.sites);
+      setSites(normalizedSites);
+
+      const currentId = selectedSiteIdRef.current;
+      if (currentId) {
+        const match = normalizedSites.find((site) => site.id === currentId);
+        if (match) {
+          setStartUrl(match.url);
+          return;
+        }
+      }
+
+      if (data.sites.length === 0) {
+        setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
+        setStartUrl("");
+        setHistory([]);
+        setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+        setActiveRunId(null);
+        activeRunIdRef.current = null;
+        setResults([]);
+        resetOccurrencesState();
+        return;
+      }
+
+      if (!currentId) {
+        const first = data.sites[0];
+        setSelectedSiteId(first.id);
+        selectedSiteIdRef.current = first.id;
+        setStartUrl(first.url);
+        await loadHistory(first.id, { preserveSelection: false });
+      }
+    } catch {}
+  }
+
   async function loadHistory(siteId: string, opts?: LoadHistoryOpts) {
     const preserveSelection = !!opts?.preserveSelection;
     const skipResultsWhileInProgress = !!opts?.skipResultsWhileInProgress;
@@ -1258,7 +2631,7 @@ const App: React.FC = () => {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=10`,
         { cache: "no-store" },
       );
@@ -1331,7 +2704,7 @@ const App: React.FC = () => {
     offset: number,
     label: string,
   ): Promise<ScanLinksResponse> {
-    const res = await fetch(
+    const res = await apiFetch(
       buildScanLinksUrl(
         runId,
         classification,
@@ -1416,9 +2789,12 @@ const App: React.FC = () => {
     setIgnoredResults([]);
     setIgnoredOffset(0);
     try {
-      const res = await fetch(buildIgnoredLinksUrl(runId, 0, LINKS_PAGE_SIZE), {
-        cache: "no-store",
-      });
+      const res = await apiFetch(
+        buildIgnoredLinksUrl(runId, 0, LINKS_PAGE_SIZE),
+        {
+          cache: "no-store",
+        },
+      );
       if (!res.ok)
         throw new Error(`Failed to load ignored links: ${res.status}`);
       const data: IgnoredLinksResponse = await res.json();
@@ -1528,7 +2904,7 @@ const App: React.FC = () => {
     if (ignoredLoading) return;
     setIgnoredLoading(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         buildIgnoredLinksUrl(runId, ignoredOffset, LINKS_PAGE_SIZE),
         { cache: "no-store" },
       );
@@ -1560,7 +2936,7 @@ const App: React.FC = () => {
         setOffset: React.Dispatch<React.SetStateAction<number>>,
         setHasMore: React.Dispatch<React.SetStateAction<boolean>>,
       ) => {
-        const res = await fetch(
+        const res = await apiFetch(
           buildScanLinksUrl(
             runId,
             classification,
@@ -1621,31 +2997,6 @@ const App: React.FC = () => {
   }
 
   useEffect(() => {
-    if (!selectedSiteId) {
-      stopPolling();
-      return;
-    }
-
-    const shouldPoll = !!activeRunId || isSelectedRunInProgress;
-
-    if (shouldPoll && !sseRef.current) startPolling();
-    else if (!shouldPoll) stopPolling();
-
-    return () => stopPolling();
-  }, [selectedSiteId, activeRunId, selectedRun?.id, selectedRun?.status]);
-
-  useEffect(() => {
-    if (selectedRun && isInProgress(selectedRun.status)) {
-      startSse(selectedRun.id);
-      return;
-    }
-
-    if (sseRef.current && sseRunIdRef.current === selectedRun?.id) {
-      stopSse();
-    }
-  }, [selectedRun?.id, selectedRun?.status]);
-
-  useEffect(() => {
     if (!selectedRunId) return;
     if (isInProgress(selectedRun?.status)) return;
     void loadResults(selectedRunId);
@@ -1656,6 +3007,11 @@ const App: React.FC = () => {
     if (activeTab !== "ignored") return;
     void loadIgnoredResults(selectedRunId);
   }, [activeTab, selectedRunId]);
+
+  useEffect(() => {
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
+  }, [selectedRunId]);
 
   useEffect(() => {
     if (!ignoreRulesOpen || !selectedSiteId) return;
@@ -1675,13 +3031,37 @@ const App: React.FC = () => {
   }, [selectedSiteId]);
 
   useEffect(() => {
+    if (!selectedSite) return;
+    setScheduleEnabled(selectedSite.schedule_enabled ?? false);
+    setScheduleFrequency(selectedSite.schedule_frequency ?? "weekly");
+    setScheduleTimeUtc(normalizeTimeInput(selectedSite.schedule_time_utc));
+    setScheduleDayOfWeek(selectedSite.schedule_day_of_week ?? 1);
+    setScheduleError(null);
+  }, [selectedSite]);
+
+  useEffect(() => {
+    if (!selectedSiteId) {
+      setNotifyEnabled(false);
+      setNotifyEmail("");
+      setNotifyOn("new_issues_only");
+      setNotifyIncludeCsv(false);
+      setNotifyError(null);
+      return;
+    }
+    void loadNotificationSettings(selectedSiteId);
+  }, [selectedSiteId]);
+
+  useEffect(() => {
     if (!selectedRunId || history.length === 0) {
       setCompareRunId(null);
-      setDiffData(null);
       return;
     }
     const idx = history.findIndex((run) => run.id === selectedRunId);
-    const fallback = history[idx + 1]?.id ?? null;
+    const fallback =
+      idx >= 0
+        ? (history.slice(idx + 1).find((run) => run.status === "completed")
+            ?.id ?? null)
+        : null;
     if (fallback && fallback !== compareRunId) {
       setCompareRunId(fallback);
     } else if (!fallback) {
@@ -1690,20 +3070,103 @@ const App: React.FC = () => {
   }, [history, selectedRunId]);
 
   useEffect(() => {
-    setDiffOpen(false);
-  }, [compareRunId, selectedRunId]);
+    if (!includeUnchanged) {
+      setUnchangedOffset(0);
+      setUnchangedOnly(false);
+    }
+  }, [includeUnchanged]);
 
   useEffect(() => {
-    if (!selectedRunId || !compareRunId) {
-      setDiffData(null);
+    setUnchangedOffset(0);
+  }, [diffIssuesOnly]);
+
+  useEffect(() => {
+    setUnchangedOffset(0);
+  }, [diffExportFilter, compareRunId, selectedRunId, diffIncludeIgnored]);
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setDiffOkTotal(0);
+      setPhase0Diagnostics(null);
+      setPhase0DiagnosticsLoading(false);
       return;
     }
-    void loadDiff(selectedRunId, compareRunId);
-  }, [selectedRunId, compareRunId]);
+    let cancelled = false;
+    const loadSummary = async () => {
+      setPhase0DiagnosticsLoading(true);
+      let summaryRows: ScanLinksSummaryRow[] = [];
+      let ignoredSkipped = 0;
+      let summaryLoaded = false;
+      let ignoredLoaded = false;
+      const errors: string[] = [];
+
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(
+            selectedRunId,
+          )}/links/summary`,
+          { cache: "no-store" },
+        );
+        if (res.ok) {
+          const data: ScanLinksSummaryResponse = await res.json();
+          summaryRows = data.summary ?? [];
+          summaryLoaded = true;
+        } else {
+          errors.push(`links summary ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "links summary failed"));
+      }
+
+      try {
+        const res = await apiFetch(buildIgnoredLinksUrl(selectedRunId, 0, 1), {
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const data: IgnoredLinksResponse = await res.json();
+          ignoredSkipped = data.totalMatching ?? 0;
+          ignoredLoaded = true;
+        } else {
+          errors.push(`ignored summary ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "ignored summary failed"));
+      }
+
+      if (cancelled) return;
+
+      const ok = getSummaryCount(summaryRows, "ok");
+      setDiffOkTotal(ok);
+      setPhase0Diagnostics({
+        scanRunId: selectedRunId,
+        ok: summaryLoaded ? ok : null,
+        broken: summaryLoaded ? getSummaryCount(summaryRows, "broken") : null,
+        blocked: summaryLoaded ? getSummaryCount(summaryRows, "blocked") : null,
+        noResponse: summaryLoaded
+          ? getSummaryCount(summaryRows, "no_response")
+          : null,
+        ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
+        error: errors.length > 0 ? errors.join("; ") : null,
+        loadedAt: Date.now(),
+      });
+      setPhase0DiagnosticsLoading(false);
+    };
+    void loadSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedRunId,
+    selectedRun?.updated_at,
+    selectedRun?.status,
+    selectedRun?.checked_links,
+    selectedRun?.total_links,
+    selectedRun?.broken_links,
+  ]);
 
   async function refreshSelectedRun(runId: string) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(runId)}`,
         {
           cache: "no-store",
@@ -1736,8 +3199,6 @@ const App: React.FC = () => {
         setActiveRunId(null);
         activeRunIdRef.current = null;
 
-        stopSse();
-        stopPolling();
         await loadHistory(run.site_id, { preserveSelection: true });
         await loadResults(run.id);
       }
@@ -1747,9 +3208,9 @@ const App: React.FC = () => {
   async function handleSelectSite(site: Site) {
     if (site.id === selectedSiteId) return;
 
-    stopPolling();
-    stopSse();
     setIsDrawerOpen(false);
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
 
     setActiveRunId(null);
     activeRunIdRef.current = null;
@@ -1773,10 +3234,73 @@ const App: React.FC = () => {
     await handleRunScanWithUrl(startUrl);
   }
 
+  async function createSiteRecord(url: string, name?: string) {
+    const res = await apiFetch(`${API_BASE}/sites`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url, name: name?.trim() || undefined }),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+      );
+    }
+
+    const data = (await res.json()) as { site: Site };
+    return data.site;
+  }
+
+  function applyCreatedSite(site: Site, name?: string) {
+    const normalized = normalizeSiteNotifyOn(site);
+    setSites((prev) => {
+      const filtered = prev.filter((item) => item.id !== site.id);
+      return [normalized, ...filtered];
+    });
+    setSelectedSiteId(site.id);
+    selectedSiteIdRef.current = site.id;
+    setStartUrl(site.url);
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    setSelectedRunId(null);
+    selectedRunIdRef.current = null;
+    setResults([]);
+    resetOccurrencesState();
+    setHistory([]);
+    void loadHistory(site.id, { preserveSelection: false });
+    if (name) {
+      persistSiteName(site.id, name);
+    }
+  }
+
+  function handleNewScanAction() {
+    if (!hasSites) {
+      setCreateError(null);
+      setAddSiteOpen(true);
+      return;
+    }
+    if (!selectedSiteId) {
+      setIsDrawerOpen(true);
+      pushToast("Select a site to start a new scan", "warning");
+      return;
+    }
+    void handleRunScan();
+  }
+
+  function openFixQueue() {
+    setResultsView("fix_queue");
+    setFixQueueIncludeNew(true);
+    setFixQueueIncludeOutstanding(true);
+    setFixQueueIncludeIgnored(false);
+    setFixQueueStatus("open");
+    setFixQueueOffset(0);
+  }
+
   async function handleCancelScan() {
     if (!selectedRunId) return;
     try {
-      await fetch(
+      await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/cancel`,
         {
           method: "POST",
@@ -1806,26 +3330,77 @@ const App: React.FC = () => {
     setCreatingSite(true);
     setCreateError(null);
     try {
-      const res = await fetch(`${API_BASE}/sites`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(
-          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
-      }
-
+      const site = await createSiteRecord(url);
+      applyCreatedSite(site);
       setNewSiteUrl("");
-      await loadSites();
+      setAddSiteOpen(false);
+      pushToast("Site added", "success");
     } catch (err: unknown) {
       setCreateError(getErrorMessage(err, "Failed to create site"));
     } finally {
       setCreatingSite(false);
     }
+  }
+
+  async function handleCreateSampleSite() {
+    const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+    if (existing) {
+      await handleSelectSite(existing);
+      return;
+    }
+    try {
+      setCreatingSite(true);
+      const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+      applyCreatedSite(site, SAMPLE_SITE_NAME);
+      pushToast("Sample site added", "success");
+    } catch (err: unknown) {
+      setCreateError(getErrorMessage(err, "Failed to add sample site"));
+    } finally {
+      setCreatingSite(false);
+    }
+  }
+
+  async function handleOnboardingCreateSite() {
+    const url = onboardingSiteUrl.trim();
+    if (!url) return;
+    setOnboardingWorking(true);
+    setOnboardingError(null);
+    try {
+      const site = await createSiteRecord(url, onboardingSiteName);
+      applyCreatedSite(site, onboardingSiteName);
+      setOnboardingSiteUrl("");
+      setOnboardingSiteName("");
+      setOnboardingStep(1);
+    } catch (err: unknown) {
+      setOnboardingError(getErrorMessage(err, "Failed to create site"));
+    } finally {
+      setOnboardingWorking(false);
+    }
+  }
+
+  async function handleOnboardingSampleSite() {
+    setOnboardingWorking(true);
+    setOnboardingError(null);
+    try {
+      const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+      if (existing) {
+        await handleSelectSite(existing);
+      } else {
+        const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+        applyCreatedSite(site, SAMPLE_SITE_NAME);
+      }
+      setOnboardingStep(1);
+    } catch (err: unknown) {
+      setOnboardingError(getErrorMessage(err, "Failed to add sample site"));
+    } finally {
+      setOnboardingWorking(false);
+    }
+  }
+
+  async function handleOnboardingRunScan() {
+    if (!selectedSiteId) return;
+    setOnboardingScanRequested(true);
+    await handleRunScan();
   }
 
   async function handleDeleteSite(siteId: string) {
@@ -1840,7 +3415,7 @@ const App: React.FC = () => {
     setDeletingSiteId(siteId);
     setDeleteError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}`,
         {
           method: "DELETE",
@@ -1861,9 +3436,6 @@ const App: React.FC = () => {
       }
 
       if (selectedSiteId === siteId) {
-        stopPolling();
-        stopSse();
-
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
 
@@ -1888,12 +3460,199 @@ const App: React.FC = () => {
     }
   }
 
+  async function handleSaveSchedule() {
+    if (!selectedSiteId) return;
+    setScheduleSaving(true);
+    setScheduleError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/schedule`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: scheduleEnabled,
+            frequency: scheduleFrequency,
+            timeUtc: scheduleTimeUtc,
+            dayOfWeek:
+              scheduleFrequency === "weekly" ? scheduleDayOfWeek : null,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Schedule update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as {
+        scheduleEnabled: boolean;
+        scheduleFrequency: "daily" | "weekly";
+        scheduleTimeUtc: string;
+        scheduleDayOfWeek: number | null;
+        nextScheduledAt: string | null;
+        lastScheduledAt: string | null;
+      };
+
+      setSites((prev) =>
+        prev.map((site) =>
+          site.id === selectedSiteId
+            ? {
+                ...site,
+                schedule_enabled: data.scheduleEnabled,
+                schedule_frequency: data.scheduleFrequency,
+                schedule_time_utc: data.scheduleTimeUtc,
+                schedule_day_of_week: data.scheduleDayOfWeek,
+                next_scheduled_at: data.nextScheduledAt,
+                last_scheduled_at: data.lastScheduledAt,
+              }
+            : site,
+        ),
+      );
+
+      pushToast("Schedule updated", "success");
+    } catch (err: unknown) {
+      setScheduleError(getErrorMessage(err, "Failed to update schedule"));
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
+  async function loadNotificationSettings(siteId: string) {
+    setNotifyLoading(true);
+    setNotifyError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/notification-settings`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to load notification settings: ${res.status}${
+            text ? ` - ${text.slice(0, 200)}` : ""
+          }`,
+        );
+      }
+      const data = (await res.json()) as {
+        notifyEnabled: boolean;
+        notifyEmail: string | null;
+        notifyOn: NotifyOnOption;
+        notifyIncludeCsv: boolean;
+      };
+      setNotifyEnabled(data.notifyEnabled);
+      setNotifyEmail(data.notifyEmail ?? "");
+      setNotifyOn(normalizeNotifyOn(data.notifyOn));
+      setNotifyIncludeCsv(data.notifyIncludeCsv);
+    } catch (err: unknown) {
+      setNotifyError(
+        getErrorMessage(err, "Failed to load notification settings"),
+      );
+    } finally {
+      setNotifyLoading(false);
+    }
+  }
+
+  async function handleSaveNotifications() {
+    if (!selectedSiteId) return;
+    if (notifyEnabled && notifyOn !== "never" && !notifyEmail.trim()) {
+      setNotifyError(
+        "Email is required when notifications are enabled and notify on is not never.",
+      );
+      return;
+    }
+    setNotifySaving(true);
+    setNotifyError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notification-settings`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: notifyEnabled,
+            email: notifyEmail.trim() || null,
+            notifyOn,
+            includeCsv: notifyIncludeCsv,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Notifications update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as {
+        notifyEnabled: boolean;
+        notifyEmail: string | null;
+        notifyOn: NotifyOnOption;
+        notifyIncludeCsv: boolean;
+      };
+
+      setNotifyEnabled(data.notifyEnabled);
+      setNotifyEmail(data.notifyEmail ?? "");
+      setNotifyOn(normalizeNotifyOn(data.notifyOn));
+      setNotifyIncludeCsv(data.notifyIncludeCsv);
+
+      setSites((prev) =>
+        prev.map((site) =>
+          site.id === selectedSiteId
+            ? {
+                ...site,
+                notify_enabled: data.notifyEnabled,
+                notify_email: data.notifyEmail,
+                notify_on: normalizeNotifyOn(data.notifyOn),
+                notify_include_csv: data.notifyIncludeCsv,
+              }
+            : site,
+        ),
+      );
+
+      pushToast("Notifications updated", "success");
+    } catch (err: unknown) {
+      setNotifyError(getErrorMessage(err, "Failed to update notifications"));
+    } finally {
+      setNotifySaving(false);
+    }
+  }
+
+  async function handleSendTestEmail() {
+    if (!selectedSiteId) return;
+    setNotifyTestSending(true);
+    setNotifyError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notifications/test`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Test alert failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      pushToast("Test alert generated", "success");
+    } catch (err: unknown) {
+      setNotifyError(getErrorMessage(err, "Failed to send test alert"));
+      pushToast(getErrorMessage(err, "Failed to send test alert"), "warning");
+    } finally {
+      setNotifyTestSending(false);
+    }
+  }
+
   async function fetchOccurrencesForLink(scanLinkId: string, offset: number) {
     setOccurrencesLoadingByLinkId((prev) => ({ ...prev, [scanLinkId]: true }));
     setOccurrencesErrorByLinkId((prev) => ({ ...prev, [scanLinkId]: null }));
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-links/${encodeURIComponent(scanLinkId)}/occurrences?limit=${OCCURRENCES_PAGE_SIZE}&offset=${offset}`,
         { cache: "no-store" },
       );
@@ -1944,24 +3703,7 @@ const App: React.FC = () => {
     await fetchOccurrencesForLink(scanLinkId, offset);
   }
 
-  async function toggleExpandLink(scanLinkId: string) {
-    const nextExpanded = !expandedRowIds[scanLinkId];
-    setExpandedRowIds((prev) => ({ ...prev, [scanLinkId]: nextExpanded }));
-    if (nextExpanded && !occurrencesByLinkId[scanLinkId]) {
-      await fetchOccurrencesForLink(scanLinkId, 0);
-    }
-    if (nextExpanded) {
-      window.setTimeout(() => {
-        document.getElementById(`scan-link-${scanLinkId}`)?.scrollIntoView({
-          block: "nearest",
-          behavior: "smooth",
-        });
-      }, 0);
-    }
-  }
-
   function resetOccurrencesState() {
-    setExpandedRowIds({});
     setOccurrencesByLinkId({});
     setOccurrencesOffsetByLinkId({});
     setOccurrencesHasMoreByLinkId({});
@@ -1970,32 +3712,160 @@ const App: React.FC = () => {
     setOccurrencesErrorByLinkId({});
   }
 
-  function showCopyFeedback(key: string) {
-    setCopyFeedback((prev) => ({ ...prev, [key]: true }));
-    const existing = copyTimersRef.current.get(key);
-    if (existing) window.clearTimeout(existing);
-    const timer = window.setTimeout(() => {
-      setCopyFeedback((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-      copyTimersRef.current.delete(key);
-    }, 1200);
-    copyTimersRef.current.set(key, timer);
-  }
-
   async function copyToClipboard(
     text: string,
-    feedbackKey?: string,
+    _feedbackKey?: string,
     toastMessage = "Copied to clipboard",
   ) {
     try {
       await navigator.clipboard.writeText(text);
-      if (feedbackKey) showCopyFeedback(feedbackKey);
       pushToast(toastMessage, "success");
     } catch (err) {
       pushToast("Copy failed", "warning");
+    }
+  }
+
+  function openNoteModal(linkUrl: string) {
+    const existing = linkNotesByUrl.get(linkUrl);
+    setNoteTargetUrl(linkUrl);
+    setNoteDraft(existing?.note ?? "");
+    setNoteStatus(existing?.status ?? "open");
+    setNoteError(null);
+    setNoteModalOpen(true);
+  }
+
+  async function handleSaveNote() {
+    if (!selectedSiteId || !noteTargetUrl) return;
+    if (!noteDraft.trim()) {
+      setNoteError("Note cannot be empty.");
+      return;
+    }
+    setNoteSaving(true);
+    setNoteError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            link_url: noteTargetUrl,
+            note: noteDraft.trim(),
+            status: noteStatus,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Save failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setNoteModalOpen(false);
+      setNoteTargetUrl(null);
+      setNoteDraft("");
+      queryClient.invalidateQueries({
+        queryKey: ["linkNotes", selectedSiteId],
+      });
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Note saved", "success");
+    } catch (err: unknown) {
+      setNoteError(getErrorMessage(err, "Failed to save note"));
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
+  async function handleDeleteNote() {
+    if (!selectedSiteId || !noteTargetUrl) return;
+    setNoteDeleting(true);
+    setNoteError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ link_url: noteTargetUrl }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Delete failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setNoteModalOpen(false);
+      setNoteTargetUrl(null);
+      setNoteDraft("");
+      queryClient.invalidateQueries({
+        queryKey: ["linkNotes", selectedSiteId],
+      });
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Note deleted", "info");
+    } catch (err: unknown) {
+      setNoteError(getErrorMessage(err, "Failed to delete note"));
+    } finally {
+      setNoteDeleting(false);
+    }
+  }
+
+  async function handleIgnoreLinkByUrl(linkUrl: string, runId?: string | null) {
+    const targetRunId = runId ?? selectedRunId;
+    if (!targetRunId) return;
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(
+          targetRunId,
+        )}/links/${encodeURIComponent(linkUrl)}/ignore`,
+        {
+          method: "POST",
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      if (selectedRunId && selectedRunId === targetRunId) {
+        await loadResults(selectedRunId);
+        await loadIgnoredResults(selectedRunId);
+      }
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      pushToast("Ignored link", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
+    }
+  }
+
+  function openSourcePage(url: string) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function openFirstSourceForResult(row: ScanLink) {
+    const existing = occurrencesByLinkId[row.id] ?? [];
+    if (existing.length > 0) {
+      openSourcePage(existing[0].source_page);
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to fetch source page: ${res.status}`);
+      }
+      const data = (await res.json()) as ScanLinkOccurrencesResponse;
+      const first = data.occurrences?.[0];
+      if (first?.source_page) {
+        openSourcePage(first.source_page);
+      } else {
+        pushToast("No source page available", "warning");
+      }
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to open source page"), "warning");
     }
   }
 
@@ -2039,7 +3909,22 @@ const App: React.FC = () => {
   ) {
     if (!selectedRunId) return;
     const classification = classificationOverride ?? getExportClassification();
-    const url = `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/links/export.${format}?classification=${encodeURIComponent(classification)}`;
+    const params = new URLSearchParams({
+      classification,
+      statusGroup,
+      sort: sortOption,
+    });
+    if (activeTab === "ignored") params.set("ignoredOnly", "true");
+    if (showIgnored) params.set("showIgnored", "true");
+    if (searchQuery.trim()) params.set("search", searchQuery.trim());
+    if (minOccurrencesOnly) params.set("minOccurrencesOnly", "true");
+    const activeStatusFilters = Object.keys(statusFilters).filter(
+      (key) => statusFilters[key],
+    );
+    if (activeStatusFilters.length > 0) {
+      params.set("statusFilters", activeStatusFilters.join(","));
+    }
+    const url = `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/links/export.${format}?${params.toString()}`;
     const a = document.createElement("a");
     a.href = url;
     a.download = "";
@@ -2051,12 +3936,67 @@ const App: React.FC = () => {
   }
 
   async function handleRetryScan() {
-    const retryUrl = selectedRun?.start_url ?? startUrl;
-    if (!selectedRun || !retryUrl.trim()) return;
-    setStartUrl(retryUrl);
-    setResults([]);
-    resetOccurrencesState();
-    await handleRunScanWithUrl(retryUrl);
+    if (!selectedRunId) return;
+    setTriggeringScan(true);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/retry`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Retry failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setResults([]);
+      resetOccurrencesState();
+      setActiveRunId(selectedRunId);
+      activeRunIdRef.current = selectedRunId;
+      setHistory((prev) =>
+        prev.map((run) =>
+          run.id === selectedRunId ? { ...run, status: "queued" } : run,
+        ),
+      );
+      pushToast("Scan queued", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to retry scan"), "warning");
+    } finally {
+      setTriggeringScan(false);
+    }
+  }
+
+  function updateScanLinkState(next: ScanLink) {
+    setResults((prev) => prev.map((row) => (row.id === next.id ? next : row)));
+  }
+
+  async function handleRecheckLink(row: ScanLink) {
+    if (row.ignored) {
+      pushToast("Ignored links cannot be rechecked", "warning");
+      return;
+    }
+    setRecheckLoadingId(row.id);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/recheck`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Recheck failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as RecheckScanLinkResponse;
+      if (data.scanLink) {
+        updateScanLinkState(data.scanLink);
+      }
+      pushToast("Link rechecked", "success");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to recheck link"), "warning");
+    } finally {
+      setRecheckLoadingId(null);
+    }
   }
 
   async function handleIgnoreLink(
@@ -2070,11 +4010,6 @@ const App: React.FC = () => {
     if (!selectedRunId) return;
     try {
       setResults((prev) => prev.filter((item) => item.id !== row.id));
-      setExpandedRowIds((prev) => {
-        const copy = { ...prev };
-        delete copy[row.id];
-        return copy;
-      });
       setOccurrencesByLinkId((prev) => {
         const copy = { ...prev };
         delete copy[row.id];
@@ -2106,7 +4041,7 @@ const App: React.FC = () => {
         return copy;
       });
 
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
         {
           method: "POST",
@@ -2125,7 +4060,101 @@ const App: React.FC = () => {
         await loadResults(selectedRunId);
         await loadIgnoredResults(selectedRunId);
       }
+      if (selectedSiteId) {
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", selectedSiteId],
+        });
+      }
       pushToast("Ignored link", "info");
+    } catch (err: unknown) {
+      if (selectedRunId) {
+        await loadResults(selectedRunId);
+      }
+      pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
+    }
+  }
+
+  async function handleIgnoreLinkWithUndo(row: ScanLink) {
+    if (!selectedRunId) return;
+    try {
+      setResults((prev) =>
+        prev.map((item) =>
+          item.id === row.id
+            ? {
+                ...item,
+                ignored: true,
+                ignored_source: "rule",
+                ignored_at: new Date().toISOString(),
+              }
+            : item,
+        ),
+      );
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "site_rule_exact" }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as {
+        scanRunId: string;
+        link_url: string;
+        rule?: IgnoreRule;
+      };
+      await loadResults(selectedRunId);
+      if (selectedSiteId) {
+        queryClient.invalidateQueries({
+          queryKey: ["fixQueue", selectedSiteId],
+        });
+      }
+      pushToast("Link ignored", "info", {
+        label: "Undo",
+        onClick: () => {
+          void (async () => {
+            try {
+              if (data.rule?.id) {
+                const deleteRes = await apiFetch(
+                  `${API_BASE}/ignore-rules/${encodeURIComponent(data.rule.id)}`,
+                  { method: "DELETE" },
+                );
+                if (!deleteRes.ok) {
+                  throw new Error(`Undo failed: ${deleteRes.status}`);
+                }
+                await reapplyIgnoreRules(selectedRunId);
+              } else {
+                const unignoreRes = await apiFetch(
+                  `${API_BASE}/scan-runs/${encodeURIComponent(
+                    selectedRunId,
+                  )}/links/${encodeURIComponent(data.link_url)}/unignore`,
+                  { method: "POST" },
+                );
+                if (!unignoreRes.ok) {
+                  throw new Error(`Undo failed: ${unignoreRes.status}`);
+                }
+              }
+              await loadResults(selectedRunId);
+              if (selectedSiteId) {
+                queryClient.invalidateQueries({
+                  queryKey: ["fixQueue", selectedSiteId],
+                });
+              }
+              pushToast("Ignore undone", "success");
+            } catch (err: unknown) {
+              pushToast(
+                getErrorMessage(err, "Failed to undo ignore"),
+                "warning",
+              );
+            }
+          })();
+        },
+      });
     } catch (err: unknown) {
       if (selectedRunId) {
         await loadResults(selectedRunId);
@@ -2138,7 +4167,7 @@ const App: React.FC = () => {
     setIgnoreRulesLoading(true);
     setIgnoreRulesError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}/ignore-rules`,
         {
           cache: "no-store",
@@ -2154,56 +4183,47 @@ const App: React.FC = () => {
     }
   }
 
-  async function loadDiff(runId: string, compareTo: string) {
-    setDiffLoading(true);
-    setDiffError(null);
+  async function exportDiffCsv() {
+    if (!selectedSiteId || !selectedRunId) return;
     try {
-      const res = await fetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/diff?compareTo=${encodeURIComponent(compareTo)}`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const data: DiffResponse = await res.json();
-      setDiffData(data.diff);
-    } catch (err: unknown) {
-      setDiffError(getErrorMessage(err, "Failed to load diff"));
-      setDiffData(null);
-    } finally {
-      setDiffLoading(false);
-    }
-  }
-
-  async function toggleDiffOccurrences(runId: string, linkUrl: string) {
-    const key = `${runId}:${linkUrl}`;
-    if (diffOccurrences[key]) {
-      setDiffOccurrences((prev) => {
-        const copy = { ...prev };
-        delete copy[key];
-        return copy;
+      const params = new URLSearchParams({
+        baseline: diffBaseline,
+        issuesOnly: diffIssuesOnly ? "true" : "false",
+        exportScope: "all",
+        includeIgnored: diffIncludeIgnored ? "true" : "false",
       });
-      return;
-    }
-
-    setDiffOccLoading((prev) => ({ ...prev, [key]: true }));
-    setDiffOccError((prev) => ({ ...prev, [key]: null }));
-    try {
-      const res = await fetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/links/${encodeURIComponent(linkUrl)}/occurrences?limit=${DIFF_OCCURRENCES_LIMIT}&offset=0`,
+      if (diffExportFilter !== "all") {
+        params.set("changeTypes", diffExportFilter);
+      }
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(
+          selectedSiteId,
+        )}/scan-runs/${encodeURIComponent(selectedRunId)}/diff.csv?${params.toString()}`,
         { cache: "no-store" },
       );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const data: ScanLinkOccurrencesResponse = await res.json();
-      setDiffOccurrences((prev) => ({
-        ...prev,
-        [key]: data.occurrences ?? [],
-      }));
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Export failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const filename =
+        getFilenameFromDisposition(res.headers.get("Content-Disposition")) ??
+        "scanlark-diff.csv";
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      if (!diffBaselineRun) {
+        pushToast("No baseline scan yet – exported empty CSV", "info");
+      } else {
+        pushToast("Exported changes CSV", "success");
+      }
     } catch (err: unknown) {
-      setDiffOccError((prev) => ({
-        ...prev,
-        [key]: getErrorMessage(err, "Failed to load occurrences"),
-      }));
-    } finally {
-      setDiffOccLoading((prev) => ({ ...prev, [key]: false }));
+      pushToast(getErrorMessage(err, "Failed to export CSV"), "warning");
     }
   }
 
@@ -2223,7 +4243,7 @@ const App: React.FC = () => {
     setIgnoredOccLoading((prev) => ({ ...prev, [ignoredLinkId]: true }));
     setIgnoredOccError((prev) => ({ ...prev, [ignoredLinkId]: null }));
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/ignored/${encodeURIComponent(ignoredLinkId)}/occurrences?limit=${IGNORED_OCCURRENCES_LIMIT}&offset=0`,
         { cache: "no-store" },
       );
@@ -2243,12 +4263,15 @@ const App: React.FC = () => {
     }
   }
   async function reapplyIgnoreRules(runId: string) {
-    await fetch(
+    await apiFetch(
       `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/reapply-ignore?force=1`,
       {
         method: "POST",
       },
     );
+    if (selectedSiteId) {
+      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+    }
   }
 
   async function handleCreateIgnoreRule() {
@@ -2256,7 +4279,7 @@ const App: React.FC = () => {
     const pattern = newRulePattern.trim();
     if (!pattern) return;
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
         {
           method: "POST",
@@ -2288,7 +4311,7 @@ const App: React.FC = () => {
 
   async function handleToggleIgnoreRule(rule: IgnoreRule) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/ignore-rules/${encodeURIComponent(rule.id)}`,
         {
           method: "PATCH",
@@ -2307,7 +4330,7 @@ const App: React.FC = () => {
 
   async function handleDeleteIgnoreRule(rule: IgnoreRule) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/ignore-rules/${encodeURIComponent(rule.id)}`,
         {
           method: "DELETE",
@@ -2328,7 +4351,7 @@ const App: React.FC = () => {
     setTriggeringScan(true);
     setTriggerError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/scans`,
         {
           method: "POST",
@@ -2351,7 +4374,7 @@ const App: React.FC = () => {
         const optimistic: ScanRunSummary = {
           id: scanRunId,
           site_id: selectedSiteId,
-          status: "in_progress",
+          status: "queued",
           started_at: new Date().toISOString(),
           finished_at: null,
           start_url: url,
@@ -2375,9 +4398,8 @@ const App: React.FC = () => {
         activeRunIdRef.current = scanRunId;
         markRunProgress(scanRunId);
 
-        startSse(scanRunId);
         void refreshSelectedRun(scanRunId);
-        pushToast("Scan started", "info");
+        pushToast("Scan queued", "info");
       } else {
         await loadHistory(selectedSiteId, { preserveSelection: false });
       }
@@ -2401,24 +4423,114 @@ const App: React.FC = () => {
   function pushToast(
     message: string,
     tone: "success" | "warning" | "info" = "info",
+    action?: { label: string; onClick: () => void },
   ) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setToasts((prev) => [...prev, { id, message, tone }]);
+    setToasts((prev) => [...prev, { id, message, tone, action }]);
+    const ttl = action ? 4500 : 2200;
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 2200);
+    }, ttl);
   }
 
   function maybeNotifyRunStatus(run: ScanRunSummary) {
     const prev = runStatusRef.current.get(run.id);
     if (prev === run.status) return;
     runStatusRef.current.set(run.id, run.status);
-    if (run.status === "completed") pushToast("Scan completed", "success");
+    if (run.status === "completed") {
+      const canUseResults =
+        run.id === selectedRunIdRef.current && results.length > 0;
+      const canUseDiagnostics =
+        run.id === selectedRunIdRef.current && currentPhase0Diagnostics != null;
+      const blockedCount = canUseDiagnostics
+        ? phase0BlockedCount
+        : canUseResults
+          ? blockedResults.length
+          : 0;
+      const noResponseCount = canUseDiagnostics
+        ? phase0NoResponseCount
+        : canUseResults
+          ? noResponseResults.length
+          : 0;
+      const checked = run.checked_links ?? 0;
+      const total = run.total_links ?? 0;
+      const broken = canUseDiagnostics
+        ? phase0BrokenCount
+        : (run.broken_links ?? 0);
+      const message = `Scan complete: ${checked}/${total} checked • ${broken} broken • ${blockedCount} blocked • ${noResponseCount} no response`;
+      pushToast(message, "success", {
+        label: "View results",
+        onClick: () => {
+          setSelectedRunId(run.id);
+          scansRef.current?.scrollIntoView({ behavior: "smooth" });
+        },
+      });
+    }
     if (run.status === "failed") pushToast("Scan failed", "warning");
   }
 
   function toggleStatusFilter(key: string) {
     setStatusFilters((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  async function createQuickIgnoreRule(
+    ruleType: IgnoreRule["rule_type"],
+    pattern: string,
+  ) {
+    if (!selectedSiteId) return;
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ruleType,
+            pattern,
+            scope: "site",
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      await loadIgnoreRules(selectedSiteId);
+      if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
+      if (selectedRunId) await loadResults(selectedRunId);
+      pushToast("Ignore rule applied", "success");
+    } catch (err: unknown) {
+      pushToast(
+        getErrorMessage(err, "Failed to create ignore rule"),
+        "warning",
+      );
+    }
+  }
+
+  function openDetails(row: ScanLink) {
+    setDetailsLinkId(row.id);
+    setDetailsOpen(true);
+    if (!occurrencesByLinkId[row.id]) {
+      void fetchOccurrencesForLink(row.id, 0);
+    }
+  }
+
+  function handleRowClick(
+    event: React.MouseEvent<HTMLDivElement>,
+    row: ScanLink,
+  ) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-no-drawer]")) return;
+    openDetails(row);
+  }
+
+  function toggleFixQueueExpanded(linkUrl: string) {
+    setFixQueueExpanded((prev) => ({
+      ...prev,
+      [linkUrl]: !prev[linkUrl],
+    }));
   }
 
   type LinkRowTheme = {
@@ -2427,8 +4539,6 @@ const App: React.FC = () => {
     copyBorder: string;
     copyColor: string;
     panelBg: string;
-    loadMoreBg: string;
-    loadMoreColor: string;
   };
 
   function renderLinkRows(
@@ -2437,18 +4547,15 @@ const App: React.FC = () => {
   ) {
     return rows.map((row) => {
       const theme = themeForRow(row);
-      const isExpanded = !!expandedRowIds[row.id];
-      const occurrences = occurrencesByLinkId[row.id] ?? [];
-      const occurrencesTotal =
-        occurrencesTotalByLinkId[row.id] ?? row.occurrence_count;
-      const occurrencesLoading = occurrencesLoadingByLinkId[row.id] ?? false;
-      const occurrencesError = occurrencesErrorByLinkId[row.id];
-      const occurrencesHasMore = occurrencesHasMoreByLinkId[row.id] ?? false;
       const linkCopyKey = `link:${row.id}`;
-      const sourceCopyKey = `source:${row.id}`;
-      const firstSource = occurrences[0]?.source_page;
-      const canCopySource = !!firstSource;
       const host = safeHost(row.link_url);
+      const note = linkNotesByUrl.get(row.link_url);
+      const hasNote = !!note;
+      const sourcePages = (occurrencesByLinkId[row.id] ?? []).map(
+        (occ) => occ.source_page,
+      );
+      const menuId = `result:${row.id}`;
+      const menuOpen = actionMenuOpenId === menuId;
       const statusChipBg =
         row.status_code == null
           ? "var(--border)"
@@ -2467,467 +4574,211 @@ const App: React.FC = () => {
         <div
           id={`scan-link-${row.id}`}
           key={row.id}
-          className={`result-row ${isExpanded ? "expanded" : ""}`}
+          className={`result-row severity-${row.classification}`}
+          data-classification={row.classification}
           style={{
-            borderRadius: "10px",
-            border: `1px solid ${theme.border}`,
+            borderLeft: `3px solid ${theme.border}`,
             background: theme.panelBg,
-            display: "flex",
-            flexDirection: "column",
-            boxShadow: isExpanded ? "0 0 0 2px var(--accent)" : "none",
-            opacity: row.ignored ? 0.75 : 1,
+            boxShadow: row.ignored ? "none" : "var(--soft-shadow)",
+            opacity: row.ignored ? 0.7 : 1,
+          }}
+          onClick={(event) => handleRowClick(event, row)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openDetails(row);
+            }
           }}
         >
-          <div
-            style={{
-              padding: "8px 10px",
-              display: "flex",
-              gap: "8px",
-              alignItems: "flex-start",
-            }}
-          >
-            <button
-              onClick={() => toggleExpandLink(row.id)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: theme.accent,
-                cursor: "pointer",
-                padding: "0 4px",
-                fontSize: "16px",
-                lineHeight: "1.2",
-                marginTop: "2px",
-              }}
-              title={isExpanded ? "Collapse" : "Expand"}
-            >
-              {isExpanded ? "▼" : "▶"}
-            </button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  flexWrap: "wrap",
-                  marginBottom: "6px",
-                }}
-              >
-                <span style={{ fontWeight: 600, fontSize: "13px" }}>
-                  {host}
-                </span>
+          <div className="result-cell result-link">
+            <div className="result-host">{host}</div>
+            <div className="result-url" title={row.link_url}>
+              {row.link_url}
+            </div>
+            <div className="result-meta">
+              {row.error_message ? row.error_message : "Tap for details"}
+              {hasNote && (
                 <span
                   style={{
+                    marginLeft: "8px",
                     fontSize: "11px",
                     padding: "2px 6px",
                     borderRadius: "999px",
-                    background: statusChipBg,
-                    color: statusChipText,
-                    maxWidth: "100%",
-                  }}
-                  title={statusTooltip(row.status_code)}
-                >
-                  {row.status_code ?? "No HTTP response"}
-                </span>
-                <span
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 6px",
-                    borderRadius: "999px",
-                    background: "var(--chip-bg)",
-                    color: "var(--chip-text)",
-                    border: `1px solid ${theme.border}`,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {formatClassification(row.classification)}
-                </span>
-                {row.classification === "no_response" && row.error_message && (
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "var(--panel)",
-                      color: "var(--muted)",
-                      border: "1px solid var(--border)",
-                      maxWidth: "100%",
-                    }}
-                    title={row.error_message}
-                  >
-                    {row.error_message}
-                  </span>
-                )}
-                {row.ignored && (
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "var(--panel)",
-                      color: "var(--muted)",
-                      border: "1px dashed var(--border)",
-                    }}
-                  >
-                    Ignored
-                  </span>
-                )}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  minWidth: 0,
-                }}
-              >
-                <a
-                  href={row.link_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={row.link_url}
-                  style={{
-                    color: theme.accent,
-                    textDecoration: "underline",
-                    fontSize: "12px",
-                    flex: 1,
-                    minWidth: 0,
-                    maxWidth: "100%",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                    whiteSpace: "normal",
-                  }}
-                >
-                  {row.link_url}
-                </a>
-                <div className="row-actions">
-                  <button
-                    onClick={() => copyToClipboard(row.link_url, linkCopyKey)}
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    aria-label="Copy link"
-                    title="Copy link"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <rect
-                        x="9"
-                        y="9"
-                        width="10"
-                        height="10"
-                        rx="2"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <rect
-                        x="5"
-                        y="5"
-                        width="10"
-                        height="10"
-                        rx="2"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() =>
-                      firstSource && copyToClipboard(firstSource, sourceCopyKey)
-                    }
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    disabled={!canCopySource}
-                    aria-label="Copy source"
-                    title={
-                      canCopySource ? "Copy source page" : "Source not loaded"
-                    }
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M4 6h10a2 2 0 0 1 2 2v10H6a2 2 0 0 1-2-2V6z"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M8 4h10a2 2 0 0 1 2 2v10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() =>
-                      window.open(row.link_url, "_blank", "noopener,noreferrer")
-                    }
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    aria-label="Open link"
-                    title="Open link"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M9 5h10v10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M19 5l-9 9"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M5 9v10h10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => handleIgnoreLink(row, "site_rule_exact")}
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    disabled={row.ignored}
-                    aria-label="Ignore link"
-                    title={row.ignored ? "Already ignored" : "Ignore link"}
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <circle
-                        cx="12"
-                        cy="12"
-                        r="9"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M7 7l10 10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              {row.error_message && (
-                <div
-                  style={{
-                    fontSize: "12px",
+                    border: "1px solid var(--border)",
                     color: "var(--muted)",
-                    marginTop: "4px",
-                    overflowWrap: "anywhere",
                   }}
                 >
-                  {row.error_message}
-                </div>
+                  Note
+                </span>
               )}
-              <div
-                style={{
-                  fontSize: "11px",
-                  color: "var(--muted)",
-                  marginTop: "2px",
-                }}
-              >
-                found on {row.occurrence_count}{" "}
-                {row.occurrence_count === 1 ? "page" : "pages"}
-              </div>
             </div>
           </div>
-
-          {isExpanded && (
-            <div
-              className="expand-panel"
-              style={{
-                marginTop: "6px",
-                padding: "10px 12px",
-                borderTop: `1px solid ${theme.border}`,
-                background: "var(--panel)",
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-              }}
+          <div className="result-cell result-status">
+            <span
+              className="status-chip"
+              style={{ background: statusChipBg, color: statusChipText }}
+              title={statusTooltip(row.status_code)}
             >
-              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                Seen on {occurrencesTotal}{" "}
-                {occurrencesTotal === 1 ? "page" : "pages"}
-              </div>
-              <div
+              {row.status_code ?? "No response"}
+            </span>
+            <span
+              className="status-chip subtle"
+              style={{ borderColor: theme.border }}
+            >
+              {formatClassification(row.classification)}
+            </span>
+            {row.ignored && <span className="status-chip subtle">Ignored</span>}
+          </div>
+          <div className="result-cell result-occ">
+            <div className="occ-count">{row.occurrence_count}</div>
+            <div className="occ-label">
+              {row.occurrence_count === 1 ? "occurrence" : "occurrences"}
+            </div>
+          </div>
+          <div
+            className="result-cell result-actions row-actions"
+            data-no-drawer
+          >
+            <div
+              style={{ position: "relative", display: "inline-flex" }}
+              data-action-menu
+            >
+              <button
+                onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+                className="icon-button"
                 style={{
-                  fontSize: "12px",
-                  color: "var(--muted)",
-                  overflowWrap: "anywhere",
+                  borderColor: theme.copyBorder,
+                  color: theme.copyColor,
+                  padding: "6px",
                 }}
+                aria-label="Open actions"
+                title="Actions"
               >
-                <a
-                  href={row.link_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "var(--text)", textDecoration: "underline" }}
+                <svg
+                  viewBox="0 0 24 24"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
                 >
-                  {row.link_url}
-                </a>{" "}
-                · status{" "}
-                <span title={statusTooltip(row.status_code)}>
-                  {row.status_code ?? "No HTTP response"}
-                </span>{" "}
-                {row.error_message ? `· ${row.error_message}` : ""}
-              </div>
-              {row.ignored && (
+                  <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                  <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                  <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+                </svg>
+              </button>
+              {menuOpen && (
                 <div
+                  className="action-menu"
                   style={{
-                    fontSize: "11px",
-                    color: "var(--muted)",
-                    display: "flex",
-                    gap: "8px",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <span>
-                    {row.ignored_source === "rule"
-                      ? "Ignored by rule"
-                      : "Manually ignored"}
-                    {row.ignore_reason ? ` · ${row.ignore_reason}` : ""}
-                  </span>
-                  {row.ignored_source === "rule" && row.ignored_by_rule_id && (
-                    <button
-                      onClick={() => setIgnoreRulesOpen(true)}
-                      style={{
-                        padding: "2px 6px",
-                        borderRadius: "6px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "10px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Manage rules
-                    </button>
-                  )}
-                </div>
-              )}
-              {occurrencesLoading && occurrences.length === 0 && (
-                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Loading occurrences...
-                </div>
-              )}
-              {occurrencesError && (
-                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-                  {occurrencesError}
-                </div>
-              )}
-              {occurrences.length > 0 && (
-                <div
-                  style={{
+                    position: "absolute",
+                    right: 0,
+                    top: "calc(100% + 6px)",
+                    background: "var(--panel)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "12px",
+                    boxShadow: "var(--shadow)",
+                    padding: "6px",
                     display: "flex",
                     flexDirection: "column",
-                    gap: "6px",
+                    gap: "4px",
+                    minWidth: "220px",
+                    zIndex: 40,
                   }}
                 >
-                  {occurrences.map((occ) => (
+                  <button
+                    onClick={() => {
+                      void copyToClipboard(
+                        row.link_url,
+                        linkCopyKey,
+                        "Copied link URL",
+                      );
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Copy Link URL
+                  </button>
+                  <button
+                    onClick={() => {
+                      window.open(
+                        row.link_url,
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Open Link
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (sourcePages.length > 0) {
+                        openSourcePage(sourcePages[0]);
+                      } else {
+                        void openFirstSourceForResult(row);
+                      }
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    Open Source Page
+                  </button>
+                  {sourcePages.length > 1 && (
                     <div
-                      key={occ.id}
                       style={{
-                        padding: "6px 8px",
-                        borderRadius: "8px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel-elev)",
+                        borderTop: "1px solid var(--border)",
+                        paddingTop: "6px",
                         display: "flex",
-                        gap: "8px",
-                        alignItems: "center",
+                        flexDirection: "column",
+                        gap: "4px",
                       }}
                     >
-                      <a
-                        href={occ.source_page}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          color: "var(--text)",
-                          textDecoration: "underline",
-                          overflowWrap: "anywhere",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {occ.source_page}
-                      </a>
-                      <button
-                        onClick={() =>
-                          copyToClipboard(occ.source_page, `occ:${occ.id}`)
-                        }
-                        style={{
-                          padding: "2px 6px",
-                          borderRadius: "6px",
-                          border: "1px solid var(--border)",
-                          background: "var(--panel)",
-                          fontSize: "10px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {copyFeedback[`occ:${occ.id}`] ? "Copied!" : "Copy"}
-                      </button>
+                      {sourcePages.map((page) => (
+                        <button
+                          key={page}
+                          onClick={() => {
+                            openSourcePage(page);
+                            setActionMenuOpenId(null);
+                          }}
+                          style={{
+                            fontSize: "11px",
+                            textAlign: "left",
+                            color: "var(--muted)",
+                            background: "transparent",
+                            border: "1px solid transparent",
+                            padding: "4px 6px",
+                          }}
+                        >
+                          {page}
+                        </button>
+                      ))}
                     </div>
-                  ))}
-                  {occurrencesHasMore && (
-                    <button
-                      onClick={() => handleLoadMoreOccurrences(row.id)}
-                      disabled={occurrencesLoading}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "8px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        cursor: occurrencesLoading ? "default" : "pointer",
-                        fontSize: "11px",
-                      }}
-                    >
-                      {occurrencesLoading
-                        ? "Loading..."
-                        : "Load more occurrences"}
-                    </button>
                   )}
+                  <button
+                    onClick={() => {
+                      handleIgnoreLink(row, "site_rule_exact");
+                      setActionMenuOpenId(null);
+                    }}
+                    disabled={row.ignored}
+                    data-no-drawer
+                  >
+                    {row.ignored ? "Ignored" : "Ignore this link"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      openNoteModal(row.link_url);
+                      setActionMenuOpenId(null);
+                    }}
+                    data-no-drawer
+                  >
+                    {hasNote ? "Edit Note" : "Add Note"}
+                  </button>
                 </div>
               )}
             </div>
-          )}
+          </div>
         </div>
       );
     });
@@ -2939,8 +4790,6 @@ const App: React.FC = () => {
     copyBorder: "var(--danger)",
     copyColor: "var(--danger)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--danger)",
-    loadMoreColor: "white",
   };
 
   const blockedTheme: LinkRowTheme = {
@@ -2949,8 +4798,6 @@ const App: React.FC = () => {
     copyBorder: "var(--warning)",
     copyColor: "var(--warning)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--warning)",
-    loadMoreColor: "white",
   };
 
   const okTheme: LinkRowTheme = {
@@ -2959,8 +4806,6 @@ const App: React.FC = () => {
     copyBorder: "var(--success)",
     copyColor: "var(--success)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--success)",
-    loadMoreColor: "white",
   };
 
   const noResponseTheme: LinkRowTheme = {
@@ -2969,9 +4814,311 @@ const App: React.FC = () => {
     copyBorder: "var(--border)",
     copyColor: "var(--muted)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--border)",
-    loadMoreColor: "var(--text)",
   };
+
+  const themeForClassification = (classification: LinkClassification) => {
+    if (classification === "blocked") return blockedTheme;
+    if (classification === "ok") return okTheme;
+    if (classification === "no_response") return noResponseTheme;
+    return brokenTheme;
+  };
+
+  const renderFixQueueRow = (item: FixQueueItem) => {
+    const theme = themeForClassification(item.classification);
+    const tone = changeTypeTone(item.change_type);
+    const statusChipBg =
+      item.status_code == null
+        ? "var(--border)"
+        : item.status_code >= 500
+          ? "var(--danger)"
+          : item.status_code === 404 || item.status_code === 410
+            ? "var(--danger)"
+            : item.status_code === 401 ||
+                item.status_code === 403 ||
+                item.status_code === 429
+              ? "var(--warning)"
+              : "var(--success)";
+    const statusChipText = item.status_code == null ? "var(--muted)" : "white";
+    const menuId = `fix:${item.change_type}:${item.link_url}`;
+    const menuOpen = actionMenuOpenId === menuId;
+    const isExpanded = !!fixQueueExpanded[item.link_url];
+    const noteSnippet =
+      item.note?.note && item.note.note.length > 120
+        ? `${item.note.note.slice(0, 120)}…`
+        : (item.note?.note ?? null);
+
+    return (
+      <div
+        key={`${item.change_type}:${item.link_url}`}
+        className="result-row"
+        style={{
+          borderLeft: `3px solid ${theme.border}`,
+          background: theme.panelBg,
+          boxShadow: "var(--soft-shadow)",
+          opacity: item.ignored ? 0.6 : 1,
+          margin: "10px 16px",
+        }}
+      >
+        <div className="result-cell result-link">
+          <div className="result-host">{safeHost(item.link_url)}</div>
+          <div className="result-url" title={item.link_url}>
+            {item.link_url}
+          </div>
+          <div className="result-meta">
+            {item.error_message || "Focus this link in your queue"}
+            {noteSnippet && (
+              <>
+                <span
+                  style={{
+                    marginLeft: "8px",
+                    fontSize: "11px",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {noteSnippet}
+                </span>
+                <span
+                  style={{
+                    marginLeft: "6px",
+                    fontSize: "11px",
+                    padding: "2px 6px",
+                    borderRadius: "999px",
+                    border: "1px solid var(--border)",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {item.note?.status === "resolved"
+                    ? "Resolved"
+                    : item.note?.status === "snoozed"
+                      ? "Snoozed"
+                      : "Note"}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="result-cell result-status">
+          <span
+            className="status-chip"
+            style={{ background: statusChipBg, color: statusChipText }}
+          >
+            {item.status_code ?? "No response"}
+          </span>
+          <span
+            className="status-chip subtle"
+            style={{ borderColor: theme.border }}
+          >
+            {formatClassification(item.classification)}
+          </span>
+          <span
+            className="status-chip"
+            style={{ background: tone.bg, color: tone.text }}
+          >
+            {item.change_type === "new_issue" ? "New" : "Outstanding"}
+          </span>
+          {item.ignored && <span className="status-chip subtle">Ignored</span>}
+        </div>
+        <div className="result-cell result-occ">
+          <div className="occ-count">{item.source_pages.length}</div>
+          <div className="occ-label">
+            {item.source_pages.length === 1 ? "source page" : "source pages"}
+          </div>
+          {item.source_pages.length > 0 && (
+            <button
+              onClick={() => toggleFixQueueExpanded(item.link_url)}
+              className="tab-pill"
+              style={{ marginTop: "6px" }}
+              data-no-drawer
+            >
+              {isExpanded ? "Hide sources" : "Show sources"}
+            </button>
+          )}
+        </div>
+        <div className="result-cell result-actions row-actions" data-no-drawer>
+          <div style={{ position: "relative" }} data-action-menu>
+            <button
+              onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+              className="icon-button"
+              style={{
+                borderColor: theme.copyBorder,
+                color: theme.copyColor,
+                padding: "6px",
+              }}
+              aria-label="Open actions"
+              title="Actions"
+              data-no-drawer
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <div
+                className="action-menu"
+                style={{
+                  position: "absolute",
+                  right: 0,
+                  top: "calc(100% + 6px)",
+                  background: "var(--panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  boxShadow: "var(--shadow)",
+                  padding: "6px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                  minWidth: "220px",
+                  zIndex: 40,
+                }}
+              >
+                <button
+                  onClick={() => {
+                    void copyToClipboard(
+                      item.link_url,
+                      undefined,
+                      "Copied link URL",
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Copy Link URL
+                </button>
+                <button
+                  onClick={() => {
+                    window.open(item.link_url, "_blank", "noopener,noreferrer");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Link
+                </button>
+                <button
+                  onClick={() => {
+                    const source = item.source_pages[0];
+                    if (source) openSourcePage(source);
+                    else pushToast("No source page available", "warning");
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Open Source Page
+                </button>
+                {item.source_pages.length > 1 && (
+                  <div
+                    style={{
+                      borderTop: "1px solid var(--border)",
+                      paddingTop: "6px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                    }}
+                  >
+                    {item.source_pages.map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => {
+                          openSourcePage(page);
+                          setActionMenuOpenId(null);
+                        }}
+                        style={{
+                          fontSize: "11px",
+                          textAlign: "left",
+                          color: "var(--muted)",
+                          background: "transparent",
+                          border: "1px solid transparent",
+                          padding: "4px 6px",
+                        }}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => {
+                    void handleIgnoreLinkByUrl(
+                      item.link_url,
+                      fixQueueData?.currentRun?.id ?? null,
+                    );
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  Ignore this link
+                </button>
+                <button
+                  onClick={() => {
+                    openNoteModal(item.link_url);
+                    setActionMenuOpenId(null);
+                  }}
+                  data-no-drawer
+                >
+                  {item.note ? "Edit Note" : "Add Note"}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        {isExpanded && item.source_pages.length > 0 && (
+          <div
+            className="expand-panel"
+            style={{
+              padding: "10px 12px",
+              margin: "0 12px 12px",
+              border: "1px solid var(--border)",
+              borderRadius: "10px",
+              background: "var(--panel)",
+              boxShadow: "var(--soft-shadow)",
+            }}
+          >
+            {item.source_pages.map((page) => (
+              <div
+                key={page}
+                style={{
+                  fontSize: "12px",
+                  color: "var(--muted)",
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {page}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const selectedOccurrences = useMemo(() => {
+    if (!selectedLink) return [];
+    return occurrencesByLinkId[selectedLink.id] ?? [];
+  }, [occurrencesByLinkId, selectedLink]);
+  const selectedOccurrencesTotal = selectedLink
+    ? (occurrencesTotalByLinkId[selectedLink.id] ??
+      selectedLink.occurrence_count)
+    : 0;
+  const selectedOccurrencesLoading = selectedLink
+    ? (occurrencesLoadingByLinkId[selectedLink.id] ?? false)
+    : false;
+  const selectedOccurrencesError = selectedLink
+    ? occurrencesErrorByLinkId[selectedLink.id]
+    : null;
+  const selectedOccurrencesHasMore = selectedLink
+    ? (occurrencesHasMoreByLinkId[selectedLink.id] ?? false)
+    : false;
+  const showOccurrencesSkeleton =
+    selectedOccurrencesLoading && selectedOccurrences.length === 0;
+  const noteExisting = noteTargetUrl
+    ? (linkNotesByUrl.get(noteTargetUrl) ?? null)
+    : null;
 
   return (
     <div
@@ -2981,64 +5128,89 @@ const App: React.FC = () => {
         background: "var(--bg)",
         color: "var(--text)",
         padding: "24px",
+        width: "100%",
         maxWidth: "100%",
         overflowX: "hidden",
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
         :root[data-theme="dark"] {
-          --bg: #0b1220;
-          --panel: #0f172a;
-          --panel-elev: #111827;
-          --text: #e5e7eb;
-          --muted: #9ca3af;
-          --border: #1f2937;
-          --accent: #60a5fa;
-          --danger: #ef4444;
-          --warning: #f59e0b;
-          --success: #22c55e;
-          --shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
-          --chip-bg: #111827;
-          --chip-text: #e5e7eb;
+          --bg: #070b14;
+          --surface: #0f172a;
+          --surface-2: #111f3a;
+          --surface-3: #0b1224;
+          --border: rgba(148, 163, 184, 0.18);
+          --text: #e2e8f0;
+          --muted: #94a3b8;
+          --accent: #38bdf8;
+          --accent-2: #22d3ee;
+          --danger: #f87171;
+          --warning: #fbbf24;
+          --success: #34d399;
+          --shadow: 0 20px 60px rgba(2, 6, 23, 0.45);
+          --soft-shadow: 0 10px 30px rgba(2, 6, 23, 0.32);
+          --chip-bg: rgba(15, 23, 42, 0.9);
+          --chip-text: #e2e8f0;
           --ghost: #0b1220;
+          --surface-accent: rgba(56, 189, 248, 0.1);
         }
         :root[data-theme="light"] {
           --bg: #f8fafc;
-          --panel: #ffffff;
-          --panel-elev: #f1f5f9;
+          --surface: #ffffff;
+          --surface-2: #f1f5f9;
+          --surface-3: #eef2ff;
+          --border: rgba(15, 23, 42, 0.12);
           --text: #0f172a;
           --muted: #64748b;
-          --border: #e2e8f0;
           --accent: #2563eb;
+          --accent-2: #38bdf8;
           --danger: #dc2626;
           --warning: #d97706;
           --success: #16a34a;
-          --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-          --chip-bg: #f1f5f9;
+          --shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
+          --soft-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+          --chip-bg: rgba(241, 245, 249, 0.9);
           --chip-text: #0f172a;
           --ghost: #ffffff;
+          --surface-accent: rgba(37, 99, 235, 0.08);
         }
-        html, body, * {
-          transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+        :root {
+          --panel: var(--surface);
+          --panel-elev: var(--surface-2);
+          --panel-faint: var(--surface-3);
+          --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+          --font-display: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+        }
+        html, body {
+          margin: 0;
+          padding: 0;
+        }
+        * {
+          box-sizing: border-box;
         }
         .app-container {
-          max-width: 1240px;
+          max-width: 1400px;
+          width: 100%;
           margin: 0 auto;
           display: flex;
           flex-direction: column;
           gap: 24px;
-          font-family: "Inter", system-ui, -apple-system, sans-serif;
+          font-family: var(--font-body);
+          min-height: calc(100vh - 48px);
+          min-width: 0;
         }
         .app-shell {
-          background: radial-gradient(1200px 400px at 10% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
-            radial-gradient(800px 300px at 90% 0%, rgba(14, 165, 233, 0.12), transparent 60%),
+          background: radial-gradient(1200px 420px at 10% -20%, rgba(34, 211, 238, 0.2), transparent 60%),
+            radial-gradient(900px 340px at 90% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
             var(--bg);
         }
         .shell {
           display: flex;
           gap: 16px;
           align-items: stretch;
+          min-height: 0;
+          flex: 1;
         }
         .top-nav {
           position: sticky;
@@ -3050,7 +5222,7 @@ const App: React.FC = () => {
           gap: 16px;
           padding: 12px 16px;
           border: 1px solid var(--border);
-          border-radius: 14px;
+          border-radius: 16px;
           background: var(--panel);
           box-shadow: var(--shadow);
         }
@@ -3100,6 +5272,19 @@ const App: React.FC = () => {
           display: flex;
           flex-direction: column;
           gap: 16px;
+          height: calc(100dvh - 90px);
+          overflow: hidden;
+          min-height: 0;
+        }
+        .sidebar-content {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+          overflow-x: hidden;
+          padding-right: 4px;
         }
         .main {
           flex: 1;
@@ -3107,6 +5292,8 @@ const App: React.FC = () => {
           display: flex;
           flex-direction: column;
           gap: 16px;
+          min-height: 0;
+          height: 100%;
         }
         .resizer {
           width: 6px;
@@ -3119,25 +5306,327 @@ const App: React.FC = () => {
           display: grid;
           grid-template-columns: 1fr;
           gap: 16px;
+          min-width: 0;
+        }
+        .results-layout > * {
+          min-width: 0;
+        }
+        .results-title {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 4px;
+          color: var(--text);
+        }
+        .results-title__label {
+          font-family: var(--font-display);
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+        }
+        .results-title__meta {
+          margin-top: 4px;
+          font-size: 11px;
+          color: var(--muted);
+        }
+        .results-table {
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          overflow: hidden;
+          box-shadow: var(--soft-shadow);
+          min-width: 0;
+        }
+        .results-footer-space {
+          height: 16px;
+        }
+        .results-summary {
+          position: sticky;
+          top: 70px;
+          z-index: 10;
+          background: var(--panel);
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .results-summary__top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        .results-summary__stats {
+          font-size: 12px;
+          color: var(--muted);
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+        .results-summary__chip {
+          font-size: 11px;
+          color: var(--accent);
+          background: var(--surface-accent);
+          border: 1px solid var(--border);
+          padding: 4px 10px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .results-summary__controls {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .results-tabs {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .results-controls {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .results-controls input,
+        .results-controls select {
+          padding: 6px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          color: var(--text);
+          font-size: 12px;
+        }
+        .results-controls select {
+          appearance: none;
+          background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+            linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+          background-position: calc(100% - 14px) calc(50% - 3px),
+            calc(100% - 9px) calc(50% - 3px);
+          background-size: 5px 5px, 5px 5px;
+          background-repeat: no-repeat;
+          padding-right: 24px;
+        }
+        .results-header {
+          position: sticky;
+          top: 0;
+          z-index: 5;
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(160px, 0.6fr) 100px 140px;
+          gap: 12px;
+          padding: 12px 16px;
+          background: linear-gradient(90deg, var(--surface), var(--surface-2));
+          border-bottom: 1px solid var(--border);
+          font-size: 11px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--muted);
+          white-space: nowrap;
+        }
+        .results-header div:nth-child(3) {
+          text-align: center;
+        }
+        .results-header div:last-child {
+          text-align: right;
+        }
+        .results-header.single {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .changes-header {
+          grid-template-columns:
+            minmax(0, 1.8fr)
+            minmax(110px, 0.5fr)
+            minmax(0, 1.2fr)
+            minmax(0, 1fr);
+        }
+        .change-row {
+          display: grid;
+          grid-template-columns:
+            minmax(0, 1.8fr)
+            minmax(110px, 0.5fr)
+            minmax(0, 1.2fr)
+            minmax(0, 1fr);
+          gap: 12px;
+          align-items: start;
+        }
+        .summary-chip {
+          font-size: 11px;
+          color: var(--text);
+          background: var(--panel-elev);
+          border: 1px solid var(--border);
+          padding: 4px 10px;
+          border-radius: 999px;
+          font-weight: 600;
+        }
+        .results-scroll {
+          max-height: 560px;
+          display: flex;
+          flex-direction: column;
+          gap: 0;
+          overflow-y: auto;
+          overflow-x: hidden;
+          background: var(--panel);
+          min-width: 0;
         }
         .result-row {
-          transition: transform 140ms ease, box-shadow 140ms ease;
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(160px, 0.6fr) 100px 140px;
+          gap: 12px;
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border);
+          transition: box-shadow 140ms ease, background 140ms ease;
           position: relative;
           overflow: visible;
+          cursor: pointer;
+          align-items: center;
+          min-width: 0;
+        }
+        .result-row::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 140ms ease;
+        }
+        .result-row.severity-broken::after {
+          background: linear-gradient(90deg, rgba(248, 113, 113, 0.12), transparent 50%);
+        }
+        .result-row.severity-blocked::after {
+          background: linear-gradient(90deg, rgba(251, 191, 36, 0.12), transparent 50%);
+        }
+        .result-row.severity-no_response::after {
+          background: linear-gradient(90deg, rgba(148, 163, 184, 0.16), transparent 50%);
         }
         .result-row:hover {
-          transform: translateY(-2px);
+          background: var(--surface-accent);
         }
-        .result-row.expanded,
-        .result-row.expanded:hover {
-          transform: none;
-          z-index: 2;
+        .result-row:hover::after,
+        .result-row:focus-within::after {
+          opacity: 1;
+        }
+        .result-row:last-child {
+          border-bottom: none;
+        }
+        .ignored-row {
+          display: flex;
+          border-bottom: none;
+        }
+        .result-cell {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-width: 0;
+        }
+        .result-link {
+          align-items: flex-start;
+        }
+        .result-actions {
+          align-items: center;
+          justify-content: flex-end;
+          width: 100%;
+        }
+        .result-host {
+          font-family: var(--font-display);
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .result-url {
+          font-size: 12px;
+          color: var(--accent);
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+        .result-meta {
+          font-size: 11px;
+          color: var(--muted);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .result-status {
+          align-items: flex-start;
+        }
+        .status-chip {
+          font-size: 11px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          font-weight: 600;
+          color: white;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid transparent;
+        }
+        .status-chip.subtle {
+          background: var(--chip-bg);
+          color: var(--chip-text);
+          border-color: var(--border);
+          font-weight: 500;
+        }
+        .status-chip.run-status {
+          background: rgba(148, 163, 184, 0.2);
+          color: var(--text);
+          border-color: rgba(148, 163, 184, 0.35);
+          font-weight: 600;
+          text-transform: capitalize;
+        }
+        .status-chip.run-status.success {
+          background: rgba(34, 197, 94, 0.18);
+          color: var(--success);
+          border-color: rgba(34, 197, 94, 0.45);
+        }
+        .status-chip.run-status.warning {
+          background: rgba(245, 158, 11, 0.2);
+          color: var(--warning);
+          border-color: rgba(245, 158, 11, 0.45);
+        }
+        .status-chip.run-status.danger {
+          background: rgba(239, 68, 68, 0.18);
+          color: var(--danger);
+          border-color: rgba(239, 68, 68, 0.45);
+        }
+        .result-occ {
+          align-items: center;
+          text-align: center;
+        }
+        .occ-count {
+          font-size: 20px;
+          font-weight: 600;
+          color: var(--text);
+          font-family: var(--font-display);
+        }
+        .occ-label {
+          font-size: 10px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
         }
         .row-actions {
           display: inline-flex;
           gap: 6px;
-          opacity: 0;
-          transition: opacity 140ms ease;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+          align-items: center;
+          opacity: 0.7;
+          transition: opacity 140ms ease, transform 140ms ease;
+          width: 100%;
+        }
+        .row-actions .icon-button {
+          background: var(--surface-2);
+          border-color: rgba(148, 163, 184, 0.35);
         }
         .result-row:hover .row-actions {
           opacity: 1;
@@ -3153,12 +5642,19 @@ const App: React.FC = () => {
           align-items: center;
           justify-content: center;
         }
+        .icon-button:hover {
+          background: var(--surface-2);
+        }
         .icon-button:disabled {
           cursor: not-allowed;
           opacity: 0.5;
         }
         .expand-panel {
           animation: expandFade 160ms ease;
+          overflow: hidden;
+          max-height: 640px;
+          opacity: 1;
+          transition: max-height 200ms ease, opacity 200ms ease;
         }
         @keyframes expandFade {
           from {
@@ -3174,9 +5670,27 @@ const App: React.FC = () => {
           .row-actions {
             opacity: 1;
           }
+          .results-header {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 6px;
+          }
+          .result-row {
+            grid-template-columns: minmax(0, 1fr);
+          }
+          .changes-header {
+            display: none;
+          }
+          .change-row {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 8px;
+          }
+          .result-occ {
+            align-items: flex-start;
+            text-align: left;
+          }
         }
         .results-layout.drawer-open {
-          grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+          grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
         }
         .drawer {
           position: sticky;
@@ -3184,6 +5698,119 @@ const App: React.FC = () => {
           align-self: start;
           max-height: calc(100vh - 120px);
           overflow: hidden;
+        }
+        .details-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(2, 6, 23, 0.55);
+          z-index: 45;
+        }
+        .details-drawer {
+          position: sticky;
+          top: 16px;
+          align-self: start;
+          height: calc(100vh - 120px);
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          box-shadow: var(--shadow);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          animation: drawerSlide 200ms ease;
+        }
+        .details-drawer.overlay {
+          position: fixed;
+          right: 16px;
+          left: 16px;
+          top: 80px;
+          bottom: 16px;
+          height: auto;
+          z-index: 50;
+        }
+        .drawer-header {
+          padding: 16px;
+          border-bottom: 1px solid var(--border);
+          background: var(--surface-2);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .drawer-title {
+          font-family: var(--font-display);
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--text);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .drawer-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .drawer-body {
+          padding: 16px;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          overflow: auto;
+        }
+        .drawer-section {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .drawer-section h4 {
+          margin: 0;
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: var(--muted);
+        }
+        .drawer-chip-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .drawer-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          max-height: 260px;
+          overflow: auto;
+        }
+        .drawer-row {
+          padding: 8px 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .drawer-row a {
+          flex: 1;
+          min-width: 0;
+          color: var(--text);
+          text-decoration: none;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          white-space: normal;
+        }
+        .drawer-row button {
+          font-size: 11px;
+        }
+        @keyframes drawerSlide {
+          from {
+            transform: translateX(12px);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
         }
         .toast-stack {
           position: fixed;
@@ -3202,6 +5829,29 @@ const App: React.FC = () => {
           color: var(--text);
           box-shadow: var(--shadow);
           font-size: 12px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .toast-action {
+          margin-left: auto;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          color: var(--text);
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .toast.success {
+          border-color: rgba(52, 211, 153, 0.6);
+        }
+        .toast.warning {
+          border-color: rgba(251, 191, 36, 0.7);
+        }
+        .toast.info {
+          border-color: rgba(56, 189, 248, 0.6);
         }
         .skeleton {
           height: 44px;
@@ -3209,6 +5859,13 @@ const App: React.FC = () => {
           background: linear-gradient(90deg, var(--panel-elev), var(--panel), var(--panel-elev));
           background-size: 200% 100%;
           animation: shimmer 1.2s ease-in-out infinite;
+        }
+        .skeleton--site {
+          height: 58px;
+        }
+        .skeleton--occ {
+          height: 32px;
+          border-radius: 12px;
         }
         .scan-progress {
           border: 1px solid var(--border);
@@ -3310,6 +5967,57 @@ const App: React.FC = () => {
         .filter-dropdown {
           position: relative;
         }
+        .theme-toggle {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .theme-menu {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          box-shadow: var(--shadow);
+          padding: 6px;
+          min-width: 160px;
+          z-index: 30;
+        }
+        .theme-menu button {
+          width: 100%;
+          text-align: left;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .theme-menu button.active {
+          background: var(--surface-2);
+          border-color: var(--border);
+        }
+        .action-menu button {
+          width: 100%;
+          text-align: left;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .action-menu button:hover {
+          background: var(--surface-2);
+        }
+        .action-menu button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
         .filter-dropdown__panel {
           position: absolute;
           top: calc(100% + 8px);
@@ -3322,6 +6030,7 @@ const App: React.FC = () => {
           background: var(--panel);
           box-shadow: var(--shadow);
           z-index: 20;
+          animation: dropdownIn 160ms ease;
         }
         .filter-row {
           display: flex;
@@ -3352,19 +6061,30 @@ const App: React.FC = () => {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
         }
+        @keyframes dropdownIn {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
         .tab-pill {
           padding: 6px 12px;
           border-radius: 999px;
           border: 1px solid var(--border);
-          background: transparent;
+          background: var(--panel);
           color: var(--muted);
           cursor: pointer;
           font-size: 12px;
+          transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
         }
         .tab-pill.active {
-          background: var(--accent);
+          background: linear-gradient(135deg, var(--accent), var(--accent-2));
           color: white;
-          border-color: var(--accent);
+          border-color: transparent;
+          box-shadow: 0 8px 18px rgba(37, 99, 235, 0.25);
+        }
+        .tab-pill:hover {
+          transform: translateY(-1px);
+          border-color: rgba(148, 163, 184, 0.6);
+          box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12);
         }
         @media (max-width: 1100px) {
           .shell {
@@ -3425,7 +6145,7 @@ const App: React.FC = () => {
         .card {
           background: var(--panel);
           border: 1px solid var(--border);
-          border-radius: 14px;
+          border-radius: 16px;
           padding: 16px;
           box-shadow: var(--shadow);
         }
@@ -3457,6 +6177,7 @@ const App: React.FC = () => {
         .report-title {
           font-size: 20px;
           font-weight: 700;
+          font-family: var(--font-display);
         }
         .report-subtitle {
           font-size: 12px;
@@ -3470,12 +6191,17 @@ const App: React.FC = () => {
         .report-button {
           padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: var(--panel);
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          background: var(--surface-2);
           color: var(--text);
           cursor: pointer;
           font-size: 12px;
           font-weight: 600;
+          transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+        }
+        .report-button:hover {
+          transform: translateY(-1px);
+          border-color: var(--accent);
         }
         .report-card {
           background: var(--panel);
@@ -3533,11 +6259,13 @@ const App: React.FC = () => {
         }
         .report-table-wrap {
           overflow-x: auto;
+          min-width: 0;
         }
         .report-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 12px;
+          table-layout: fixed;
         }
         .report-table th,
         .report-table td {
@@ -3550,6 +6278,10 @@ const App: React.FC = () => {
           color: var(--muted);
           text-transform: uppercase;
           letter-spacing: 0.04em;
+        }
+        .report-table td {
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .report-empty {
           padding: 12px;
@@ -3579,11 +6311,162 @@ const App: React.FC = () => {
         }
       `}</style>
       <div className="app-container">
-        {reportView ? (
+        {authLoading ? (
+          <div
+            style={{
+              minHeight: "60vh",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--muted)",
+              fontSize: "13px",
+            }}
+          >
+            Loading session...
+          </div>
+        ) : !authUser ? (
+          <div
+            style={{
+              minHeight: "70vh",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "24px",
+            }}
+          >
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleAuthSubmit();
+              }}
+              style={{
+                width: "min(420px, 100%)",
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: "18px",
+                padding: "20px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "14px",
+                boxShadow: "var(--shadow)",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: "20px",
+                    fontWeight: 700,
+                    fontFamily: "var(--font-display)",
+                  }}
+                >
+                  Scanlark
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                  Beta access required
+                </div>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                }}
+              >
+                {(["login", "register"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setAuthMode(mode)}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "999px",
+                      border: "1px solid var(--border)",
+                      background:
+                        authMode === mode ? "var(--surface-2)" : "transparent",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {mode === "login" ? "Login" : "Register"}
+                  </button>
+                ))}
+              </div>
+              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                Email
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  disabled={authWorking}
+                  style={{
+                    marginTop: "6px",
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--border)",
+                    background: "var(--panel)",
+                    color: "var(--text)",
+                  }}
+                />
+              </label>
+              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                Password
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  autoComplete={
+                    authMode === "login" ? "current-password" : "new-password"
+                  }
+                  placeholder="Enter your password"
+                  disabled={authWorking}
+                  style={{
+                    marginTop: "6px",
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--border)",
+                    background: "var(--panel)",
+                    color: "var(--text)",
+                  }}
+                />
+              </label>
+              {authError && (
+                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                  {authError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={authWorking}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "12px",
+                  border: "1px solid var(--border)",
+                  background: "var(--panel-elev)",
+                  cursor: authWorking ? "not-allowed" : "pointer",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                }}
+              >
+                {authWorking
+                  ? "Please wait..."
+                  : authMode === "login"
+                    ? "Log in"
+                    : "Create account"}
+              </button>
+              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+                TODO: Swap to managed auth provider before public launch.
+              </div>
+            </form>
+          </div>
+        ) : reportView ? (
           <div className="report-page">
             <div className="report-header">
               <div>
-                <div className="report-title">Link Sentry</div>
+                <div className="report-title">Scanlark</div>
                 <div className="report-subtitle">Scan Report</div>
               </div>
               <div className="report-actions">
@@ -3790,6 +6673,8 @@ const App: React.FC = () => {
                   ref={hamburgerRef}
                   onClick={() => setIsDrawerOpen(true)}
                   className="hamburger"
+                  aria-controls="sidebar-drawer"
+                  aria-expanded={isDrawerOpen}
                   style={{
                     border: "1px solid var(--border)",
                     background: "var(--panel)",
@@ -3803,8 +6688,15 @@ const App: React.FC = () => {
                   ☰
                 </button>
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: "16px" }}>
-                    Link Sentry
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: "16px",
+                      fontFamily: "var(--font-display)",
+                      letterSpacing: "-0.02em",
+                    }}
+                  >
+                    Scanlark
                   </div>
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
                     Link integrity monitor
@@ -3822,7 +6714,9 @@ const App: React.FC = () => {
                   padding: "0 8px",
                 }}
               >
-                Dashboard
+                {selectedSiteId
+                  ? `Selected: ${safeHost(startUrl || "")}`
+                  : "No site selected"}
               </div>
 
               <div
@@ -3833,467 +6727,1036 @@ const App: React.FC = () => {
                   flexWrap: "wrap",
                 }}
               >
-                <button
-                  onClick={handleThemeToggle}
-                  style={{
-                    position: "relative",
-                    width: "44px",
-                    height: "24px",
-                    borderRadius: "999px",
-                    border: "1px solid var(--border)",
-                    background:
-                      themeMode === "dark"
-                        ? "var(--panel-elev)"
-                        : "var(--accent)",
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
-                  title="Toggle theme"
-                >
-                  <span
+                {hasSites && (
+                  <button
+                    onClick={() => {
+                      setCreateError(null);
+                      setAddSiteOpen(true);
+                    }}
                     style={{
-                      position: "absolute",
-                      top: "2px",
-                      left: themeMode === "dark" ? "2px" : "22px",
-                      width: "20px",
-                      height: "20px",
-                      borderRadius: "999px",
+                      padding: "6px 12px",
+                      borderRadius: "10px",
+                      border: "1px solid var(--border)",
                       background: "var(--panel)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
                       fontSize: "12px",
-                      transition: "left 160ms ease",
+                      cursor: "pointer",
+                      fontWeight: 600,
                     }}
                   >
-                    {themeMode === "dark" ? "🌙" : "☀️"}
-                  </span>
-                </button>
-
-                <button
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Login
-                </button>
-                <button
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Register
-                </button>
-                {/* TODO: replace auth placeholders with user menu */}
+                    Add site
+                  </button>
+                )}
+                {authUser ? (
+                  <div
+                    ref={userMenuRef}
+                    style={{
+                      position: "relative",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      Hi, {authUser.name ?? authUser.email}
+                    </div>
+                    <button
+                      onClick={() => setUserMenuOpen((prev) => !prev)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Options
+                    </button>
+                    {userMenuOpen && (
+                      <div className="theme-menu">
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--muted)",
+                            padding: "4px 8px",
+                          }}
+                        >
+                          Theme
+                        </div>
+                        <button onClick={handleThemeToggle}>
+                          Toggle {themeMode === "dark" ? "Light" : "Dark"}
+                        </button>
+                        {(["system", "dark", "light"] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            className={
+                              themePreference === mode ? "active" : undefined
+                            }
+                            onClick={() => {
+                              handleThemeChange(mode);
+                              setUserMenuOpen(false);
+                            }}
+                          >
+                            {mode === "system"
+                              ? "System"
+                              : mode === "dark"
+                                ? "Dark"
+                                : "Light"}
+                          </button>
+                        ))}
+                        <div
+                          style={{
+                            height: "1px",
+                            margin: "6px 0",
+                            background: "var(--border)",
+                          }}
+                        />
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--muted)",
+                            padding: "4px 8px",
+                          }}
+                        >
+                          Help
+                        </div>
+                        <button
+                          onClick={() => {
+                            openOnboarding(0);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Run onboarding
+                        </button>
+                        <button
+                          onClick={() => {
+                            clearOnboardingState();
+                            openOnboarding(0);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Reset onboarding
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShortcutsOpen(true);
+                            setUserMenuOpen(false);
+                          }}
+                        >
+                          Keyboard shortcuts
+                        </button>
+                        <div
+                          style={{
+                            height: "1px",
+                            margin: "6px 0",
+                            background: "var(--border)",
+                          }}
+                        />
+                        <button onClick={() => void handleLogout()}>
+                          Logout
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Login
+                    </button>
+                    <button
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Register
+                    </button>
+                  </>
+                )}
               </div>
             </nav>
 
             <div className="shell">
               <aside
+                id="sidebar-drawer"
                 ref={sidebarRef}
                 className={`sidebar card drawer ${isDrawerOpen ? "open" : ""}`}
                 style={{ width: paneWidth }}
+                aria-label="Site navigation"
               >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <div>
-                    <h1
-                      style={{
-                        margin: 0,
-                        fontSize: "20px",
-                        letterSpacing: "-0.02em",
-                      }}
-                    >
-                      Link Sentry
-                    </h1>
-                    <p
-                      style={{
-                        margin: 0,
-                        color: "var(--muted)",
-                        fontSize: "12px",
-                      }}
-                    >
-                      Link integrity monitor
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setIsDrawerOpen(false)}
-                    className="drawer-close"
-                    style={{
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      borderRadius: "10px",
-                      padding: "4px 6px",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                    }}
-                    title="Close menu"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Search sites
-                  <input
-                    value={siteSearch}
-                    onChange={(e) => setSiteSearch(e.target.value)}
-                    placeholder="Search by URL"
-                    style={{
-                      marginTop: "6px",
-                      width: "100%",
-                      padding: "6px 8px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                </label>
-
-                <div>
+                <div className="sidebar-content">
                   <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "6px",
-                    }}
-                  >
-                    Add site
-                  </div>
-                  <input
-                    value={newSiteUrl}
-                    onChange={(e) => setNewSiteUrl(e.target.value)}
-                    placeholder="https://example.com"
-                    style={{
-                      width: "100%",
-                      padding: "6px 8px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  <button
-                    onClick={handleCreateSite}
-                    disabled={creatingSite || !newSiteUrl.trim()}
-                    style={{
-                      marginTop: "8px",
-                      padding: "6px 10px",
-                      borderRadius: "999px",
-                      border: "none",
-                      background: creatingSite
-                        ? "var(--panel-elev)"
-                        : "var(--accent)",
-                      color: "white",
-                      fontWeight: 600,
-                      cursor:
-                        creatingSite || !newSiteUrl.trim()
-                          ? "not-allowed"
-                          : "pointer",
-                      fontSize: "12px",
-                    }}
-                  >
-                    {creatingSite ? "Adding..." : "Add site"}
-                  </button>
-                  {createError && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--warning)",
-                        marginTop: "6px",
-                      }}
-                    >
-                      {createError}
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "8px",
-                    }}
-                  >
-                    Sites
-                  </div>
-                  {sitesLoading && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      Loading sites...
-                    </div>
-                  )}
-                  {sitesError && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--warning)",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      {sitesError}
-                    </div>
-                  )}
-                  <div
-                    className="scroll-y"
                     style={{
                       display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      maxHeight: "220px",
+                      justifyContent: "space-between",
+                      alignItems: "center",
                     }}
                   >
-                    {filteredSites.map((site) => {
-                      const isSelected = site.id === selectedSiteId;
-                      const isDeleting = deletingSiteId === site.id;
+                    <div>
+                      <h1
+                        style={{
+                          margin: 0,
+                          fontSize: "20px",
+                          fontFamily: "var(--font-display)",
+                          letterSpacing: "-0.02em",
+                        }}
+                      >
+                        Scanlark
+                      </h1>
+                      <p
+                        style={{
+                          margin: 0,
+                          color: "var(--muted)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        Link integrity monitor
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setIsDrawerOpen(false)}
+                      className="drawer-close"
+                      ref={drawerCloseRef}
+                      style={{
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        borderRadius: "10px",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                      title="Close menu"
+                    >
+                      ✕
+                    </button>
+                  </div>
 
-                      return (
-                        <div
-                          key={site.id}
-                          style={{
-                            borderRadius: "12px",
-                            border: "1px solid var(--border)",
-                            background: isSelected
-                              ? "var(--panel-elev)"
-                              : "var(--panel)",
-                            padding: "8px 10px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "6px",
-                          }}
-                        >
-                          <button
-                            onClick={() => handleSelectSite(site)}
-                            style={{
-                              textAlign: "left",
-                              border: "none",
-                              background: "transparent",
-                              color: "var(--text)",
-                              cursor: "pointer",
-                              padding: 0,
-                            }}
-                          >
-                            <div
-                              style={{
-                                fontSize: "13px",
-                                fontWeight: 600,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {site.url}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: "11px",
-                                color: "var(--muted)",
-                                marginTop: "2px",
-                              }}
-                            >
-                              created {formatDate(site.created_at)}
-                            </div>
-                          </button>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Search sites
+                    <input
+                      value={siteSearch}
+                      onChange={(e) => setSiteSearch(e.target.value)}
+                      placeholder="Search by URL"
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "6px 8px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
 
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Sites
+                    </div>
+                    {sitesError && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "var(--warning)",
+                          marginBottom: "6px",
+                        }}
+                      >
+                        {sitesError}
+                      </div>
+                    )}
+                    <div
+                      className="scroll-y"
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "8px",
+                        maxHeight: "220px",
+                      }}
+                    >
+                      {sitesLoading &&
+                        filteredSites.length === 0 &&
+                        Array.from({ length: 4 }).map((_, idx) => (
                           <div
+                            key={`site-skeleton-${idx}`}
+                            className="skeleton skeleton--site"
+                          />
+                        ))}
+                      {filteredSites.map((site) => {
+                        const isSelected = site.id === selectedSiteId;
+                        const isDeleting = deletingSiteId === site.id;
+
+                        return (
+                          <div
+                            key={site.id}
                             style={{
+                              borderRadius: "12px",
+                              border: "1px solid var(--border)",
+                              background: isSelected
+                                ? "var(--panel-elev)"
+                                : "var(--panel)",
+                              padding: "8px 10px",
                               display: "flex",
-                              justifyContent: "flex-end",
+                              flexDirection: "column",
+                              gap: "6px",
                             }}
                           >
                             <button
-                              onClick={() => handleDeleteSite(site.id)}
-                              disabled={isDeleting}
+                              onClick={() => handleSelectSite(site)}
                               style={{
-                                padding: "4px 8px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--danger)",
-                                background: isDeleting
-                                  ? "var(--panel-elev)"
-                                  : "var(--panel)",
-                                color: "var(--danger)",
-                                cursor: isDeleting ? "not-allowed" : "pointer",
-                                fontSize: "11px",
+                                textAlign: "left",
+                                border: "none",
+                                background: "transparent",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                padding: 0,
                               }}
                             >
-                              {isDeleting ? "Deleting..." : "Delete"}
+                              <div
+                                style={{
+                                  fontSize: "13px",
+                                  fontWeight: 600,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {siteNameById[site.id] ?? site.url}
+                              </div>
+                              {siteNameById[site.id] && (
+                                <div
+                                  style={{
+                                    fontSize: "11px",
+                                    color: "var(--muted)",
+                                    marginTop: "2px",
+                                  }}
+                                >
+                                  {site.url}
+                                </div>
+                              )}
+                              {site.url === SAMPLE_SITE_URL && (
+                                <div
+                                  style={{
+                                    fontSize: "10px",
+                                    color: "var(--muted)",
+                                    marginTop: "2px",
+                                  }}
+                                >
+                                  Sample site
+                                </div>
+                              )}
+                              <div
+                                style={{
+                                  fontSize: "11px",
+                                  color: "var(--muted)",
+                                  marginTop: "2px",
+                                }}
+                              >
+                                created {formatDate(site.created_at)}
+                              </div>
                             </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {!sitesLoading && filteredSites.length === 0 && (
-                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        No sites match.
-                      </div>
-                    )}
-                  </div>
-                  {deleteError && (
-                    <p
-                      style={{
-                        color: "var(--warning)",
-                        fontSize: "12px",
-                        marginTop: "8px",
-                      }}
-                    >
-                      {deleteError}
-                    </p>
-                  )}
-                </div>
 
-                <div>
-                  <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "8px",
-                    }}
-                  >
-                    Recent scans
-                  </div>
-                  <div
-                    className="scroll-y"
-                    style={{
-                      maxHeight: "220px",
-                      borderRadius: "12px",
-                      border: "1px solid var(--border)",
-                    }}
-                  >
-                    <table
-                      style={{
-                        width: "100%",
-                        borderCollapse: "collapse",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <thead
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "flex-end",
+                              }}
+                            >
+                              <button
+                                onClick={() => handleDeleteSite(site.id)}
+                                disabled={isDeleting}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--danger)",
+                                  background: isDeleting
+                                    ? "var(--panel-elev)"
+                                    : "var(--panel)",
+                                  color: "var(--danger)",
+                                  cursor: isDeleting
+                                    ? "not-allowed"
+                                    : "pointer",
+                                  fontSize: "11px",
+                                }}
+                              >
+                                {isDeleting ? "Deleting..." : "Delete"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!sitesLoading && filteredSites.length === 0 && (
+                        <div
+                          style={{
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                          }}
+                        >
+                          {sites.length === 0 && !siteSearch.trim()
+                            ? "No sites yet."
+                            : "No sites match."}
+                          {sites.length === 0 && !siteSearch.trim() && (
+                            <div style={{ display: "flex", gap: "8px" }}>
+                              <button
+                                onClick={() => {
+                                  setCreateError(null);
+                                  setAddSiteOpen(true);
+                                }}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Add site
+                              </button>
+                              <button
+                                onClick={() => void handleCreateSampleSite()}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Try sample
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {deleteError && (
+                      <p
                         style={{
-                          position: "sticky",
-                          top: 0,
-                          background: "var(--panel)",
-                          zIndex: 1,
+                          color: "var(--warning)",
+                          fontSize: "12px",
+                          marginTop: "8px",
                         }}
                       >
-                        <tr>
-                          <th
-                            style={{
-                              textAlign: "left",
-                              padding: "6px 8px",
-                              borderBottom: "1px solid var(--border)",
-                              color: "var(--muted)",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Started
-                          </th>
-                          <th
-                            style={{
-                              textAlign: "right",
-                              padding: "6px 8px",
-                              borderBottom: "1px solid var(--border)",
-                              color: "var(--muted)",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Broken
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {history.map((run) => {
-                          const isSelected = run.id === pinnedRunId;
-                          const brokenPct = percentBroken(
-                            run.checked_links || run.total_links,
-                            run.broken_links,
-                          );
-                          return (
-                            <tr
-                              key={run.id}
-                              onClick={() => {
-                                setResults([]);
-                                resetOccurrencesState();
-                                setSelectedRunId(run.id);
-                                selectedRunIdRef.current = run.id;
+                        {deleteError}
+                      </p>
+                    )}
+                  </div>
 
-                                if (isInProgress(run.status)) {
-                                  setActiveRunId(run.id);
-                                  activeRunIdRef.current = run.id;
-                                  startSse(run.id);
-                                  void refreshSelectedRun(run.id);
-                                } else {
-                                  setActiveRunId(null);
-                                  activeRunIdRef.current = null;
-                                  stopSse();
-                                  void loadResults(run.id);
-                                }
-                              }}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Schedule
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                        padding: "10px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                      }}
+                    >
+                      {!selectedSite && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure auto-scans.
+                        </div>
+                      )}
+                      {selectedSite && (
+                        <>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <span>Auto-scan</span>
+                            <input
+                              type="checkbox"
+                              checked={scheduleEnabled}
+                              onChange={(e) =>
+                                setScheduleEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr",
+                              gap: "8px",
+                            }}
+                          >
+                            <label
                               style={{
-                                cursor: "pointer",
-                                background: isSelected
-                                  ? "var(--panel-elev)"
-                                  : "transparent",
-                              }}
-                            >
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  borderBottom: "1px solid var(--border)",
-                                }}
-                              >
-                                {formatDate(run.started_at)}
-                              </td>
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  borderBottom: "1px solid var(--border)",
-                                  textAlign: "right",
-                                }}
-                              >
-                                {run.broken_links} ({brokenPct})
-                              </td>
-                            </tr>
-                          );
-                        })}
-                        {history.length === 0 && !historyLoading && (
-                          <tr>
-                            <td
-                              colSpan={2}
-                              style={{
-                                padding: "10px",
-                                textAlign: "center",
+                                fontSize: "12px",
                                 color: "var(--muted)",
                               }}
                             >
-                              No scans yet.
-                            </td>
+                              Frequency
+                              <select
+                                value={scheduleFrequency}
+                                onChange={(e) =>
+                                  setScheduleFrequency(
+                                    e.target.value as "daily" | "weekly",
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              >
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                              </select>
+                            </label>
+                            {scheduleFrequency === "weekly" && (
+                              <label
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                Day of week (UTC)
+                                <select
+                                  value={scheduleDayOfWeek}
+                                  onChange={(e) =>
+                                    setScheduleDayOfWeek(Number(e.target.value))
+                                  }
+                                  style={{
+                                    marginTop: "6px",
+                                    width: "100%",
+                                    padding: "6px 8px",
+                                    borderRadius: "10px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                  }}
+                                >
+                                  <option value={0}>Sunday</option>
+                                  <option value={1}>Monday</option>
+                                  <option value={2}>Tuesday</option>
+                                  <option value={3}>Wednesday</option>
+                                  <option value={4}>Thursday</option>
+                                  <option value={5}>Friday</option>
+                                  <option value={6}>Saturday</option>
+                                </select>
+                              </label>
+                            )}
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Time (UTC)
+                              <input
+                                type="time"
+                                value={scheduleTimeUtc}
+                                onChange={(e) =>
+                                  setScheduleTimeUtc(e.target.value)
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              />
+                            </label>
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Time (UTC):{" "}
+                            {formatScheduleUtcLabel(
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                            )}
+                          </div>
+                          {showLocalTimeZone && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Your time:{" "}
+                              {formatScheduleLocalLabel(
+                                scheduleFrequency,
+                                scheduleTimeUtc,
+                                scheduleDayOfWeek,
+                              )}{" "}
+                              ({localTimeZone})
+                            </div>
+                          )}
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Next run (UTC):{" "}
+                            {formatUtcDateTime(selectedSite.next_scheduled_at)}
+                          </div>
+                          {showLocalTimeZone && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Next run (local):{" "}
+                              {formatLocalDateTime(
+                                selectedSite.next_scheduled_at,
+                              )}{" "}
+                              ({localTimeZone})
+                            </div>
+                          )}
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Last scheduled run:{" "}
+                            {formatDate(selectedSite.last_scheduled_at)}
+                          </div>
+                          {scheduleError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {scheduleError}
+                            </div>
+                          )}
+                          <button
+                            onClick={() => void handleSaveSchedule()}
+                            disabled={scheduleSaving}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: scheduleSaving
+                                ? "var(--panel-elev)"
+                                : "var(--panel)",
+                              cursor: scheduleSaving
+                                ? "not-allowed"
+                                : "pointer",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {scheduleSaving ? "Saving..." : "Save schedule"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Notifications
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                        padding: "10px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                      }}
+                    >
+                      {!selectedSite && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure notifications.
+                        </div>
+                      )}
+                      {selectedSite && (
+                        <>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <span>Email alerts</span>
+                            <input
+                              type="checkbox"
+                              checked={notifyEnabled}
+                              disabled={notifyLoading}
+                              onChange={(e) =>
+                                setNotifyEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Email address
+                            <input
+                              type="email"
+                              value={notifyEmail}
+                              onChange={(e) => setNotifyEmail(e.target.value)}
+                              placeholder="you@example.com"
+                              disabled={notifyLoading}
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            />
+                          </label>
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Notify on
+                            <select
+                              value={notifyOn}
+                              onChange={(e) =>
+                                setNotifyOn(e.target.value as NotifyOnOption)
+                              }
+                              disabled={notifyLoading}
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            >
+                              <option value="new_issues_only">
+                                Only when NEW issues appear
+                              </option>
+                              <option value="issues_exist">
+                                Only when issues exist
+                              </option>
+                              <option value="always">Always</option>
+                              <option value="never">Never</option>
+                            </select>
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyIncludeCsv}
+                              onChange={(e) =>
+                                setNotifyIncludeCsv(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Include CSV attachment (coming soon)
+                          </label>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            We email you based on the selected trigger.
+                          </div>
+                          {notifyLoading && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Loading notification settings...
+                            </div>
+                          )}
+                          {notifyError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {notifyError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveNotifications()}
+                              disabled={
+                                notifySaving ||
+                                notifyLoading ||
+                                (notifyEnabled &&
+                                  notifyOn !== "never" &&
+                                  !notifyEmail.trim())
+                              }
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: notifySaving
+                                  ? "var(--panel-elev)"
+                                  : "var(--panel)",
+                                cursor:
+                                  notifySaving ||
+                                  notifyLoading ||
+                                  (notifyEnabled &&
+                                    notifyOn !== "never" &&
+                                    !notifyEmail.trim())
+                                    ? "not-allowed"
+                                    : "pointer",
+                                fontSize: "12px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              {notifySaving ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              onClick={() => void handleSendTestEmail()}
+                              disabled={
+                                notifyTestSending ||
+                                !notifyEmail.trim() ||
+                                notifyLoading
+                              }
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: notifyTestSending
+                                  ? "var(--panel-elev)"
+                                  : "var(--panel)",
+                                cursor:
+                                  notifyTestSending ||
+                                  !notifyEmail.trim() ||
+                                  !notifyEnabled ||
+                                  notifyOn === "never" ||
+                                  notifyLoading
+                                    ? "not-allowed"
+                                    : "pointer",
+                                fontSize: "12px",
+                              }}
+                            >
+                              {notifyTestSending
+                                ? "Sending..."
+                                : "Send test alert"}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Recent scans
+                    </div>
+                    <div
+                      className="scroll-y"
+                      style={{
+                        maxHeight: "220px",
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      <table
+                        style={{
+                          width: "100%",
+                          borderCollapse: "collapse",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <thead
+                          style={{
+                            position: "sticky",
+                            top: 0,
+                            background: "var(--panel)",
+                            zIndex: 1,
+                          }}
+                        >
+                          <tr>
+                            <th
+                              style={{
+                                textAlign: "left",
+                                padding: "6px 8px",
+                                borderBottom: "1px solid var(--border)",
+                                color: "var(--muted)",
+                                fontWeight: 500,
+                              }}
+                            >
+                              Started
+                            </th>
+                            <th
+                              style={{
+                                textAlign: "right",
+                                padding: "6px 8px",
+                                borderBottom: "1px solid var(--border)",
+                                color: "var(--muted)",
+                                fontWeight: 500,
+                              }}
+                            >
+                              Broken
+                            </th>
                           </tr>
-                        )}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {history.map((run) => {
+                            const isSelected = run.id === pinnedRunId;
+                            const brokenPct = percentBroken(
+                              run.checked_links || run.total_links,
+                              run.broken_links,
+                            );
+                            return (
+                              <tr
+                                key={run.id}
+                                onClick={() => {
+                                  setResults([]);
+                                  resetOccurrencesState();
+                                  setSelectedRunId(run.id);
+                                  selectedRunIdRef.current = run.id;
+
+                                  if (isInProgress(run.status)) {
+                                    setActiveRunId(run.id);
+                                    activeRunIdRef.current = run.id;
+                                    void refreshSelectedRun(run.id);
+                                  } else {
+                                    setActiveRunId(null);
+                                    activeRunIdRef.current = null;
+                                    void loadResults(run.id);
+                                  }
+                                }}
+                                style={{
+                                  cursor: "pointer",
+                                  background: isSelected
+                                    ? "var(--panel-elev)"
+                                    : "transparent",
+                                }}
+                              >
+                                <td
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderBottom: "1px solid var(--border)",
+                                  }}
+                                >
+                                  {formatDate(run.started_at)}
+                                </td>
+                                <td
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderBottom: "1px solid var(--border)",
+                                    textAlign: "right",
+                                  }}
+                                >
+                                  {run.broken_links} ({brokenPct})
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {history.length === 0 && !historyLoading && (
+                            <tr>
+                              <td
+                                colSpan={2}
+                                style={{
+                                  padding: "10px",
+                                  textAlign: "center",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                <div style={{ marginBottom: "6px" }}>
+                                  No scans yet. Run your first scan to see what
+                                  Scanlark finds (usually a minute or two).
+                                </div>
+                                <button
+                                  onClick={handleRunScan}
+                                  disabled={!selectedSiteId || triggeringScan}
+                                  style={{
+                                    padding: "4px 8px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    fontSize: "11px",
+                                    cursor:
+                                      !selectedSiteId || triggeringScan
+                                        ? "not-allowed"
+                                        : "pointer",
+                                  }}
+                                >
+                                  {triggeringScan ? "Starting..." : "Run scan"}
+                                </button>
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               </aside>
@@ -4316,8 +7779,15 @@ const App: React.FC = () => {
                   }}
                 >
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: "22px", fontWeight: 700 }}>
-                      {startUrl ? safeHost(startUrl) : "No site selected"}
+                    <div
+                      style={{
+                        fontSize: "22px",
+                        fontWeight: 700,
+                        fontFamily: "var(--font-display)",
+                      }}
+                    >
+                      {selectedSiteName ??
+                        (startUrl ? safeHost(startUrl) : "No site selected")}
                     </div>
                     <div
                       style={{
@@ -4341,8 +7811,75 @@ const App: React.FC = () => {
                         {startUrl || "Select a site to begin"}
                       </span>
                     </div>
+                    <div
+                      style={{
+                        marginTop: "10px",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                        maxWidth: "520px",
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, color: "var(--text)" }}>
+                        Automation
+                      </div>
+                      <div>
+                        {selectedSite
+                          ? formatScheduleSummary(
+                              scheduleEnabled,
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                              selectedSite.next_scheduled_at,
+                            )
+                          : "Auto-scan: —"}
+                      </div>
+                      <div>
+                        {selectedSite
+                          ? formatAlertsSummary(notifyEnabled, notifyOn)
+                          : "Alerts: —"}
+                      </div>
+                    </div>
                   </div>
                   <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      onClick={handleNewScanAction}
+                      disabled={
+                        !!selectedSiteId && (triggeringScan || canCancelRun)
+                      }
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "999px",
+                        border: "none",
+                        background:
+                          selectedSiteId && (triggeringScan || canCancelRun)
+                            ? "var(--panel-elev)"
+                            : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                        color: "white",
+                        fontWeight: 600,
+                        cursor:
+                          selectedSiteId && (triggeringScan || canCancelRun)
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                      title={
+                        !hasSites
+                          ? "Add a site to start scanning"
+                          : !selectedSiteId
+                            ? "Select a site to start a scan"
+                            : "Start a new scan"
+                      }
+                    >
+                      {selectedSiteId && triggeringScan
+                        ? "Running..."
+                        : "New scan"}
+                    </button>
                     <button
                       onClick={() => startUrl && copyToClipboard(startUrl)}
                       disabled={!startUrl}
@@ -4372,26 +7909,6 @@ const App: React.FC = () => {
                     >
                       Ignore rules
                     </button>
-                    <button
-                      onClick={handleRunScan}
-                      disabled={!selectedSiteId || triggeringScan}
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "999px",
-                        border: "none",
-                        background: triggeringScan
-                          ? "var(--panel-elev)"
-                          : "var(--success)",
-                        color: "white",
-                        fontWeight: 600,
-                        cursor:
-                          triggeringScan || !selectedSiteId
-                            ? "not-allowed"
-                            : "pointer",
-                      }}
-                    >
-                      {triggeringScan ? "Running..." : "New scan"}
-                    </button>
                     <a
                       href={startUrl || "#"}
                       target="_blank"
@@ -4413,1326 +7930,2243 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div ref={scansRef} className="card" style={{ padding: "0" }}>
-                  {showProgress && selectedRun && (
+                {!hasSites && (
+                  <div className="card" style={{ padding: "24px" }}>
                     <div
                       style={{
-                        padding: "16px 16px 0 16px",
+                        fontSize: "18px",
+                        fontWeight: 600,
+                        fontFamily: "var(--font-display)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Add your first site
+                    </div>
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      Scan for broken links, track changes, and get alerts.
+                    </div>
+                    <div
+                      style={{
+                        marginTop: "16px",
                         display: "flex",
-                        gap: "12px",
-                        alignItems: "flex-start",
+                        gap: "10px",
                         flexWrap: "wrap",
                       }}
                     >
-                      <div style={{ flex: 1, minWidth: "240px" }}>
-                        <ScanProgressBar
-                          status={
-                            progressPhase === "completed"
-                              ? "completed"
-                              : selectedRun.status
-                          }
-                          totalLinks={selectedRun.total_links}
-                          checkedLinks={selectedRun.checked_links}
-                          brokenLinks={selectedRun.broken_links}
-                          blockedLinks={blockedResults.length}
-                          noResponseLinks={
-                            visibleResults.filter(
-                              (row) => row.classification === "no_response",
-                            ).length
-                          }
-                          lastUpdateAt={lastProgressAt ?? null}
-                        />
-                      </div>
-                      {selectedRun.status === "in_progress" && (
-                        <button
-                          onClick={handleCancelScan}
-                          style={{
-                            padding: "10px 14px",
-                            borderRadius: "10px",
-                            border: "1px solid var(--danger)",
-                            background: "var(--danger)",
-                            color: "white",
-                            fontSize: "12px",
-                            fontWeight: 600,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Cancel scan
-                        </button>
-                      )}
+                      <button
+                        onClick={() => {
+                          setCreateError(null);
+                          setAddSiteOpen(true);
+                        }}
+                        style={{
+                          padding: "8px 14px",
+                          borderRadius: "999px",
+                          border: "none",
+                          background:
+                            "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                          color: "white",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Add site
+                      </button>
+                      <button
+                        onClick={() => void handleCreateSampleSite()}
+                        style={{
+                          padding: "8px 14px",
+                          borderRadius: "999px",
+                          border: "1px solid var(--border)",
+                          background: "var(--panel)",
+                          color: "var(--text)",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Try sample site
+                      </button>
                     </div>
-                  )}
-                  {!showProgress && (
-                    <div style={{ padding: "16px 16px 0 16px" }}>
-                      <div className="card" style={{ padding: "12px 14px" }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            flexWrap: "wrap",
-                            gap: "12px",
-                          }}
-                        >
-                          <div>
-                            <div style={{ fontWeight: 600 }}>Diff</div>
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              {compareRun
-                                ? `Comparing to ${formatRelative(compareRun.started_at)}`
-                                : compareRunId
-                                  ? "Comparing to selected run"
-                                  : "Run another scan to enable comparisons"}
-                            </div>
-                          </div>
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "10px",
-                              flexWrap: "wrap",
-                              alignItems: "center",
-                            }}
-                          >
-                            {diffSummary && (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: "10px",
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <span>
-                                  New issues {diffSummary.addedIssues}
-                                </span>
-                                <span>Fixed {diffSummary.removedIssues}</span>
-                                <span>Changed {diffSummary.changed}</span>
-                                <span>Unchanged {diffSummary.unchanged}</span>
-                              </div>
-                            )}
-                            {hasDiffChanges && (
-                              <button
-                                onClick={() => setDiffOpen((prev) => !prev)}
-                                style={{
-                                  padding: "4px 8px",
-                                  borderRadius: "8px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  fontSize: "11px",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                {diffOpen ? "Hide details" : "Show details"}
-                              </button>
-                            )}
-                          </div>
+                  </div>
+                )}
+
+                {hasSites && (
+                  <div ref={scansRef} className="card" style={{ padding: "0" }}>
+                    {showProgress && selectedRun && (
+                      <div
+                        style={{
+                          padding: "16px 16px 0 16px",
+                          display: "flex",
+                          gap: "12px",
+                          alignItems: "flex-start",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: "240px" }}>
+                          <ScanProgressBar
+                            status={
+                              progressPhase === "completed"
+                                ? "completed"
+                                : selectedRun.status
+                            }
+                            totalLinks={selectedRun.total_links}
+                            checkedLinks={selectedRun.checked_links}
+                            brokenLinks={phase0BrokenCount}
+                            blockedLinks={phase0BlockedCount}
+                            noResponseLinks={phase0NoResponseCount}
+                            lastUpdateAt={lastProgressAt ?? null}
+                          />
                         </div>
-                        {diffLoading && (
-                          <div
+                        {canCancelRun && (
+                          <button
+                            onClick={handleCancelScan}
                             style={{
+                              padding: "10px 14px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--danger)",
+                              background: "var(--danger)",
+                              color: "white",
                               fontSize: "12px",
-                              color: "var(--muted)",
-                              marginTop: "8px",
+                              fontWeight: 600,
+                              cursor: "pointer",
                             }}
                           >
-                            Loading diff…
-                          </div>
-                        )}
-                        {diffError && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                              marginTop: "8px",
-                            }}
-                          >
-                            {diffError}
-                          </div>
-                        )}
-                        {issueDiff && !hasDiffChanges && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--muted)",
-                              marginTop: "8px",
-                            }}
-                          >
-                            No issue changes since last run.
-                          </div>
-                        )}
-                        {issueDiff && hasDiffChanges && diffOpen && (
-                          <div style={{ marginTop: "10px" }}>
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                                marginBottom: "10px",
-                              }}
-                            >
-                              {(["added", "removed", "changed"] as const).map(
-                                (tab) => (
-                                  <button
-                                    key={tab}
-                                    className={`tab-pill ${diffTab === tab ? "active" : ""}`}
-                                    onClick={() => setDiffTab(tab)}
-                                  >
-                                    {tab === "added"
-                                      ? `Added (${issueDiff.added.length})`
-                                      : tab === "removed"
-                                        ? `Fixed (${issueDiff.removed.length})`
-                                        : `Changed (${issueDiff.changed.length})`}
-                                  </button>
-                                ),
-                              )}
-                            </div>
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "8px",
-                              }}
-                            >
-                              {diffItems.length === 0 && (
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  Nothing in this category.
-                                </div>
-                              )}
-                              {diffItems.map((item) => {
-                                const runIdForOcc =
-                                  diffTab === "removed"
-                                    ? (compareRunId ?? selectedRunId)
-                                    : selectedRunId;
-                                const row = item.row;
-                                const key = `${runIdForOcc}:${row.link_url}`;
-                                const isOpen = !!diffOccurrences[key];
-                                return (
-                                  <div
-                                    key={item.key}
-                                    style={{
-                                      border: "1px solid var(--border)",
-                                      borderRadius: "10px",
-                                      padding: "8px",
-                                      background: "var(--panel-elev)",
-                                    }}
-                                  >
-                                    <div
-                                      style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "8px",
-                                        flexWrap: "wrap",
-                                      }}
-                                    >
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          padding: "2px 6px",
-                                          borderRadius: "999px",
-                                          background: "var(--chip-bg)",
-                                          color: "var(--chip-text)",
-                                        }}
-                                      >
-                                        {formatClassification(
-                                          row.classification,
-                                        )}
-                                      </span>
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          color: "var(--muted)",
-                                        }}
-                                      >
-                                        {row.status_code ?? "No response"}
-                                      </span>
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          color: "var(--muted)",
-                                        }}
-                                      >
-                                        {row.occurrence_count}x
-                                      </span>
-                                      {item.before && item.after && (
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {formatClassification(
-                                            item.before.classification,
-                                          )}{" "}
-                                          {item.before.status_code ??
-                                            "No response"}{" "}
-                                          →{" "}
-                                          {formatClassification(
-                                            item.after.classification,
-                                          )}{" "}
-                                          {item.after.status_code ??
-                                            "No response"}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <div
-                                      style={{
-                                        marginTop: "6px",
-                                        fontSize: "12px",
-                                        color: "var(--text)",
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
-                                      }}
-                                      title={row.link_url}
-                                    >
-                                      {row.link_url}
-                                    </div>
-                                    <div style={{ marginTop: "6px" }}>
-                                      <button
-                                        onClick={() =>
-                                          runIdForOcc &&
-                                          toggleDiffOccurrences(
-                                            runIdForOcc,
-                                            row.link_url,
-                                          )
-                                        }
-                                        style={{
-                                          padding: "4px 8px",
-                                          borderRadius: "8px",
-                                          border: "1px solid var(--border)",
-                                          background: "var(--panel)",
-                                          fontSize: "11px",
-                                          cursor: "pointer",
-                                        }}
-                                      >
-                                        {isOpen
-                                          ? "Hide occurrences"
-                                          : "View occurrences"}
-                                      </button>
-                                    </div>
-                                    {isOpen && (
-                                      <div
-                                        style={{
-                                          marginTop: "8px",
-                                          display: "flex",
-                                          flexDirection: "column",
-                                          gap: "6px",
-                                        }}
-                                      >
-                                        {diffOccLoading[key] && (
-                                          <div
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--muted)",
-                                            }}
-                                          >
-                                            Loading…
-                                          </div>
-                                        )}
-                                        {diffOccError[key] && (
-                                          <div
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--warning)",
-                                            }}
-                                          >
-                                            {diffOccError[key]}
-                                          </div>
-                                        )}
-                                        {(diffOccurrences[key] ?? []).map(
-                                          (occ) => (
-                                            <div
-                                              key={occ.id}
-                                              style={{
-                                                fontSize: "12px",
-                                                color: "var(--muted)",
-                                                overflowWrap: "anywhere",
-                                              }}
-                                            >
-                                              {occ.source_page}
-                                            </div>
-                                          ),
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
+                            Cancel scan
+                          </button>
                         )}
                       </div>
-                    </div>
-                  )}
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: "12px",
-                      flexWrap: "wrap",
-                      marginBottom: "12px",
-                    }}
-                  >
+                    )}
+                    {!showProgress && (
+                      <div style={{ padding: "16px 16px 0 16px" }} />
+                    )}
                     <div
                       style={{
-                        position: "sticky",
-                        top: 70,
-                        zIndex: 10,
-                        background: "var(--panel)",
-                        padding: "14px 16px",
+                        padding: "16px",
                         borderBottom: "1px solid var(--border)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
                       }}
                     >
                       <div
                         style={{
                           display: "flex",
                           justifyContent: "space-between",
-                          gap: "12px",
                           alignItems: "center",
+                          gap: "12px",
                           flexWrap: "wrap",
                         }}
                       >
-                        {!isSelectedRunInProgress && (
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            {runHeadingText}
+                          </div>
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
-                            Checked {selectedRun?.checked_links ?? 0} /{" "}
-                            {selectedRun?.total_links ?? 0} • Broken{" "}
-                            {selectedRun?.broken_links ?? 0} • Blocked{" "}
-                            {blockedResults.length} • Timed out{" "}
-                            {
-                              visibleResults.filter(
-                                (row) => row.classification === "no_response",
-                              ).length
-                            }
+                            {selectedRun
+                              ? `Started ${formatRelative(selectedRun.started_at)}`
+                              : "No scans yet"}
                           </div>
-                        )}
-                        {hasActiveFilters && (
-                          <span
-                            style={{ fontSize: "12px", color: "var(--accent)" }}
-                          >
-                            Filters active
-                          </span>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                          }}
-                        >
-                          {(
-                            [
-                              "all",
-                              "broken",
-                              "blocked",
-                              "no_response",
-                              "ok",
-                              "ignored",
-                            ] as const
-                          ).map((tab) => (
-                            <button
-                              key={tab}
-                              className={`tab-pill ${activeTab === tab ? "active" : ""}`}
-                              onClick={() => setActiveTab(tab)}
-                            >
-                              {tab === "ok"
-                                ? "OK"
-                                : tab === "no_response"
-                                  ? "Timed out"
-                                  : tab === "ignored"
-                                    ? "Ignored"
-                                    : tab[0].toUpperCase() + tab.slice(1)}
-                            </button>
-                          ))}
                         </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                          }}
-                        >
+                        {selectedRun && (
                           <div
-                            className="filter-dropdown"
-                            ref={filterDropdownRef}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
                           >
-                            <button
-                              onClick={() => setFiltersOpen((prev) => !prev)}
-                              className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
+                            <span
+                              className={`status-chip run-status ${runStatusTone(
+                                selectedRun.status,
+                              )}`}
                             >
-                              Filters {filtersOpen ? "▴" : "▾"}
-                            </button>
-                            {filtersOpen && (
-                              <div className="filter-dropdown__panel">
-                                <div className="filter-row">
-                                  {(["all", "http_error"] as const).map(
-                                    (group) => (
-                                      <button
-                                        key={group}
-                                        onClick={() => setStatusGroup(group)}
-                                        className={`tab-pill ${statusGroup === group ? "active" : ""}`}
-                                      >
-                                        {group === "all"
-                                          ? "All responses"
-                                          : "HTTP response"}
-                                      </button>
-                                    ),
-                                  )}
-                                </div>
-                                <div className="filter-row">
-                                  {["401/403/429", "404", "5xx"].map((key) => (
-                                    <button
-                                      key={key}
-                                      onClick={() => toggleStatusFilter(key)}
-                                      className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
-                                    >
-                                      {key}
-                                    </button>
-                                  ))}
-                                  <button
-                                    onClick={() =>
-                                      setMinOccurrencesOnly((prev) => !prev)
-                                    }
-                                    className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
-                                  >
-                                    Occurrences &gt; 1
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      setShowIgnored((prev) => !prev)
-                                    }
-                                    className={`tab-pill ${showIgnored ? "active" : ""}`}
-                                  >
-                                    {showIgnored
-                                      ? "Showing ignored"
-                                      : "Show ignored"}
-                                  </button>
-                                </div>
-                                <div className="filter-row">
-                                  <button
-                                    onClick={() => {
-                                      setStatusFilters({});
-                                      setMinOccurrencesOnly(false);
-                                      setSearchQuery("");
-                                      setActiveTab("all");
-                                      setStatusGroup("all");
-                                      setShowIgnored(false);
-                                    }}
-                                    className="tab-pill"
-                                  >
-                                    Reset filters
-                                  </button>
-                                </div>
-                              </div>
+                              {selectedRun.status.replace("_", " ")}
+                            </span>
+                            {(canRetryRun || canRescan) && (
+                              <button
+                                onClick={() => {
+                                  if (canRescan) {
+                                    void handleRunScan();
+                                  } else {
+                                    void handleRetryScan();
+                                  }
+                                }}
+                                className="report-button"
+                                disabled={
+                                  (canRescan &&
+                                    (!selectedSiteId || triggeringScan)) ||
+                                  (!canRescan && !canRetryRun)
+                                }
+                              >
+                                Retry scan
+                              </button>
                             )}
                           </div>
-                          <input
-                            ref={searchInputRef}
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder="Search links"
-                            style={{
-                              padding: "6px 8px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              width: "180px",
-                            }}
-                          />
-                          <select
-                            value={sortOption}
-                            onChange={(e) =>
-                              setSortOption(e.target.value as typeof sortOption)
-                            }
-                            style={{
-                              padding: "6px 8px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <option value="severity">Severity</option>
-                            <option value="occ_desc">Occurrences</option>
-                            <option value="status_asc">Status code ↑</option>
-                            <option value="status_desc">Status code ↓</option>
-                            <option value="recent">Recently seen</option>
-                          </select>
-                          {isSelectedRunInProgress && (
-                            <span
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Updating…
+                        )}
+                      </div>
+                      {selectedRun && (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "16px",
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          <span>
+                            Duration{" "}
+                            {formatDuration(
+                              selectedRun.started_at,
+                              selectedRun.finished_at,
+                            )}
+                          </span>
+                          <span>
+                            Finished{" "}
+                            {formatDate(selectedRun.finished_at ?? null)}
+                          </span>
+                          {selectedRun.error_message && (
+                            <span style={{ color: "var(--warning)" }}>
+                              {selectedRun.error_message}
                             </span>
                           )}
-                          <button
-                            onClick={() => setHistoryOpen(true)}
+                        </div>
+                      )}
+                      {selectedRun && (
+                        <div
+                          style={{
+                            paddingTop: "10px",
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "12px",
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          <span
+                            style={{ fontWeight: 600, color: "var(--text)" }}
+                          >
+                            Phase 0 diagnostics
+                          </span>
+                          <span>
+                            Status {selectedRun.status.replace("_", " ")}
+                          </span>
+                          <span>
+                            Started {formatDate(selectedRun.started_at)}
+                          </span>
+                          <span>
+                            Finished{" "}
+                            {formatDate(selectedRun.finished_at ?? null)}
+                          </span>
+                          <span>
+                            Duration{" "}
+                            {formatDuration(
+                              selectedRun.started_at,
+                              selectedRun.finished_at,
+                            )}
+                          </span>
+                          <span>Pages crawled not tracked</span>
+                          <span>
+                            Links checked {selectedRun.checked_links}/
+                            {selectedRun.total_links}
+                          </span>
+                          <span>Broken {phase0BrokenCount}</span>
+                          <span>Blocked {phase0BlockedCount}</span>
+                          <span>No response {phase0NoResponseCount}</span>
+                          <span>
+                            Ignored/skipped {phase0IgnoredSkippedCount}
+                          </span>
+                          <span>Limits hit not tracked</span>
+                          {phase0DiagnosticsLoading && (
+                            <span>Refreshing...</span>
+                          )}
+                          {currentPhase0Diagnostics?.loadedAt && (
+                            <span>
+                              Diagnostics{" "}
+                              {formatRelative(
+                                new Date(
+                                  currentPhase0Diagnostics.loadedAt,
+                                ).toISOString(),
+                              )}
+                            </span>
+                          )}
+                          {selectedRun.error_message && (
+                            <span style={{ color: "var(--warning)" }}>
+                              Failure reason {selectedRun.error_message}
+                            </span>
+                          )}
+                          {currentPhase0Diagnostics?.error && (
+                            <span style={{ color: "var(--warning)" }}>
+                              Diagnostics error {currentPhase0Diagnostics.error}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {selectedRun && diffBaselineRun && diffSummary && (
+                        <div
+                          style={{
+                            paddingTop: "10px",
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span style={{ color: "var(--muted)" }}>
+                            Compared to{" "}
+                            {formatRelative(diffBaselineRun.started_at)} ·{" "}
+                            {formatDate(diffBaselineRun.started_at)}
+                          </span>
+                          <div
                             style={{
-                              padding: "6px 10px",
-                              borderRadius: "999px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "12px",
                               color: "var(--text)",
-                              cursor: "pointer",
-                              fontSize: "12px",
                               fontWeight: 600,
                             }}
                           >
-                            History
-                          </button>
-                          <div
-                            ref={exportMenuRef}
-                            style={{ position: "relative" }}
-                          >
-                            <button
-                              onClick={() => setExportMenuOpen((prev) => !prev)}
-                              disabled={exportDisabled}
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                cursor: exportDisabled
-                                  ? "not-allowed"
-                                  : "pointer",
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              Export
-                            </button>
-                            {exportMenuOpen && !exportDisabled && (
-                              <div
-                                className="export-menu"
-                                style={{
-                                  position: "absolute",
-                                  right: 0,
-                                  top: "calc(100% + 6px)",
-                                  background: "var(--panel)",
-                                  border: "1px solid var(--border)",
-                                  borderRadius: "12px",
-                                  boxShadow: "var(--shadow)",
-                                  padding: "6px",
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  gap: "4px",
-                                  minWidth: "180px",
-                                  zIndex: 30,
-                                }}
-                              >
-                                <button
-                                  onClick={() => triggerExport("csv")}
-                                  disabled={exportLinksDisabled}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: exportLinksDisabled
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Export CSV (current filter)
-                                </button>
-                                <button
-                                  onClick={() => triggerExport("json")}
-                                  disabled={exportLinksDisabled}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: exportLinksDisabled
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Export JSON (current filter)
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (!selectedRunId) return;
-                                    openReport(selectedRunId);
-                                    setExportMenuOpen(false);
-                                  }}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Open Report
-                                </button>
-                              </div>
+                            <span>New issues {diffSummary.newIssues}</span>
+                            <span>Fixed {diffSummary.fixedIssues}</span>
+                            <span>Changed {diffSummary.changed}</span>
+                            <span>
+                              Outstanding issues {diffSummary.outstandingIssues}
+                            </span>
+                            {!diffIssuesOnly && <span>OK {diffOkTotal}</span>}
+                            {!diffIssuesOnly && (
+                              <span>Added {diffSummary.added}</span>
+                            )}
+                            {!diffIssuesOnly && (
+                              <span>Removed {diffSummary.removed}</span>
                             )}
                           </div>
+                          {!hasDiffChanges && (
+                            <span style={{ color: "var(--muted)" }}>
+                              {diffIssuesOnly
+                                ? "No issue changes since last run."
+                                : "No changes since last run."}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {!selectedRunId && (
+                      <div style={{ padding: "16px" }}>
+                        <div
+                          style={{
+                            padding: "20px",
+                            borderRadius: "12px",
+                            border: "1px dashed var(--border)",
+                            textAlign: "center",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Select a scan run to explore results, or start a new
+                          scan from the site panel.
                         </div>
                       </div>
-                    </div>
-                  </div>
-
-                  <div
-                    className={`results-layout ${historyOpen && !isNarrow ? "drawer-open" : ""}`}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        className="scroll-y"
-                        style={{
-                          maxHeight: "560px",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "10px",
-                          padding: "16px",
-                        }}
-                      >
-                        {activeTab !== "ignored" && (
-                          <>
-                            {(activeTab === "broken" ||
-                              activeTab === "blocked") && (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: "8px",
-                                }}
-                              >
+                    )}
+                    <div style={{ marginBottom: "12px" }}>
+                      <div className="results-summary">
+                        <div className="results-summary__top">
+                          {!isSelectedRunInProgress && (
+                            <div className="results-summary__stats">
+                              {resultsView === "changes" ? (
+                                diffLoading ? (
+                                  <div
+                                    className="skeleton"
+                                    style={{ height: "16px", width: "240px" }}
+                                  />
+                                ) : diffBaselineRun ? (
+                                  <>
+                                    Comparing to{" "}
+                                    {formatRelative(diffBaselineRun.started_at)}{" "}
+                                    · {formatDate(diffBaselineRun.started_at)}
+                                  </>
+                                ) : (
+                                  "No previous scan to compare yet."
+                                )
+                              ) : resultsView === "fix_queue" ? (
+                                fixQueueUnavailableReason ? (
+                                  fixQueueUnavailableReason
+                                ) : fixQueueSummary ? (
+                                  <>
+                                    New {fixQueueSummary.newIssues} •
+                                    Outstanding{" "}
+                                    {fixQueueSummary.outstandingIssues} • Total{" "}
+                                    {fixQueueSummary.totalQueueItems}
+                                  </>
+                                ) : fixQueueLoading ? (
+                                  <div
+                                    className="skeleton"
+                                    style={{ height: "16px", width: "260px" }}
+                                  />
+                                ) : (
+                                  "No fix queue items yet."
+                                )
+                              ) : resultsLoading ? (
                                 <div
-                                  style={{ fontSize: "12px", fontWeight: 600 }}
-                                >
-                                  {activeTab === "broken"
-                                    ? "Broken links"
-                                    : "Blocked links"}
-                                </div>
+                                  className="skeleton"
+                                  style={{ height: "16px", width: "260px" }}
+                                />
+                              ) : (
+                                <>
+                                  Checked {selectedRun?.checked_links ?? 0} /{" "}
+                                  {selectedRun?.total_links ?? 0} • Broken{" "}
+                                  {phase0BrokenCount} • Blocked{" "}
+                                  {phase0BlockedCount} • No response{" "}
+                                  {phase0NoResponseCount} • Ignored/skipped{" "}
+                                  {phase0IgnoredSkippedCount}
+                                </>
+                              )}
+                            </div>
+                          )}
+                          {hasActiveFilters && (
+                            <span className="results-summary__chip">
+                              Filters active
+                              <button
+                                onClick={() => {
+                                  setStatusFilters({});
+                                  setMinOccurrencesOnly(false);
+                                  setSearchQuery("");
+                                  setActiveTab("all");
+                                  setStatusGroup("all");
+                                  setShowIgnored(false);
+                                }}
+                                className="report-button"
+                                style={{ padding: "2px 8px" }}
+                              >
+                                Clear
+                              </button>
+                            </span>
+                          )}
+                        </div>
+                        <div className="results-summary__controls">
+                          <div className="results-tabs">
+                            <button
+                              className={`tab-pill ${resultsView === "results" ? "active" : ""}`}
+                              onClick={() => setResultsView("results")}
+                            >
+                              Results
+                            </button>
+                            <button
+                              className={`tab-pill ${resultsView === "changes" ? "active" : ""}`}
+                              onClick={() => setResultsView("changes")}
+                            >
+                              Changes
+                            </button>
+                            <button
+                              className={`tab-pill ${resultsView === "fix_queue" ? "active" : ""}`}
+                              onClick={() => setResultsView("fix_queue")}
+                            >
+                              Fix Queue
+                            </button>
+                            {resultsView === "results" &&
+                              (
+                                [
+                                  "all",
+                                  "broken",
+                                  "blocked",
+                                  "no_response",
+                                  "ok",
+                                  "ignored",
+                                ] as const
+                              ).map((tab) => (
                                 <button
-                                  onClick={() =>
-                                    triggerExport("csv", activeTab)
+                                  key={tab}
+                                  className={`tab-pill ${activeTab === tab ? "active" : ""}`}
+                                  onClick={() => setActiveTab(tab)}
+                                >
+                                  {tab === "ok"
+                                    ? "OK"
+                                    : tab === "no_response"
+                                      ? "No response"
+                                      : tab === "ignored"
+                                        ? "Ignored"
+                                        : tab[0].toUpperCase() + tab.slice(1)}
+                                </button>
+                              ))}
+                          </div>
+                          <div className="results-controls">
+                            {resultsView === "results" ? (
+                              <>
+                                <div
+                                  className="filter-dropdown"
+                                  ref={filterDropdownRef}
+                                >
+                                  <button
+                                    onClick={() =>
+                                      setFiltersOpen((prev) => !prev)
+                                    }
+                                    className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
+                                  >
+                                    Filters {filtersOpen ? "▴" : "▾"}
+                                  </button>
+                                  {filtersOpen && (
+                                    <div className="filter-dropdown__panel">
+                                      <div className="filter-row">
+                                        {(
+                                          [
+                                            "all",
+                                            "http_error",
+                                            "no_response",
+                                          ] as const
+                                        ).map((group) => (
+                                          <button
+                                            key={group}
+                                            onClick={() =>
+                                              setStatusGroup(group)
+                                            }
+                                            className={`tab-pill ${statusGroup === group ? "active" : ""}`}
+                                          >
+                                            {group === "all"
+                                              ? "All responses"
+                                              : group === "http_error"
+                                                ? "HTTP response"
+                                                : "No response"}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      <div className="filter-row">
+                                        {["401/403/429", "404", "5xx"].map(
+                                          (key) => (
+                                            <button
+                                              key={key}
+                                              onClick={() =>
+                                                toggleStatusFilter(key)
+                                              }
+                                              className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
+                                            >
+                                              {key}
+                                            </button>
+                                          ),
+                                        )}
+                                        <button
+                                          onClick={() =>
+                                            toggleStatusFilter("no_response")
+                                          }
+                                          className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
+                                        >
+                                          No response
+                                        </button>
+                                        <button
+                                          onClick={() =>
+                                            setMinOccurrencesOnly(
+                                              (prev) => !prev,
+                                            )
+                                          }
+                                          className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
+                                        >
+                                          Occurrences &gt; 1
+                                        </button>
+                                        <button
+                                          onClick={() =>
+                                            setShowIgnored((prev) => !prev)
+                                          }
+                                          className={`tab-pill ${showIgnored ? "active" : ""}`}
+                                        >
+                                          {showIgnored
+                                            ? "Showing ignored"
+                                            : "Show ignored"}
+                                        </button>
+                                      </div>
+                                      <div className="filter-row">
+                                        <button
+                                          onClick={() => {
+                                            setStatusFilters({});
+                                            setMinOccurrencesOnly(false);
+                                            setSearchQuery("");
+                                            setActiveTab("all");
+                                            setStatusGroup("all");
+                                            setShowIgnored(false);
+                                          }}
+                                          className="tab-pill"
+                                        >
+                                          Reset filters
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                                <input
+                                  ref={searchInputRef}
+                                  value={searchQuery}
+                                  onChange={(e) =>
+                                    setSearchQuery(e.target.value)
                                   }
-                                  disabled={!selectedRunId}
+                                  placeholder="Search links"
+                                  style={{ width: "200px" }}
+                                />
+                                <select
+                                  value={sortOption}
+                                  onChange={(e) =>
+                                    setSortOption(
+                                      e.target.value as typeof sortOption,
+                                    )
+                                  }
+                                >
+                                  <option value="severity">Severity</option>
+                                  <option value="occ_desc">
+                                    Most occurrences
+                                  </option>
+                                  <option value="status_desc">
+                                    Status code
+                                  </option>
+                                  <option value="recent">Recently seen</option>
+                                </select>
+                                {isSelectedRunInProgress && (
+                                  <span
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    Updating…
+                                  </span>
+                                )}
+                                <button
+                                  onClick={() => setHistoryOpen(true)}
                                   style={{
-                                    padding: "4px 8px",
+                                    padding: "6px 10px",
                                     borderRadius: "999px",
                                     border: "1px solid var(--border)",
                                     background: "var(--panel)",
-                                    fontSize: "11px",
-                                    cursor: !selectedRunId
-                                      ? "not-allowed"
-                                      : "pointer",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
                                   }}
                                 >
-                                  Export CSV
+                                  History
                                 </button>
-                              </div>
-                            )}
-                            {resultsError && (
-                              <div
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  color: "var(--warning)",
-                                }}
-                              >
-                                {resultsError}
-                              </div>
-                            )}
-                            {resultsLoading &&
-                              Array.from({ length: 6 }).map((_, idx) => (
-                                <div key={idx} className="skeleton" />
-                              ))}
-                            {!resultsLoading &&
-                              filteredResults.length === 0 &&
-                              results.length > 0 && (
                                 <div
-                                  style={{
-                                    padding: "20px",
-                                    borderRadius: "12px",
-                                    border: "1px dashed var(--border)",
-                                    textAlign: "center",
-                                    color: "var(--muted)",
-                                  }}
+                                  ref={exportMenuRef}
+                                  style={{ position: "relative" }}
                                 >
-                                  <div style={{ marginBottom: "8px" }}>
-                                    No results match these filters.
-                                  </div>
                                   <button
-                                    onClick={() => {
-                                      setStatusFilters({});
-                                      setMinOccurrencesOnly(false);
-                                      setSearchQuery("");
-                                      setActiveTab("all");
-                                      setStatusGroup("all");
-                                      setShowIgnored(false);
-                                    }}
+                                    onClick={() =>
+                                      setExportMenuOpen((prev) => !prev)
+                                    }
+                                    disabled={exportDisabled}
                                     style={{
                                       padding: "6px 10px",
                                       borderRadius: "999px",
                                       border: "1px solid var(--border)",
                                       background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: exportDisabled
+                                        ? "not-allowed"
+                                        : "pointer",
                                       fontSize: "12px",
-                                      cursor: "pointer",
+                                      fontWeight: 600,
                                     }}
                                   >
-                                    Clear filters
+                                    Export
                                   </button>
-                                </div>
-                              )}
-                            {!resultsLoading &&
-                              filteredResults.length === 0 &&
-                              results.length === 0 && (
-                                <div
-                                  style={{
-                                    padding: "20px",
-                                    borderRadius: "12px",
-                                    border: "1px dashed var(--border)",
-                                    textAlign: "center",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  No results yet. Run a scan to populate this
-                                  list.
-                                </div>
-                              )}
-                            {renderLinkRows(filteredResults, (row) => {
-                              if (row.classification === "blocked")
-                                return blockedTheme;
-                              if (row.classification === "ok") return okTheme;
-                              if (row.classification === "no_response")
-                                return noResponseTheme;
-                              return brokenTheme;
-                            })}
-                          </>
-                        )}
-
-                        {activeTab === "ignored" && (
-                          <>
-                            {ignoredError && (
-                              <div
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  color: "var(--warning)",
-                                }}
-                              >
-                                {ignoredError}
-                              </div>
-                            )}
-                            {ignoredLoading &&
-                              Array.from({ length: 6 }).map((_, idx) => (
-                                <div key={idx} className="skeleton" />
-                              ))}
-                            {!ignoredLoading && ignoredResults.length === 0 && (
-                              <div
-                                style={{
-                                  padding: "20px",
-                                  borderRadius: "12px",
-                                  border: "1px dashed var(--border)",
-                                  textAlign: "center",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                No ignored links yet.
-                              </div>
-                            )}
-                            {ignoredResults.map((row) => {
-                              const isOpen = !!ignoredOccurrences[row.id];
-                              return (
-                                <div
-                                  key={row.id}
-                                  className="result-row"
-                                  style={{
-                                    borderRadius: "10px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel-elev)",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      padding: "8px 10px",
-                                      display: "flex",
-                                      gap: "8px",
-                                      alignItems: "flex-start",
-                                    }}
-                                  >
-                                    <button
-                                      onClick={() =>
-                                        selectedRunId &&
-                                        toggleIgnoredOccurrences(
-                                          row.id,
-                                          selectedRunId,
-                                        )
-                                      }
-                                      style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        cursor: "pointer",
-                                        fontSize: "16px",
-                                      }}
-                                    >
-                                      {isOpen ? "▼" : "▶"}
-                                    </button>
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          gap: "8px",
-                                          alignItems: "center",
-                                          flexWrap: "wrap",
-                                          marginBottom: "6px",
-                                        }}
-                                      >
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            padding: "2px 6px",
-                                            borderRadius: "999px",
-                                            background: "var(--chip-bg)",
-                                            color: "var(--chip-text)",
-                                          }}
-                                        >
-                                          Ignored
-                                        </span>
-                                        {row.rule_type && row.rule_pattern && (
-                                          <span
-                                            style={{
-                                              fontSize: "11px",
-                                              padding: "2px 6px",
-                                              borderRadius: "999px",
-                                              background: "var(--panel)",
-                                              color: "var(--muted)",
-                                              border: "1px solid var(--border)",
-                                            }}
-                                          >
-                                            {row.rule_type}: {row.rule_pattern}
-                                          </span>
-                                        )}
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {row.status_code ??
-                                            "No HTTP response"}
-                                        </span>
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {row.occurrence_count}x
-                                        </span>
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: "12px",
-                                          color: "var(--text)",
-                                          overflowWrap: "anywhere",
-                                          wordBreak: "break-word",
-                                          whiteSpace: "normal",
-                                        }}
-                                        title={row.link_url}
-                                      >
-                                        {row.link_url}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {isOpen && (
+                                  {exportMenuOpen && !exportDisabled && (
                                     <div
-                                      className="expand-panel"
+                                      className="export-menu"
                                       style={{
-                                        padding: "10px 12px",
-                                        borderTop: "1px solid var(--border)",
+                                        position: "absolute",
+                                        right: 0,
+                                        top: "calc(100% + 6px)",
                                         background: "var(--panel)",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: "12px",
+                                        boxShadow: "var(--shadow)",
+                                        padding: "6px",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                        gap: "4px",
+                                        minWidth: "180px",
+                                        zIndex: 30,
                                       }}
                                     >
-                                      {ignoredOccLoading[row.id] && (
-                                        <div
-                                          style={{
-                                            fontSize: "12px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          Loading…
-                                        </div>
-                                      )}
-                                      {ignoredOccError[row.id] && (
-                                        <div
-                                          style={{
-                                            fontSize: "12px",
-                                            color: "var(--warning)",
-                                          }}
-                                        >
-                                          {ignoredOccError[row.id]}
-                                        </div>
-                                      )}
-                                      {(ignoredOccurrences[row.id] ?? []).map(
-                                        (occ) => (
-                                          <div
-                                            key={occ.id}
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--muted)",
-                                              overflowWrap: "anywhere",
-                                            }}
-                                          >
-                                            {occ.source_page}
-                                          </div>
-                                        ),
-                                      )}
+                                      <button
+                                        onClick={() => triggerExport("csv")}
+                                        disabled={exportLinksDisabled}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: exportLinksDisabled
+                                            ? "not-allowed"
+                                            : "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Export CSV (current view)
+                                      </button>
+                                      <button
+                                        onClick={() => triggerExport("json")}
+                                        disabled={exportLinksDisabled}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: exportLinksDisabled
+                                            ? "not-allowed"
+                                            : "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Export JSON (current view)
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          if (!selectedRunId) return;
+                                          openReport(selectedRunId);
+                                          setExportMenuOpen(false);
+                                        }}
+                                        style={{
+                                          padding: "8px 10px",
+                                          borderRadius: "10px",
+                                          border: "1px solid transparent",
+                                          background: "transparent",
+                                          textAlign: "left",
+                                          cursor: "pointer",
+                                          color: "var(--text)",
+                                        }}
+                                      >
+                                        Open Report
+                                      </button>
                                     </div>
                                   )}
                                 </div>
-                              );
-                            })}
-                          </>
-                        )}
+                              </>
+                            ) : resultsView === "changes" ? (
+                              <>
+                                <button
+                                  onClick={() =>
+                                    setDiffIssuesOnly((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${diffIssuesOnly ? "active" : ""}`}
+                                >
+                                  Issues only
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setIncludeUnchanged((prev) => !prev);
+                                    setUnchangedOnly(false);
+                                  }}
+                                  className={`tab-pill ${includeUnchanged ? "active" : ""}`}
+                                >
+                                  Include unchanged
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    setDiffIncludeIgnored((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${diffIncludeIgnored ? "active" : ""}`}
+                                >
+                                  Include ignored
+                                </button>
+                                <select
+                                  value={diffExportFilter}
+                                  onChange={(e) =>
+                                    setDiffExportFilter(
+                                      e.target.value as typeof diffExportFilter,
+                                    )
+                                  }
+                                  disabled={unchangedOnly}
+                                  title={
+                                    unchangedOnly
+                                      ? "Filters disabled in outstanding-only view"
+                                      : undefined
+                                  }
+                                >
+                                  <option value="all">All changes</option>
+                                  <option value="new_issue">
+                                    New issues only
+                                  </option>
+                                  <option value="fixed">Fixed only</option>
+                                  <option value="changed">Changed only</option>
+                                  <option value="added">Added only</option>
+                                  <option value="removed">Removed only</option>
+                                </select>
+                                <button
+                                  onClick={exportDiffCsv}
+                                  style={{
+                                    padding: "6px 10px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Export CSV
+                                </button>
+                                <button
+                                  onClick={() => setHistoryOpen(true)}
+                                  style={{
+                                    padding: "6px 10px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  History
+                                </button>
+                              </>
+                            ) : resultsView === "fix_queue" ? (
+                              <>
+                                <div
+                                  className="changes-summary"
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "8px",
+                                    padding: "12px 16px 0",
+                                  }}
+                                >
+                                  {fixQueueSummary && (
+                                    <>
+                                      <span className="summary-chip">
+                                        New issues {fixQueueSummary.newIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Outstanding{" "}
+                                        {fixQueueSummary.outstandingIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Total {fixQueueSummary.totalQueueItems}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Notes open{" "}
+                                        {fixQueueSummary.withNotesOpen}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Snoozed {fixQueueSummary.snoozed}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Resolved {fixQueueSummary.resolved}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                                {fixQueueData &&
+                                  !fixQueueData.baselineRun &&
+                                  fixQueueData.currentRun && (
+                                    <div
+                                      style={{
+                                        padding: "10px 12px",
+                                        borderRadius: "10px",
+                                        border: "1px dashed var(--border)",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No baseline yet. Showing current issues as
+                                      outstanding.
+                                    </div>
+                                  )}
+                                <div className="results-header">
+                                  <div>Link</div>
+                                  <div>Status</div>
+                                  <div>Source pages</div>
+                                  <div>Actions</div>
+                                </div>
+                                {fixQueueError && (
+                                  <div
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "10px",
+                                      border: "1px solid var(--border)",
+                                      color: "var(--warning)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    {fixQueueError}
+                                  </div>
+                                )}
+                                {fixQueueUnavailableReason && (
+                                  <div
+                                    style={{
+                                      padding: "20px",
+                                      borderRadius: "12px",
+                                      border: "1px dashed var(--border)",
+                                      textAlign: "center",
+                                      color: "var(--muted)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    {fixQueueUnavailableReason}
+                                  </div>
+                                )}
+                                {fixQueueLoading &&
+                                  Array.from({ length: 5 }).map((_, idx) => (
+                                    <div key={idx} className="skeleton" />
+                                  ))}
+                                {!fixQueueUnavailableReason &&
+                                  !fixQueueLoading &&
+                                  fixQueueItems.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No queue items match these filters.
+                                    </div>
+                                  )}
+                                {fixQueueItems.map(renderFixQueueRow)}
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(true);
+                                      setFixQueueIncludeOutstanding(true);
+                                    }}
+                                    className={`tab-pill ${fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    New + Outstanding
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(true);
+                                      setFixQueueIncludeOutstanding(false);
+                                    }}
+                                    className={`tab-pill ${fixQueueIncludeNew && !fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    New only
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setFixQueueIncludeNew(false);
+                                      setFixQueueIncludeOutstanding(true);
+                                    }}
+                                    className={`tab-pill ${!fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
+                                  >
+                                    Outstanding only
+                                  </button>
+                                </div>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  {(
+                                    [
+                                      "open",
+                                      "snoozed",
+                                      "resolved",
+                                      "all",
+                                    ] as const
+                                  ).map((status) => (
+                                    <button
+                                      key={status}
+                                      onClick={() => setFixQueueStatus(status)}
+                                      className={`tab-pill ${fixQueueStatus === status ? "active" : ""}`}
+                                    >
+                                      {status === "open"
+                                        ? "Open"
+                                        : status === "snoozed"
+                                          ? "Snoozed"
+                                          : status === "resolved"
+                                            ? "Resolved"
+                                            : "All"}
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  onClick={() =>
+                                    setFixQueueIncludeIgnored((prev) => !prev)
+                                  }
+                                  className={`tab-pill ${fixQueueIncludeIgnored ? "active" : ""}`}
+                                >
+                                  {fixQueueIncludeIgnored
+                                    ? "Including ignored"
+                                    : "Exclude ignored"}
+                                </button>
+                                <span
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  Sorted by severity
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
                       </div>
+                    </div>
 
-                      {!isSelectedRunInProgress && (
-                        <div
-                          style={{
-                            marginTop: "12px",
-                            display: "flex",
-                            gap: "12px",
-                            flexWrap: "wrap",
-                            justifyContent: "center",
-                          }}
-                        >
-                          {activeTab === "all" &&
-                            (brokenHasMore ||
-                              blockedHasMore ||
-                              okHasMore ||
-                              noResponseHasMore) && (
+                    <div
+                      className={`results-layout ${detailsOpen && !isNarrow ? "drawer-open" : ""}`}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div className="results-title">
+                          <div>
+                            <div className="results-title__label">
+                              {resultsView === "changes"
+                                ? "Changes"
+                                : resultsView === "fix_queue"
+                                  ? "Fix Queue"
+                                  : "Results"}
+                            </div>
+                            <div className="results-title__meta">
+                              Showing {resultsTitleCount}{" "}
+                              {resultsView === "changes"
+                                ? "change"
+                                : resultsView === "fix_queue"
+                                  ? "item"
+                                  : "link"}
+                              {resultsTitleCount === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="results-table">
+                          <div className="results-scroll">
+                            {resultsView === "changes" ? (
+                              <>
+                                <div
+                                  className="changes-summary"
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "8px",
+                                    padding: "12px 16px 0",
+                                  }}
+                                >
+                                  {diffSummary && (
+                                    <>
+                                      <span className="summary-chip">
+                                        New issues {diffSummary.newIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Fixed {diffSummary.fixedIssues}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Changed {diffSummary.changed}
+                                      </span>
+                                      <span className="summary-chip">
+                                        Outstanding issues{" "}
+                                        {diffSummary.outstandingIssues}
+                                      </span>
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          OK {diffOkTotal}
+                                        </span>
+                                      )}
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          Added {diffSummary.added}
+                                        </span>
+                                      )}
+                                      {!diffIssuesOnly && (
+                                        <span className="summary-chip">
+                                          Removed {diffSummary.removed}
+                                        </span>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                                <div className="results-header changes-header">
+                                  <div>Link</div>
+                                  <div>Change</div>
+                                  <div>Baseline → Current</div>
+                                  <div>Source pages</div>
+                                </div>
+                                {diffError && (
+                                  <div
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "10px",
+                                      border: "1px solid var(--border)",
+                                      color: "var(--warning)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    {diffError}
+                                  </div>
+                                )}
+                                {diffLoading &&
+                                  Array.from({ length: 5 }).map((_, idx) => (
+                                    <div key={idx} className="skeleton" />
+                                  ))}
+                                {!diffLoading && !diffBaselineRun && (
+                                  <div
+                                    style={{
+                                      padding: "20px",
+                                      borderRadius: "12px",
+                                      border: "1px dashed var(--border)",
+                                      textAlign: "center",
+                                      color: "var(--muted)",
+                                      margin: "12px 16px",
+                                    }}
+                                  >
+                                    <div style={{ marginBottom: "8px" }}>
+                                      No previous scan to compare yet. Run
+                                      another scan to see changes over time.
+                                    </div>
+                                    {selectedSiteId && (
+                                      <button
+                                        onClick={handleRunScan}
+                                        disabled={triggeringScan}
+                                        style={{
+                                          padding: "6px 10px",
+                                          borderRadius: "999px",
+                                          border: "1px solid var(--border)",
+                                          background: "var(--panel)",
+                                          fontSize: "12px",
+                                          cursor: triggeringScan
+                                            ? "not-allowed"
+                                            : "pointer",
+                                        }}
+                                      >
+                                        {triggeringScan
+                                          ? "Starting..."
+                                          : "Run a scan"}
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                                {!diffLoading &&
+                                  diffBaselineRun &&
+                                  diffChangeItems.length === 0 &&
+                                  (!includeUnchanged ||
+                                    diffUnchangedItems.length === 0) && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      <div style={{ marginBottom: "8px" }}>
+                                        No changes match this view.
+                                      </div>
+                                      {diffIssuesOnly &&
+                                        !includeUnchanged &&
+                                        (diffSummary?.outstandingIssues ?? 0) >
+                                          0 && (
+                                          <>
+                                            <div
+                                              style={{ marginBottom: "8px" }}
+                                            >
+                                              No new issue changes since the
+                                              last scan. You still have{" "}
+                                              {diffSummary?.outstandingIssues ??
+                                                0}{" "}
+                                              outstanding issues.
+                                            </div>
+                                            <button
+                                              onClick={() => {
+                                                setIncludeUnchanged(true);
+                                                setUnchangedOnly(true);
+                                                setUnchangedOffset(0);
+                                              }}
+                                              style={{
+                                                padding: "6px 10px",
+                                                borderRadius: "999px",
+                                                border:
+                                                  "1px solid var(--border)",
+                                                background: "var(--panel)",
+                                                fontSize: "12px",
+                                                cursor: "pointer",
+                                              }}
+                                            >
+                                              Show outstanding issues
+                                            </button>
+                                          </>
+                                        )}
+                                    </div>
+                                  )}
+                                {diffChangeItems.map(renderDiffRow)}
+                                {includeUnchanged && (
+                                  <div
+                                    style={{
+                                      padding: "8px 16px 0",
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: "8px",
+                                      justifyContent: "space-between",
+                                    }}
+                                  >
+                                    <span>
+                                      Outstanding (unchanged){" "}
+                                      {diffIssuesOnly
+                                        ? (diffSummary?.outstandingIssues ?? 0)
+                                        : (diffSummary?.outstandingTotal ?? 0)}
+                                    </span>
+                                    {diffMeta && (
+                                      <span>
+                                        Showing {diffMeta.unchangedReturned} of{" "}
+                                        {diffIssuesOnly
+                                          ? (diffSummary?.outstandingIssues ??
+                                            0)
+                                          : (diffSummary?.outstandingTotal ??
+                                            0)}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                {includeUnchanged &&
+                                  diffUnchangedItems.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      No unchanged items in this slice.
+                                    </div>
+                                  )}
+                                {includeUnchanged &&
+                                  diffUnchangedItems.map(renderDiffRow)}
+                              </>
+                            ) : (
+                              <>
+                                <div
+                                  className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
+                                >
+                                  {activeTab === "ignored" ? (
+                                    <div>Ignored links</div>
+                                  ) : (
+                                    <>
+                                      <div>Link</div>
+                                      <div>Status</div>
+                                      <div>Hits</div>
+                                      <div>Actions</div>
+                                    </>
+                                  )}
+                                </div>
+                                {activeTab !== "ignored" && (
+                                  <>
+                                    {(activeTab === "broken" ||
+                                      activeTab === "blocked") && (
+                                      <div
+                                        style={{
+                                          display: "flex",
+                                          justifyContent: "space-between",
+                                          alignItems: "center",
+                                          gap: "8px",
+                                        }}
+                                      >
+                                        <div
+                                          style={{
+                                            fontSize: "12px",
+                                            fontWeight: 600,
+                                          }}
+                                        >
+                                          {activeTab === "broken"
+                                            ? "Broken links"
+                                            : "Blocked links"}
+                                        </div>
+                                        <button
+                                          onClick={() =>
+                                            triggerExport("csv", activeTab)
+                                          }
+                                          disabled={!selectedRunId}
+                                          style={{
+                                            padding: "4px 8px",
+                                            borderRadius: "999px",
+                                            border: "1px solid var(--border)",
+                                            background: "var(--panel)",
+                                            fontSize: "11px",
+                                            cursor: !selectedRunId
+                                              ? "not-allowed"
+                                              : "pointer",
+                                          }}
+                                        >
+                                          Export CSV
+                                        </button>
+                                      </div>
+                                    )}
+                                    {resultsError && (
+                                      <div
+                                        style={{
+                                          padding: "10px 12px",
+                                          borderRadius: "10px",
+                                          border: "1px solid var(--border)",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {resultsError}
+                                      </div>
+                                    )}
+                                    {resultsLoading &&
+                                      Array.from({ length: 6 }).map(
+                                        (_, idx) => (
+                                          <div key={idx} className="skeleton" />
+                                        ),
+                                      )}
+                                    {!resultsLoading &&
+                                      activeTab === "broken" &&
+                                      brokenResults.length === 0 &&
+                                      results.length > 0 &&
+                                      !hasSecondaryFilters && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            All clear. No broken links to fix
+                                            right now.
+                                          </div>
+                                          <div>
+                                            Consider enabling schedules and
+                                            alerts to stay ahead.
+                                          </div>
+                                        </div>
+                                      )}
+                                    {!resultsLoading &&
+                                      filteredResults.length === 0 &&
+                                      results.length > 0 &&
+                                      !(
+                                        activeTab === "broken" &&
+                                        brokenResults.length === 0 &&
+                                        !hasSecondaryFilters
+                                      ) && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            No results match these filters.
+                                          </div>
+                                          <button
+                                            onClick={() => {
+                                              setStatusFilters({});
+                                              setMinOccurrencesOnly(false);
+                                              setSearchQuery("");
+                                              setActiveTab("all");
+                                              setStatusGroup("all");
+                                              setShowIgnored(false);
+                                            }}
+                                            style={{
+                                              padding: "6px 10px",
+                                              borderRadius: "999px",
+                                              border: "1px solid var(--border)",
+                                              background: "var(--panel)",
+                                              fontSize: "12px",
+                                              cursor: "pointer",
+                                            }}
+                                          >
+                                            Clear filters
+                                          </button>
+                                        </div>
+                                      )}
+                                    {!resultsLoading &&
+                                      filteredResults.length === 0 &&
+                                      results.length === 0 && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          <div style={{ marginBottom: "8px" }}>
+                                            No results yet. Run a scan to
+                                            populate this list (usually a minute
+                                            or two).
+                                          </div>
+                                          <button
+                                            onClick={handleRunScan}
+                                            disabled={
+                                              !selectedSiteId || triggeringScan
+                                            }
+                                            style={{
+                                              padding: "6px 10px",
+                                              borderRadius: "999px",
+                                              border: "1px solid var(--border)",
+                                              background: "var(--panel)",
+                                              fontSize: "12px",
+                                              cursor:
+                                                !selectedSiteId ||
+                                                triggeringScan
+                                                  ? "not-allowed"
+                                                  : "pointer",
+                                            }}
+                                          >
+                                            {triggeringScan
+                                              ? "Starting..."
+                                              : "Run scan"}
+                                          </button>
+                                        </div>
+                                      )}
+                                    {renderLinkRows(filteredResults, (row) => {
+                                      if (row.classification === "blocked")
+                                        return blockedTheme;
+                                      if (row.classification === "ok")
+                                        return okTheme;
+                                      if (row.classification === "no_response")
+                                        return noResponseTheme;
+                                      return brokenTheme;
+                                    })}
+                                  </>
+                                )}
+
+                                {activeTab === "ignored" && (
+                                  <>
+                                    {ignoredError && (
+                                      <div
+                                        style={{
+                                          padding: "10px 12px",
+                                          borderRadius: "10px",
+                                          border: "1px solid var(--border)",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {ignoredError}
+                                      </div>
+                                    )}
+                                    {ignoredLoading &&
+                                      Array.from({ length: 6 }).map(
+                                        (_, idx) => (
+                                          <div key={idx} className="skeleton" />
+                                        ),
+                                      )}
+                                    {!ignoredLoading &&
+                                      ignoredResults.length === 0 && (
+                                        <div
+                                          style={{
+                                            padding: "20px",
+                                            borderRadius: "12px",
+                                            border: "1px dashed var(--border)",
+                                            textAlign: "center",
+                                            color: "var(--muted)",
+                                          }}
+                                        >
+                                          No ignored links yet.
+                                        </div>
+                                      )}
+                                    {ignoredResults.map((row) => {
+                                      const isOpen =
+                                        !!ignoredOccurrences[row.id];
+                                      return (
+                                        <div
+                                          key={row.id}
+                                          className="result-row ignored-row"
+                                          style={{
+                                            borderRadius: "10px",
+                                            border: "1px solid var(--border)",
+                                            background: "var(--panel-elev)",
+                                            display: "flex",
+                                            flexDirection: "column",
+                                          }}
+                                        >
+                                          <div
+                                            style={{
+                                              padding: "8px 10px",
+                                              display: "flex",
+                                              gap: "8px",
+                                              alignItems: "flex-start",
+                                            }}
+                                          >
+                                            <button
+                                              onClick={() =>
+                                                selectedRunId &&
+                                                toggleIgnoredOccurrences(
+                                                  row.id,
+                                                  selectedRunId,
+                                                )
+                                              }
+                                              style={{
+                                                background: "transparent",
+                                                border: "none",
+                                                cursor: "pointer",
+                                                fontSize: "16px",
+                                              }}
+                                            >
+                                              {isOpen ? "▼" : "▶"}
+                                            </button>
+                                            <div
+                                              style={{ flex: 1, minWidth: 0 }}
+                                            >
+                                              <div
+                                                style={{
+                                                  display: "flex",
+                                                  gap: "8px",
+                                                  alignItems: "center",
+                                                  flexWrap: "wrap",
+                                                  marginBottom: "6px",
+                                                }}
+                                              >
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    padding: "2px 6px",
+                                                    borderRadius: "999px",
+                                                    background:
+                                                      "var(--chip-bg)",
+                                                    color: "var(--chip-text)",
+                                                  }}
+                                                >
+                                                  {row.rule_type
+                                                    ? "Ignored by rule"
+                                                    : row.error_message?.startsWith(
+                                                          "crawl_skipped:",
+                                                        )
+                                                      ? "Intentionally skipped"
+                                                      : "Ignored"}
+                                                </span>
+                                                {row.rule_type &&
+                                                  row.rule_pattern && (
+                                                    <span
+                                                      style={{
+                                                        fontSize: "11px",
+                                                        padding: "2px 6px",
+                                                        borderRadius: "999px",
+                                                        background:
+                                                          "var(--panel)",
+                                                        color: "var(--muted)",
+                                                        border:
+                                                          "1px solid var(--border)",
+                                                      }}
+                                                    >
+                                                      {row.rule_type}:{" "}
+                                                      {row.rule_pattern}
+                                                    </span>
+                                                  )}
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  {row.status_code ??
+                                                    "No HTTP response"}
+                                                </span>
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  {row.occurrence_count}x
+                                                </span>
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontSize: "12px",
+                                                  color: "var(--text)",
+                                                  overflowWrap: "anywhere",
+                                                  wordBreak: "break-word",
+                                                  whiteSpace: "normal",
+                                                }}
+                                                title={row.link_url}
+                                              >
+                                                {row.link_url}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          {isOpen && (
+                                            <div
+                                              className="expand-panel"
+                                              style={{
+                                                padding: "10px 12px",
+                                                margin: "0 12px 12px 34px",
+                                                border:
+                                                  "1px solid var(--border)",
+                                                borderRadius: "10px",
+                                                background: "var(--panel)",
+                                                boxShadow: "var(--soft-shadow)",
+                                              }}
+                                            >
+                                              {ignoredOccLoading[row.id] && (
+                                                <div
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--muted)",
+                                                  }}
+                                                >
+                                                  Loading…
+                                                </div>
+                                              )}
+                                              {ignoredOccError[row.id] && (
+                                                <div
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--warning)",
+                                                  }}
+                                                >
+                                                  {ignoredOccError[row.id]}
+                                                </div>
+                                              )}
+                                              {(
+                                                ignoredOccurrences[row.id] ?? []
+                                              ).map((occ) => (
+                                                <div
+                                                  key={occ.id}
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--muted)",
+                                                    overflowWrap: "anywhere",
+                                                  }}
+                                                >
+                                                  {occ.source_page}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {!isSelectedRunInProgress &&
+                          resultsView === "results" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {activeTab === "all" &&
+                                (brokenHasMore ||
+                                  blockedHasMore ||
+                                  okHasMore ||
+                                  noResponseHasMore) && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreAllResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--success)",
+                                      background: "var(--success)",
+                                      color: "white",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                              {activeTab === "broken" && brokenHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreBrokenResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--danger)",
+                                    background: "var(--danger)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                              {activeTab === "blocked" && blockedHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreBlockedResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--warning)",
+                                    background: "var(--warning)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                              {activeTab === "ok" && okHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreOkResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--success)",
+                                    background: "var(--success)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                              {activeTab === "no_response" &&
+                                noResponseHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreNoResponseResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--border)",
+                                      color: "var(--text)",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                              {activeTab === "ignored" && ignoredHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreIgnoredResults(selectedRunId)
+                                  }
+                                  disabled={ignoredLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: ignoredLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: ignoredLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {ignoredLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        {!isSelectedRunInProgress &&
+                          resultsView === "changes" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
+                              {!unchangedOnly && diffQuery.hasNextPage && (
+                                <button
+                                  onClick={() => diffQuery.fetchNextPage()}
+                                  disabled={diffQuery.isFetchingNextPage}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--accent)",
+                                    background: "var(--accent)",
+                                    color: "white",
+                                    cursor: diffQuery.isFetchingNextPage
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: diffQuery.isFetchingNextPage
+                                      ? 0.6
+                                      : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {diffQuery.isFetchingNextPage
+                                    ? "Loading..."
+                                    : "Load more changes"}
+                                </button>
+                              )}
+                              {includeUnchanged && (
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    alignItems: "center",
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <button
+                                    onClick={() =>
+                                      setUnchangedOffset((prev) =>
+                                        Math.max(0, prev - unchangedLimit),
+                                      )
+                                    }
+                                    disabled={!canPrevUnchanged}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: canPrevUnchanged
+                                        ? "pointer"
+                                        : "not-allowed",
+                                      opacity: canPrevUnchanged ? 1 : 0.6,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Prev outstanding
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      setUnchangedOffset(
+                                        (prev) => prev + unchangedLimit,
+                                      )
+                                    }
+                                    disabled={!canNextUnchanged}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: canNextUnchanged
+                                        ? "pointer"
+                                        : "not-allowed",
+                                      opacity: canNextUnchanged ? 1 : 0.6,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Next outstanding
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        {!isSelectedRunInProgress &&
+                          resultsView === "fix_queue" && (
+                            <div
+                              style={{
+                                marginTop: "12px",
+                                display: "flex",
+                                gap: "12px",
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                              }}
+                            >
                               <button
                                 onClick={() =>
-                                  selectedRunId &&
-                                  loadMoreAllResults(selectedRunId)
+                                  setFixQueueOffset((prev) =>
+                                    Math.max(0, prev - fixQueueLimit),
+                                  )
                                 }
-                                disabled={resultsLoading}
+                                disabled={!fixQueueHasPrev}
                                 style={{
                                   padding: "10px 18px",
                                   borderRadius: "999px",
-                                  border: "1px solid var(--success)",
-                                  background: "var(--success)",
-                                  color: "white",
-                                  cursor: resultsLoading
-                                    ? "default"
-                                    : "pointer",
-                                  opacity: resultsLoading ? 0.6 : 1,
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  cursor: fixQueueHasPrev
+                                    ? "pointer"
+                                    : "not-allowed",
+                                  opacity: fixQueueHasPrev ? 1 : 0.6,
                                   fontSize: "12px",
                                   fontWeight: 600,
                                 }}
                               >
-                                {resultsLoading
-                                  ? "Loading..."
-                                  : "Load More Results"}
+                                Prev page
                               </button>
-                            )}
-                          {activeTab === "broken" && brokenHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreBrokenResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--danger)",
-                                background: "var(--danger)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
+                              <button
+                                onClick={() =>
+                                  setFixQueueOffset(
+                                    (prev) => prev + fixQueueLimit,
+                                  )
+                                }
+                                disabled={!fixQueueHasNext}
+                                style={{
+                                  padding: "10px 18px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  cursor: fixQueueHasNext
+                                    ? "pointer"
+                                    : "not-allowed",
+                                  opacity: fixQueueHasNext ? 1 : 0.6,
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                Next page
+                              </button>
+                            </div>
                           )}
-                          {activeTab === "blocked" && blockedHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreBlockedResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--warning)",
-                                background: "var(--warning)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "ok" && okHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreOkResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--success)",
-                                background: "var(--success)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "no_response" && noResponseHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreNoResponseResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--border)",
-                                color: "var(--text)",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "ignored" && ignoredHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreIgnoredResults(selectedRunId)
-                              }
-                              disabled={ignoredLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                cursor: ignoredLoading ? "default" : "pointer",
-                                opacity: ignoredLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {ignoredLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                        <div className="results-footer-space" aria-hidden />
+                      </div>
 
-                    {!isNarrow && historyOpen && (
-                      <div
-                        className="card"
-                        style={{
-                          padding: "16px",
-                          minWidth: "280px",
-                          maxHeight: "620px",
-                          overflow: "auto",
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: "12px",
-                          }}
+                      {detailsOpen && selectedLink && (
+                        <aside
+                          className={`details-drawer ${isNarrow ? "overlay" : ""}`}
+                          ref={detailsDrawerRef}
+                          aria-label="Link details drawer"
                         >
-                          <div style={{ fontWeight: 600 }}>History</div>
-                          <button
-                            onClick={() => setHistoryOpen(false)}
-                            style={{
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              borderRadius: "8px",
-                              padding: "4px 6px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </div>
-                        {historyLoading && (
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Loading…
-                          </div>
-                        )}
-                        {historyError && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                            }}
-                          >
-                            {historyError}
-                          </div>
-                        )}
-                        {!historyLoading && history.length === 0 && (
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            No scans yet.
-                          </div>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                          }}
-                        >
-                          {history.map((run) => (
+                          <div className="drawer-header">
                             <div
-                              key={run.id}
                               style={{
-                                border: "1px solid var(--border)",
-                                borderRadius: "10px",
-                                padding: "8px",
-                                background: "var(--panel-elev)",
                                 display: "flex",
-                                flexDirection: "column",
-                                gap: "6px",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "12px",
                               }}
                             >
                               <div
+                                className="drawer-title"
+                                title={selectedLink.link_url}
+                              >
+                                {selectedLink.link_url}
+                              </div>
+                              <button
+                                ref={detailsCloseRef}
+                                onClick={() => {
+                                  setDetailsOpen(false);
+                                  setDetailsLinkId(null);
+                                }}
+                                className="icon-button"
                                 style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: "8px",
+                                  borderColor: "var(--border)",
+                                  color: "var(--text)",
+                                }}
+                                aria-label="Close details"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                            <div className="drawer-actions">
+                              <button
+                                onClick={() =>
+                                  window.open(
+                                    selectedLink.link_url,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  )
+                                }
+                                className="report-button"
+                              >
+                                Open link
+                              </button>
+                              <button
+                                onClick={() =>
+                                  copyToClipboard(
+                                    selectedLink.link_url,
+                                    `drawer:${selectedLink.id}`,
+                                  )
+                                }
+                                className="report-button"
+                              >
+                                Copy URL
+                              </button>
+                              <button
+                                onClick={() => handleRecheckLink(selectedLink)}
+                                className="report-button"
+                                disabled={
+                                  selectedLink.ignored ||
+                                  recheckLoadingId === selectedLink.id
+                                }
+                              >
+                                {recheckLoadingId === selectedLink.id
+                                  ? "Rechecking..."
+                                  : "Recheck now"}
+                              </button>
+                              <button
+                                onClick={() =>
+                                  handleIgnoreLinkWithUndo(selectedLink)
+                                }
+                                className="report-button"
+                                disabled={selectedLink.ignored}
+                              >
+                                Ignore link
+                              </button>
+                            </div>
+                            <div className="drawer-chip-row">
+                              <span
+                                className="status-chip"
+                                style={{
+                                  background:
+                                    selectedLink.status_code == null
+                                      ? "var(--border)"
+                                      : selectedLink.status_code >= 500
+                                        ? "var(--danger)"
+                                        : selectedLink.status_code === 404 ||
+                                            selectedLink.status_code === 410
+                                          ? "var(--danger)"
+                                          : selectedLink.status_code === 401 ||
+                                              selectedLink.status_code ===
+                                                403 ||
+                                              selectedLink.status_code === 429
+                                            ? "var(--warning)"
+                                            : "var(--success)",
+                                  color:
+                                    selectedLink.status_code == null
+                                      ? "var(--muted)"
+                                      : "white",
                                 }}
                               >
-                                <span
+                                {selectedLink.status_code ?? "No response"}
+                              </span>
+                              <span className="status-chip subtle">
+                                {formatClassification(
+                                  selectedLink.classification,
+                                )}
+                              </span>
+                              {selectedLink.ignored && (
+                                <span className="status-chip subtle">
+                                  Ignored
+                                </span>
+                              )}
+                            </div>
+                            {selectedLink.error_message && (
+                              <div
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--warning)",
+                                }}
+                              >
+                                {selectedLink.error_message}
+                              </div>
+                            )}
+                          </div>
+                          <div className="drawer-body">
+                            <div className="drawer-section">
+                              <h4>Why this happened</h4>
+                              {getWhyDetails(selectedLink).body.map((line) => (
+                                <div
+                                  key={line}
                                   style={{
-                                    fontSize: "11px",
+                                    fontSize: "12px",
                                     color: "var(--muted)",
                                   }}
                                 >
-                                  {formatRelative(run.started_at)}
-                                </span>
-                                <span
-                                  style={{
-                                    fontSize: "11px",
-                                    color: "var(--text)",
-                                  }}
+                                  {line}
+                                </div>
+                              ))}
+                            </div>
+                            <div className="drawer-section">
+                              <h4>Recommended actions</h4>
+                              <div className="drawer-actions">
+                                <button
+                                  className="report-button"
+                                  onClick={() =>
+                                    handleIgnoreLinkWithUndo(selectedLink)
+                                  }
+                                  disabled={selectedLink.ignored}
                                 >
-                                  {run.status}
-                                </span>
+                                  Ignore exact URL
+                                </button>
+                                <button
+                                  className="report-button"
+                                  onClick={() => {
+                                    const host = safeHost(
+                                      selectedLink.link_url,
+                                    );
+                                    if (host === "unknown") {
+                                      pushToast(
+                                        "Invalid URL for domain rule",
+                                        "warning",
+                                      );
+                                      return;
+                                    }
+                                    void createQuickIgnoreRule("domain", host);
+                                  }}
+                                  disabled={selectedLink.ignored}
+                                >
+                                  Ignore domain
+                                </button>
+                                <button
+                                  className="report-button"
+                                  onClick={() => {
+                                    try {
+                                      const url = new URL(
+                                        selectedLink.link_url,
+                                      );
+                                      const prefix = url.pathname || "/";
+                                      void createQuickIgnoreRule(
+                                        "path_prefix",
+                                        prefix,
+                                      );
+                                    } catch {
+                                      pushToast(
+                                        "Invalid URL for path rule",
+                                        "warning",
+                                      );
+                                    }
+                                  }}
+                                  disabled={selectedLink.ignored}
+                                >
+                                  Ignore path pattern
+                                </button>
                               </div>
+                            </div>
+                            <div className="drawer-section">
+                              <h4>Occurrences</h4>
                               <div
                                 style={{
-                                  fontSize: "11px",
+                                  fontSize: "12px",
                                   color: "var(--muted)",
                                 }}
                               >
-                                Broken {run.broken_links} • Checked{" "}
-                                {run.checked_links}/{run.total_links}
+                                {selectedOccurrencesTotal} total
                               </div>
-                              <div style={{ display: "flex", gap: "8px" }}>
-                                <button
-                                  onClick={() => setSelectedRunId(run.id)}
+                              {selectedOccurrencesError && (
+                                <div
                                   style={{
-                                    padding: "4px 6px",
-                                    borderRadius: "6px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    fontSize: "11px",
-                                    cursor: "pointer",
+                                    fontSize: "12px",
+                                    color: "var(--warning)",
                                   }}
                                 >
-                                  View
-                                </button>
-                                {selectedRunId && run.id !== selectedRunId && (
-                                  <button
-                                    onClick={() => setCompareRunId(run.id)}
+                                  {selectedOccurrencesError}
+                                </div>
+                              )}
+                              {!selectedOccurrencesLoading &&
+                                selectedOccurrences.length === 0 && (
+                                  <div
                                     style={{
-                                      padding: "4px 6px",
-                                      borderRadius: "6px",
-                                      border: "1px solid var(--border)",
-                                      background: "var(--panel)",
-                                      fontSize: "11px",
-                                      cursor: "pointer",
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
                                     }}
                                   >
-                                    Compare
+                                    No source pages recorded yet.
+                                  </div>
+                                )}
+                              <div className="drawer-list">
+                                {showOccurrencesSkeleton &&
+                                  Array.from({ length: 3 }).map((_, idx) => (
+                                    <div
+                                      key={`occ-skeleton-${idx}`}
+                                      className="skeleton skeleton--occ"
+                                    />
+                                  ))}
+                                {selectedOccurrences.map((occ) => (
+                                  <div key={occ.id} className="drawer-row">
+                                    <a
+                                      href={occ.source_page}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title={occ.source_page}
+                                    >
+                                      {occ.source_page}
+                                    </a>
+                                    <button
+                                      onClick={() =>
+                                        copyToClipboard(
+                                          occ.source_page,
+                                          `occ:${occ.id}`,
+                                        )
+                                      }
+                                      className="report-button"
+                                    >
+                                      Copy
+                                    </button>
+                                  </div>
+                                ))}
+                                {selectedOccurrencesHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedLink &&
+                                      handleLoadMoreOccurrences(selectedLink.id)
+                                    }
+                                    disabled={selectedOccurrencesLoading}
+                                    className="report-button"
+                                  >
+                                    {selectedOccurrencesLoading
+                                      ? "Loading..."
+                                      : "Load more occurrences"}
                                   </button>
                                 )}
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                          </div>
+                        </aside>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
               </main>
             </div>
 
@@ -5742,6 +10176,748 @@ const App: React.FC = () => {
                 onClick={() => setIsDrawerOpen(false)}
               />
             )}
+            {detailsOpen && isNarrow && (
+              <div
+                className="details-overlay"
+                onClick={() => {
+                  setDetailsOpen(false);
+                  setDetailsLinkId(null);
+                }}
+              />
+            )}
+
+            {onboardingOpen && (
+              <div className="modal-backdrop">
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                  style={{ maxWidth: "560px" }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      gap: "12px",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>
+                        First-run onboarding
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Step {onboardingStepIndex + 1} of{" "}
+                        {onboardingSteps.length}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        completeOnboarding();
+                        pushToast("Onboarding skipped", "info");
+                      }}
+                      className="report-button"
+                    >
+                      Skip
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "6px",
+                      flexWrap: "wrap",
+                      marginTop: "12px",
+                    }}
+                  >
+                    {onboardingSteps.map((step, idx) => (
+                      <div
+                        key={step}
+                        style={{
+                          padding: "4px 8px",
+                          borderRadius: "999px",
+                          border: "1px solid var(--border)",
+                          background:
+                            idx === onboardingStepIndex
+                              ? "var(--panel-elev)"
+                              : "transparent",
+                          fontSize: "11px",
+                          color:
+                            idx === onboardingStepIndex
+                              ? "var(--text)"
+                              : "var(--muted)",
+                        }}
+                      >
+                        {step}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ marginTop: "16px" }}>
+                    {onboardingStep === 0 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            Add your first site
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Paste a homepage URL to start monitoring.
+                          </div>
+                        </div>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Site URL
+                          <input
+                            value={onboardingSiteUrl}
+                            onChange={(event) =>
+                              setOnboardingSiteUrl(event.target.value)
+                            }
+                            placeholder="https://example.com"
+                            autoFocus
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleOnboardingCreateSite();
+                              }
+                            }}
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Site name (optional)
+                          <input
+                            value={onboardingSiteName}
+                            onChange={(event) =>
+                              setOnboardingSiteName(event.target.value)
+                            }
+                            placeholder="Marketing site"
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        {onboardingError && (
+                          <div
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--warning)",
+                            }}
+                          >
+                            {onboardingError}
+                          </div>
+                        )}
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleOnboardingCreateSite()}
+                            disabled={
+                              onboardingWorking || !onboardingSiteUrl.trim()
+                            }
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "none",
+                              background: onboardingWorking
+                                ? "var(--panel-elev)"
+                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                              color: "white",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor:
+                                onboardingWorking || !onboardingSiteUrl.trim()
+                                  ? "not-allowed"
+                                  : "pointer",
+                            }}
+                          >
+                            {onboardingWorking ? "Adding..." : "Add site"}
+                          </button>
+                          <button
+                            onClick={() => void handleOnboardingSampleSite()}
+                            disabled={onboardingWorking}
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor: onboardingWorking
+                                ? "not-allowed"
+                                : "pointer",
+                            }}
+                          >
+                            Try sample site
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 1 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            Run your first scan
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Start a scan and watch progress in real time.
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => void handleOnboardingRunScan()}
+                          disabled={!selectedSiteId || triggeringScan}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: "10px",
+                            border: "none",
+                            background:
+                              !selectedSiteId || triggeringScan
+                                ? "var(--panel-elev)"
+                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                            color: "white",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor:
+                              !selectedSiteId || triggeringScan
+                                ? "not-allowed"
+                                : "pointer",
+                          }}
+                        >
+                          {triggeringScan ? "Starting..." : "Start scan"}
+                        </button>
+                        {selectedRun && (
+                          <div
+                            style={{
+                              padding: "12px",
+                              borderRadius: "12px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                            }}
+                          >
+                            <ScanProgressBar
+                              status={selectedRun.status}
+                              totalLinks={selectedRun.total_links}
+                              checkedLinks={selectedRun.checked_links}
+                              brokenLinks={phase0BrokenCount}
+                              blockedLinks={phase0BlockedCount}
+                              noResponseLinks={phase0NoResponseCount}
+                              lastUpdateAt={lastProgressAt ?? null}
+                            />
+                            <div
+                              style={{
+                                marginTop: "8px",
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Status: {selectedRun.status.replace("_", " ")}
+                            </div>
+                            {selectedRun.status === "failed" &&
+                              selectedRun.error_message && (
+                                <div
+                                  style={{
+                                    marginTop: "6px",
+                                    fontSize: "12px",
+                                    color: "var(--warning)",
+                                  }}
+                                >
+                                  {selectedRun.error_message}
+                                </div>
+                              )}
+                          </div>
+                        )}
+                        {selectedRun?.status === "completed" && (
+                          <button
+                            onClick={() => setOnboardingStep(2)}
+                            className="report-button"
+                          >
+                            Continue
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {onboardingStep === 2 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Review results</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            See a quick summary and jump into fixes or changes.
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "8px",
+                          }}
+                        >
+                          <span className="summary-chip">
+                            Broken {phase0BrokenCount}
+                          </span>
+                          <span className="summary-chip">
+                            Blocked {phase0BlockedCount}
+                          </span>
+                          <span className="summary-chip">
+                            No response {phase0NoResponseCount}
+                          </span>
+                          <span className="summary-chip">
+                            OK{" "}
+                            {currentPhase0Diagnostics?.ok ??
+                              visibleResults.filter(
+                                (row) => row.classification === "ok",
+                              ).length}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => {
+                              openFixQueue();
+                            }}
+                            className="report-button"
+                          >
+                            Open Fix Queue
+                          </button>
+                          <button
+                            onClick={() => setResultsView("changes")}
+                            className="report-button"
+                          >
+                            View Changes
+                          </button>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                          }}
+                        >
+                          <button
+                            onClick={() => setOnboardingStep(1)}
+                            className="report-button"
+                          >
+                            Back
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(3)}
+                            className="report-button"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 3 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Set a schedule</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Optional. Automate scans to keep checks consistent.
+                          </div>
+                        </div>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Auto-scan enabled</span>
+                          <input
+                            type="checkbox"
+                            checked={scheduleEnabled}
+                            onChange={(event) =>
+                              setScheduleEnabled(event.target.checked)
+                            }
+                          />
+                        </label>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "1fr",
+                            gap: "8px",
+                          }}
+                        >
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Frequency
+                            <select
+                              value={scheduleFrequency}
+                              onChange={(event) =>
+                                setScheduleFrequency(
+                                  event.target.value as "daily" | "weekly",
+                                )
+                              }
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            >
+                              <option value="daily">Daily</option>
+                              <option value="weekly">Weekly</option>
+                            </select>
+                          </label>
+                          {scheduleFrequency === "weekly" && (
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Day of week (UTC)
+                              <select
+                                value={scheduleDayOfWeek}
+                                onChange={(event) =>
+                                  setScheduleDayOfWeek(
+                                    Number(event.target.value),
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              >
+                                <option value={0}>Sunday</option>
+                                <option value={1}>Monday</option>
+                                <option value={2}>Tuesday</option>
+                                <option value={3}>Wednesday</option>
+                                <option value={4}>Thursday</option>
+                                <option value={5}>Friday</option>
+                                <option value={6}>Saturday</option>
+                              </select>
+                            </label>
+                          )}
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Time (UTC)
+                            <input
+                              type="time"
+                              value={scheduleTimeUtc}
+                              onChange={(event) =>
+                                setScheduleTimeUtc(event.target.value)
+                              }
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            />
+                          </label>
+                        </div>
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Time (UTC):{" "}
+                          {formatScheduleUtcLabel(
+                            scheduleFrequency,
+                            scheduleTimeUtc,
+                            scheduleDayOfWeek,
+                          )}
+                        </div>
+                        {showLocalTimeZone && (
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Your time:{" "}
+                            {formatScheduleLocalLabel(
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                            )}{" "}
+                            ({localTimeZone})
+                          </div>
+                        )}
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleSaveSchedule()}
+                            disabled={scheduleSaving}
+                            className="report-button"
+                          >
+                            {scheduleSaving ? "Saving..." : "Save schedule"}
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(4)}
+                            className="report-button"
+                          >
+                            Skip for now
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep === 4 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>Enable alerts</div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Optional. Get notified when new issues appear.
+                          </div>
+                        </div>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Email alerts</span>
+                          <input
+                            type="checkbox"
+                            checked={notifyEnabled}
+                            onChange={(event) =>
+                              setNotifyEnabled(event.target.checked)
+                            }
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Email (optional)
+                          <input
+                            value={notifyEmail}
+                            onChange={(event) =>
+                              setNotifyEmail(event.target.value)
+                            }
+                            placeholder="you@company.com"
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "8px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </label>
+                        <label
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Notify me
+                          <select
+                            value={notifyOn}
+                            onChange={(event) =>
+                              setNotifyOn(event.target.value as NotifyOnOption)
+                            }
+                            style={{
+                              marginTop: "6px",
+                              width: "100%",
+                              padding: "6px 8px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: "var(--panel)",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <option value="new_issues_only">
+                              Only when NEW issues
+                            </option>
+                            <option value="issues_exist">
+                              When issues exist
+                            </option>
+                            <option value="always">Always</option>
+                            <option value="never">Never</option>
+                          </select>
+                        </label>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            onClick={() => void handleSaveNotifications()}
+                            disabled={
+                              notifySaving ||
+                              notifyLoading ||
+                              (notifyEnabled &&
+                                notifyOn !== "never" &&
+                                !notifyEmail.trim())
+                            }
+                            className="report-button"
+                          >
+                            {notifySaving ? "Saving..." : "Save alerts"}
+                          </button>
+                          <button
+                            onClick={() => void handleSendTestEmail()}
+                            disabled={
+                              notifyTestSending ||
+                              !notifyEmail.trim() ||
+                              !notifyEnabled ||
+                              notifyOn === "never" ||
+                              notifyLoading
+                            }
+                            className="report-button"
+                          >
+                            {notifyTestSending
+                              ? "Sending..."
+                              : "Send test alert"}
+                          </button>
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                          }}
+                        >
+                          <button
+                            onClick={() => setOnboardingStep(3)}
+                            className="report-button"
+                          >
+                            Back
+                          </button>
+                          <button
+                            onClick={() => setOnboardingStep(5)}
+                            className="report-button"
+                          >
+                            Finish
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {onboardingStep >= onboardingSteps.length && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "12px",
+                          textAlign: "center",
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
+                          You're set
+                        </div>
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Your first scan is ready. Explore the dashboard or
+                          keep tuning schedules and alerts anytime.
+                        </div>
+                        <button
+                          onClick={() => {
+                            completeOnboarding();
+                          }}
+                          style={{
+                            padding: "8px 12px",
+                            borderRadius: "10px",
+                            border: "none",
+                            background:
+                              "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                            color: "white",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          Go to dashboard
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {ignoreRulesOpen && (
               <div
@@ -5750,6 +10926,8 @@ const App: React.FC = () => {
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div
@@ -5945,13 +11123,306 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {historyOpen && isNarrow && (
+            {noteModalOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setNoteModalOpen(false)}
+              >
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>Link note</div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Keep context that persists across scans.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setNoteModalOpen(false)}
+                      style={{
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        borderRadius: "10px",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {noteTargetUrl ?? "—"}
+                  </div>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Note
+                    <textarea
+                      value={noteDraft}
+                      onChange={(event) => setNoteDraft(event.target.value)}
+                      placeholder="Add a note about this link"
+                      rows={5}
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                        resize: "vertical",
+                      }}
+                    />
+                  </label>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Status
+                    <select
+                      value={noteStatus}
+                      onChange={(event) =>
+                        setNoteStatus(event.target.value as LinkNoteStatus)
+                      }
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "6px 8px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <option value="open">Open</option>
+                      <option value="snoozed">Snoozed</option>
+                      <option value="resolved">Resolved</option>
+                    </select>
+                  </label>
+                  {noteError && (
+                    <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                      {noteError}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: "8px",
+                    }}
+                  >
+                    <button
+                      onClick={handleDeleteNote}
+                      disabled={!noteExisting || noteDeleting}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        cursor:
+                          !noteExisting || noteDeleting
+                            ? "not-allowed"
+                            : "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      {noteDeleting ? "Deleting..." : "Delete note"}
+                    </button>
+                    <button
+                      onClick={handleSaveNote}
+                      disabled={noteSaving || !noteDraft.trim()}
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: noteSaving
+                          ? "var(--panel-elev)"
+                          : "var(--accent)",
+                        color: "white",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor:
+                          noteSaving || !noteDraft.trim()
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                    >
+                      {noteSaving ? "Saving..." : "Save note"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {addSiteOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setAddSiteOpen(false)}
+              >
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>Add site</div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Enter the root URL to start scanning.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setAddSiteOpen(false)}
+                      className="icon-button"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Site URL
+                    <input
+                      value={newSiteUrl}
+                      onChange={(e) => setNewSiteUrl(e.target.value)}
+                      placeholder="https://example.com"
+                      autoFocus
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void handleCreateSite();
+                        }
+                      }}
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
+                  {createError && (
+                    <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                      {createError}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "flex-end",
+                      gap: "8px",
+                    }}
+                  >
+                    <button
+                      onClick={() => setAddSiteOpen(false)}
+                      className="report-button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCreateSite}
+                      disabled={creatingSite || !newSiteUrl.trim()}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: "10px",
+                        border: "none",
+                        background: creatingSite
+                          ? "var(--panel-elev)"
+                          : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                        color: "white",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor:
+                          creatingSite || !newSiteUrl.trim()
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                    >
+                      {creatingSite ? "Adding..." : "Add site"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {shortcutsOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setShortcutsOpen(false)}
+              >
+                <div
+                  className="modal"
+                  role="dialog"
+                  aria-modal="true"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>Keyboard shortcuts</div>
+                    <button
+                      onClick={() => setShortcutsOpen(false)}
+                      className="icon-button"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <div>Esc — Close drawers/modals</div>
+                    <div>/ — Focus link search</div>
+                    <div>N — Start new scan</div>
+                    <div>A — Add site</div>
+                    <div>? — Toggle this help</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {historyOpen && (
               <div
                 className="modal-backdrop"
                 onClick={() => setHistoryOpen(false)}
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div
@@ -6050,21 +11521,26 @@ const App: React.FC = () => {
                           >
                             View
                           </button>
-                          {selectedRunId && run.id !== selectedRunId && (
-                            <button
-                              onClick={() => setCompareRunId(run.id)}
-                              style={{
-                                padding: "4px 6px",
-                                borderRadius: "6px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                fontSize: "11px",
-                                cursor: "pointer",
-                              }}
-                            >
-                              Compare
-                            </button>
-                          )}
+                          {selectedRunId &&
+                            run.id !== selectedRunId &&
+                            run.status === "completed" && (
+                              <button
+                                onClick={() => {
+                                  setCompareRunId(run.id);
+                                  setResultsView("changes");
+                                }}
+                                style={{
+                                  padding: "4px 6px",
+                                  borderRadius: "6px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  fontSize: "11px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Compare
+                              </button>
+                            )}
                         </div>
                       </div>
                     ))}
@@ -6076,8 +11552,21 @@ const App: React.FC = () => {
         )}
         <div className="toast-stack">
           {toasts.map((toast) => (
-            <div key={toast.id} className="toast">
-              {toast.message}
+            <div key={toast.id} className={`toast ${toast.tone ?? "info"}`}>
+              <span>{toast.message}</span>
+              {toast.action && (
+                <button
+                  className="toast-action"
+                  onClick={() => {
+                    toast.action?.onClick();
+                    setToasts((prev) =>
+                      prev.filter((item) => item.id !== toast.id),
+                    );
+                  }}
+                >
+                  {toast.action.label}
+                </button>
+              )}
             </div>
           ))}
         </div>

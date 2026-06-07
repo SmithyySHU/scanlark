@@ -1,24 +1,85 @@
 import { createHash } from "crypto";
-import { ensureConnected } from "./client.js";
-import type { IgnoreRule } from "./ignoreRules.js";
+import { ensureConnected } from "./client";
+import { sortIgnoreRules } from "./ignoreRules";
+import type { IgnoreRule } from "./ignoreRules";
+import { validateSafeRegexPattern } from "./validation";
 
-const RULE_SORT = (a: IgnoreRule, b: IgnoreRule) => {
-  if (a.rule_type !== b.rule_type)
-    return a.rule_type.localeCompare(b.rule_type);
-  if (a.pattern !== b.pattern) return a.pattern.localeCompare(b.pattern);
-  return a.id.localeCompare(b.id);
-};
+function compileSafeRuleRegex(pattern: string): RegExp | null {
+  if (validateSafeRegexPattern(pattern) !== null) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
 
 function hashRules(rules: IgnoreRule[]): string {
-  const stable = [...rules]
-    .sort(RULE_SORT)
-    .map((r) => ({ type: r.rule_type, pattern: r.pattern }));
+  const stable = sortIgnoreRules(rules).map((r) => ({
+    type: r.rule_type,
+    pattern: r.pattern,
+  }));
   const json = JSON.stringify(stable);
   return createHash("sha256").update(json).digest("hex");
 }
 
 function ignoreReason(rule: IgnoreRule) {
   return `Ignored by rule: ${rule.rule_type} ${rule.pattern}`;
+}
+
+const normalizeDomainPattern = (pattern: string) => {
+  const trimmed = pattern.trim();
+  try {
+    const url = new URL(trimmed);
+    return url.hostname.toLowerCase();
+  } catch {
+    const withoutProtocol = trimmed.replace(/^https?:\/\//i, "");
+    const hostOnly = withoutProtocol.split("/")[0];
+    return hostOnly.toLowerCase();
+  }
+};
+
+const normalizePathPattern = (pattern: string) => {
+  const trimmed = pattern.trim();
+  try {
+    const url = new URL(trimmed);
+    return url.pathname;
+  } catch {
+    const slashIndex = trimmed.indexOf("/");
+    if (slashIndex >= 0) return trimmed.slice(slashIndex);
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  }
+};
+
+function matchesDomainRule(linkUrl: string, pattern: string): boolean {
+  let host = "";
+  try {
+    const url = new URL(linkUrl);
+    host = url.hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const normalized = normalizeDomainPattern(pattern);
+  if (normalized.startsWith("*.")) {
+    const suffix = normalized.slice(2);
+    return host === suffix || host.endsWith(`.${suffix}`);
+  }
+  if (normalized.startsWith(".")) {
+    const suffix = normalized.slice(1);
+    return host === suffix || host.endsWith(`.${suffix}`);
+  }
+  return host === normalized;
+}
+
+function matchesPathPrefixRule(linkUrl: string, pattern: string): boolean {
+  let path = "";
+  try {
+    const url = new URL(linkUrl);
+    path = url.pathname;
+  } catch {
+    return false;
+  }
+  const normalized = normalizePathPattern(pattern);
+  return path.startsWith(normalized);
 }
 
 export async function applyIgnoreRulesForScanRun(
@@ -36,25 +97,33 @@ export async function applyIgnoreRulesForScanRun(
   }
 
   try {
-    const runRes = await client.query<{ site_id: string }>(
-      `SELECT site_id FROM scan_runs WHERE id = $1`,
+    const runRes = await client.query<{ site_id: string; user_id: string }>(
+      `
+        SELECT r.site_id, s.user_id
+        FROM scan_runs r
+        JOIN sites s ON s.id = r.site_id
+        WHERE r.id = $1
+      `,
       [scanRunId],
     );
     const siteId = runRes.rows[0]?.site_id;
-    if (!siteId) {
+    const userId = runRes.rows[0]?.user_id;
+    if (!siteId || !userId) {
       return { applied: false, ignoredCount: 0, rulesHash: "" };
     }
 
     const rulesRes = await client.query<IgnoreRule>(
       `
-        SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+        SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
         FROM ignore_rules
-        WHERE site_id = $1 AND is_enabled = true
+        WHERE user_id = $2
+          AND (site_id = $1 OR site_id IS NULL)
+          AND is_enabled = true
       `,
-      [siteId],
+      [siteId, userId],
     );
 
-    const rules = rulesRes.rows;
+    const rules = sortIgnoreRules(rulesRes.rows);
     const rulesHash = hashRules(rules);
 
     if (!opts?.force) {
@@ -83,9 +152,62 @@ export async function applyIgnoreRulesForScanRun(
 
     let ignoredCount = 0;
 
-    const nonRegex = rules.filter((rule) => rule.rule_type !== "regex");
-    for (const rule of nonRegex) {
+    for (const rule of rules) {
       const reason = ignoreReason(rule);
+      if (
+        rule.rule_type === "domain" ||
+        rule.rule_type === "path_prefix" ||
+        rule.rule_type === "regex"
+      ) {
+        const candidates = await client.query<{
+          id: string;
+          link_url: string;
+        }>(
+          `
+            SELECT id, link_url
+            FROM scan_links
+            WHERE scan_run_id = $1
+              AND ignored_source != 'manual'
+              AND ignored = false
+          `,
+          [scanRunId],
+        );
+        const ids: string[] = [];
+        const regex =
+          rule.rule_type === "regex"
+            ? compileSafeRuleRegex(rule.pattern)
+            : null;
+        if (rule.rule_type === "regex" && !regex) continue;
+        for (const row of candidates.rows) {
+          if (rule.rule_type === "domain") {
+            if (!matchesDomainRule(row.link_url, rule.pattern)) continue;
+          } else if (rule.rule_type === "path_prefix") {
+            if (!matchesPathPrefixRule(row.link_url, rule.pattern)) continue;
+          } else if (rule.rule_type === "regex") {
+            if (regex) regex.lastIndex = 0;
+            if (!regex?.test(row.link_url)) continue;
+          }
+          ids.push(row.id);
+        }
+        if (ids.length > 0) {
+          const res = await client.query(
+            `
+              UPDATE scan_links
+              SET ignored = true,
+                  ignored_source = 'rule',
+                  ignored_by_rule_id = $2,
+                  ignored_at = now(),
+                  ignore_reason = $3
+              WHERE id = ANY($1::uuid[])
+                AND ignored_source != 'manual'
+                AND ignored = false
+            `,
+            [ids, rule.id, reason],
+          );
+          ignoredCount += res.rowCount ?? 0;
+        }
+        continue;
+      }
       if (rule.rule_type === "exact") {
         const res = await client.query(
           `
@@ -97,6 +219,7 @@ export async function applyIgnoreRulesForScanRun(
                 ignore_reason = $3
             WHERE scan_run_id = $1
               AND ignored_source != 'manual'
+              AND ignored = false
               AND link_url = $4
           `,
           [scanRunId, rule.id, reason, rule.pattern],
@@ -114,6 +237,7 @@ export async function applyIgnoreRulesForScanRun(
                 ignore_reason = $3
             WHERE scan_run_id = $1
               AND ignored_source != 'manual'
+              AND ignored = false
               AND link_url ILIKE '%' || $4 || '%'
           `,
           [scanRunId, rule.id, reason, rule.pattern],
@@ -133,6 +257,7 @@ export async function applyIgnoreRulesForScanRun(
                   ignore_reason = $3
               WHERE scan_run_id = $1
                 AND ignored_source != 'manual'
+                AND ignored = false
                 AND status_code = $4
             `,
             [scanRunId, rule.id, reason, code],
@@ -151,65 +276,10 @@ export async function applyIgnoreRulesForScanRun(
                 ignore_reason = $3
             WHERE scan_run_id = $1
               AND ignored_source != 'manual'
+              AND ignored = false
               AND classification = $4
           `,
           [scanRunId, rule.id, reason, rule.pattern],
-        );
-        ignoredCount += res.rowCount ?? 0;
-      }
-    }
-
-    const regexRules = rules
-      .filter((rule) => rule.rule_type === "regex")
-      .map((rule) => {
-        try {
-          return { rule, regex: new RegExp(rule.pattern) };
-        } catch {
-          return null;
-        }
-      })
-      .filter(
-        (entry): entry is { rule: IgnoreRule; regex: RegExp } => entry !== null,
-      );
-
-    if (regexRules.length > 0) {
-      const candidates = await client.query<{ id: string; link_url: string }>(
-        `
-          SELECT id, link_url
-          FROM scan_links
-          WHERE scan_run_id = $1 AND ignored_source != 'manual' AND ignored = false
-        `,
-        [scanRunId],
-      );
-
-      const idsByRule = new Map<string, string[]>();
-      for (const entry of regexRules) {
-        idsByRule.set(entry.rule.id, []);
-      }
-
-      for (const row of candidates.rows) {
-        for (const entry of regexRules) {
-          if (entry.regex.test(row.link_url)) {
-            idsByRule.get(entry.rule.id)?.push(row.id);
-            break;
-          }
-        }
-      }
-
-      for (const entry of regexRules) {
-        const ids = idsByRule.get(entry.rule.id) ?? [];
-        if (ids.length === 0) continue;
-        const res = await client.query(
-          `
-            UPDATE scan_links
-            SET ignored = true,
-                ignored_source = 'rule',
-                ignored_by_rule_id = $2,
-                ignored_at = now(),
-                ignore_reason = $3
-            WHERE id = ANY($1::uuid[])
-          `,
-          [ids, entry.rule.id, ignoreReason(entry.rule)],
         );
         ignoredCount += res.rowCount ?? 0;
       }

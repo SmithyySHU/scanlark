@@ -12,6 +12,7 @@ dist/
 .next/
 out/
 /db/
+/db/migrations/
 
 # Logs
 *.log
@@ -33,3 +34,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# Local-only rebrand notes
+REBRAND_NOTES.md

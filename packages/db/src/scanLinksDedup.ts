@@ -1,5 +1,44 @@
-import { ensureConnected } from "./client.js";
-import type { LinkClassification } from "./scanRuns.js";
+import { ensureConnected } from "./client";
+import type { LinkClassification } from "./scanRuns";
+
+async function isScanRunOwnedByUser(
+  userId: string,
+  scanRunId: string,
+): Promise<boolean> {
+  const client = await ensureConnected();
+  const res = await client.query(
+    `
+      SELECT 1
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.id = $1 AND s.user_id = $2
+      LIMIT 1
+    `,
+    [scanRunId, userId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+async function getScanLinkOwnership(
+  userId: string,
+  scanLinkId: string,
+): Promise<{ scanRunId: string } | null> {
+  const client = await ensureConnected();
+  const res = await client.query<{ scan_run_id: string }>(
+    `
+      SELECT l.scan_run_id
+      FROM scan_links l
+      JOIN scan_runs r ON r.id = l.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE l.id = $1 AND s.user_id = $2
+      LIMIT 1
+    `,
+    [scanLinkId, userId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return { scanRunId: row.scan_run_id };
+}
 
 /**
  * Represents a unique link found in a scan run.
@@ -222,6 +261,26 @@ export async function getScanLinksForRun(
   };
 }
 
+export async function getScanLinksForRunForUser(
+  userId: string,
+  scanRunId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    classification?: LinkClassification;
+    statusGroup?: "all" | "no_response" | "http_error";
+    includeIgnored?: boolean;
+  },
+): Promise<{
+  links: ScanLink[];
+  countReturned: number;
+  totalMatching: number;
+}> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return { links: [], countReturned: 0, totalMatching: 0 };
+  return getScanLinksForRun(scanRunId, options);
+}
+
 /**
  * Get all occurrences of a specific link in a scan run.
  * Used to show "where does this link appear".
@@ -312,6 +371,21 @@ export async function getScanLinksSummary(scanRunId: string): Promise<
   }));
 }
 
+export async function getScanLinksSummaryForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<
+  Array<{
+    classification: LinkClassification;
+    status_code: number | null;
+    count: number;
+  }>
+> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return [];
+  return getScanLinksSummary(scanRunId);
+}
+
 export async function getScanLinksForExport(
   scanRunId: string,
   classification: ExportClassification = "all",
@@ -353,6 +427,180 @@ export async function getScanLinksForExport(
   return res.rows;
 }
 
+export async function getScanLinksForExportForUser(
+  userId: string,
+  scanRunId: string,
+  classification: ExportClassification = "all",
+  limit = 5000,
+): Promise<ScanLinkExportRow[]> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return [];
+  return getScanLinksForExport(scanRunId, classification, limit);
+}
+
+type ExportFilterOptions = {
+  classification?: ExportClassification;
+  statusGroup?: "all" | "no_response" | "http_error";
+  statusFilters?: string[];
+  searchQuery?: string;
+  minOccurrencesOnly?: boolean;
+  sortOption?:
+    | "severity"
+    | "occ_desc"
+    | "status_asc"
+    | "status_desc"
+    | "recent";
+  showIgnored?: boolean;
+  ignoredOnly?: boolean;
+  limit?: number;
+};
+
+export async function getScanLinksForExportFiltered(
+  scanRunId: string,
+  options: ExportFilterOptions,
+): Promise<ScanLinkExportRow[]> {
+  const client = await ensureConnected();
+
+  const whereClauses: string[] = ["scan_run_id = $1"];
+  const params: Array<string | number | string[] | number[] | boolean> = [
+    scanRunId,
+  ];
+
+  const classification = options.classification ?? "all";
+  if (classification !== "all") {
+    if (classification === "timeout") {
+      whereClauses.push(
+        "classification = 'no_response' AND status_code IS NULL AND error_message = 'timeout'",
+      );
+    } else {
+      params.push(classification);
+      whereClauses.push(`classification = $${params.length}`);
+    }
+  }
+
+  if (options.ignoredOnly) {
+    whereClauses.push("ignored = true");
+  } else if (!options.showIgnored) {
+    whereClauses.push("ignored = false");
+  }
+
+  if (options.statusGroup === "no_response") {
+    whereClauses.push("classification = 'no_response'");
+  } else if (options.statusGroup === "http_error") {
+    whereClauses.push("status_code IS NOT NULL");
+  }
+
+  if (options.searchQuery) {
+    params.push(`%${options.searchQuery}%`);
+    whereClauses.push(`link_url ILIKE $${params.length}`);
+  }
+
+  if (options.minOccurrencesOnly) {
+    whereClauses.push("occurrence_count > 1");
+  }
+
+  if (options.statusFilters && options.statusFilters.length > 0) {
+    const statusClauses: string[] = [];
+    if (options.statusFilters.includes("401/403/429")) {
+      params.push([401, 403, 429]);
+      statusClauses.push(`status_code = ANY($${params.length})`);
+    }
+    if (options.statusFilters.includes("404")) {
+      params.push([404, 410]);
+      statusClauses.push(`status_code = ANY($${params.length})`);
+    }
+    if (options.statusFilters.includes("5xx")) {
+      statusClauses.push("status_code >= 500 AND status_code < 600");
+    }
+    if (options.statusFilters.includes("no_response")) {
+      statusClauses.push("status_code IS NULL");
+    }
+    if (statusClauses.length > 0) {
+      whereClauses.push(`(${statusClauses.join(" OR ")})`);
+    }
+  }
+
+  const sort = options.sortOption ?? "severity";
+  let orderBy = "last_seen_at DESC";
+  if (sort === "occ_desc") {
+    orderBy = "occurrence_count DESC, last_seen_at DESC";
+  } else if (sort === "status_asc") {
+    orderBy = "status_code IS NULL, status_code ASC, last_seen_at DESC";
+  } else if (sort === "status_desc") {
+    orderBy = "status_code IS NULL, status_code DESC, last_seen_at DESC";
+  } else if (sort === "recent") {
+    orderBy = "last_seen_at DESC";
+  } else {
+    orderBy = `
+      CASE classification
+        WHEN 'broken' THEN 0
+        WHEN 'blocked' THEN 1
+        WHEN 'no_response' THEN 2
+        WHEN 'ok' THEN 3
+        ELSE 4
+      END,
+      occurrence_count DESC,
+      last_seen_at DESC
+    `;
+  }
+
+  const limit = options.limit ?? 5000;
+  params.push(limit);
+
+  const res = await client.query<ScanLinkExportRow>(
+    `
+      SELECT
+        link_url,
+        classification,
+        status_code,
+        error_message,
+        occurrence_count,
+        first_seen_at,
+        last_seen_at
+      FROM scan_links
+      WHERE ${whereClauses.join(" AND ")}
+      ORDER BY ${orderBy}
+      LIMIT $${params.length}
+    `,
+    params,
+  );
+
+  return res.rows;
+}
+
+export async function getScanLinksForExportFilteredForUser(
+  userId: string,
+  scanRunId: string,
+  options: ExportFilterOptions,
+): Promise<ScanLinkExportRow[]> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return [];
+  return getScanLinksForExportFiltered(scanRunId, options);
+}
+
+export async function updateScanLinkAfterRecheck(args: {
+  scanLinkId: string;
+  classification: LinkClassification;
+  statusCode: number | null;
+  errorMessage: string | null;
+}): Promise<ScanLink | null> {
+  const client = await ensureConnected();
+  const res = await client.query<ScanLink>(
+    `
+      UPDATE scan_links
+      SET classification = $2,
+          status_code = $3,
+          error_message = $4,
+          last_seen_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [args.scanLinkId, args.classification, args.statusCode, args.errorMessage],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function getTopLinksByClassification(
   scanRunId: string,
   classification: LinkClassification,
@@ -382,6 +630,17 @@ export async function getTopLinksByClassification(
   return res.rows;
 }
 
+export async function getTopLinksByClassificationForUser(
+  userId: string,
+  scanRunId: string,
+  classification: LinkClassification,
+  limit: number,
+): Promise<ScanLinkExportRow[]> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return [];
+  return getTopLinksByClassification(scanRunId, classification, limit);
+}
+
 export async function getTimeoutCountForRun(
   scanRunId: string,
 ): Promise<number> {
@@ -399,6 +658,15 @@ export async function getTimeoutCountForRun(
     [scanRunId],
   );
   return Number(res.rows[0]?.count ?? 0);
+}
+
+export async function getTimeoutCountForRunForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<number> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return 0;
+  return getTimeoutCountForRun(scanRunId);
 }
 
 export async function getScanLinkByRunAndUrl(
@@ -434,6 +702,16 @@ export async function getScanLinkByRunAndUrl(
   return res.rows[0] ?? null;
 }
 
+export async function getScanLinkByRunAndUrlForUser(
+  userId: string,
+  scanRunId: string,
+  linkUrl: string,
+): Promise<ScanLink | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinkByRunAndUrl(scanRunId, linkUrl);
+}
+
 export async function getScanLinkById(
   scanLinkId: string,
 ): Promise<ScanLink | null> {
@@ -464,6 +742,15 @@ export async function getScanLinkById(
     [scanLinkId],
   );
   return res.rows[0] ?? null;
+}
+
+export async function getScanLinkByIdForUser(
+  userId: string,
+  scanLinkId: string,
+): Promise<ScanLink | null> {
+  const owned = await getScanLinkOwnership(userId, scanLinkId);
+  if (!owned) return null;
+  return getScanLinkById(scanLinkId);
 }
 
 export async function listScanLinksForIgnore(scanRunId: string): Promise<
@@ -598,4 +885,21 @@ export async function getOccurrencesForScanLink(
     totalMatching,
     occurrences: res.rows,
   };
+}
+
+export async function getOccurrencesForScanLinkForUser(
+  userId: string,
+  scanLinkId: string,
+  options?: { limit?: number; offset?: number },
+): Promise<PaginatedOccurrences> {
+  const owned = await getScanLinkOwnership(userId, scanLinkId);
+  if (!owned) {
+    return {
+      scanLinkId,
+      countReturned: 0,
+      totalMatching: 0,
+      occurrences: [],
+    };
+  }
+  return getOccurrencesForScanLink(scanLinkId, options);
 }

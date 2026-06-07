@@ -1,3 +1,4 @@
+import dotenv from "dotenv";
 import express from "express";
 import type { Response } from "express";
 import cors from "cors";
@@ -5,47 +6,80 @@ import type {
   ExportClassification,
   IgnoreRuleType,
   LinkClassification,
+  ScanDiffChangeType,
   ScanLinkOccurrenceRow,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import {
   applyIgnoreRulesForScanRun,
+  cancelScanJob,
   cancelScanRun,
+  createSiteForUser,
   createIgnoreRule,
+  createScanRun,
   deleteIgnoreRule,
-  getDiffBetweenRuns,
-  getLatestScanForSite,
-  getOccurrencesForScanLink,
-  getRecentScanRunsForSite,
-  getRecentScansForSite,
-  getResultsForScanRun,
-  getResultsSummaryForScanRun,
-  getScanLinkById,
-  getScanLinkByRunAndUrl,
-  getScanLinksForExport,
-  getScanLinksForRun,
-  getScanLinksSummary,
+  deleteSiteForUser,
+  enqueueScanJob,
+  getDiffBetweenRunsForUser,
+  getBaselineRunForDiff,
+  getCompletedRunForSite,
+  getFixQueueForRuns,
+  getJobForScanRun,
+  getLatestCompletedScanForSiteForUser,
+  getLatestScanForSiteForUser,
+  getOccurrencesForScanLinkForUser,
+  getRecentScanRunsForSiteForUser,
+  getRecentScansForSiteForUser,
+  getResultsForScanRunForUser,
+  getResultsSummaryForScanRunForUser,
+  getScanLinkByIdForUser,
+  getScanLinkByRunAndUrlForUser,
+  getScanLinksForExportFilteredForUser,
+  getScanLinksForExportForUser,
+  getScanLinksForRunForUser,
+  getScanLinksSummaryForUser,
+  getScanDiff,
+  getScanRunByIdForUser,
   getScanRunById,
+  getSiteByIdForUser,
   getSiteById,
-  getSitesForUser,
-  getTimeoutCountForRun,
-  getTopLinksByClassification,
+  getSiteNotificationSettingsForUser,
+  listSitesForUser,
+  getSiteScheduleForUser,
+  getTimeoutCountForRunForUser,
+  getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
-  listIgnoreRules,
-  listIgnoreRulesForSite,
-  listIgnoredLinksForRun,
-  listIgnoredOccurrences,
+  isValidEmailAddress,
+  getLinkNoteForSiteByUrlForUser,
+  getIgnoreRuleByIdForUser,
+  listIgnoreRulesForUser,
+  listIgnoreRulesForSiteForUser,
+  listIgnoredLinksForRunForUser,
+  listIgnoredOccurrencesForUser,
+  listLinkNotesForSiteForUser,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
+  setScanRunStatus,
+  deleteLinkNoteForSiteForUser,
+  updateLinkNoteForSiteForUser,
+  upsertLinkNoteForSiteForUser,
+  updateSiteNotificationSettingsForUser,
+  updateSiteScheduleForUser,
+  updateScanLinkAfterRecheck,
   upsertIgnoredLink,
-  createSite,
-  deleteSite,
-} from "@link-sentry/db";
-import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
-
+  validateSafeRegexPattern,
+} from "@scanlark/db";
+import validateLink from "../../../packages/crawler/src/validateLink";
+import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
+import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
+import { authMiddleware, initDemoAuth } from "./authMiddleware";
+import { sessionMiddleware } from "./auth";
+import { mountAuthRoutes } from "./routes/auth";
+import { initEventRelay, mountEventStream } from "./events";
 
-const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
+dotenv.config({ path: new URL("../../../.env", import.meta.url) });
+
 const LINK_CLASSIFICATIONS = new Set<LinkClassification>([
   "ok",
   "broken",
@@ -61,6 +95,50 @@ const EXPORT_CLASSIFICATIONS = new Set<ExportClassification>([
   "timeout",
 ]);
 const STATUS_GROUPS = new Set(["all", "no_response", "http_error"]);
+const STATUS_FILTERS = new Set(["401/403/429", "404", "5xx", "no_response"]);
+const EXPORT_SORT_OPTIONS = new Set([
+  "severity",
+  "occ_desc",
+  "status_asc",
+  "status_desc",
+  "recent",
+]);
+const DIFF_CHANGE_TYPES = new Set<ScanDiffChangeType>([
+  "new_issue",
+  "fixed",
+  "changed",
+  "added",
+  "removed",
+]);
+const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
+const NOTIFY_ON_OPTIONS = new Set([
+  "always",
+  "issues",
+  "issues_exist",
+  "new_issues_only",
+  "never",
+]);
+const LINK_NOTE_STATUSES = new Set(["open", "snoozed", "resolved", "all"]);
+const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
+const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+
+function isValidTimeUtc(value: string) {
+  const parts = value.split(":");
+  if (parts.length < 2) return false;
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return false;
+  if (hours < 0 || hours > 23) return false;
+  if (minutes < 0 || minutes > 59) return false;
+  return true;
+}
+
+type ExportSortOption =
+  | "severity"
+  | "occ_desc"
+  | "status_asc"
+  | "status_desc"
+  | "recent";
 const IGNORE_RULE_TYPES = new Set<IgnoreRuleType>([
   "contains",
   "regex",
@@ -94,11 +172,52 @@ function parseStatusGroup(
     : "all";
 }
 
+function parseStatusFilters(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.filter((part) => STATUS_FILTERS.has(part));
+}
+
+function parseSortOption(value: unknown): ExportSortOption {
+  if (typeof value !== "string") return "severity";
+  return EXPORT_SORT_OPTIONS.has(value)
+    ? (value as ExportSortOption)
+    : "severity";
+}
+
 function parseIgnoreRuleType(value: unknown): IgnoreRuleType | null {
   if (typeof value !== "string") return null;
   return IGNORE_RULE_TYPES.has(value as IgnoreRuleType)
     ? (value as IgnoreRuleType)
     : null;
+}
+
+function parseLinkNoteStatus(
+  value: unknown,
+  fallback: "all" | "open" = "all",
+): "open" | "snoozed" | "resolved" | "all" {
+  if (typeof value !== "string") return fallback;
+  return LINK_NOTE_STATUSES.has(value)
+    ? (value as "open" | "snoozed" | "resolved" | "all")
+    : fallback;
+}
+
+function normalizeNotifyOn(value: string): string {
+  if (value === "issues") return "issues_exist";
+  return value;
+}
+
+function validateIgnoreRulePattern(
+  ruleType: IgnoreRuleType,
+  pattern: string,
+): string | null {
+  if (ruleType === "regex") {
+    return validateSafeRegexPattern(pattern);
+  }
+  return null;
 }
 
 function getErrorMessage(err: unknown) {
@@ -133,8 +252,76 @@ function sendInternalError(res: Response, message: string, err?: unknown) {
   );
 }
 
+function sendNotFound(res: Response) {
+  return sendApiError(res, 404, "not_found", "Not found");
+}
+
+async function requireSiteForUser(
+  req: express.Request,
+  res: express.Response,
+  siteId: string,
+) {
+  const userId = req.user?.id;
+  if (!userId) {
+    sendApiError(res, 401, "unauthorized", "Unauthorized");
+    return null;
+  }
+  const site = await getSiteByIdForUser(userId, siteId);
+  if (!site) {
+    sendNotFound(res);
+    return null;
+  }
+  return site;
+}
+
+async function requireScanRunForUser(
+  req: express.Request,
+  res: express.Response,
+  scanRunId: string,
+) {
+  const userId = req.user?.id;
+  if (!userId) {
+    sendApiError(res, 401, "unauthorized", "Unauthorized");
+    return null;
+  }
+  const run = await getScanRunByIdForUser(userId, scanRunId);
+  if (!run) {
+    sendNotFound(res);
+    return null;
+  }
+  return { run };
+}
+
 function parseShowIgnored(value: unknown): boolean {
   return value === "true" || value === "1";
+}
+
+function parseBooleanParam(value: unknown, defaultValue: boolean): boolean {
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  return defaultValue;
+}
+
+function parseDiffChangeTypes(value: unknown): ScanDiffChangeType[] | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const filtered = parts.filter((part): part is ScanDiffChangeType =>
+    DIFF_CHANGE_TYPES.has(part as ScanDiffChangeType),
+  );
+  return filtered.length > 0 ? filtered : [];
+}
+
+function parseExportScope(value: unknown): "all" | "page" {
+  if (value === "page") return "page";
+  return "all";
+}
+
+function parseUnchangedScope(value: unknown): "issues" | "ok" | "all" {
+  if (value === "issues" || value === "ok") return value;
+  return "all";
 }
 
 function csvEscape(value: unknown): string {
@@ -144,20 +331,60 @@ function csvEscape(value: unknown): string {
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+const corsOrigins = new Set(
+  [process.env.WEB_ORIGIN, "http://localhost:5173", "http://localhost:3000"]
+    .filter(Boolean)
+    .map((origin) => origin as string),
+);
 
-mountScanRunEvents(app);
+const corsOptions: cors.CorsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (corsOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+};
+
+app.set("trust proxy", 1);
+app.options("*", cors(corsOptions));
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(sessionMiddleware);
+
+if (process.env.DEV_BYPASS_AUTH === "true") {
+  void initDemoAuth();
+}
+
+mountAuthRoutes(app);
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "link-sentry-api" });
+  res.json({ status: "ok", service: "scanlark-api" });
 });
 
-// List sites for a (temporary) demo user
+app.use(authMiddleware);
+
+mountEventStream(app);
+mountScanRunEvents(app);
+
+app.get("/me", (req, res) => {
+  if (!req.user) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  return res.json({
+    id: req.user.id,
+    email: req.user.email,
+    name: req.user.name,
+  });
+});
+
 app.get("/sites", async (req, res) => {
   try {
-    const userId = (req.query.userId as string) ?? DEMO_USER_ID;
-    const sites = await getSitesForUser(userId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const sites = await listSitesForUser(userId);
 
     res.json({
       userId,
@@ -167,6 +394,278 @@ app.get("/sites", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error fetching sites", err);
     sendInternalError(res, "Failed to fetch sites", err);
+  }
+});
+
+app.get("/sites/:siteId/schedule", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const schedule = await getSiteScheduleForUser(userId, siteId);
+    if (!schedule) {
+      return sendNotFound(res);
+    }
+    res.json({ siteId, ...schedule });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/schedule", err);
+    sendInternalError(res, "Failed to fetch schedule", err);
+  }
+});
+
+app.put("/sites/:siteId/schedule", async (req, res) => {
+  const siteId = req.params.siteId;
+  const { enabled, frequency, timeUtc, dayOfWeek } = req.body ?? {};
+
+  if (typeof enabled !== "boolean") {
+    return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
+  }
+  if (typeof frequency !== "string" || !SCHEDULE_FREQUENCIES.has(frequency)) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_frequency",
+      "frequency must be daily or weekly",
+    );
+  }
+  if (typeof timeUtc !== "string" || !isValidTimeUtc(timeUtc)) {
+    return sendApiError(res, 400, "invalid_time", "timeUtc must be HH:MM");
+  }
+  const frequencyValue = frequency === "daily" ? "daily" : "weekly";
+  let resolvedDay: number | null = null;
+  if (frequencyValue === "weekly") {
+    if (typeof dayOfWeek !== "number" || dayOfWeek < 0 || dayOfWeek > 6) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_day",
+        "dayOfWeek must be 0-6 for weekly schedules",
+      );
+    }
+    resolvedDay = dayOfWeek;
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const schedule = await updateSiteScheduleForUser(userId, siteId, {
+      scheduleEnabled: enabled,
+      scheduleFrequency: frequencyValue,
+      scheduleTimeUtc: timeUtc,
+      scheduleDayOfWeek: resolvedDay,
+    });
+    res.json({ siteId, ...schedule });
+  } catch (err: unknown) {
+    console.error("Error in PUT /sites/:siteId/schedule", err);
+    sendInternalError(res, "Failed to update schedule", err);
+  }
+});
+
+async function handleGetNotificationSettings(
+  req: express.Request,
+  res: express.Response,
+) {
+  const siteId = req.params.siteId;
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const settings = await getSiteNotificationSettingsForUser(userId, siteId);
+    if (!settings) {
+      return sendNotFound(res);
+    }
+    res.json({ siteId, ...settings });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/notification-settings", err);
+    sendInternalError(res, "Failed to fetch notification settings", err);
+  }
+}
+
+async function handlePatchNotificationSettings(
+  req: express.Request,
+  res: express.Response,
+) {
+  const siteId = req.params.siteId;
+  const { enabled, email, notifyOn, includeCsv } = req.body ?? {};
+
+  const patch: {
+    notifyEnabled?: boolean;
+    notifyEmail?: string | null;
+    notifyOn?: "always" | "issues_exist" | "new_issues_only" | "never";
+    notifyIncludeCsv?: boolean;
+  } = {};
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_enabled",
+        "enabled must be boolean",
+      );
+    }
+    patch.notifyEnabled = enabled;
+  }
+  if (email !== undefined) {
+    if (email != null && typeof email !== "string") {
+      return sendApiError(res, 400, "invalid_email", "email must be a string");
+    }
+    if (email && !isValidEmailAddress(email)) {
+      return sendApiError(res, 400, "invalid_email", "email is invalid");
+    }
+    patch.notifyEmail = email ?? null;
+  }
+  if (notifyOn !== undefined) {
+    if (typeof notifyOn !== "string" || !NOTIFY_ON_OPTIONS.has(notifyOn)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_notify_on",
+        "notifyOn must be new_issues_only, issues_exist, always, or never",
+      );
+    }
+    patch.notifyOn = normalizeNotifyOn(notifyOn) as
+      | "always"
+      | "issues_exist"
+      | "new_issues_only"
+      | "never";
+  }
+  if (includeCsv !== undefined) {
+    if (typeof includeCsv !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_include_csv",
+        "includeCsv must be boolean",
+      );
+    }
+    patch.notifyIncludeCsv = includeCsv;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    return sendApiError(res, 400, "empty_patch", "No fields to update");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const updated = await updateSiteNotificationSettingsForUser(
+      userId,
+      siteId,
+      patch,
+    );
+    res.json({ siteId, ...updated });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    if (err instanceof Error && err.message === "invalid_notify_email") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_notify_email",
+        "notify_email is required when notifications are enabled and notifyOn is not never",
+      );
+    }
+    console.error("Error in PATCH /sites/:siteId/notification-settings", err);
+    sendInternalError(res, "Failed to update notification settings", err);
+  }
+}
+
+app.get("/sites/:siteId/notification-settings", handleGetNotificationSettings);
+app.patch(
+  "/sites/:siteId/notification-settings",
+  handlePatchNotificationSettings,
+);
+
+// Backwards-compatible routes for older clients
+app.get("/sites/:siteId/notifications", handleGetNotificationSettings);
+
+app.put("/sites/:siteId/notifications", async (req, res) => {
+  const { enabled, email, onlyOnChange } = req.body ?? {};
+  const notifyOn = onlyOnChange === false ? "always" : "new_issues_only";
+  req.body = { enabled, email, notifyOn };
+  await handlePatchNotificationSettings(req, res);
+});
+
+async function handleSendTestAlert(
+  req: express.Request,
+  res: express.Response,
+) {
+  const siteId = req.params.siteId;
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const settings = await getSiteNotificationSettingsForUser(userId, siteId);
+    if (!settings) {
+      return sendNotFound(res);
+    }
+    const target = EMAIL_TEST_TO || settings.notifyEmail;
+    if (!target) {
+      return sendApiError(
+        res,
+        400,
+        "missing_email",
+        "notify_email is required",
+      );
+    }
+    await sendTestEmail(userId, siteId, target);
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    console.error("Error in POST /sites/:siteId/notifications/test", err);
+    sendInternalError(res, "Failed to send test alert", err);
+  }
+}
+
+app.post("/sites/:siteId/notifications/test", handleSendTestAlert);
+app.post("/sites/:siteId/alerts/test", handleSendTestAlert);
+
+app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    let userId = req.user?.id;
+    let run = null;
+
+    if (!userId) {
+      const internalToken =
+        typeof req.headers["x-internal-token"] === "string"
+          ? req.headers["x-internal-token"]
+          : "";
+      if (!API_INTERNAL_TOKEN || internalToken !== API_INTERNAL_TOKEN) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const internalRun = await getScanRunById(scanRunId);
+      if (!internalRun) {
+        return sendNotFound(res);
+      }
+      const site = await getSiteById(internalRun.site_id);
+      if (!site || !site.user_id) {
+        return sendNotFound(res);
+      }
+      userId = site.user_id;
+      run = internalRun;
+    } else {
+      const result = await requireScanRunForUser(req, res, scanRunId);
+      if (!result) return;
+      run = result.run;
+    }
+
+    await notifyIfNeeded(userId, scanRunId);
+    res.json({ ok: true, status: run.status });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/notify", err);
+    sendInternalError(res, "Failed to notify", err);
   }
 });
 
@@ -186,7 +685,13 @@ app.get("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const scans = await getRecentScansForSite(siteId, limit);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const scans = await getRecentScansForSiteForUser(userId, siteId, limit);
 
     res.json({
       siteId,
@@ -215,7 +720,13 @@ app.get("/sites/:siteId/scan-runs", async (req, res) => {
   }
 
   try {
-    const runs = await getRecentScanRunsForSite(siteId, limit);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const runs = await getRecentScanRunsForSiteForUser(userId, siteId, limit);
     res.json({
       siteId,
       runs: runs.map(serializeScanRun),
@@ -226,20 +737,478 @@ app.get("/sites/:siteId/scan-runs", async (req, res) => {
   }
 });
 
+// Diff between a scan run and previous completed run for the same site
+app.get("/sites/:siteId/scan-runs/:scanRunId/diff", async (req, res) => {
+  const siteId = req.params.siteId;
+  const scanRunId = req.params.scanRunId;
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
+  const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
+  const includeUnchangedRaw = parseBooleanParam(
+    req.query.includeUnchanged,
+    false,
+  );
+  const unchangedOnly = parseBooleanParam(req.query.unchangedOnly, false);
+  const unchangedScope = parseUnchangedScope(req.query.unchangedScope);
+  const unchangedLimitRaw = req.query.unchangedLimit;
+  const unchangedOffsetRaw = req.query.unchangedOffset;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const unchangedLimit = unchangedLimitRaw ? Number(unchangedLimitRaw) : 50;
+  const unchangedOffset = unchangedOffsetRaw ? Number(unchangedOffsetRaw) : 0;
+  const includeUnchanged = includeUnchangedRaw || unchangedOnly;
+  const effectiveUnchangedScope = issuesOnly ? "issues" : unchangedScope;
+
+  if (changeTypes && changeTypes.length === 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_change_types",
+      "changeTypes must include valid change types",
+    );
+  }
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  if (Number.isNaN(unchangedLimit) || unchangedLimit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_unchanged_limit",
+      "unchangedLimit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(unchangedOffset) || unchangedOffset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_unchanged_offset",
+      "unchangedOffset must be 0 or greater",
+    );
+  }
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    if (run.site_id !== siteId) {
+      return sendNotFound(res);
+    }
+
+    if (baselineRaw && baselineRaw !== "prev" && baselineRaw === scanRunId) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, scanRunId);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const serializeRun = (row: {
+      id: string;
+      started_at: Date;
+      finished_at: Date | null;
+    }) => ({
+      id: row.id,
+      started_at: row.started_at.toISOString(),
+      finished_at: row.finished_at ? row.finished_at.toISOString() : null,
+    });
+
+    if (!baselineRun) {
+      return res.json({
+        siteId,
+        currentRun: serializeRun(run),
+        baselineRun: null,
+        summary: {
+          newIssues: 0,
+          fixedIssues: 0,
+          changed: 0,
+          outstandingIssues: 0,
+          outstandingOk: 0,
+          outstandingTotal: 0,
+          removed: 0,
+          added: 0,
+        },
+        meta: {
+          includeUnchanged,
+          unchangedOnly,
+          unchangedScope: effectiveUnchangedScope,
+          includeIgnored,
+          unchangedLimit,
+          unchangedOffset,
+          unchangedReturned: 0,
+          changesReturned: 0,
+        },
+        items: [],
+      });
+    }
+
+    await applyIgnoreRulesForScanRun(scanRunId);
+    await applyIgnoreRulesForScanRun(baselineRun.id);
+
+    const diff = await getScanDiff(scanRunId, baselineRun.id, {
+      issuesOnly,
+      limit,
+      offset,
+      changeTypes,
+      includeUnchanged,
+      unchangedOnly,
+      unchangedScope,
+      unchangedLimit,
+      unchangedOffset,
+      includeIgnored,
+    });
+
+    return res.json({
+      siteId,
+      currentRun: serializeRun(run),
+      baselineRun: serializeRun(baselineRun),
+      summary: diff.summary,
+      meta: { ...diff.meta, includeIgnored },
+      items: diff.items,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/scan-runs/:scanRunId/diff", err);
+    return sendInternalError(res, "Failed to compute scan diff", err);
+  }
+});
+
+app.get("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const status = parseLinkNoteStatus(req.query.status, "all");
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const notes = await listLinkNotesForSiteForUser(userId, siteId, status);
+    return res.json({ siteId, count: notes.length, notes });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to fetch link notes", err);
+  }
+});
+
+app.get("/sites/:siteId/link-notes/lookup", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl = typeof req.query.url === "string" ? req.query.url : "";
+  if (!linkUrl.trim()) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_link_url",
+      "url query param is required",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await getLinkNoteForSiteByUrlForUser(userId, siteId, linkUrl);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/link-notes/lookup", err);
+    return sendInternalError(res, "Failed to fetch link note", err);
+  }
+});
+
+app.put("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  const noteText = typeof req.body?.note === "string" ? req.body.note : "";
+  const status = parseLinkNoteStatus(req.body?.status, "open");
+
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+  if (!noteText.trim()) {
+    return sendApiError(res, 400, "invalid_note", "note is required");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await upsertLinkNoteForSiteForUser({
+      userId,
+      siteId,
+      linkUrl,
+      note: noteText.trim(),
+      status: status === "all" ? "open" : status,
+    });
+    if (!note) return sendNotFound(res);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in PUT /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to save link note", err);
+  }
+});
+
+app.patch("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  const noteRaw = req.body?.note;
+  const statusRaw = req.body?.status;
+  const nextNote = typeof noteRaw === "string" ? noteRaw.trim() : undefined;
+  const status = parseLinkNoteStatus(statusRaw, "all");
+  const hasNoteUpdate = typeof noteRaw === "string";
+  const hasStatusUpdate = status !== "all";
+
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+  if (!hasNoteUpdate && !hasStatusUpdate) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_update",
+      "note or status must be provided",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const note = await updateLinkNoteForSiteForUser({
+      userId,
+      siteId,
+      linkUrl,
+      note: nextNote && nextNote.length > 0 ? nextNote : undefined,
+      status: status === "all" ? undefined : status,
+    });
+    if (!note) return sendNotFound(res);
+    return res.json({ siteId, note });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to update link note", err);
+  }
+});
+
+app.delete("/sites/:siteId/link-notes", async (req, res) => {
+  const siteId = req.params.siteId;
+  const linkUrl =
+    typeof req.body?.link_url === "string" ? req.body.link_url : "";
+  if (!linkUrl.trim()) {
+    return sendApiError(res, 400, "invalid_link_url", "link_url is required");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const deleted = await deleteLinkNoteForSiteForUser(userId, siteId, linkUrl);
+    if (!deleted) return sendNotFound(res);
+    return res.json({ siteId, deleted: true });
+  } catch (err: unknown) {
+    console.error("Error in DELETE /sites/:siteId/link-notes", err);
+    return sendInternalError(res, "Failed to delete link note", err);
+  }
+});
+
+app.get("/sites/:siteId/fix-queue", async (req, res) => {
+  const siteId = req.params.siteId;
+  const runIdRaw = typeof req.query.runId === "string" ? req.query.runId : "";
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const includeOutstanding = parseBooleanParam(
+    req.query.includeOutstanding,
+    true,
+  );
+  const includeNew = parseBooleanParam(req.query.includeNew, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
+  const status = parseLinkNoteStatus(req.query.status, "open");
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+
+    const currentRun = runIdRaw
+      ? await getCompletedRunForSite(siteId, runIdRaw)
+      : await getLatestCompletedScanForSiteForUser(userId, siteId);
+
+    if (!currentRun) {
+      return res.json({
+        siteId,
+        currentRun: null,
+        baselineRun: null,
+        summary: {
+          newIssues: 0,
+          outstandingIssues: 0,
+          totalQueueItems: 0,
+          withNotesOpen: 0,
+          snoozed: 0,
+          resolved: 0,
+        },
+        items: [],
+      });
+    }
+
+    if (
+      baselineRaw &&
+      baselineRaw !== "prev" &&
+      baselineRaw === currentRun.id
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, currentRun.id);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const serializeRun = (row: {
+      id: string;
+      started_at: Date;
+      finished_at: Date | null;
+    }) => ({
+      id: row.id,
+      started_at: row.started_at.toISOString(),
+      finished_at: row.finished_at ? row.finished_at.toISOString() : null,
+    });
+
+    await applyIgnoreRulesForScanRun(currentRun.id);
+    if (baselineRun) {
+      await applyIgnoreRulesForScanRun(baselineRun.id);
+    }
+
+    const queue = await getFixQueueForRuns({
+      userId,
+      siteId,
+      currentRunId: currentRun.id,
+      baselineRunId: baselineRun?.id ?? null,
+      includeNew,
+      includeOutstanding,
+      includeIgnored,
+      status,
+      limit,
+      offset,
+    });
+
+    return res.json({
+      siteId,
+      currentRun: serializeRun(currentRun),
+      baselineRun: baselineRun ? serializeRun(baselineRun) : null,
+      summary: queue.summary,
+      items: queue.items,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/fix-queue", err);
+    return sendInternalError(res, "Failed to fetch fix queue", err);
+  }
+});
+
 // Latest scan for a site
 app.get("/sites/:siteId/scans/latest", async (req, res) => {
   const siteId = req.params.siteId;
 
   try {
-    const latest = await getLatestScanForSite(siteId);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const latest = await getLatestScanForSiteForUser(userId, siteId);
 
     if (!latest) {
-      return sendApiError(
-        res,
-        404,
-        "no_scans_for_site",
-        `No scans found for site ${siteId}`,
-      );
+      return sendNotFound(res);
     }
 
     res.json(serializeScanRun(latest));
@@ -254,16 +1223,9 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const run = await getScanRunById(scanRunId);
-
-    if (!run) {
-      return sendApiError(
-        res,
-        404,
-        "scan_run_not_found",
-        `No scan run found with id ${scanRunId}`,
-      );
-    }
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
 
     const serialized = serializeScanRun(run);
     return res.json(serialized);
@@ -278,20 +1240,18 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const run = await getScanRunById(scanRunId);
-    if (!run) {
-      return sendApiError(
-        res,
-        404,
-        "scan_run_not_found",
-        `No scan run found with id ${scanRunId}`,
-      );
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
 
     await applyIgnoreRulesForScanRun(scanRunId);
 
-    const summaryRows = await getScanLinksSummary(scanRunId);
-    const timeoutCount = await getTimeoutCountForRun(scanRunId);
+    const summaryRows = await getScanLinksSummaryForUser(userId, scanRunId);
+    const timeoutCount = await getTimeoutCountForRunForUser(userId, scanRunId);
     const byClassification: Record<string, number> = {
       ok: 0,
       broken: 0,
@@ -324,12 +1284,14 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
           : row.last_seen_at,
     });
 
-    const topBroken = await getTopLinksByClassification(
+    const topBroken = await getTopLinksByClassificationForUser(
+      userId,
       scanRunId,
       "broken",
       20,
     );
-    const topBlocked = await getTopLinksByClassification(
+    const topBlocked = await getTopLinksByClassificationForUser(
+      userId,
       scanRunId,
       "blocked",
       20,
@@ -353,25 +1315,63 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
 app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const job = await getJobForScanRun(scanRunId);
+    if (job && job.status !== "completed") {
+      await cancelScanJob(job.id);
+    }
     await cancelScanRun(scanRunId);
-    return res.json({ ok: true });
+    return res.json({ ok: true, status: "cancelled" });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/cancel", err);
     return sendInternalError(res, "Failed to cancel scan run", err);
   }
 });
 
+app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    if (run.status !== "failed" && run.status !== "cancelled") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_retryable",
+        "Scan run must be failed or cancelled to retry",
+      );
+    }
+    const jobId = await enqueueScanJob({
+      scanRunId,
+      siteId: run.site_id,
+    });
+    await setScanRunStatus(scanRunId, "queued", {
+      errorMessage: null,
+      clearFinishedAt: true,
+    });
+    return res.json({ scanRunId, jobId, status: "queued" });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/retry", err);
+    return sendInternalError(res, "Failed to retry scan run", err);
+  }
+});
+
 // Create a new site
 app.post("/sites", async (req, res) => {
   try {
-    const userId = (req.body.userId as string) ?? DEMO_USER_ID;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     const url = req.body.url as string | undefined;
 
     if (!url) {
       return sendApiError(res, 400, "missing_url", "Missing 'url' in body");
     }
 
-    const site = await createSite(userId, url);
+    const site = await createSiteForUser(userId, url);
 
     res.status(201).json({ site });
   } catch (err: unknown) {
@@ -395,22 +1395,16 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    // Get the scanRunId synchronously (from createScanRun)
-    const { getScanRunIdOnly } =
-      await import("../../../packages/crawler/src/scanService.js");
-    const scanRunId = await getScanRunIdOnly(siteId, body.startUrl);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const scanRunId = await createScanRun(siteId, body.startUrl);
+    const jobId = await enqueueScanJob({ scanRunId, siteId });
 
-    // Return immediately with the scanRunId
     res.status(201).json({
       scanRunId,
+      jobId,
       siteId,
       startUrl: body.startUrl,
-    });
-
-    // Run the scan in the background (fire-and-forget) with the same scanRunId
-    // The frontend will poll /scan-runs/:scanRunId or use SSE for progress
-    runScanForSite(siteId, body.startUrl, scanRunId).catch((err) => {
-      console.error("Background scan error for site", siteId, ":", err);
     });
   } catch (err: unknown) {
     console.error("Error in POST /sites/:siteId/scans", err);
@@ -448,11 +1442,21 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   }
 
   try {
-    const paginatedResults = await getResultsForScanRun(scanRunId, {
-      limit,
-      offset,
-      classification,
-    });
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const paginatedResults = await getResultsForScanRunForUser(
+      userId,
+      scanRunId,
+      {
+        limit,
+        offset,
+        classification,
+      },
+    );
 
     res.json({
       scanRunId,
@@ -472,7 +1476,13 @@ app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const summary = await getResultsSummaryForScanRun(scanRunId);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const summary = await getResultsSummaryForScanRunForUser(userId, scanRunId);
 
     res.json({
       scanRunId,
@@ -488,7 +1498,13 @@ app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
 app.get("/scan-runs/:scanRunId/links/summary", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
-    const summary = await getScanLinksSummary(scanRunId);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const summary = await getScanLinksSummaryForUser(userId, scanRunId);
     const noResponse = summary
       .filter((row) => row.status_code == null)
       .reduce((acc, row) => acc + row.count, 0);
@@ -504,6 +1520,13 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const classificationRaw = req.query.classification;
   const limitRaw = req.query.limit;
+  const statusGroupRaw = req.query.statusGroup;
+  const statusFiltersRaw = req.query.statusFilters;
+  const searchRaw = req.query.search;
+  const minOccurrencesRaw = req.query.minOccurrencesOnly;
+  const sortRaw = req.query.sort;
+  const showIgnoredRaw = req.query.showIgnored;
+  const ignoredOnlyRaw = req.query.ignoredOnly;
   const classification = parseExportClassification(classificationRaw);
   const limit = typeof limitRaw === "string" ? Number(limitRaw) : 5000;
   if (
@@ -528,8 +1551,46 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
   }
 
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     await applyIgnoreRulesForScanRun(scanRunId);
-    const rows = await getScanLinksForExport(scanRunId, classification, limit);
+    const statusGroup = parseStatusGroup(statusGroupRaw);
+    const statusFilters = parseStatusFilters(statusFiltersRaw);
+    const searchQuery = typeof searchRaw === "string" ? searchRaw.trim() : "";
+    const minOccurrencesOnly = minOccurrencesRaw === "true";
+    const sortOption = parseSortOption(sortRaw);
+    const showIgnored = showIgnoredRaw === "true";
+    const ignoredOnly = ignoredOnlyRaw === "true";
+    const useFiltered =
+      statusGroupRaw ||
+      statusFiltersRaw ||
+      searchQuery ||
+      minOccurrencesRaw ||
+      sortRaw ||
+      showIgnoredRaw ||
+      ignoredOnlyRaw;
+    const rows = useFiltered
+      ? await getScanLinksForExportFilteredForUser(userId, scanRunId, {
+          classification,
+          statusGroup,
+          statusFilters,
+          searchQuery,
+          minOccurrencesOnly,
+          sortOption,
+          showIgnored,
+          ignoredOnly,
+          limit,
+        })
+      : await getScanLinksForExportForUser(
+          userId,
+          scanRunId,
+          classification,
+          limit,
+        );
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.csv`;
     const header = [
@@ -576,6 +1637,13 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const classificationRaw = req.query.classification;
   const limitRaw = req.query.limit;
+  const statusGroupRaw = req.query.statusGroup;
+  const statusFiltersRaw = req.query.statusFilters;
+  const searchRaw = req.query.search;
+  const minOccurrencesRaw = req.query.minOccurrencesOnly;
+  const sortRaw = req.query.sort;
+  const showIgnoredRaw = req.query.showIgnored;
+  const ignoredOnlyRaw = req.query.ignoredOnly;
   const classification = parseExportClassification(classificationRaw);
   const limit = typeof limitRaw === "string" ? Number(limitRaw) : 5000;
   if (
@@ -600,8 +1668,46 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   }
 
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     await applyIgnoreRulesForScanRun(scanRunId);
-    const rows = await getScanLinksForExport(scanRunId, classification, limit);
+    const statusGroup = parseStatusGroup(statusGroupRaw);
+    const statusFilters = parseStatusFilters(statusFiltersRaw);
+    const searchQuery = typeof searchRaw === "string" ? searchRaw.trim() : "";
+    const minOccurrencesOnly = minOccurrencesRaw === "true";
+    const sortOption = parseSortOption(sortRaw);
+    const showIgnored = showIgnoredRaw === "true";
+    const ignoredOnly = ignoredOnlyRaw === "true";
+    const useFiltered =
+      statusGroupRaw ||
+      statusFiltersRaw ||
+      searchQuery ||
+      minOccurrencesRaw ||
+      sortRaw ||
+      showIgnoredRaw ||
+      ignoredOnlyRaw;
+    const rows = useFiltered
+      ? await getScanLinksForExportFilteredForUser(userId, scanRunId, {
+          classification,
+          statusGroup,
+          statusFilters,
+          searchQuery,
+          minOccurrencesOnly,
+          sortOption,
+          showIgnored,
+          ignoredOnly,
+          limit,
+        })
+      : await getScanLinksForExportForUser(
+          userId,
+          scanRunId,
+          classification,
+          limit,
+        );
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.json`;
     const payload = rows.map((row) => ({
@@ -625,6 +1731,176 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   }
 });
 
+// CSV export for diff results
+app.get("/sites/:siteId/scan-runs/:scanRunId/diff.csv", async (req, res) => {
+  const siteId = req.params.siteId;
+  const scanRunId = req.params.scanRunId;
+  const baselineRaw =
+    typeof req.query.baseline === "string" ? req.query.baseline : "prev";
+  const issuesOnly = parseBooleanParam(req.query.issuesOnly, true);
+  const includeIgnored = parseBooleanParam(req.query.includeIgnored, false);
+  const exportScope = parseExportScope(req.query.exportScope);
+  const changeTypes = parseDiffChangeTypes(req.query.changeTypes);
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (changeTypes && changeTypes.length === 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_change_types",
+      "changeTypes must include valid change types",
+    );
+  }
+
+  if (exportScope === "page") {
+    if (Number.isNaN(limit) || limit <= 0) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_limit",
+        "limit must be a positive number",
+      );
+    }
+
+    if (Number.isNaN(offset) || offset < 0) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_offset",
+        "offset must be 0 or greater",
+      );
+    }
+  }
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    if (run.site_id !== siteId) {
+      return sendNotFound(res);
+    }
+
+    if (baselineRaw && baselineRaw !== "prev" && baselineRaw === scanRunId) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_baseline",
+        "baseline must be different from current run",
+      );
+    }
+
+    const baselineRun =
+      baselineRaw && baselineRaw !== "prev"
+        ? await getCompletedRunForSite(siteId, baselineRaw)
+        : await getBaselineRunForDiff(siteId, scanRunId);
+
+    if (baselineRaw && baselineRaw !== "prev" && !baselineRun) {
+      return sendApiError(
+        res,
+        404,
+        "baseline_not_found",
+        "Baseline scan run not found",
+      );
+    }
+
+    const baselineId = baselineRun?.id ?? "no-baseline";
+    const filename = `scanlark-diff-${siteId}-${scanRunId}-vs-${baselineId}.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const headers = [
+      "change_type",
+      "link_url",
+      "baseline_classification",
+      "baseline_status_code",
+      "baseline_error_message",
+      "baseline_source_pages",
+      "current_classification",
+      "current_status_code",
+      "current_error_message",
+      "current_source_pages",
+      "site_id",
+      "current_run_id",
+      "baseline_run_id",
+    ];
+
+    if (!baselineRun) {
+      return res.status(200).send(`${headers.join(",")}\n`);
+    }
+
+    await applyIgnoreRulesForScanRun(scanRunId);
+    await applyIgnoreRulesForScanRun(baselineRun.id);
+
+    const pageLimit = exportScope === "page" ? limit : 2000;
+    let pageOffset = exportScope === "page" ? offset : 0;
+    const items: Array<{
+      link_url: string;
+      change_type: string;
+      current: {
+        classification: string;
+        status_code: number | null;
+        error_message: string | null;
+        source_pages: string[];
+      } | null;
+      baseline: {
+        classification: string;
+        status_code: number | null;
+        error_message: string | null;
+        source_pages: string[];
+      } | null;
+    }> = [];
+
+    while (true) {
+      const diff = await getScanDiff(scanRunId, baselineRun.id, {
+        issuesOnly,
+        limit: pageLimit,
+        offset: pageOffset,
+        changeTypes: changeTypes ?? null,
+        includeIgnored,
+      });
+      items.push(...diff.items);
+      if (exportScope === "page" || diff.items.length < pageLimit) break;
+      pageOffset += pageLimit;
+    }
+
+    const rows = items.map((item) => {
+      const baseline = item.baseline;
+      const current = item.current;
+      const baselinePages = baseline?.source_pages ?? [];
+      const currentPages = current?.source_pages ?? [];
+      return [
+        csvEscape(item.change_type),
+        csvEscape(item.link_url),
+        csvEscape(baseline?.classification ?? ""),
+        csvEscape(baseline?.status_code ?? ""),
+        csvEscape(baseline?.error_message ?? ""),
+        csvEscape(baselinePages.join(" | ")),
+        csvEscape(current?.classification ?? ""),
+        csvEscape(current?.status_code ?? ""),
+        csvEscape(current?.error_message ?? ""),
+        csvEscape(currentPages.join(" | ")),
+        csvEscape(siteId),
+        csvEscape(scanRunId),
+        csvEscape(baselineRun.id),
+      ].join(",");
+    });
+
+    return res.status(200).send(`${headers.join(",")}\n${rows.join("\n")}`);
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /sites/:siteId/scan-runs/:scanRunId/diff.csv",
+      err,
+    );
+    return sendInternalError(res, "Failed to export scan diff", err);
+  }
+});
+
 // Diff between two scan runs (dedup links)
 app.get("/scan-runs/:scanRunId/diff", async (req, res) => {
   const scanRunId = req.params.scanRunId;
@@ -640,7 +1916,16 @@ app.get("/scan-runs/:scanRunId/diff", async (req, res) => {
   }
 
   try {
-    const diff = await getDiffBetweenRuns(scanRunId, compareTo);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const diff = await getDiffBetweenRunsForUser(userId, scanRunId, compareTo);
+    if (!diff) {
+      return sendNotFound(res);
+    }
     const serializeRow = (row: { last_seen_at: Date }) => ({
       ...row,
       last_seen_at:
@@ -695,8 +1980,19 @@ app.get("/scan-runs/:scanRunId/ignored", async (req, res) => {
   }
 
   try {
-    const result = await listIgnoredLinksForRun(scanRunId, limit, offset);
-    const serialized = result.links.map((link) => ({
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const ignoredResult = await listIgnoredLinksForRunForUser(
+      userId,
+      scanRunId,
+      limit,
+      offset,
+    );
+    const serialized = ignoredResult.links.map((link) => ({
       ...link,
       first_seen_at:
         link.first_seen_at instanceof Date
@@ -713,8 +2009,8 @@ app.get("/scan-runs/:scanRunId/ignored", async (req, res) => {
     }));
     res.json({
       scanRunId,
-      countReturned: result.countReturned,
-      totalMatching: result.totalMatching,
+      countReturned: ignoredResult.countReturned,
+      totalMatching: ignoredResult.totalMatching,
       links: serialized,
     });
   } catch (err: unknown) {
@@ -753,7 +2049,18 @@ app.get(
     }
 
     try {
-      const result = await listIgnoredOccurrences(ignoredLinkId, limit, offset);
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const result = await listIgnoredOccurrencesForUser(
+        userId,
+        ignoredLinkId,
+        limit,
+        offset,
+      );
       const serialized = result.occurrences.map((occ) => ({
         ...occ,
         created_at:
@@ -813,9 +2120,15 @@ app.get("/scan-runs/:scanRunId/links", async (req, res) => {
   }
 
   try {
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
     await applyIgnoreRulesForScanRun(scanRunId);
 
-    const paginatedLinks = await getScanLinksForRun(scanRunId, {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const paginatedLinks = await getScanLinksForRunForUser(userId, scanRunId, {
       limit,
       offset,
       classification,
@@ -894,11 +2207,24 @@ app.get(
     }
 
     try {
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
       const linkUrl = decodeURIComponent(encodedLinkUrl);
-      const scanLink = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const scanLink = await getScanLinkByRunAndUrlForUser(
+        userId,
+        scanRunId,
+        linkUrl,
+      );
       const scanLinkId = scanLink?.id;
       const paginatedOccurrences = scanLinkId
-        ? await getOccurrencesForScanLink(scanLinkId, { limit, offset })
+        ? await getOccurrencesForScanLinkForUser(userId, scanLinkId, {
+            limit,
+            offset,
+          })
         : {
             scanLinkId: scanLinkId ?? "",
             countReturned: 0,
@@ -972,7 +2298,15 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
   }
 
   try {
-    const result = await getOccurrencesForScanLink(scanLinkId, {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const link = await getScanLinkByIdForUser(userId, scanLinkId);
+    if (!link) {
+      return sendNotFound(res);
+    }
+    const result = await getOccurrencesForScanLinkForUser(userId, scanLinkId, {
       limit,
       offset,
     });
@@ -998,10 +2332,86 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
   }
 });
 
-// Ignore rules (global list)
-app.get("/ignore-rules", async (_req, res) => {
+app.post("/scan-links/:scanLinkId/recheck", async (req, res) => {
+  const scanLinkId = req.params.scanLinkId;
   try {
-    const rules = await listIgnoreRules();
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const link = await getScanLinkByIdForUser(userId, scanLinkId);
+    if (!link) {
+      return sendNotFound(res);
+    }
+    if (link.ignored) {
+      return sendApiError(
+        res,
+        400,
+        "scan_link_ignored",
+        "Ignored links cannot be rechecked",
+      );
+    }
+
+    const result = await validateLink(link.link_url);
+    const statusCode = result.ok ? result.status : result.status;
+    const classification = classifyStatus(
+      link.link_url,
+      statusCode ?? undefined,
+    );
+    const errorMessage = result.ok ? null : result.error;
+
+    const updated = await updateScanLinkAfterRecheck({
+      scanLinkId,
+      classification,
+      statusCode,
+      errorMessage,
+    });
+    if (!updated) {
+      return sendApiError(
+        res,
+        500,
+        "scan_link_update_failed",
+        "Failed to update scan link",
+      );
+    }
+    const serialized = {
+      ...updated,
+      first_seen_at:
+        updated.first_seen_at instanceof Date
+          ? updated.first_seen_at.toISOString()
+          : updated.first_seen_at,
+      last_seen_at:
+        updated.last_seen_at instanceof Date
+          ? updated.last_seen_at.toISOString()
+          : updated.last_seen_at,
+      created_at:
+        updated.created_at instanceof Date
+          ? updated.created_at.toISOString()
+          : updated.created_at,
+      updated_at:
+        updated.updated_at instanceof Date
+          ? updated.updated_at.toISOString()
+          : updated.updated_at,
+      ignored_at:
+        updated.ignored_at instanceof Date
+          ? updated.ignored_at.toISOString()
+          : updated.ignored_at,
+    };
+    return res.json({ scanLink: serialized });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-links/:scanLinkId/recheck", err);
+    return sendInternalError(res, "Failed to recheck scan link", err);
+  }
+});
+
+// Ignore rules (global list)
+app.get("/ignore-rules", async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rules = await listIgnoreRulesForUser(userId);
     res.json({ count: rules.length, rules });
   } catch (err: unknown) {
     console.error("Error in GET /ignore-rules", err);
@@ -1025,9 +2435,27 @@ app.post("/ignore-rules", async (req, res) => {
       "pattern must be a non-empty string",
     );
   }
+  const invalidPattern = validateIgnoreRulePattern(ruleType, pattern);
+  if (invalidPattern) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_pattern",
+      "pattern must be a valid value",
+      invalidPattern,
+    );
+  }
 
   try {
-    const rule = await createIgnoreRule(siteId, ruleType, pattern);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    if (siteId) {
+      const site = await requireSiteForUser(req, res, siteId);
+      if (!site) return;
+    }
+    const rule = await createIgnoreRule(userId, siteId, ruleType, pattern);
     if (!enabled) {
       const updated = await setIgnoreRuleEnabled(rule.id, false);
       return res.status(201).json({ rule: updated ?? rule });
@@ -1043,7 +2471,13 @@ app.post("/ignore-rules", async (req, res) => {
 app.get("/sites/:siteId/ignore-rules", async (req, res) => {
   const siteId = req.params.siteId;
   try {
-    const rules = await listIgnoreRules(siteId);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rules = await listIgnoreRulesForSiteForUser(userId, siteId);
     res.json({ siteId, count: rules.length, rules });
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/ignore-rules", err);
@@ -1074,9 +2508,28 @@ app.post("/sites/:siteId/ignore-rules", async (req, res) => {
       "pattern must be a non-empty string",
     );
   }
+  if (ruleType) {
+    const invalidPattern = validateIgnoreRulePattern(ruleType, pattern);
+    if (invalidPattern) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_pattern",
+        "pattern must be a valid value",
+        invalidPattern,
+      );
+    }
+  }
 
   try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     const rule = await createIgnoreRule(
+      userId,
       scope === "global" ? null : siteId,
       ruleType,
       pattern,
@@ -1100,15 +2553,23 @@ app.patch("/ignore-rules/:ruleId", async (req, res) => {
     );
   }
   try {
-    const rule = await setIgnoreRuleEnabled(ruleId, isEnabled);
-    if (!rule)
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const existingRule = await getIgnoreRuleByIdForUser(userId, ruleId);
+    if (!existingRule) {
+      return sendNotFound(res);
+    }
+    const updatedRule = await setIgnoreRuleEnabled(ruleId, isEnabled);
+    if (!updatedRule)
       return sendApiError(
         res,
         404,
         "ignore_rule_not_found",
         "Ignore rule not found",
       );
-    res.json({ rule });
+    res.json({ rule: updatedRule });
   } catch (err: unknown) {
     console.error("Error in PATCH /ignore-rules/:ruleId", err);
     return sendInternalError(res, "Failed to update ignore rule", err);
@@ -1118,6 +2579,14 @@ app.patch("/ignore-rules/:ruleId", async (req, res) => {
 app.delete("/ignore-rules/:ruleId", async (req, res) => {
   const ruleId = req.params.ruleId;
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rule = await getIgnoreRuleByIdForUser(userId, ruleId);
+    if (!rule) {
+      return sendNotFound(res);
+    }
     await deleteIgnoreRule(ruleId);
     res.status(204).send();
   } catch (err: unknown) {
@@ -1145,21 +2614,24 @@ app.post(
     }
 
     try {
-      const run = await getScanRunById(scanRunId);
-      if (!run)
-        return sendApiError(
-          res,
-          404,
-          "scan_run_not_found",
-          "Scan run not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const { run } = runCheck;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
       if (mode === "this_scan") {
         await setScanLinkIgnoredForRun(scanRunId, linkUrl, true, {
           reason: "Manually ignored",
           source: "manual",
         });
-        const scanLink = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
+        const scanLink = await getScanLinkByRunAndUrlForUser(
+          userId,
+          scanRunId,
+          linkUrl,
+        );
         if (scanLink) {
           const ignored = await upsertIgnoredLink({
             scanRunId,
@@ -1168,10 +2640,14 @@ app.post(
             statusCode: scanLink.status_code,
             errorMessage: scanLink.error_message ?? undefined,
           });
-          const occ = await getOccurrencesForScanLink(scanLink.id, {
-            limit: 1,
-            offset: 0,
-          });
+          const occ = await getOccurrencesForScanLinkForUser(
+            userId,
+            scanLink.id,
+            {
+              limit: 1,
+              offset: 0,
+            },
+          );
           const first = occ.occurrences[0];
           if (first) {
             await insertIgnoredOccurrence({
@@ -1191,7 +2667,22 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
-      const rule = await createIgnoreRule(run.site_id, ruleType, linkUrl);
+      const invalidPattern = validateIgnoreRulePattern(ruleType, linkUrl);
+      if (invalidPattern) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_pattern",
+          "pattern must be a valid value",
+          invalidPattern,
+        );
+      }
+      const rule = await createIgnoreRule(
+        userId,
+        run.site_id,
+        ruleType,
+        linkUrl,
+      );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
       return res.json({ scanRunId, link_url: linkUrl, rule });
     } catch (err: unknown) {
@@ -1222,23 +2713,17 @@ app.post(
     }
 
     try {
-      const run = await getScanRunById(scanRunId);
-      if (!run)
-        return sendApiError(
-          res,
-          404,
-          "scan_run_not_found",
-          "Scan run not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const { run } = runCheck;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
-      const link = await getScanLinkById(scanLinkId);
+      const link = await getScanLinkByIdForUser(userId, scanLinkId);
       if (!link || link.scan_run_id !== scanRunId) {
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+        return sendNotFound(res);
       }
 
       if (mode === "this_scan") {
@@ -1253,7 +2738,7 @@ app.post(
           statusCode: link.status_code,
           errorMessage: link.error_message ?? undefined,
         });
-        const occ = await getOccurrencesForScanLink(link.id, {
+        const occ = await getOccurrencesForScanLinkForUser(userId, link.id, {
           limit: 1,
           offset: 0,
         });
@@ -1275,7 +2760,22 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
-      const rule = await createIgnoreRule(run.site_id, ruleType, link.link_url);
+      const invalidPattern = validateIgnoreRulePattern(ruleType, link.link_url);
+      if (invalidPattern) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_pattern",
+          "pattern must be a valid value",
+          invalidPattern,
+        );
+      }
+      const rule = await createIgnoreRule(
+        userId,
+        run.site_id,
+        ruleType,
+        link.link_url,
+      );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
       return res.json({ scanRunId, link_url: link.link_url, rule });
     } catch (err: unknown) {
@@ -1295,14 +2795,18 @@ app.post(
     const encodedLinkUrl = req.params.encodedLinkUrl;
     const linkUrl = decodeURIComponent(encodedLinkUrl);
     try {
-      const link = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
-      if (!link)
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const link = await getScanLinkByRunAndUrlForUser(
+        userId,
+        scanRunId,
+        linkUrl,
+      );
+      if (!link) return sendNotFound(res);
       if (link.ignored_source !== "manual") {
         return sendApiError(
           res,
@@ -1329,6 +2833,8 @@ app.post("/scan-runs/:scanRunId/reapply-ignore", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const force = req.query.force === "true" || req.query.force === "1";
   try {
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
     const result = await applyIgnoreRulesForScanRun(scanRunId, { force });
     res.json({ scanRunId, ...result });
   } catch (err: unknown) {
@@ -1343,14 +2849,15 @@ app.post(
     const scanRunId = req.params.scanRunId;
     const scanLinkId = req.params.scanLinkId;
     try {
-      const link = await getScanLinkById(scanLinkId);
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const link = await getScanLinkByIdForUser(userId, scanLinkId);
       if (!link || link.scan_run_id !== scanRunId) {
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+        return sendNotFound(res);
       }
       if (link.ignored_source !== "manual") {
         return sendApiError(
@@ -1377,20 +2884,18 @@ app.post(
 // Delete a site (and its scans/results)
 app.delete("/sites/:siteId", async (req, res) => {
   const siteId = req.params.siteId;
-  const userId = (req.query.userId as string) ?? DEMO_USER_ID;
+  const userId = req.user?.id;
 
   try {
-    const site = await getSiteById(siteId);
-    if (!site || site.user_id !== userId) {
-      return sendApiError(
-        res,
-        404,
-        "site_not_found",
-        `No site found with id ${siteId}`,
-      );
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await getSiteByIdForUser(userId, siteId);
+    if (!site) {
+      return sendNotFound(res);
     }
 
-    const deleted = await deleteSite(siteId);
+    const deleted = await deleteSiteForUser(siteId, userId);
 
     if (!deleted) {
       return sendApiError(
@@ -1409,6 +2914,10 @@ app.delete("/sites/:siteId", async (req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 3001;
+
+void initEventRelay().catch((err) => {
+  console.error("Failed to start event relay", err);
+});
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:3001`);

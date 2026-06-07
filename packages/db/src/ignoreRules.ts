@@ -1,4 +1,5 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
+import { validateSafeRegexPattern } from "./validation";
 
 export type IgnoreRuleType =
   | "contains"
@@ -11,11 +12,50 @@ export type IgnoreRuleType =
 
 export interface IgnoreRule {
   id: string;
+  user_id: string;
   site_id: string | null;
   rule_type: IgnoreRuleType;
   pattern: string;
   is_enabled: boolean;
   created_at: Date;
+}
+
+const IGNORE_RULE_PRIORITY: Record<IgnoreRuleType, number> = {
+  domain: 0,
+  path_prefix: 1,
+  exact: 2,
+  contains: 3,
+  regex: 4,
+  status_code: 5,
+  classification: 6,
+};
+
+function compileSafeRuleRegex(pattern: string): RegExp | null {
+  if (validateSafeRegexPattern(pattern) !== null) return null;
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
+
+export function sortIgnoreRules(rules: IgnoreRule[]): IgnoreRule[] {
+  return [...rules].sort((a, b) => {
+    const priority =
+      (IGNORE_RULE_PRIORITY[a.rule_type] ?? 99) -
+      (IGNORE_RULE_PRIORITY[b.rule_type] ?? 99);
+    if (priority !== 0) return priority;
+    const aCreated =
+      a.created_at instanceof Date
+        ? a.created_at.getTime()
+        : new Date(a.created_at).getTime();
+    const bCreated =
+      b.created_at instanceof Date
+        ? b.created_at.getTime()
+        : new Date(b.created_at).getTime();
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 export async function listIgnoreRulesForSite(
@@ -26,7 +66,7 @@ export async function listIgnoreRulesForSite(
   const enabledOnly = opts?.enabledOnly ?? false;
   const res = await client.query<IgnoreRule>(
     `
-      SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
       FROM ignore_rules
       WHERE site_id = $1 ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
@@ -51,7 +91,7 @@ export async function listIgnoreRules(
   const enabledOnly = opts?.enabledOnly ?? false;
   if (!siteId) {
     const res = await client.query<IgnoreRule>(
-      `SELECT id, site_id, rule_type, pattern, is_enabled, created_at FROM ignore_rules ${
+      `SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at FROM ignore_rules ${
         enabledOnly ? "WHERE is_enabled = true" : ""
       } ORDER BY created_at DESC`,
     );
@@ -60,7 +100,7 @@ export async function listIgnoreRules(
 
   const res = await client.query<IgnoreRule>(
     `
-      SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
       FROM ignore_rules
       WHERE (site_id = $1 OR site_id IS NULL) ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
@@ -70,12 +110,86 @@ export async function listIgnoreRules(
   return res.rows;
 }
 
+export async function listIgnoreRulesForUser(
+  userId: string,
+  opts?: { enabledOnly?: boolean },
+): Promise<IgnoreRule[]> {
+  const client = await ensureConnected();
+  const enabledOnly = opts?.enabledOnly ?? false;
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT r.id, r.user_id, r.site_id, r.rule_type, r.pattern, r.is_enabled, r.created_at
+      FROM ignore_rules r
+      LEFT JOIN sites s ON s.id = r.site_id
+      WHERE r.user_id = $1
+        ${enabledOnly ? "AND r.is_enabled = true" : ""}
+      ORDER BY r.created_at DESC
+    `,
+    [userId],
+  );
+  return res.rows;
+}
+
+export async function getIgnoreRuleById(
+  ruleId: string,
+): Promise<IgnoreRule | null> {
+  const client = await ensureConnected();
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [ruleId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function listIgnoreRulesForSiteForUser(
+  userId: string,
+  siteId: string,
+  opts?: { enabledOnly?: boolean },
+): Promise<IgnoreRule[]> {
+  const client = await ensureConnected();
+  const enabledOnly = opts?.enabledOnly ?? false;
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE user_id = $1 AND (site_id = $2 OR site_id IS NULL)
+        ${enabledOnly ? "AND is_enabled = true" : ""}
+      ORDER BY created_at DESC
+    `,
+    [userId, siteId],
+  );
+  return res.rows;
+}
+
+export async function getIgnoreRuleByIdForUser(
+  userId: string,
+  ruleId: string,
+): Promise<IgnoreRule | null> {
+  const client = await ensureConnected();
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE id = $1 AND user_id = $2
+      LIMIT 1
+    `,
+    [ruleId, userId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export function findMatchingIgnoreRule(
   siteId: string | null,
   linkUrl: string,
   statusCode: number | null,
   rules: IgnoreRule[],
 ): IgnoreRule | null {
+  const orderedRules = sortIgnoreRules(rules);
   let host = "";
   let path = "";
   try {
@@ -110,7 +224,7 @@ export function findMatchingIgnoreRule(
     }
   };
 
-  for (const rule of rules) {
+  for (const rule of orderedRules) {
     if (!rule.is_enabled) continue;
     if (rule.site_id && siteId && rule.site_id !== siteId) continue;
     if (rule.rule_type === "domain") {
@@ -133,10 +247,8 @@ export function findMatchingIgnoreRule(
     if (rule.rule_type === "contains" && linkUrl.includes(rule.pattern))
       return rule;
     if (rule.rule_type === "regex") {
-      try {
-        const regex = new RegExp(rule.pattern);
-        if (regex.test(linkUrl)) return rule;
-      } catch {}
+      const regex = compileSafeRuleRegex(rule.pattern);
+      if (regex?.test(linkUrl)) return rule;
     }
     if (rule.rule_type === "status_code") {
       const code = Number(rule.pattern);
@@ -147,18 +259,23 @@ export function findMatchingIgnoreRule(
 }
 
 export async function createIgnoreRule(
+  userId: string,
   siteId: string | null,
   ruleType: IgnoreRuleType,
   pattern: string,
 ): Promise<IgnoreRule> {
+  if (ruleType === "regex") {
+    const error = validateSafeRegexPattern(pattern);
+    if (error) throw new Error(error);
+  }
   const client = await ensureConnected();
   const res = await client.query<IgnoreRule>(
     `
-      INSERT INTO ignore_rules (site_id, rule_type, pattern)
-      VALUES ($1, $2, $3)
-      RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
+      INSERT INTO ignore_rules (user_id, site_id, rule_type, pattern)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, user_id, site_id, rule_type, pattern, is_enabled, created_at
     `,
-    [siteId, ruleType, pattern],
+    [userId, siteId, ruleType, pattern],
   );
   return res.rows[0];
 }
@@ -178,7 +295,7 @@ export async function setIgnoreRuleEnabled(
       UPDATE ignore_rules
       SET is_enabled = $2
       WHERE id = $1
-      RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
+      RETURNING id, user_id, site_id, rule_type, pattern, is_enabled, created_at
     `,
     [ruleId, enabled],
   );
@@ -198,12 +315,8 @@ export function matchesIgnoreRules(
       return true;
     }
     if (rule.rule_type === "regex") {
-      try {
-        const regex = new RegExp(rule.pattern);
-        if (regex.test(input.url)) return true;
-      } catch {
-        // Invalid regex should not crash or match.
-      }
+      const regex = compileSafeRuleRegex(rule.pattern);
+      if (regex?.test(input.url)) return true;
     }
     if (rule.rule_type === "status_code") {
       const code = Number(rule.pattern);
