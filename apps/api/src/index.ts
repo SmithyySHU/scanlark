@@ -145,6 +145,15 @@ const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
 const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const DASHBOARD_ISSUE_CATEGORIES: ScanIssueCategory[] = [
+  "link_integrity",
+  "seo_basic",
+  "robots",
+  "sitemap",
+  "ssl_https",
+  "security_header",
+  "performance_basic",
+];
 
 function isValidTimeUtc(value: string) {
   const parts = value.split(":");
@@ -1319,6 +1328,97 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/scans/latest", err);
     return sendInternalError(res, "Failed to fetch latest scan", err);
+  }
+});
+
+app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
+  const siteId = req.params.siteId;
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const [latestRun, history, notificationSettings] = await Promise.all([
+      getLatestScanForSiteForUser(userId, siteId),
+      getRecentScanRunsForSiteForUser(userId, siteId, 8),
+      getSiteNotificationSettingsForUser(userId, siteId),
+    ]);
+
+    if (!latestRun) {
+      return res.json({
+        site,
+        latestRun: null,
+        latestLinkSummary: [],
+        latestIssueSummary: null,
+        latestResolvedCount: 0,
+        latestCategoryIssueSummaries: {},
+        latestTechnicalDiagnostics: null,
+        latestDiffSummary: null,
+        baselineRun: null,
+        history: history.map(serializeScanRun),
+        notificationSettings,
+      });
+    }
+
+    await applyIgnoreRulesForScanRun(latestRun.id);
+
+    const [
+      latestLinkSummary,
+      latestIssues,
+      latestTechnicalDiagnostics,
+      baselineRun,
+    ] = await Promise.all([
+      getScanLinksSummaryForUser(userId, latestRun.id),
+      listIssuesForScanRunForUser(userId, latestRun.id, {
+        limit: 1,
+        offset: 0,
+      }),
+      getScanTechnicalDiagnosticsForUser(userId, latestRun.id),
+      getBaselineRunForDiff(siteId, latestRun.id),
+    ]);
+
+    const categoryEntries = await Promise.all(
+      DASHBOARD_ISSUE_CATEGORIES.map(async (category) => {
+        const issues = await listIssuesForScanRunForUser(userId, latestRun.id, {
+          category,
+          limit: 1,
+          offset: 0,
+        });
+        return [category, issues.summary] as const;
+      }),
+    );
+
+    const latestDiffSummary =
+      baselineRun && latestRun.status === "completed"
+        ? (
+            await getScanDiff(latestRun.id, baselineRun.id, {
+              issuesOnly: true,
+              limit: 1,
+              offset: 0,
+            })
+          ).summary
+        : null;
+
+    return res.json({
+      site,
+      latestRun: serializeScanRun(latestRun),
+      latestLinkSummary,
+      latestIssueSummary: latestIssues.summary,
+      latestResolvedCount: latestIssues.resolvedCount,
+      latestCategoryIssueSummaries: Object.fromEntries(categoryEntries),
+      latestTechnicalDiagnostics,
+      latestDiffSummary,
+      baselineRun,
+      history: history.map(serializeScanRun),
+      notificationSettings,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/dashboard-summary", err);
+    return sendInternalError(res, "Failed to fetch dashboard summary", err);
   }
 });
 

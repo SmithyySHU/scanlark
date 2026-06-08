@@ -10,6 +10,15 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { AuthPage } from "./components/AuthPage";
+import {
+  CategoryStatusCard,
+  MetricCard,
+  ScoreRingCard,
+  StatusBadge,
+} from "./components/DashboardPrimitives";
+import { MarketingPage } from "./components/MarketingPage";
+import { ScanProgressHero } from "./components/ScanProgressHero";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
@@ -39,6 +48,14 @@ type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
 type LinkNoteStatus = "open" | "snoozed" | "resolved";
 type FixQueueStatusFilter = LinkNoteStatus | "all";
 type FixQueueView = "results" | "changes" | "fix_queue";
+type AppRoute = "landing" | "login" | "app" | "report" | "learn";
+type AppSection =
+  | "dashboard"
+  | "reports"
+  | "schedule"
+  | "alerts"
+  | "ignore_rules"
+  | "sites";
 
 interface Site {
   id: string;
@@ -493,6 +510,28 @@ interface ScanIssuesResponse {
   resolvedIssues: ResolvedScanIssue[];
 }
 
+interface DashboardSummaryResponse {
+  site: Site;
+  latestRun: ScanRunSummary | null;
+  latestLinkSummary: ScanLinksSummaryRow[];
+  latestIssueSummary: ScanIssuesResponse["summary"] | null;
+  latestResolvedCount: number;
+  latestCategoryIssueSummaries: Partial<
+    Record<IssueCategory, ScanIssuesResponse["summary"]>
+  >;
+  latestTechnicalDiagnostics: ScanTechnicalDiagnosticsResponse | null;
+  latestDiffSummary: ScanDiffResponse["summary"] | null;
+  baselineRun: ScanDiffRun | null;
+  history: ScanRunSummary[];
+  notificationSettings: {
+    notifyEnabled: boolean;
+    notifyEmail: string | null;
+    notifyOn: NotifyOnOption;
+    notifyIncludeCsv: boolean;
+    summaryEnabled: boolean;
+  } | null;
+}
+
 type ReportIssuesState = {
   issues: ScanIssue[];
   resolvedIssues: ResolvedScanIssue[];
@@ -659,7 +698,49 @@ const REPORT_ISSUE_FILTERS: Array<{
   { key: "info", label: "Info" },
   { key: "link_integrity", label: "Link integrity" },
   { key: "seo_basic", label: "SEO basics" },
-  { key: "performance_basic", label: "Performance" },
+  { key: "performance_basic", label: "Speed Basics" },
+];
+
+const DASHBOARD_CATEGORIES: Array<{
+  key: IssueCategory;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "link_integrity",
+    label: "Broken Links",
+    description: "Broken, blocked, and no-response links",
+  },
+  {
+    key: "seo_basic",
+    label: "SEO basics",
+    description: "Titles, descriptions, H1s, canonicals, noindex",
+  },
+  {
+    key: "robots",
+    label: "Robots.txt",
+    description: "Search engine crawl access",
+  },
+  {
+    key: "sitemap",
+    label: "Sitemap",
+    description: "Search engine page discovery",
+  },
+  {
+    key: "ssl_https",
+    label: "SSL / HTTPS",
+    description: "HTTPS reachability, redirects, and certificate checks",
+  },
+  {
+    key: "security_header",
+    label: "Security Setup",
+    description: "Basic passive response-header checks",
+  },
+  {
+    key: "performance_basic",
+    label: "Speed Basics",
+    description: "Basic response size and asset-count signals",
+  },
 ];
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
@@ -809,11 +890,97 @@ function formatIssueCategoryLabel(category: IssueCategory) {
   if (category === "seo_basic") return "SEO basic";
   if (category === "link_integrity") return "Link integrity";
   if (category === "ssl_https") return "SSL / HTTPS";
-  if (category === "security_header") return "Security headers";
-  if (category === "robots") return "Robots";
+  if (category === "security_header") return "Security Setup";
+  if (category === "robots") return "Robots.txt";
   if (category === "sitemap") return "Sitemap";
-  if (category === "performance_basic") return "Performance";
+  if (category === "performance_basic") return "Speed Basics";
   return String(category).replace(/_/g, " ");
+}
+
+function getDiagnosticIssueCount(
+  category: IssueCategory,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  if (!diagnostics) return null;
+  if (category === "seo_basic") return diagnostics.seoBasic.issueCount;
+  if (category === "robots") return diagnostics.robots.issueCount;
+  if (category === "sitemap") return diagnostics.sitemap.issueCount;
+  if (category === "ssl_https") return diagnostics.sslHttps.issueCount;
+  if (category === "security_header")
+    return diagnostics.securityHeader.issueCount;
+  if (category === "performance_basic")
+    return diagnostics.performanceBasic.issueCount;
+  return null;
+}
+
+function getDiagnosticCheckCount(
+  category: IssueCategory,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  if (!diagnostics) return null;
+  if (category === "seo_basic") return diagnostics.seoBasic.pageChecksCount;
+  if (category === "robots") return diagnostics.robots.checksCount;
+  if (category === "sitemap") return diagnostics.sitemap.checksCount;
+  if (category === "ssl_https") return diagnostics.sslHttps.checksCount;
+  if (category === "security_header")
+    return diagnostics.securityHeader.checksCount;
+  if (category === "performance_basic")
+    return diagnostics.performanceBasic.checksCount;
+  return null;
+}
+
+function getCategoryStatus(
+  category: IssueCategory,
+  issueSummary: ScanIssuesResponse["summary"] | null | undefined,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  const issueCount = issueSummary?.total ?? 0;
+  const diagnosticIssues = getDiagnosticIssueCount(category, diagnostics);
+  const checks = getDiagnosticCheckCount(category, diagnostics);
+
+  if (issueCount > 0 || (diagnosticIssues ?? 0) > 0) {
+    return { label: "Needs attention", tone: "warning" as const };
+  }
+  if (category !== "link_integrity" && (!checks || checks <= 0)) {
+    return { label: "Warning", tone: "muted" as const };
+  }
+  return { label: "Healthy", tone: "success" as const };
+}
+
+function getCategoryDetail(
+  category: IssueCategory,
+  issueSummary: ScanIssuesResponse["summary"] | null | undefined,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  const issueCount = issueSummary?.total ?? 0;
+  if (category === "link_integrity") {
+    return `${issueCount} open issue${issueCount === 1 ? "" : "s"}`;
+  }
+  const checks = getDiagnosticCheckCount(category, diagnostics);
+  const diagnosticIssues = getDiagnosticIssueCount(category, diagnostics);
+  if (!checks || checks <= 0) return "Warning: no diagnostic evidence yet";
+  const count = diagnosticIssues ?? issueCount;
+  return `${count} finding${count === 1 ? "" : "s"}`;
+}
+
+function getScanStageText(run: ScanRunSummary | null | undefined) {
+  if (!run) return "No scan yet";
+  if (run.status === "queued") return "Queued";
+  if (run.status === "in_progress" && run.total_links <= 0) {
+    return "Discovering links";
+  }
+  if (run.status === "in_progress") return "Checking links";
+  if (
+    run.status === "completed" &&
+    run.issue_generation_status &&
+    run.issue_generation_status !== "completed"
+  ) {
+    return "Building issue summary";
+  }
+  if (run.status === "completed") return "Scan complete";
+  if (run.status === "failed") return "Scan failed";
+  if (run.status === "cancelled") return "Scan cancelled";
+  return "Scan status unavailable";
 }
 
 function matchesReportIssueFilter(
@@ -1318,6 +1485,16 @@ function getReportScanRunIdFromLocation() {
   return null;
 }
 
+function getRouteFromLocation(): AppRoute {
+  if (typeof window === "undefined") return "landing";
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/" || path === "/landing") return "landing";
+  if (path === "/login") return "login";
+  if (path === "/report") return "report";
+  if (path === "/learn") return "learn";
+  return "app";
+}
+
 function getErrorMessage(err: unknown, fallback: string) {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string") return err;
@@ -1600,9 +1777,16 @@ const App: React.FC = () => {
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [dashboardObservedScanRunId, setDashboardObservedScanRunId] = useState<
+    string | null
+  >(null);
+  const [dashboardRecentlyFinishedRunId, setDashboardRecentlyFinishedRunId] =
+    useState<string | null>(null);
   const [results, setResults] = useState<ScanLink[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const [appSection, setAppSection] = useState<AppSection>("dashboard");
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
     getReportScanRunIdFromLocation() ? "report" : "dashboard",
   );
@@ -1780,6 +1964,7 @@ const App: React.FC = () => {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
   const [resultsView, setResultsView] = useState<FixQueueView>("results");
+  const [scanWorkspaceOpen, setScanWorkspaceOpen] = useState(false);
   const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
   const [includeUnchanged, setIncludeUnchanged] = useState(false);
   const [unchangedOnly, setUnchangedOnly] = useState(false);
@@ -1845,13 +2030,22 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handlePopState = () => {
+      const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
+      setRoute(nextRoute);
       setReportScanRunId(nextReportId);
-      setViewMode(nextReportId ? "report" : "dashboard");
+      setViewMode(
+        nextRoute === "report" && nextReportId ? "report" : "dashboard",
+      );
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (!authUser || route !== "login") return;
+    navigateTo("/app");
+  }, [authUser, route]);
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -3208,6 +3402,17 @@ const App: React.FC = () => {
     reportIssueSummary,
     reportLinkIntegrityIssueSummary,
   );
+  const reportTechnicalDiagnosticsNeedsAttention =
+    !!reportRun?.issue_generation_error ||
+    reportRun?.issue_generation_status === "failed" ||
+    [
+      reportTechnicalDiagnostics?.seoBasic?.issueCount,
+      reportTechnicalDiagnostics?.robots?.issueCount,
+      reportTechnicalDiagnostics?.sitemap?.issueCount,
+      reportTechnicalDiagnostics?.sslHttps?.issueCount,
+      reportTechnicalDiagnostics?.securityHeader?.issueCount,
+      reportTechnicalDiagnostics?.performanceBasic?.issueCount,
+    ].some((count) => (count ?? 0) > 0);
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -3219,6 +3424,273 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+  const fetchDashboardSummary = useCallback(
+    async (siteId: string) => {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/dashboard-summary`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to load dashboard summary: ${res.status}`);
+      }
+      return (await res.json()) as DashboardSummaryResponse;
+    },
+    [apiFetch],
+  );
+  const dashboardSummaryQuery = useQuery({
+    queryKey: ["dashboardSummary", selectedSiteId],
+    enabled: !!selectedSiteId,
+    queryFn: async () => {
+      if (!selectedSiteId) throw new Error("site_required");
+      return await fetchDashboardSummary(selectedSiteId);
+    },
+  });
+  const refreshDashboardSummary = useCallback(
+    async (
+      siteId: string,
+      _reason: string,
+      opts?: {
+        targetRunId?: string;
+        waitForIssueSummary?: boolean;
+        maxAttempts?: number;
+      },
+    ) => {
+      const maxAttempts = opts?.maxAttempts ?? 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        try {
+          const data = await queryClient.fetchQuery({
+            queryKey: ["dashboardSummary", siteId],
+            queryFn: () => fetchDashboardSummary(siteId),
+            staleTime: 0,
+          });
+          const latestRunId = data.latestRun?.id ?? null;
+          const matchesRun =
+            !opts?.targetRunId || latestRunId === opts.targetRunId;
+          const latestIssueStatus = data.latestRun?.issue_generation_status;
+          const issueSummaryReady =
+            !opts?.waitForIssueSummary ||
+            !matchesRun ||
+            !data.latestRun ||
+            data.latestRun.status !== "completed" ||
+            (latestIssueStatus != null
+              ? latestIssueStatus === "completed" ||
+                latestIssueStatus === "failed"
+              : data.latestIssueSummary != null);
+          if (matchesRun && issueSummaryReady) {
+            return data;
+          }
+        } catch {}
+        if (attempt < maxAttempts - 1) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 700 * (attempt + 1));
+          });
+        }
+      }
+      return null;
+    },
+    [fetchDashboardSummary, queryClient],
+  );
+  const dashboardSummary = dashboardSummaryQuery.data ?? null;
+  const dashboardObservedRun =
+    selectedRun && dashboardObservedScanRunId === selectedRun.id
+      ? selectedRun
+      : null;
+  const dashboardSummaryMatchesObservedRun =
+    !!dashboardObservedRun &&
+    dashboardSummary?.latestRun?.id === dashboardObservedRun.id;
+  const dashboardTerminalSummaryPending =
+    !!dashboardObservedRun &&
+    !isInProgress(dashboardObservedRun.status) &&
+    (!dashboardSummaryMatchesObservedRun ||
+      (dashboardObservedRun.status === "completed" &&
+        dashboardObservedRun.issue_generation_status != null &&
+        dashboardObservedRun.issue_generation_status !== "completed"));
+  const dashboardLatestRun =
+    selectedRun &&
+    (isInProgress(selectedRun.status) || dashboardTerminalSummaryPending)
+      ? selectedRun
+      : (dashboardSummary?.latestRun ?? selectedRun ?? null);
+  const phase0SummaryRows = currentPhase0Diagnostics
+    ? ([
+        {
+          classification: "ok",
+          status_code: 200,
+          count: currentPhase0Diagnostics.ok ?? 0,
+        },
+        {
+          classification: "broken",
+          status_code: null,
+          count: currentPhase0Diagnostics.broken ?? 0,
+        },
+        {
+          classification: "blocked",
+          status_code: null,
+          count: currentPhase0Diagnostics.blocked ?? 0,
+        },
+        {
+          classification: "no_response",
+          status_code: null,
+          count: currentPhase0Diagnostics.noResponse ?? 0,
+        },
+      ] satisfies ScanLinksSummaryRow[])
+    : [];
+  const dashboardLinkSummaryRows =
+    dashboardSummary?.latestLinkSummary ?? phase0SummaryRows;
+  const dashboardLinkSummary = summarizeReportClassifications(
+    dashboardLinkSummaryRows,
+  );
+  const dashboardSummaryMatchesLatestRun =
+    !!dashboardLatestRun &&
+    dashboardSummary?.latestRun?.id === dashboardLatestRun.id;
+  const dashboardSummaryPending =
+    !!dashboardLatestRun &&
+    dashboardLatestRun.status === "completed" &&
+    (!dashboardSummaryMatchesLatestRun ||
+      (dashboardLatestRun.issue_generation_status != null &&
+        dashboardLatestRun.issue_generation_status !== "completed"));
+  const dashboardSummaryDataReady =
+    !dashboardLatestRun ||
+    (dashboardSummaryMatchesLatestRun && !dashboardSummaryPending);
+  const dashboardIssueSummary = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestIssueSummary ?? null)
+    : null;
+  const dashboardCategorySummaries = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestCategoryIssueSummaries ?? {})
+    : {};
+  const dashboardLatestDiffSummary = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestDiffSummary ?? null)
+    : null;
+  const dashboardScores = calculateReportScores(
+    dashboardLatestRun,
+    dashboardIssueSummary,
+    dashboardCategorySummaries.link_integrity ?? null,
+  );
+  const dashboardStage = getScanStageText(dashboardLatestRun);
+  const dashboardProgress =
+    dashboardLatestRun && dashboardLatestRun.total_links > 0
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            (dashboardLatestRun.checked_links /
+              dashboardLatestRun.total_links) *
+              100,
+          ),
+        )
+      : 0;
+  const dashboardIgnoredSkipped =
+    currentPhase0Diagnostics?.ignoredSkipped ?? null;
+  const dashboardIssueMovement = dashboardIssueSummary?.byChangeStatus ?? null;
+  const dashboardHighPriority =
+    (dashboardIssueSummary?.bySeverity.critical ?? 0) +
+    (dashboardIssueSummary?.bySeverity.high ?? 0);
+  const dashboardActiveLike =
+    !!dashboardLatestRun &&
+    (isInProgress(dashboardLatestRun.status) || dashboardSummaryPending);
+  const dashboardSummaryMatchesActiveRun =
+    !!dashboardLatestRun &&
+    dashboardSummary?.latestRun?.id === dashboardLatestRun.id;
+  const dashboardPhase0MatchesActiveRun =
+    !!dashboardLatestRun &&
+    currentPhase0Diagnostics?.scanRunId === dashboardLatestRun.id;
+  const dashboardActiveCounterRows = dashboardActiveLike
+    ? dashboardPhase0MatchesActiveRun
+      ? phase0SummaryRows
+      : dashboardSummaryMatchesActiveRun
+        ? (dashboardSummary?.latestLinkSummary ?? [])
+        : []
+    : [];
+  const dashboardActiveLinkSummary = summarizeReportClassifications(
+    dashboardActiveCounterRows,
+  );
+  const dashboardTerminalLike =
+    !!dashboardLatestRun &&
+    !dashboardActiveLike &&
+    (dashboardLatestRun.status === "completed" ||
+      dashboardLatestRun.status === "failed" ||
+      dashboardLatestRun.status === "cancelled");
+  const dashboardRunningPreviewItems = [
+    dashboardActiveLinkSummary.broken > 0
+      ? {
+          label: "Broken links detected",
+          detail: `${dashboardActiveLinkSummary.broken} currently failing checks`,
+        }
+      : null,
+    dashboardActiveLinkSummary.blocked > 0
+      ? {
+          label: "Blocked responses",
+          detail: `${dashboardActiveLinkSummary.blocked} links are currently blocked`,
+        }
+      : null,
+    dashboardActiveLinkSummary.no_response > 0
+      ? {
+          label: "No response",
+          detail: `${dashboardActiveLinkSummary.no_response} links have no response yet`,
+        }
+      : null,
+    dashboardIgnoredSkipped != null && dashboardIgnoredSkipped > 0
+      ? {
+          label: "Ignored or skipped",
+          detail: `${dashboardIgnoredSkipped} links are excluded from active findings`,
+        }
+      : null,
+  ].filter((item): item is { label: string; detail: string } => item != null);
+
+  useEffect(() => {
+    if (!selectedSiteId) {
+      setDashboardObservedScanRunId(null);
+      setDashboardRecentlyFinishedRunId(null);
+    }
+  }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (!dashboardLatestRun) return;
+    if (dashboardActiveLike) {
+      if (dashboardObservedScanRunId !== dashboardLatestRun.id) {
+        setDashboardObservedScanRunId(dashboardLatestRun.id);
+      }
+      if (dashboardRecentlyFinishedRunId === dashboardLatestRun.id) {
+        setDashboardRecentlyFinishedRunId(null);
+      }
+      return;
+    }
+    if (
+      dashboardTerminalLike &&
+      dashboardObservedScanRunId === dashboardLatestRun.id &&
+      dashboardRecentlyFinishedRunId !== dashboardLatestRun.id
+    ) {
+      setDashboardRecentlyFinishedRunId(dashboardLatestRun.id);
+    }
+  }, [
+    dashboardActiveLike,
+    dashboardLatestRun,
+    dashboardObservedScanRunId,
+    dashboardRecentlyFinishedRunId,
+    dashboardTerminalLike,
+  ]);
+
+  const shouldShowDashboardTerminalPanel =
+    !!dashboardLatestRun &&
+    dashboardTerminalLike &&
+    dashboardRecentlyFinishedRunId === dashboardLatestRun.id;
+  const dashboardHistoryItems =
+    dashboardSummaryDataReady || !dashboardObservedRun
+      ? (dashboardSummary?.history ?? history)
+      : history;
+  const primaryAppSections: Array<{ key: AppSection; label: string }> = [
+    { key: "dashboard", label: "Dashboard" },
+    { key: "reports", label: "Reports" },
+  ];
+  const isPublicLandingRoute = route === "landing";
+  const isLoginRoute = route === "login";
+  const isReportRoute = route === "report";
+  const protectedRouteRequiresAuth = route === "app" || route === "report";
+  const authPageTitle =
+    isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
+  const authPageSubtitle =
+    isReportRoute && !authUser
+      ? "Reports stay behind your account so evidence and history remain private."
+      : "Use your Scanlark account to open the monitoring dashboard.";
 
   const formatReportUrlLabel = (url: string) => {
     try {
@@ -4040,6 +4512,10 @@ const App: React.FC = () => {
         activeRunIdRef.current = runId;
         setSelectedRunId(runId);
         selectedRunIdRef.current = runId;
+        void refreshDashboardSummary(payload.site_id, "scan_event_active", {
+          targetRunId: runId,
+          maxAttempts: 2,
+        });
       } else if (activeRunIdRef.current === runId) {
         setActiveRunId(null);
         activeRunIdRef.current = null;
@@ -4053,7 +4529,19 @@ const App: React.FC = () => {
         void refreshSelectedRun(runId);
       }
 
-      if (payload.status === "completed" || payload.status === "failed") {
+      if (
+        payload.status === "completed" ||
+        payload.status === "failed" ||
+        payload.status === "cancelled"
+      ) {
+        void refreshDashboardSummary(payload.site_id, "scan_event_terminal", {
+          targetRunId: runId,
+          waitForIssueSummary: payload.status === "completed",
+          maxAttempts: payload.status === "completed" ? 6 : 2,
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["dashboardSummary", payload.site_id],
+        });
         queryClient.invalidateQueries({
           queryKey: ["scanDiff", payload.site_id],
         });
@@ -4065,6 +4553,9 @@ const App: React.FC = () => {
   }
 
   function handleScheduleEvent(payload: ScheduleEventPayload) {
+    queryClient.invalidateQueries({
+      queryKey: ["dashboardSummary", payload.site_id],
+    });
     setSites((prev) =>
       prev.map((site) =>
         site.id === payload.site_id
@@ -4478,6 +4969,9 @@ const App: React.FC = () => {
       setAuthUser(data);
       setAuthPassword("");
       setAuthError(null);
+      if (route === "login" || route === "landing") {
+        navigateTo("/app");
+      }
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, "Failed to authenticate"));
     } finally {
@@ -4493,6 +4987,7 @@ const App: React.FC = () => {
     } finally {
       setAuthUser(null);
       resetSessionState();
+      navigateTo("/landing");
     }
   }
 
@@ -5241,6 +5736,11 @@ const App: React.FC = () => {
         setActiveRunId(null);
         activeRunIdRef.current = null;
 
+        await refreshDashboardSummary(run.site_id, "refresh_selected_run", {
+          targetRunId: run.id,
+          waitForIssueSummary: run.status === "completed",
+          maxAttempts: run.status === "completed" ? 6 : 2,
+        });
         await loadHistory(run.site_id, { preserveSelection: true });
         await loadResults(run.id);
       }
@@ -5270,6 +5770,24 @@ const App: React.FC = () => {
     setStartUrl(site.url);
 
     await loadHistory(site.id, { preserveSelection: false });
+  }
+
+  async function handleSelectRunForWorkspace(run: ScanRunSummary) {
+    setResults([]);
+    resetOccurrencesState();
+    setSelectedRunId(run.id);
+    selectedRunIdRef.current = run.id;
+
+    if (isInProgress(run.status)) {
+      setActiveRunId(run.id);
+      activeRunIdRef.current = run.id;
+      await refreshSelectedRun(run.id);
+      return;
+    }
+
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    await loadResults(run.id);
   }
 
   async function handleRunScan() {
@@ -5331,6 +5849,7 @@ const App: React.FC = () => {
   }
 
   function openFixQueue() {
+    setScanWorkspaceOpen(true);
     setResultsView("fix_queue");
     setFixQueueIncludeNew(true);
     setFixQueueIncludeOutstanding(true);
@@ -5937,9 +6456,18 @@ const App: React.FC = () => {
     return buildAppUrl("/report", { scanRunId });
   }
 
+  function navigateTo(pathname: string) {
+    const url = buildAppUrl(pathname);
+    window.history.pushState({}, "", url);
+    const nextRoute = getRouteFromLocation();
+    setRoute(nextRoute);
+    setViewMode(nextRoute === "report" ? "report" : "dashboard");
+  }
+
   function openReport(scanRunId: string) {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
+    setRoute("report");
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -5951,8 +6479,9 @@ const App: React.FC = () => {
   }
 
   function backToDashboard() {
-    const url = buildAppUrl("/");
+    const url = buildAppUrl("/app");
     window.history.pushState({}, "", url);
+    setRoute("app");
     setReportScanRunId(null);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -6458,6 +6987,10 @@ const App: React.FC = () => {
         activeRunIdRef.current = scanRunId;
         markRunProgress(scanRunId);
 
+        void refreshDashboardSummary(selectedSiteId, "scan_start", {
+          targetRunId: scanRunId,
+          maxAttempts: 2,
+        });
         void refreshSelectedRun(scanRunId);
         pushToast("Scan queued", "info");
       } else {
@@ -7265,10 +7798,1151 @@ const App: React.FC = () => {
             radial-gradient(900px 340px at 90% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
             var(--bg);
         }
-        .shell {
+        .primary-button,
+        .secondary-button,
+        .ghost-button,
+        .toggle-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-height: 40px;
+          padding: 10px 14px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          font: inherit;
+          font-size: 13px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+        .primary-button:hover,
+        .secondary-button:hover,
+        .ghost-button:hover,
+        .toggle-pill:hover {
+          transform: translateY(-1px);
+        }
+        .primary-button:disabled,
+        .secondary-button:disabled,
+        .ghost-button:disabled,
+        .toggle-pill:disabled {
+          cursor: not-allowed;
+          opacity: 0.65;
+          transform: none;
+        }
+        .primary-button {
+          background: linear-gradient(135deg, var(--accent), var(--accent-2));
+          color: white;
+          border-color: color-mix(in srgb, var(--accent) 66%, white 8%);
+          box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 22%, transparent);
+        }
+        .primary-button--large {
+          min-height: 48px;
+          padding: 12px 18px;
+          font-size: 14px;
+        }
+        .secondary-button {
+          background: color-mix(in srgb, var(--panel) 88%, white 6%);
+          color: var(--text);
+          box-shadow: var(--soft-shadow);
+        }
+        .ghost-button {
+          background: transparent;
+          color: var(--text);
+        }
+        .toggle-pill {
+          background: transparent;
+          color: var(--text-muted);
+          border-radius: 999px;
+        }
+        .toggle-pill.active {
+          background: var(--panel-elev);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+        }
+        .field-label {
+          display: grid;
+          gap: 8px;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .app-input {
+          width: 100%;
+          min-height: 42px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          color: var(--text);
+          font: inherit;
+        }
+        .app-input:focus {
+          outline: 2px solid color-mix(in srgb, var(--accent) 44%, transparent);
+          border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+        }
+        .marketing-chip {
+          display: inline-flex;
+          align-items: center;
+          width: fit-content;
+          min-height: 36px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 72%, transparent);
+          color: var(--text-muted);
+          font-size: 12px;
+        }
+        .marketing-glow {
+          position: absolute;
+          border-radius: 50%;
+          filter: blur(44px);
+          opacity: 0.75;
+        }
+        .marketing-glow--primary {
+          inset: 12% auto auto 8%;
+          width: 220px;
+          height: 220px;
+          background: rgba(56, 189, 248, 0.28);
+        }
+        .marketing-glow--secondary {
+          inset: auto 2% 8% auto;
+          width: 180px;
+          height: 180px;
+          background: rgba(139, 92, 246, 0.22);
+        }
+        .marketing-mockup {
+          position: relative;
+          width: min(100%, 540px);
+          border-radius: 24px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, white 10%);
+          background: color-mix(in srgb, var(--panel) 90%, rgba(15, 23, 42, 0.12));
+          box-shadow: var(--shadow);
+          backdrop-filter: blur(14px);
+          padding: 20px;
+          display: grid;
+          gap: 16px;
+        }
+        .marketing-mockup__toolbar,
+        .marketing-score-row,
+        .marketing-category-grid,
+        .marketing-pricing-grid,
+        .marketing-faq-grid,
+        .marketing-feature-grid,
+        .marketing-step-grid {
+          display: grid;
+          gap: 12px;
+        }
+        .marketing-mockup__toolbar {
+          grid-template-columns: repeat(auto-fit, minmax(110px, max-content));
+        }
+        .marketing-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 32px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .marketing-badge--success {
+          color: var(--success);
+        }
+        .marketing-mockup__hero {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 16px;
+          align-items: center;
+        }
+        .marketing-kicker {
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--accent);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .marketing-score-row {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .marketing-score-card,
+        .marketing-category-card,
+        .marketing-history-card,
+        .marketing-feature-card,
+        .marketing-step-card,
+        .marketing-boundary-card,
+        .marketing-pricing-card,
+        .marketing-faq-card {
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, rgba(15, 23, 42, 0.06));
+          box-shadow: var(--soft-shadow);
+        }
+        .marketing-score-card,
+        .marketing-history-card,
+        .marketing-feature-card,
+        .marketing-step-card,
+        .marketing-boundary-card,
+        .marketing-pricing-card,
+        .marketing-faq-card {
+          padding: 16px;
+        }
+        .marketing-score-card__label {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .marketing-score-card__value {
+          margin-top: 8px;
+          font-size: 34px;
+          font-family: var(--font-display);
+          font-weight: 700;
+        }
+        .marketing-score-ring {
+          display: grid;
+          place-items: center;
+        }
+        .marketing-score-ring__inner {
+          width: 154px;
+          height: 154px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          background: conic-gradient(var(--accent) 0 62%, rgba(148, 163, 184, 0.16) 62% 100%);
+          box-shadow: 0 18px 48px color-mix(in srgb, var(--accent) 18%, transparent);
+          position: relative;
+        }
+        .marketing-score-ring__inner::after {
+          content: "";
+          position: absolute;
+          inset: 18px;
+          border-radius: 50%;
+          background: var(--panel);
+          border: 1px solid var(--border);
+        }
+        .marketing-score-ring__inner strong,
+        .marketing-score-ring__inner span {
+          position: relative;
+          z-index: 1;
+        }
+        .marketing-score-ring__inner strong {
+          font-size: 42px;
+          font-family: var(--font-display);
+        }
+        .marketing-score-ring__inner span {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .marketing-category-grid {
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        }
+        .marketing-category-card {
+          padding: 14px;
+          display: grid;
+          gap: 6px;
+          font-size: 13px;
+        }
+        .marketing-category-card span,
+        .marketing-history-row span:last-child {
+          color: var(--text-muted);
+        }
+        .marketing-history-row {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+          padding-top: 10px;
+          margin-top: 10px;
+          border-top: 1px solid var(--border);
+          font-size: 12px;
+        }
+        .marketing-band {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+        }
+        .marketing-trust-item {
+          min-height: 56px;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          padding: 12px;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 82%, transparent);
+          color: var(--text-muted);
+          font-size: 13px;
+          font-weight: 600;
+        }
+        .marketing-section {
+          display: grid;
+          gap: 20px;
+          padding: 8px 0;
+        }
+        .marketing-section--split {
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          align-items: start;
+        }
+        .marketing-section__heading {
+          display: grid;
+          gap: 10px;
+          max-width: 64ch;
+        }
+        .marketing-section__heading h2,
+        .marketing-boundary-card h2,
+        .marketing-pricing-card h2,
+        .learn-preview-page__inner h1 {
+          margin: 0;
+          font-family: var(--font-display);
+          font-size: clamp(28px, 4vw, 42px);
+          line-height: 1.08;
+        }
+        .marketing-section__heading p,
+        .marketing-boundary-card p,
+        .marketing-pricing-card p,
+        .marketing-faq-card p,
+        .learn-preview-page__inner p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+          font-size: 15px;
+        }
+        .marketing-feature-grid,
+        .marketing-faq-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .marketing-step-grid {
+          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+        .marketing-feature-card h3,
+        .marketing-faq-card h3 {
+          margin: 0 0 10px;
+          font-size: 18px;
+        }
+        .marketing-feature-card p,
+        .marketing-faq-card p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+          font-size: 14px;
+        }
+        .marketing-step-card__index {
+          font-family: var(--font-display);
+          font-size: 28px;
+          color: var(--accent);
+          margin-bottom: 10px;
+        }
+        .marketing-step-card p,
+        .marketing-pricing-grid span {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .marketing-boundary-card ul {
+          margin: 0;
+          padding-left: 20px;
+          display: grid;
+          gap: 8px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .marketing-pricing-grid {
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          margin-top: 14px;
+        }
+        .marketing-pricing-grid strong {
+          display: block;
+          margin-bottom: 6px;
+          font-size: 16px;
+        }
+        .marketing-footer {
           display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 16px;
+          padding: 24px 0 8px;
+          border-top: 1px solid var(--border);
+          flex-wrap: wrap;
+        }
+        .marketing-footer__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .surface-card {
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
+          box-shadow: var(--soft-shadow);
+        }
+        .surface-card--metric,
+        .surface-card--category,
+        .surface-card--summary,
+        .surface-card--history {
+          padding: 18px;
+          display: grid;
+          gap: 12px;
+          box-shadow: var(--soft-shadow);
+        }
+        .surface-card--metric {
+          min-height: 168px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.03)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--metric.prominent {
+          min-height: 220px;
+          padding: 22px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 76%, rgba(56, 189, 248, 0.12)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 84%,
+                rgba(139, 92, 246, 0.08)
+              )
+              100%
+          );
+          box-shadow: var(--shadow);
+        }
+        .surface-card--metric.prominent .surface-card__value {
+          font-size: clamp(38px, 6vw, 54px);
+        }
+        .surface-card--metric.prominent .surface-card__detail {
+          font-size: 13px;
+        }
+        .surface-card__label {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .surface-card__value {
+          font-size: clamp(28px, 4vw, 36px);
+          line-height: 1;
+          font-weight: 700;
+          font-family: var(--font-display);
+        }
+        .surface-card__detail {
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .surface-card--category {
+          min-height: 172px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 88%,
+                rgba(56, 189, 248, 0.025)
+              )
+              100%
+          );
+        }
+        .surface-card--category[data-tone="success"] {
+          border-color: color-mix(in srgb, var(--success) 18%, var(--border));
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(52, 211, 153, 0.05)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--category[data-tone="warning"] {
+          border-color: color-mix(in srgb, var(--warning) 22%, var(--border));
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(251, 191, 36, 0.06)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--summary,
+        .surface-card--history {
+          padding: 0;
+          overflow: hidden;
+        }
+        .score-ring-card {
+          position: relative;
+          overflow: hidden;
+        }
+        .score-ring-card::after {
+          content: "";
+          position: absolute;
+          inset: auto -18% -34% auto;
+          width: 220px;
+          height: 220px;
+          background: radial-gradient(
+            circle,
+            rgba(56, 189, 248, 0.18) 0%,
+            rgba(56, 189, 248, 0) 72%
+          );
+          pointer-events: none;
+        }
+        .score-ring-card__body {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          align-items: center;
+          gap: 18px;
+          min-height: 0;
+        }
+        .score-ring {
+          --score-progress: 0%;
+          --score-ring-color: var(--accent);
+          position: relative;
+          width: 154px;
+          height: 154px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background:
+            radial-gradient(
+              circle at 50% 50%,
+              color-mix(in srgb, var(--panel) 92%, transparent) 58%,
+              transparent 59%
+            ),
+            conic-gradient(
+              var(--score-ring-color) 0 var(--score-progress),
+              color-mix(in srgb, var(--border) 86%, transparent)
+                var(--score-progress)
+                100%
+            );
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--score-ring-color) 16%, var(--border)),
+            0 18px 34px color-mix(in srgb, var(--score-ring-color) 18%, transparent);
+        }
+        .score-ring::before {
+          content: "";
+          position: absolute;
+          inset: 12px;
+          border-radius: 50%;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.03)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+        }
+        .score-ring__inner {
+          position: relative;
+          z-index: 1;
+          display: grid;
+          gap: 6px;
+          justify-items: center;
+          text-align: center;
+          padding: 12px;
+        }
+        .score-ring__value {
+          font-size: clamp(34px, 4vw, 46px);
+          line-height: 1;
+          font-weight: 700;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .score-ring__caption {
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .score-ring-card__content {
+          display: grid;
+          gap: 8px;
+          min-width: 0;
+          position: relative;
+          z-index: 1;
+        }
+        .score-ring-card__status {
+          font-size: clamp(18px, 2vw, 24px);
+          line-height: 1.3;
+          font-weight: 700;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .score-ring-card__helper {
+          display: inline-flex;
+          align-items: center;
+          width: fit-content;
+          min-height: 32px;
+          padding: 7px 11px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(56, 189, 248, 0.06)
+          );
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .score-ring-card__stats {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 2px;
+        }
+        .score-ring-card__stat {
+          display: grid;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .score-ring-card__stat span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .score-ring-card__stat strong {
+          font-size: 18px;
+          line-height: 1.1;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .site-header-card {
+          display: grid;
+          grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+          gap: 20px;
+          padding: 20px;
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 86%,
+                rgba(139, 92, 246, 0.06)
+              )
+              100%
+          );
+          box-shadow: var(--shadow);
+          align-items: start;
+        }
+        .site-header-card__title {
+          font-size: clamp(30px, 5vw, 40px);
+          font-weight: 700;
+          font-family: var(--font-display);
+          line-height: 1.1;
+          overflow-wrap: anywhere;
+        }
+        .site-header-card__subtitle {
+          margin-top: 6px;
+          font-size: 14px;
+          color: var(--text-muted);
+          overflow-wrap: anywhere;
+        }
+        .dashboard-health-layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
           gap: 16px;
           align-items: stretch;
+        }
+        .dashboard-hero-panel {
+          padding: 22px;
+          border-radius: 24px;
+          border: 1px solid var(--border);
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 78%, rgba(56, 189, 248, 0.09)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel) 90%,
+                rgba(139, 92, 246, 0.06)
+              )
+              52%,
+            color-mix(in srgb, var(--panel-elev) 92%, transparent) 100%
+          );
+          box-shadow: var(--shadow);
+          display: grid;
+          gap: 16px;
+        }
+        .dashboard-hero-panel__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .dashboard-hero-panel__eyebrow {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: var(--accent);
+          font-weight: 700;
+        }
+        .dashboard-hero-panel__headline {
+          margin-top: 6px;
+          font-size: clamp(28px, 4vw, 38px);
+          font-family: var(--font-display);
+          font-weight: 700;
+          line-height: 1.15;
+        }
+        .dashboard-hero-panel__copy {
+          margin-top: 8px;
+          font-size: 14px;
+          color: var(--text-muted);
+          line-height: 1.6;
+          max-width: 60ch;
+        }
+        .dashboard-hero-panel__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          align-items: flex-start;
+        }
+        .dashboard-hero-panel__status-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .dashboard-hero-panel__meta {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px;
+        }
+        .dashboard-hero-meta-card {
+          padding: 14px 16px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 76%,
+            rgba(255, 255, 255, 0.035)
+          );
+          display: grid;
+          gap: 8px;
+        }
+        .dashboard-hero-meta-card span:first-child {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: var(--text-muted);
+          font-weight: 700;
+        }
+        .dashboard-hero-meta-card span:last-child {
+          font-size: 14px;
+          color: var(--text);
+          font-weight: 600;
+        }
+        .dashboard-hero-panel__footer-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .dashboard-score-grid {
+          display: grid;
+          grid-template-columns: 1.2fr 1fr 1fr 1fr;
+          gap: 14px;
+          align-items: stretch;
+        }
+        .dashboard-category-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+          gap: 14px;
+        }
+        .dashboard-history-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
+          gap: 18px;
+        }
+        .dashboard-history-card__header,
+        .dashboard-summary-card__header {
+          padding: 18px 20px 14px;
+          border-bottom: 1px solid var(--border);
+          display: grid;
+          gap: 4px;
+        }
+        .dashboard-history-card__title,
+        .dashboard-summary-card__title {
+          font-size: 16px;
+          font-weight: 700;
+        }
+        .dashboard-history-card__meta,
+        .dashboard-summary-card__meta {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row {
+          padding: 18px 20px;
+          border-top: 1px solid var(--border);
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.2fr) auto;
+          gap: 16px;
+          align-items: center;
+        }
+        .dashboard-history-row:first-of-type {
+          border-top: none;
+        }
+        .dashboard-history-row__title {
+          font-size: 14px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+        .dashboard-history-row__meta {
+          margin-top: 6px;
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row__meta-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .dashboard-history-row__stats {
+          display: grid;
+          gap: 4px;
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row__stats strong {
+          font-size: 13px;
+          color: var(--text);
+          font-weight: 600;
+        }
+        .dashboard-summary-list {
+          display: grid;
+          gap: 14px;
+          padding: 18px 20px 20px;
+        }
+        .dashboard-summary-item {
+          padding: 16px 18px;
+          border-radius: 18px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 76%,
+            rgba(255, 255, 255, 0.03)
+          );
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .dashboard-summary-item span:first-child {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .dashboard-summary-item strong {
+          font-family: var(--font-display);
+          font-size: 24px;
+          line-height: 1;
+        }
+        .category-status-card__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }
+        .category-status-card__title {
+          font-size: 15px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+        .category-status-card__description {
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .category-status-card__summary {
+          font-size: 13px;
+          color: var(--text);
+          line-height: 1.6;
+          font-weight: 600;
+        }
+        .scan-hero-card {
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          padding: 22px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel-elev) 82%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(in srgb, var(--panel) 96%, transparent) 100%
+          );
+          box-shadow: var(--shadow);
+          display: grid;
+          grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1.15fr);
+          gap: 22px;
+          align-items: center;
+        }
+        .scan-hero-card[data-tone="success"] {
+          border-color: color-mix(in srgb, var(--success) 20%, var(--border));
+        }
+        .scan-hero-card[data-tone="warning"] {
+          border-color: color-mix(in srgb, var(--warning) 24%, var(--border));
+        }
+        .scan-hero-card[data-tone="danger"] {
+          border-color: color-mix(in srgb, var(--danger) 22%, var(--border));
+        }
+        .scan-hero-card__ring {
+          display: grid;
+          place-items: center;
+          gap: 10px;
+        }
+        .scan-hero-card__ring-outer {
+          --scan-progress: 0%;
+          --scan-ring-color: var(--accent);
+          width: 196px;
+          height: 196px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          position: relative;
+          background: conic-gradient(
+            var(--scan-ring-color) 0 var(--scan-progress),
+            color-mix(in srgb, var(--border) 88%, transparent)
+              var(--scan-progress)
+              100%
+          );
+          transition: background 700ms ease;
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+            0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent);
+          animation: scanRingPulse 3s ease-in-out infinite;
+        }
+        .scan-hero-card__ring-outer.is-indeterminate {
+          background: radial-gradient(
+              circle at 50% 50%,
+              transparent 62%,
+              color-mix(in srgb, var(--scan-ring-color) 22%, transparent) 63%,
+              color-mix(in srgb, var(--scan-ring-color) 28%, transparent) 68%,
+              transparent 69%
+            ),
+            conic-gradient(
+              from 0deg,
+              color-mix(in srgb, var(--scan-ring-color) 82%, transparent) 0deg,
+              color-mix(in srgb, var(--scan-ring-color) 14%, transparent) 72deg,
+              transparent 160deg,
+              color-mix(in srgb, var(--scan-ring-color) 10%, transparent) 360deg
+            );
+          transition: none;
+        }
+        .scan-hero-card__ring-orbit {
+          position: absolute;
+          inset: 8px;
+          border-radius: 50%;
+          border: 1px solid transparent;
+          border-top-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 72%,
+            transparent
+          );
+          border-right-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 20%,
+            transparent
+          );
+          opacity: 0.95;
+          animation: scanRingOrbit 3.2s linear infinite;
+        }
+        .scan-hero-card__ring-outer:not(.is-indeterminate)
+          .scan-hero-card__ring-orbit {
+          inset: 10px;
+          border-top-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 44%,
+            transparent
+          );
+          border-right-color: transparent;
+          opacity: 0.5;
+        }
+        .scan-hero-card__ring-inner {
+          width: 142px;
+          height: 142px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 86%, transparent) 100%
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+          text-align: center;
+          padding: 14px;
+        }
+        .scan-hero-card__ring-inner strong {
+          font-size: 36px;
+          line-height: 1;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__ring-inner span {
+          font-size: 11px;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__ring-fallback {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-align: center;
+        }
+        .scan-hero-card__title {
+          font-size: 22px;
+          font-weight: 700;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__summary,
+        .scan-hero-card__note {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .scan-hero-card__counter-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+          gap: 10px;
+        }
+        .scan-hero-card__counter {
+          padding: 13px 14px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel) 90%,
+            rgba(255, 255, 255, 0.025)
+          );
+          display: grid;
+          gap: 6px;
+        }
+        .scan-hero-card__counter strong {
+          font-size: 20px;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__counter span {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__preview {
+          display: grid;
+          gap: 10px;
+          padding: 14px 16px;
+          border-radius: 18px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .scan-hero-card__preview-title {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .scan-hero-card__preview-list {
+          display: grid;
+          gap: 10px;
+        }
+        .scan-hero-card__preview-item {
+          display: grid;
+          gap: 4px;
+        }
+        .scan-hero-card__preview-item strong {
+          font-size: 13px;
+          line-height: 1.4;
+          color: var(--text);
+        }
+        .scan-hero-card__preview-item span {
+          font-size: 12px;
+          line-height: 1.5;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__summary-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          gap: 10px;
+        }
+        .scan-hero-card__summary-item {
+          display: grid;
+          gap: 6px;
+          padding: 12px 14px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel) 90%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .scan-hero-card__summary-item span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .scan-hero-card__summary-item strong {
+          font-size: 20px;
+          line-height: 1.1;
+          color: var(--text);
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        @keyframes scanRingPulse {
+          0%, 100% {
+            transform: scale(1);
+            box-shadow:
+              inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+              0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent);
+          }
+          50% {
+            transform: scale(1.012);
+            box-shadow:
+              inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+              0 22px 48px color-mix(in srgb, var(--accent) 24%, transparent);
+          }
+        }
+        @keyframes scanRingOrbit {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+        .learn-preview-page {
+          min-height: 72vh;
+          display: grid;
+          place-items: center;
+        }
+        .learn-preview-page__inner {
+          width: min(760px, 100%);
+          padding: 28px;
+          border-radius: 20px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, transparent);
+          box-shadow: var(--shadow);
+          display: grid;
+          gap: 16px;
+          text-align: left;
+        }
+        .shell {
+          display: block;
           min-height: 0;
           flex: 1;
         }
@@ -7276,15 +8950,84 @@ const App: React.FC = () => {
           position: sticky;
           top: 0;
           z-index: 20;
-          display: flex;
-          justify-content: space-between;
+          display: grid;
+          grid-template-columns: minmax(0, 0.9fr) minmax(320px, 1.1fr) auto;
           align-items: center;
-          gap: 16px;
+          gap: 18px;
           padding: 12px 16px;
           border: 1px solid var(--border);
           border-radius: 16px;
-          background: var(--panel);
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(56, 189, 248, 0.03)) 0%,
+            color-mix(in srgb, var(--panel) 96%, transparent) 100%
+          );
           box-shadow: var(--shadow);
+        }
+        .app-brand-block {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          min-width: 0;
+        }
+        .app-nav-tabs {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 4px;
+          border-radius: 999px;
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 82%,
+            rgba(255, 255, 255, 0.02)
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+        }
+        .app-nav-tab {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 38px;
+          padding: 8px 14px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--muted);
+          font: inherit;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .app-nav-tab.active {
+          background: color-mix(
+            in srgb,
+            var(--panel) 86%,
+            rgba(56, 189, 248, 0.08)
+          );
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+          box-shadow: var(--soft-shadow);
+        }
+        .app-site-switcher {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto auto;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+        .app-site-switcher__label {
+          font-size: 11px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .app-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-wrap: wrap;
         }
         .hamburger {
           display: none;
@@ -7326,15 +9069,7 @@ const App: React.FC = () => {
           transform: translateX(0);
         }
         .sidebar {
-          width: 320px;
-          min-width: 240px;
-          max-width: 520px;
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          height: calc(100dvh - 90px);
-          overflow: hidden;
-          min-height: 0;
+          display: none !important;
         }
         .sidebar-content {
           display: flex;
@@ -7347,7 +9082,7 @@ const App: React.FC = () => {
           padding-right: 4px;
         }
         .main {
-          flex: 1;
+          width: 100%;
           min-width: 0;
           display: flex;
           flex-direction: column;
@@ -7356,11 +9091,74 @@ const App: React.FC = () => {
           height: 100%;
         }
         .resizer {
-          width: 6px;
-          cursor: col-resize;
-          background: var(--border);
-          border-radius: 999px;
-          align-self: stretch;
+          display: none !important;
+        }
+        .app-section-shell {
+          display: grid;
+          gap: 18px;
+        }
+        .app-section-heading {
+          display: grid;
+          gap: 8px;
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 94%, rgba(56, 189, 248, 0.04)) 0%, var(--panel) 100%);
+          box-shadow: var(--soft-shadow);
+        }
+        .app-section-heading__title {
+          font-family: var(--font-display);
+          font-size: 28px;
+          line-height: 1.1;
+          font-weight: 700;
+        }
+        .app-section-heading__meta {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.6;
+        }
+        .app-section-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          gap: 16px;
+        }
+        .app-settings-card {
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          box-shadow: var(--soft-shadow);
+          display: grid;
+          gap: 14px;
+        }
+        .app-settings-card__title {
+          font-family: var(--font-display);
+          font-size: 22px;
+          font-weight: 700;
+        }
+        .app-settings-card__subtitle {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.6;
+        }
+        .app-form-grid {
+          display: grid;
+          gap: 12px;
+        }
+        .app-form-grid--two {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .app-site-list {
+          display: grid;
+          gap: 12px;
+        }
+        .app-site-row {
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
+          display: grid;
+          gap: 10px;
         }
         .results-layout {
           display: grid;
@@ -8147,8 +9945,45 @@ const App: React.FC = () => {
           box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12);
         }
         @media (max-width: 1100px) {
+          .top-nav {
+            grid-template-columns: 1fr;
+            align-items: stretch;
+          }
+          .app-brand-block,
+          .app-site-switcher,
+          .app-toolbar {
+            justify-content: flex-start;
+          }
+          .app-site-switcher {
+            grid-template-columns: 1fr;
+          }
           .shell {
             flex-direction: column;
+          }
+          .dashboard-health-layout,
+          .dashboard-history-grid,
+          .site-header-card {
+            grid-template-columns: 1fr;
+          }
+          .dashboard-score-grid {
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          }
+          .dashboard-history-row {
+            grid-template-columns: 1fr;
+            align-items: start;
+          }
+          .dashboard-hero-panel__actions {
+            justify-content: flex-start;
+          }
+          .scan-hero-card {
+            grid-template-columns: 1fr;
+          }
+          .score-ring-card__body {
+            grid-template-columns: 1fr;
+            justify-items: start;
+          }
+          .score-ring-card__stats {
+            width: 100%;
           }
           .sidebar {
             width: 100%;
@@ -8522,142 +10357,96 @@ const App: React.FC = () => {
             Loading session...
           </div>
         ) : !authUser ? (
-          <div
-            style={{
-              minHeight: "70vh",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: "24px",
-            }}
-          >
-            <form
+          isPublicLandingRoute ? (
+            <MarketingPage
+              isAuthenticated={false}
+              onOpenApp={() => navigateTo("/login")}
+              onOpenLogin={() => navigateTo("/login")}
+              onOpenLearn={() => navigateTo("/learn")}
+            />
+          ) : isLoginRoute || protectedRouteRequiresAuth ? (
+            <AuthPage
+              authMode={authMode}
+              authEmail={authEmail}
+              authPassword={authPassword}
+              authError={authError}
+              authWorking={authWorking}
+              title={authPageTitle}
+              subtitle={authPageSubtitle}
+              onAuthModeChange={setAuthMode}
+              onAuthEmailChange={setAuthEmail}
+              onAuthPasswordChange={setAuthPassword}
+              onBackToLanding={() => navigateTo("/landing")}
               onSubmit={(event) => {
                 event.preventDefault();
                 void handleAuthSubmit();
               }}
-              style={{
-                width: "min(420px, 100%)",
-                background: "var(--panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "18px",
-                padding: "20px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "14px",
-                boxShadow: "var(--shadow)",
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    fontSize: "20px",
-                    fontWeight: 700,
-                    fontFamily: "var(--font-display)",
-                  }}
-                >
-                  Scanlark
-                </div>
-                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Beta access required
-                </div>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                }}
-              >
-                {(["login", "register"] as const).map((mode) => (
+            />
+          ) : (
+            <div className="learn-preview-page">
+              <div className="learn-preview-page__inner">
+                <div className="marketing-kicker">Scanlark Learn</div>
+                <h1>
+                  Plain-English help for reports, issues, and monitoring
+                  decisions.
+                </h1>
+                <p>
+                  The knowledge base route is reserved and visually aligned with
+                  the public site. Deep issue guides and glossary content land
+                  here in a later phase.
+                </p>
+                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
                   <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setAuthMode(mode)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: "999px",
-                      border: "1px solid var(--border)",
-                      background:
-                        authMode === mode ? "var(--surface-2)" : "transparent",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                    }}
+                    className="primary-button"
+                    onClick={() => navigateTo("/landing")}
                   >
-                    {mode === "login" ? "Login" : "Register"}
+                    Back to landing
                   </button>
-                ))}
-              </div>
-              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                Email
-                <input
-                  type="email"
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  autoComplete="email"
-                  placeholder="you@example.com"
-                  disabled={authWorking}
-                  style={{
-                    marginTop: "6px",
-                    width: "100%",
-                    padding: "8px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    color: "var(--text)",
-                  }}
-                />
-              </label>
-              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                Password
-                <input
-                  type="password"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  autoComplete={
-                    authMode === "login" ? "current-password" : "new-password"
-                  }
-                  placeholder="Enter your password"
-                  disabled={authWorking}
-                  style={{
-                    marginTop: "6px",
-                    width: "100%",
-                    padding: "8px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    color: "var(--text)",
-                  }}
-                />
-              </label>
-              {authError && (
-                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-                  {authError}
+                  <button
+                    className="secondary-button"
+                    onClick={() => navigateTo("/login")}
+                  >
+                    Sign in
+                  </button>
                 </div>
-              )}
-              <button
-                type="submit"
-                disabled={authWorking}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: "12px",
-                  border: "1px solid var(--border)",
-                  background: "var(--panel-elev)",
-                  cursor: authWorking ? "not-allowed" : "pointer",
-                  fontSize: "13px",
-                  fontWeight: 600,
-                }}
-              >
-                {authWorking
-                  ? "Please wait..."
-                  : authMode === "login"
-                    ? "Log in"
-                    : "Create account"}
-              </button>
-              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                TODO: Swap to managed auth provider before public launch.
               </div>
-            </form>
+            </div>
+          )
+        ) : isPublicLandingRoute ? (
+          <MarketingPage
+            isAuthenticated
+            onOpenApp={() => navigateTo("/app")}
+            onOpenLogin={() => navigateTo("/app")}
+            onOpenLearn={() => navigateTo("/learn")}
+          />
+        ) : route === "learn" ? (
+          <div className="learn-preview-page">
+            <div className="learn-preview-page__inner">
+              <div className="marketing-kicker">Scanlark Learn</div>
+              <h1>
+                Knowledge base structure is ready for glossary and issue
+                explanations.
+              </h1>
+              <p>
+                This route keeps the same visual system as the landing page
+                while staying distinct from the operational dashboard and
+                detailed report views.
+              </p>
+              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                <button
+                  className="primary-button"
+                  onClick={() => navigateTo("/app")}
+                >
+                  Open dashboard
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() => navigateTo("/landing")}
+                >
+                  Back to landing
+                </button>
+              </div>
+            </div>
           </div>
         ) : reportView ? (
           <div className="report-page">
@@ -8665,6 +10454,16 @@ const App: React.FC = () => {
               <div>
                 <div className="report-title">Scanlark</div>
                 <div className="report-subtitle">Scan Report</div>
+                <div
+                  style={{
+                    marginTop: "8px",
+                    fontSize: "13px",
+                    color: "var(--muted)",
+                  }}
+                >
+                  Detailed breakdown, evidence, and diagnostics for a single
+                  scan run.
+                </div>
               </div>
               <div className="report-actions">
                 <button className="report-button" onClick={backToDashboard}>
@@ -8689,9 +10488,17 @@ const App: React.FC = () => {
 
             <div className="report-card report-meta">
               <div className="report-meta-item">
-                <div className="report-label">Scan run</div>
+                <div className="report-label">Report ID</div>
                 <div className="report-value">
-                  {reportRun?.id ?? reportScanRunId ?? "-"}
+                  <span
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {reportRun?.id ?? reportScanRunId ?? "-"}
+                  </span>
                 </div>
               </div>
               <div className="report-meta-item">
@@ -8914,13 +10721,17 @@ const App: React.FC = () => {
                   </div>
                 )}
 
-                <div
+                <details
                   className="report-card"
+                  open={reportTechnicalDiagnosticsNeedsAttention}
                   style={{ display: "grid", gap: "10px" }}
                 >
-                  <div className="report-table-title">
+                  <summary
+                    className="report-table-title"
+                    style={{ cursor: "pointer" }}
+                  >
                     Technical diagnostics
-                  </div>
+                  </summary>
                   <div
                     style={{
                       display: "flex",
@@ -8988,7 +10799,7 @@ const App: React.FC = () => {
                         : "-"}
                     </span>
                   </div>
-                </div>
+                </details>
 
                 {reportRun.status === "completed" && (
                   <>
@@ -9088,92 +10899,84 @@ const App: React.FC = () => {
         ) : (
           <>
             <nav className="top-nav">
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  minWidth: 0,
-                }}
-              >
-                <button
-                  ref={hamburgerRef}
-                  onClick={() => setIsDrawerOpen(true)}
-                  className="hamburger"
-                  aria-controls="sidebar-drawer"
-                  aria-expanded={isDrawerOpen}
-                  style={{
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    borderRadius: "10px",
-                    padding: "6px 8px",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                  }}
-                  title="Open menu"
-                >
-                  ☰
-                </button>
+              <div className="app-brand-block">
                 <div>
                   <div
                     style={{
                       fontWeight: 700,
-                      fontSize: "16px",
+                      fontSize: "18px",
                       fontFamily: "var(--font-display)",
-                      letterSpacing: "-0.02em",
                     }}
                   >
                     Scanlark
                   </div>
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                    Link integrity monitor
+                    Customer monitoring control centre
                   </div>
+                </div>
+                <div className="app-nav-tabs">
+                  {primaryAppSections.map((item) => (
+                    <button
+                      key={item.key}
+                      className={`app-nav-tab ${appSection === item.key ? "active" : ""}`}
+                      onClick={() => setAppSection(item.key)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  textAlign: "center",
-                  fontSize: "12px",
-                  color: "var(--muted)",
-                  padding: "0 8px",
-                }}
-              >
-                {selectedSiteId
-                  ? `Selected: ${safeHost(startUrl || "")}`
-                  : "No site selected"}
+              <div className="app-site-switcher">
+                <div style={{ minWidth: 0 }}>
+                  <div className="app-site-switcher__label">Selected Site</div>
+                  <select
+                    value={selectedSiteId ?? ""}
+                    onChange={(event) => {
+                      const nextSite = sites.find(
+                        (site) => site.id === event.target.value,
+                      );
+                      if (nextSite) void handleSelectSite(nextSite);
+                    }}
+                    className="app-input"
+                    style={{ minHeight: "44px" }}
+                  >
+                    {!selectedSiteId && <option value="">Select a site</option>}
+                    {sites.map((site) => (
+                      <option key={site.id} value={site.id}>
+                        {(siteNameById[site.id] ?? site.url).slice(0, 90)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={() => {
+                    setCreateError(null);
+                    setAddSiteOpen(true);
+                  }}
+                  className="secondary-button"
+                >
+                  Add site
+                </button>
+                <button
+                  onClick={() => setAppSection("sites")}
+                  className="ghost-button"
+                >
+                  Manage
+                </button>
               </div>
 
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  flexWrap: "wrap",
-                }}
-              >
-                {hasSites && (
-                  <button
-                    onClick={() => {
-                      setCreateError(null);
-                      setAddSiteOpen(true);
-                    }}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      fontSize: "12px",
-                      cursor: "pointer",
-                      fontWeight: 600,
-                    }}
-                  >
-                    Add site
-                  </button>
-                )}
-                {authUser ? (
+              <div className="app-toolbar">
+                <button
+                  onClick={handleNewScanAction}
+                  disabled={
+                    !!selectedSiteId && (triggeringScan || canCancelRun)
+                  }
+                  className="primary-button"
+                >
+                  {triggeringScan ? "Starting..." : "Run scan"}
+                </button>
+                {authUser && (
                   <div
                     ref={userMenuRef}
                     style={{
@@ -9184,20 +10987,13 @@ const App: React.FC = () => {
                     }}
                   >
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Hi, {authUser.name ?? authUser.email}
+                      {authUser.name ?? authUser.email}
                     </div>
                     <button
                       onClick={() => setUserMenuOpen((prev) => !prev)}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
+                      className="secondary-button"
                     >
-                      Options
+                      Account
                     </button>
                     {userMenuOpen && (
                       <div className="theme-menu">
@@ -9285,33 +11081,6 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                ) : (
-                  <>
-                    <button
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Login
-                    </button>
-                    <button
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Register
-                    </button>
-                  </>
                 )}
               </div>
             </nav>
@@ -10265,229 +12034,1481 @@ const App: React.FC = () => {
               />
 
               <main className="main">
-                <div
-                  className="card"
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: "16px",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: "22px",
-                        fontWeight: 700,
-                        fontFamily: "var(--font-display)",
-                      }}
-                    >
-                      {selectedSiteName ??
-                        (startUrl ? safeHost(startUrl) : "No site selected")}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        display: "flex",
-                        gap: "8px",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <span
-                        title={startUrl}
+                <div className="app-section-shell">
+                  {!hasSites && (
+                    <div className="app-section-heading">
+                      <div className="app-section-heading__title">
+                        Add your first site
+                      </div>
+                      <div className="app-section-heading__meta">
+                        Scanlark is ready. Add a site to start monitoring
+                        health, reports, changes, and alerts.
+                      </div>
+                      <div
                         style={{
-                          maxWidth: "520px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
+                          display: "flex",
+                          gap: "10px",
+                          flexWrap: "wrap",
                         }}
                       >
-                        {startUrl || "Select a site to begin"}
-                      </span>
+                        <button
+                          onClick={() => {
+                            setCreateError(null);
+                            setAddSiteOpen(true);
+                          }}
+                          className="primary-button"
+                        >
+                          Add site
+                        </button>
+                        <button
+                          onClick={() => void handleCreateSampleSite()}
+                          className="secondary-button"
+                        >
+                          Try sample site
+                        </button>
+                      </div>
                     </div>
+                  )}
+
+                  {hasSites && appSection === "dashboard" && (
                     <div
                       style={{
-                        marginTop: "10px",
-                        padding: "8px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        maxWidth: "520px",
+                        display: "grid",
+                        gap: "22px",
                       }}
                     >
-                      <div style={{ fontWeight: 600, color: "var(--text)" }}>
-                        Automation
+                      <div className="dashboard-health-layout">
+                        <div className="dashboard-hero-panel">
+                          <div className="dashboard-hero-panel__header">
+                            <div style={{ minWidth: 0 }}>
+                              <div className="dashboard-hero-panel__eyebrow">
+                                Site health overview
+                              </div>
+                              <div className="dashboard-hero-panel__headline">
+                                {selectedSiteName ??
+                                  (selectedSite?.url
+                                    ? safeHost(selectedSite.url)
+                                    : "No site selected")}
+                              </div>
+                              <div className="dashboard-hero-panel__copy">
+                                {selectedSite?.url ??
+                                  "Select a site to monitor"}{" "}
+                                {dashboardSummaryPending
+                                  ? "· Building issue summary"
+                                  : dashboardScores.overall.band
+                                    ? `· ${dashboardScores.overall.band}`
+                                    : ""}
+                              </div>
+                            </div>
+                            <div className="dashboard-hero-panel__actions">
+                              <button
+                                onClick={handleNewScanAction}
+                                disabled={
+                                  !!selectedSiteId &&
+                                  (triggeringScan || canCancelRun)
+                                }
+                                className="primary-button primary-button--large"
+                              >
+                                {triggeringScan ? "Starting..." : "Run scan"}
+                              </button>
+                              <button
+                                onClick={() =>
+                                  dashboardLatestRun &&
+                                  openReport(dashboardLatestRun.id)
+                                }
+                                disabled={
+                                  !dashboardLatestRun ||
+                                  dashboardLatestRun.status !== "completed"
+                                }
+                                className="secondary-button primary-button--large"
+                              >
+                                View latest report
+                              </button>
+                            </div>
+                          </div>
+                          <div className="dashboard-hero-panel__status-row">
+                            <StatusBadge
+                              label={
+                                dashboardSummaryPending
+                                  ? "Score pending"
+                                  : (dashboardScores.overall.band ??
+                                    "Monitoring")
+                              }
+                              tone="accent"
+                            />
+                            <StatusBadge
+                              label={
+                                dashboardSummary?.notificationSettings
+                                  ?.notifyEnabled
+                                  ? "Alerts enabled"
+                                  : "Alerts off"
+                              }
+                              tone={
+                                dashboardSummary?.notificationSettings
+                                  ?.notifyEnabled
+                                  ? "success"
+                                  : "default"
+                              }
+                            />
+                            <StatusBadge
+                              label={`Schedule ${selectedSite?.schedule_frequency ?? "manual"}`}
+                              tone="default"
+                            />
+                          </div>
+                          <div className="dashboard-hero-panel__meta">
+                            <div className="dashboard-hero-meta-card">
+                              <span>Last scan</span>
+                              <span>
+                                {dashboardLatestRun
+                                  ? formatDate(
+                                      dashboardLatestRun.finished_at ??
+                                        dashboardLatestRun.started_at,
+                                    )
+                                  : "No scan yet"}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Next scan</span>
+                              <span>
+                                {formatDate(
+                                  selectedSite?.next_scheduled_at ?? null,
+                                )}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Status</span>
+                              <span>
+                                {dashboardLatestRun
+                                  ? dashboardLatestRun.status.replace("_", " ")
+                                  : "Ready"}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Actions</span>
+                              <span>
+                                Schedule, alerts, ignore rules, and reports are
+                                one click away
+                              </span>
+                            </div>
+                          </div>
+                          <div className="dashboard-hero-panel__footer-actions">
+                            <button
+                              onClick={() => setAppSection("schedule")}
+                              className="secondary-button"
+                            >
+                              Configure schedule
+                            </button>
+                            <button
+                              onClick={() => setAppSection("alerts")}
+                              className="secondary-button"
+                            >
+                              Configure alerts
+                            </button>
+                            <button
+                              onClick={() => setAppSection("ignore_rules")}
+                              disabled={!selectedSiteId}
+                              className="secondary-button"
+                            >
+                              Ignore rules
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (selectedSite?.url) {
+                                  window.open(
+                                    selectedSite.url,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  );
+                                }
+                              }}
+                              disabled={!selectedSite?.url}
+                              className="ghost-button"
+                            >
+                              Open site
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAppSection("reports");
+                                setScanWorkspaceOpen(true);
+                              }}
+                              className="ghost-button"
+                            >
+                              Open reports workspace
+                            </button>
+                          </div>
+                        </div>
+                        <ScoreRingCard
+                          label="Overall score"
+                          score={
+                            dashboardSummaryPending
+                              ? null
+                              : dashboardScores.overall.score
+                          }
+                          status={
+                            dashboardSummaryPending
+                              ? "Score pending"
+                              : (dashboardScores.overall.band ??
+                                dashboardScores.overall.detail)
+                          }
+                          detail="A compact health view across site trust, link integrity, and current findings."
+                          helper={
+                            dashboardSummaryPending
+                              ? "Building issue summary"
+                              : `Link integrity ${
+                                  dashboardScores.linkIntegrity.score == null
+                                    ? "-"
+                                    : `${dashboardScores.linkIntegrity.score}%`
+                                }`
+                          }
+                          stats={[
+                            {
+                              label: "Open issues",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : (dashboardIssueSummary?.total ?? 0),
+                            },
+                            {
+                              label: "High priority",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : dashboardHighPriority,
+                            },
+                            {
+                              label: "Fixed this scan",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : (dashboardLatestDiffSummary?.fixedIssues ??
+                                  0),
+                            },
+                            {
+                              label: "Links checked",
+                              value: dashboardLatestRun?.checked_links ?? 0,
+                            },
+                          ]}
+                          tone={
+                            dashboardScores.overall.score == null
+                              ? "default"
+                              : dashboardScores.overall.score >= 90
+                                ? "success"
+                                : dashboardScores.overall.score >= 75
+                                  ? "accent"
+                                  : dashboardScores.overall.score >= 60
+                                    ? "warning"
+                                    : "danger"
+                          }
+                        />
                       </div>
-                      <div>
-                        {selectedSite
-                          ? formatScheduleSummary(
-                              scheduleEnabled,
-                              scheduleFrequency,
-                              scheduleTimeUtc,
-                              scheduleDayOfWeek,
-                              scheduleDayOfMonth,
-                              selectedSite.next_scheduled_at,
-                            )
-                          : "Auto-scan: —"}
+
+                      {dashboardSummaryQuery.isLoading && (
+                        <div className="skeleton" style={{ height: "80px" }} />
+                      )}
+                      {dashboardSummaryQuery.error && (
+                        <div
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: "10px",
+                            border: "1px solid var(--border)",
+                            color: "var(--warning)",
+                          }}
+                        >
+                          {getErrorMessage(
+                            dashboardSummaryQuery.error,
+                            "Failed to load dashboard summary",
+                          )}
+                        </div>
+                      )}
+
+                      {dashboardLatestRun && dashboardActiveLike && (
+                        <ScanProgressHero
+                          progress={
+                            dashboardSummaryPending ? 100 : dashboardProgress
+                          }
+                          indeterminate={
+                            dashboardLatestRun.status === "queued" ||
+                            dashboardLatestRun.total_links <= 0
+                          }
+                          title={
+                            dashboardSummaryPending
+                              ? "Finalising scan"
+                              : "Scan running"
+                          }
+                          stage={dashboardStage}
+                          summary={`${dashboardLatestRun.checked_links} / ${dashboardLatestRun.total_links || "?"} links checked · Last update ${formatRelative(dashboardLatestRun.updated_at ?? dashboardLatestRun.started_at)}`}
+                          counters={[
+                            {
+                              label: "Links checked",
+                              value: dashboardLatestRun.checked_links,
+                            },
+                            {
+                              label: "Broken",
+                              value: dashboardActiveLinkSummary.broken,
+                            },
+                            {
+                              label: "Blocked",
+                              value: dashboardActiveLinkSummary.blocked,
+                            },
+                            {
+                              label: "No response",
+                              value: dashboardActiveLinkSummary.no_response,
+                            },
+                            ...(dashboardIgnoredSkipped != null
+                              ? [
+                                  {
+                                    label: "Ignored",
+                                    value: dashboardIgnoredSkipped,
+                                  },
+                                ]
+                              : dashboardActiveLike
+                                ? [
+                                    {
+                                      label: "Ignored",
+                                      value: "Pending",
+                                    },
+                                  ]
+                                : []),
+                          ]}
+                          previewTitle="Live preview · read-only"
+                          previewItems={
+                            dashboardRunningPreviewItems.length > 0
+                              ? dashboardRunningPreviewItems.slice(0, 4)
+                              : [
+                                  {
+                                    label: "Scan is in progress",
+                                    detail:
+                                      "Counts update live as links are discovered and checked.",
+                                  },
+                                ]
+                          }
+                          note={
+                            dashboardSummaryPending
+                              ? "The crawl is complete. Scanlark is building the issue summary before the report is ready."
+                              : "Live preview stays read-only while the scan is running. Open the report after completion for raw evidence and source pages."
+                          }
+                          statusTone={
+                            dashboardSummaryPending ? "success" : "accent"
+                          }
+                          primaryAction={
+                            canCancelRun ? (
+                              <button
+                                onClick={handleCancelScan}
+                                className="secondary-button"
+                                style={{
+                                  borderColor: "var(--danger)",
+                                  color: "var(--danger)",
+                                }}
+                              >
+                                Cancel scan
+                              </button>
+                            ) : undefined
+                          }
+                        />
+                      )}
+
+                      {dashboardLatestRun &&
+                        shouldShowDashboardTerminalPanel && (
+                          <ScanProgressHero
+                            progress={
+                              dashboardLatestRun.status === "completed"
+                                ? 100
+                                : 0
+                            }
+                            title={
+                              dashboardLatestRun.status === "completed"
+                                ? "Scan complete"
+                                : dashboardLatestRun.status === "failed"
+                                  ? "Scan failed"
+                                  : "Scan cancelled"
+                            }
+                            stage={dashboardStage}
+                            summary={
+                              dashboardLatestRun.status === "completed"
+                                ? `${formatDate(dashboardLatestRun.finished_at ?? dashboardLatestRun.started_at)} · Report-ready summary is available below.`
+                                : `${
+                                    dashboardLatestRun.error_message ??
+                                    "The scan stopped before completion."
+                                  }`
+                            }
+                            counters={[
+                              {
+                                label: "Links checked",
+                                value: dashboardLatestRun.checked_links,
+                              },
+                              {
+                                label: "Broken",
+                                value: dashboardLinkSummary.broken,
+                              },
+                              {
+                                label: "Blocked",
+                                value: dashboardLinkSummary.blocked,
+                              },
+                              {
+                                label: "No response",
+                                value: dashboardLinkSummary.no_response,
+                              },
+                              ...(dashboardIgnoredSkipped != null
+                                ? [
+                                    {
+                                      label: "Ignored",
+                                      value: dashboardIgnoredSkipped,
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                            summaryStats={
+                              dashboardLatestRun.status === "completed"
+                                ? [
+                                    {
+                                      label: "Latest score",
+                                      value:
+                                        !dashboardSummaryDataReady ||
+                                        dashboardScores.overall.score == null
+                                          ? "-"
+                                          : `${dashboardScores.overall.score}%`,
+                                    },
+                                    {
+                                      label: "Open issues",
+                                      value: dashboardIssueSummary?.total ?? 0,
+                                    },
+                                    {
+                                      label: "High priority",
+                                      value: dashboardHighPriority,
+                                    },
+                                    {
+                                      label: "New",
+                                      value: dashboardIssueMovement?.new ?? 0,
+                                    },
+                                    {
+                                      label: "Existing",
+                                      value:
+                                        dashboardIssueMovement?.existing ?? 0,
+                                    },
+                                    {
+                                      label: "Resolved",
+                                      value:
+                                        dashboardIssueMovement?.resolved ?? 0,
+                                    },
+                                  ]
+                                : undefined
+                            }
+                            previewTitle={
+                              dashboardLatestRun.status === "completed"
+                                ? "Scan completion snapshot"
+                                : "Latest captured snapshot"
+                            }
+                            previewItems={
+                              dashboardLatestRun.status === "completed"
+                                ? [
+                                    {
+                                      label: "High-priority issues",
+                                      detail: `${dashboardHighPriority} critical or high-priority issues need review`,
+                                    },
+                                    {
+                                      label: "Open issues",
+                                      detail: `${dashboardIssueSummary?.total ?? 0} issues remain in the latest report`,
+                                    },
+                                    {
+                                      label: "Fixed this scan",
+                                      detail: `${dashboardLatestDiffSummary?.fixedIssues ?? 0} issues were resolved compared with the previous baseline`,
+                                    },
+                                  ]
+                                : dashboardRunningPreviewItems.slice(0, 3)
+                            }
+                            note={
+                              dashboardLatestRun.status === "completed"
+                                ? "Detailed evidence, source pages, and technical diagnostics remain in the report."
+                                : "You can start a fresh scan immediately. Existing dashboard cards and history remain available below."
+                            }
+                            statusTone={
+                              dashboardLatestRun.status === "completed"
+                                ? "success"
+                                : dashboardLatestRun.status === "failed"
+                                  ? "danger"
+                                  : "warning"
+                            }
+                            primaryAction={
+                              dashboardLatestRun.status === "completed" ? (
+                                <button
+                                  onClick={() =>
+                                    openReport(dashboardLatestRun.id)
+                                  }
+                                  className="primary-button"
+                                >
+                                  View report
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={handleNewScanAction}
+                                  disabled={
+                                    !!selectedSiteId &&
+                                    (triggeringScan || canCancelRun)
+                                  }
+                                  className="primary-button"
+                                >
+                                  {triggeringScan
+                                    ? "Starting..."
+                                    : "Run scan again"}
+                                </button>
+                              )
+                            }
+                            secondaryAction={
+                              <button
+                                onClick={() => {
+                                  setDashboardRecentlyFinishedRunId(null);
+                                }}
+                                className="secondary-button"
+                              >
+                                Back to dashboard
+                              </button>
+                            }
+                          />
+                        )}
+
+                      <div className="dashboard-score-grid">
+                        <MetricCard
+                          label="Link integrity"
+                          value={
+                            dashboardSummaryPending
+                              ? "Pending"
+                              : dashboardScores.linkIntegrity.score == null
+                                ? "-"
+                                : `${dashboardScores.linkIntegrity.score}%`
+                          }
+                          detail={
+                            dashboardSummaryPending
+                              ? "Building issue summary"
+                              : (dashboardScores.linkIntegrity.band ??
+                                dashboardScores.linkIntegrity.detail)
+                          }
+                          tone="accent"
+                        />
+                        <MetricCard
+                          label="Website changes"
+                          value={
+                            dashboardSummaryPending
+                              ? "Summary pending"
+                              : `${dashboardIssueMovement?.new ?? 0} new issues`
+                          }
+                          detail={
+                            dashboardSummaryPending
+                              ? "Issue movement updates when the latest scan summary is ready."
+                              : `${dashboardLatestDiffSummary?.fixedIssues ?? dashboardIssueMovement?.resolved ?? 0} fixed since last scan · ${dashboardIssueMovement?.existing ?? 0} still present`
+                          }
+                          tone="warning"
+                        />
+                        <MetricCard
+                          label="Last scan"
+                          value={
+                            dashboardLatestRun
+                              ? dashboardLatestRun.status.replace("_", " ")
+                              : "None"
+                          }
+                          detail={formatDate(
+                            dashboardLatestRun?.finished_at ?? null,
+                          )}
+                        />
+                        <MetricCard
+                          label="Schedule and alerts"
+                          value={
+                            dashboardSummary?.notificationSettings
+                              ?.notifyEnabled
+                              ? "Alerts on"
+                              : "Alerts off"
+                          }
+                          detail={`${selectedSite?.schedule_frequency ?? "manual"} · next ${formatDate(selectedSite?.next_scheduled_at ?? null)}`}
+                          tone={
+                            dashboardSummary?.notificationSettings
+                              ?.notifyEnabled
+                              ? "success"
+                              : "default"
+                          }
+                        />
                       </div>
-                      <div>
-                        {selectedSite
-                          ? formatAlertsSummary(notifyEnabled, notifyOn)
-                          : "Alerts: —"}
+
+                      <div className="dashboard-category-grid">
+                        {DASHBOARD_CATEGORIES.map((category) => {
+                          const issueSummary =
+                            dashboardCategorySummaries[category.key] ?? null;
+                          const status = dashboardSummaryPending
+                            ? { label: "Pending", tone: "default" as const }
+                            : getCategoryStatus(
+                                category.key,
+                                issueSummary,
+                                dashboardSummary?.latestTechnicalDiagnostics,
+                              );
+                          return (
+                            <CategoryStatusCard
+                              key={category.key}
+                              title={category.label}
+                              statusLabel={status.label}
+                              tone={
+                                status.tone === "success"
+                                  ? "success"
+                                  : status.tone === "warning"
+                                    ? "warning"
+                                    : "default"
+                              }
+                              description={category.description}
+                              detail={
+                                dashboardSummaryPending
+                                  ? "Building issue summary"
+                                  : getCategoryDetail(
+                                      category.key,
+                                      issueSummary,
+                                      dashboardSummary?.latestTechnicalDiagnostics,
+                                    )
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+
+                      <div className="dashboard-history-grid">
+                        <div className="surface-card surface-card--history">
+                          <div className="dashboard-history-card__header">
+                            <div className="dashboard-history-card__title">
+                              Report history
+                            </div>
+                            <div className="dashboard-history-card__meta">
+                              Recent runs stay readable here. Open the report
+                              for detailed evidence and issue breakdown.
+                            </div>
+                          </div>
+                          {dashboardHistoryItems.slice(0, 5).map((run) => (
+                            <div key={run.id} className="dashboard-history-row">
+                              <div>
+                                <div className="dashboard-history-row__title">
+                                  {formatDate(run.started_at)}
+                                </div>
+                                <div className="dashboard-history-row__meta">
+                                  <span className="dashboard-history-row__meta-status">
+                                    <span>
+                                      {formatRelative(run.started_at)}
+                                    </span>
+                                    <StatusBadge
+                                      label={run.status.replace("_", " ")}
+                                      tone={
+                                        run.status === "completed"
+                                          ? "success"
+                                          : run.status === "failed"
+                                            ? "danger"
+                                            : run.status === "cancelled"
+                                              ? "warning"
+                                              : "accent"
+                                      }
+                                    />
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="dashboard-history-row__stats">
+                                <strong>
+                                  Checked {run.checked_links}/{run.total_links}
+                                </strong>
+                                <span>
+                                  Broken {run.broken_links} (
+                                  {percentBroken(
+                                    run.checked_links || run.total_links,
+                                    run.broken_links,
+                                  )}
+                                  )
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => openReport(run.id)}
+                                disabled={run.status !== "completed"}
+                                className="secondary-button"
+                              >
+                                View report
+                              </button>
+                            </div>
+                          ))}
+                          {dashboardHistoryItems.length === 0 && (
+                            <div
+                              style={{
+                                padding: "16px",
+                                color: "var(--muted)",
+                                fontSize: "13px",
+                              }}
+                            >
+                              No scans yet.
+                            </div>
+                          )}
+                        </div>
+                        <div className="surface-card surface-card--summary">
+                          <div className="dashboard-summary-card__header">
+                            <div className="dashboard-summary-card__title">
+                              Latest scan summary
+                            </div>
+                            <div className="dashboard-summary-card__meta">
+                              A compact snapshot of the most important numbers
+                              from the latest dashboard run.
+                            </div>
+                          </div>
+                          <div className="dashboard-summary-list">
+                            <div className="dashboard-summary-item">
+                              <span>High priority issues</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : dashboardHighPriority}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Open issues</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : (dashboardIssueSummary?.total ?? 0)}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Fixed this scan</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : (dashboardLatestDiffSummary?.fixedIssues ??
+                                    0)}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Links checked</span>
+                              <strong>
+                                {dashboardLatestRun?.checked_links ?? 0}
+                              </strong>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <button
-                      onClick={handleNewScanAction}
-                      disabled={
-                        !!selectedSiteId && (triggeringScan || canCancelRun)
-                      }
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "999px",
-                        border: "none",
-                        background:
-                          selectedSiteId && (triggeringScan || canCancelRun)
-                            ? "var(--panel-elev)"
-                            : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                        color: "white",
-                        fontWeight: 600,
-                        cursor:
-                          selectedSiteId && (triggeringScan || canCancelRun)
-                            ? "not-allowed"
-                            : "pointer",
-                      }}
-                      title={
-                        !hasSites
-                          ? "Add a site to start scanning"
-                          : !selectedSiteId
-                            ? "Select a site to start a scan"
-                            : "Start a new scan"
-                      }
-                    >
-                      {selectedSiteId && triggeringScan
-                        ? "Running..."
-                        : "New scan"}
-                    </button>
-                    <button
-                      onClick={() => startUrl && copyToClipboard(startUrl)}
-                      disabled={!startUrl}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: startUrl ? "pointer" : "not-allowed",
-                      }}
-                    >
-                      Copy URL
-                    </button>
-                    <button
-                      onClick={() => setIgnoreRulesOpen(true)}
-                      disabled={!selectedSiteId}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: selectedSiteId ? "pointer" : "not-allowed",
-                        opacity: selectedSiteId ? 1 : 0.6,
-                      }}
-                    >
-                      Ignore rules
-                    </button>
-                    <a
-                      href={startUrl || "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        color: "var(--text)",
-                        textDecoration: "none",
-                        pointerEvents: startUrl ? "auto" : "none",
-                        opacity: startUrl ? 1 : 0.6,
-                      }}
-                    >
-                      Open site
-                    </a>
-                  </div>
+                  )}
+
+                  {hasSites && appSection === "reports" && (
+                    <div style={{ display: "grid", gap: "18px" }}>
+                      <div className="app-section-heading">
+                        <div className="app-section-heading__title">
+                          Reports and Scan History
+                        </div>
+                        <div className="app-section-heading__meta">
+                          Review recent runs, open detailed reports, and use the
+                          existing results workspace for raw evidence, changes,
+                          and fix-queue workflows.
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "10px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            className="primary-button"
+                            onClick={handleNewScanAction}
+                            disabled={
+                              !!selectedSiteId &&
+                              (triggeringScan || canCancelRun)
+                            }
+                          >
+                            {triggeringScan ? "Starting..." : "Run scan"}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            onClick={() =>
+                              setScanWorkspaceOpen((prev) => !prev)
+                            }
+                          >
+                            {scanWorkspaceOpen
+                              ? "Hide results workspace"
+                              : "Open results workspace"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="app-section-grid">
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Scan history
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Select a run for the workspace or open the final
+                            report artifact directly.
+                          </div>
+                          <div className="app-site-list">
+                            {history.map((run) => (
+                              <div key={run.id} className="app-site-row">
+                                <div>
+                                  <div
+                                    style={{
+                                      fontWeight: 700,
+                                      fontSize: "14px",
+                                    }}
+                                  >
+                                    {formatRelative(run.started_at)}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    {run.status.replace("_", " ")} · Checked{" "}
+                                    {run.checked_links}/{run.total_links} ·
+                                    Broken {run.broken_links}
+                                  </div>
+                                </div>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <button
+                                    className="secondary-button"
+                                    onClick={() => {
+                                      void handleSelectRunForWorkspace(run);
+                                      setScanWorkspaceOpen(true);
+                                    }}
+                                  >
+                                    Open workspace
+                                  </button>
+                                  <button
+                                    className="ghost-button"
+                                    disabled={run.status !== "completed"}
+                                    onClick={() => openReport(run.id)}
+                                  >
+                                    View report
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                            {history.length === 0 && !historyLoading && (
+                              <div
+                                style={{
+                                  color: "var(--muted)",
+                                  fontSize: "13px",
+                                }}
+                              >
+                                No scans yet.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Current report context
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Keep the dashboard focused on health. Use this area
+                            when you need deeper evidence and detailed scan
+                            operations.
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <StatusBadge
+                              label={`Selected run ${selectedRun ? formatRelative(selectedRun.started_at) : "none"}`}
+                              tone="default"
+                            />
+                            <StatusBadge
+                              label={`Workspace ${scanWorkspaceOpen ? "open" : "hidden"}`}
+                              tone="accent"
+                            />
+                            <div style={{ color: "var(--muted)" }}>
+                              {selectedRun
+                                ? `Current status: ${selectedRun.status.replace("_", " ")} · ${selectedRun.checked_links}/${selectedRun.total_links} links checked`
+                                : "Select a run to load results, changes, or fix queue data."}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "schedule" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Schedule Settings
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Configure recurring scans without keeping schedules
+                        pinned in a permanent sidebar.
+                      </div>
+                      {!selectedSite ? (
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure auto-scans.
+                        </div>
+                      ) : (
+                        <div className="app-form-grid">
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <span>Auto-scan enabled</span>
+                            <input
+                              type="checkbox"
+                              checked={
+                                scheduleFrequency === "manual"
+                                  ? false
+                                  : scheduleEnabled
+                              }
+                              onChange={(e) =>
+                                setScheduleEnabled(e.target.checked)
+                              }
+                              disabled={scheduleFrequency === "manual"}
+                            />
+                          </label>
+                          <div className="app-form-grid app-form-grid--two">
+                            <label className="field-label">
+                              Frequency
+                              <select
+                                value={scheduleFrequency}
+                                onChange={(e) => {
+                                  const nextFrequency = e.target.value as
+                                    | "manual"
+                                    | "daily"
+                                    | "weekly"
+                                    | "monthly";
+                                  setScheduleFrequency(nextFrequency);
+                                  if (nextFrequency === "manual") {
+                                    setScheduleEnabled(false);
+                                  }
+                                }}
+                                className="app-input"
+                              >
+                                <option value="manual">Manual</option>
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                              </select>
+                            </label>
+                            <label className="field-label">
+                              Time (UTC)
+                              <input
+                                type="time"
+                                value={scheduleTimeUtc}
+                                onChange={(e) =>
+                                  setScheduleTimeUtc(e.target.value)
+                                }
+                                className="app-input"
+                              />
+                            </label>
+                            {scheduleFrequency === "weekly" && (
+                              <label className="field-label">
+                                Day of week (UTC)
+                                <select
+                                  value={scheduleDayOfWeek}
+                                  onChange={(e) =>
+                                    setScheduleDayOfWeek(Number(e.target.value))
+                                  }
+                                  className="app-input"
+                                >
+                                  <option value={0}>Sunday</option>
+                                  <option value={1}>Monday</option>
+                                  <option value={2}>Tuesday</option>
+                                  <option value={3}>Wednesday</option>
+                                  <option value={4}>Thursday</option>
+                                  <option value={5}>Friday</option>
+                                  <option value={6}>Saturday</option>
+                                </select>
+                              </label>
+                            )}
+                            {scheduleFrequency === "monthly" && (
+                              <label className="field-label">
+                                Day of month (UTC)
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={31}
+                                  value={scheduleDayOfMonth}
+                                  onChange={(e) =>
+                                    setScheduleDayOfMonth(
+                                      Math.min(
+                                        31,
+                                        Math.max(
+                                          1,
+                                          Number(e.target.value) || 1,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="app-input"
+                                />
+                              </label>
+                            )}
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "6px",
+                              fontSize: "12px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <div>
+                              Time (UTC):{" "}
+                              {formatScheduleUtcLabel(
+                                scheduleFrequency,
+                                scheduleTimeUtc,
+                                scheduleDayOfWeek,
+                                scheduleDayOfMonth,
+                              )}
+                            </div>
+                            {showLocalTimeZone && (
+                              <div>
+                                Your time:{" "}
+                                {formatScheduleLocalLabel(
+                                  scheduleFrequency,
+                                  scheduleTimeUtc,
+                                  scheduleDayOfWeek,
+                                  scheduleDayOfMonth,
+                                )}{" "}
+                                ({localTimeZone})
+                              </div>
+                            )}
+                            <div>
+                              Next run (UTC):{" "}
+                              {formatUtcDateTime(
+                                selectedSite.next_scheduled_at,
+                              )}
+                            </div>
+                            {showLocalTimeZone && (
+                              <div>
+                                Next run (local):{" "}
+                                {formatLocalDateTime(
+                                  selectedSite.next_scheduled_at,
+                                )}{" "}
+                                ({localTimeZone})
+                              </div>
+                            )}
+                            <div>
+                              Last scheduled run:{" "}
+                              {formatDate(selectedSite.last_scheduled_at)}
+                            </div>
+                          </div>
+                          {scheduleError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {scheduleError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "10px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveSchedule()}
+                              disabled={scheduleSaving}
+                              className="primary-button"
+                            >
+                              {scheduleSaving ? "Saving..." : "Save schedule"}
+                            </button>
+                            <button
+                              onClick={() => setAppSection("dashboard")}
+                              className="ghost-button"
+                            >
+                              Back to dashboard
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "alerts" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Alert Settings
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Manage email alerts, delivery triggers, summaries, and
+                        test sends as a dedicated panel.
+                      </div>
+                      {!selectedSite ? (
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure notifications.
+                        </div>
+                      ) : (
+                        <div className="app-form-grid">
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <span>Email alerts</span>
+                            <input
+                              type="checkbox"
+                              checked={notifyEnabled}
+                              disabled={notifyLoading}
+                              onChange={(e) =>
+                                setNotifyEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <div className="app-form-grid app-form-grid--two">
+                            <label className="field-label">
+                              Email address
+                              <input
+                                type="email"
+                                value={notifyEmail}
+                                onChange={(e) => setNotifyEmail(e.target.value)}
+                                placeholder="you@example.com"
+                                disabled={notifyLoading}
+                                className="app-input"
+                              />
+                            </label>
+                            <label className="field-label">
+                              Notify on
+                              <select
+                                value={notifyOn}
+                                onChange={(e) =>
+                                  setNotifyOn(e.target.value as NotifyOnOption)
+                                }
+                                disabled={notifyLoading}
+                                className="app-input"
+                              >
+                                <option value="new_issues_only">
+                                  Only when NEW issues appear
+                                </option>
+                                <option value="issues_exist">
+                                  Only when issues exist
+                                </option>
+                                <option value="always">Always</option>
+                                <option value="never">Never</option>
+                              </select>
+                            </label>
+                          </div>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyIncludeCsv}
+                              onChange={(e) =>
+                                setNotifyIncludeCsv(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Include CSV attachment (coming soon)
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={summaryEnabled}
+                              onChange={(e) =>
+                                setSummaryEnabled(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Weekly summary
+                          </label>
+                          {notifyLoading && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Loading notification settings...
+                            </div>
+                          )}
+                          {notifyError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {notifyError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "10px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveNotifications()}
+                              disabled={
+                                notifySaving ||
+                                notifyLoading ||
+                                (notifyEnabled &&
+                                  notifyOn !== "never" &&
+                                  !notifyEmail.trim())
+                              }
+                              className="primary-button"
+                            >
+                              {notifySaving ? "Saving..." : "Save alerts"}
+                            </button>
+                            <button
+                              onClick={() => void handleSendTestEmail()}
+                              disabled={
+                                notifyTestSending ||
+                                !notifyEmail.trim() ||
+                                !notifyEnabled ||
+                                notifyOn === "never" ||
+                                notifyLoading
+                              }
+                              className="secondary-button"
+                            >
+                              {notifyTestSending
+                                ? "Sending..."
+                                : "Send test alert"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "ignore_rules" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Ignore Rules
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Manage site and global ignore rules as a dashboard tool
+                        instead of permanent sidebar clutter.
+                      </div>
+                      <div
+                        className="app-form-grid app-form-grid--two"
+                        style={{ alignItems: "end" }}
+                      >
+                        <label className="field-label">
+                          Scope
+                          <select
+                            value={newRuleScope}
+                            onChange={(e) =>
+                              setNewRuleScope(
+                                e.target.value as "site" | "global",
+                              )
+                            }
+                            className="app-input"
+                          >
+                            <option value="site">This site</option>
+                            <option value="global">Global</option>
+                          </select>
+                        </label>
+                        <label className="field-label">
+                          Rule type
+                          <select
+                            value={newRuleType}
+                            onChange={(e) =>
+                              setNewRuleType(
+                                e.target.value as IgnoreRule["rule_type"],
+                              )
+                            }
+                            className="app-input"
+                          >
+                            <option value="domain">domain</option>
+                            <option value="path_prefix">path_prefix</option>
+                            <option value="regex">regex</option>
+                            <option value="status_code">status_code</option>
+                          </select>
+                        </label>
+                      </div>
+                      <label className="field-label">
+                        Pattern
+                        <input
+                          value={newRulePattern}
+                          onChange={(e) => setNewRulePattern(e.target.value)}
+                          placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
+                          className="app-input"
+                        />
+                      </label>
+                      <button
+                        onClick={handleCreateIgnoreRule}
+                        disabled={!selectedSiteId || !newRulePattern.trim()}
+                        className="primary-button"
+                      >
+                        Add rule
+                      </button>
+                      {ignoreRulesError && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--warning)" }}
+                        >
+                          {ignoreRulesError}
+                        </div>
+                      )}
+                      {!ignoreRulesLoading && ignoreRules.length > 0 && (
+                        <div className="app-site-list">
+                          {ignoreRules.map((rule) => (
+                            <div key={rule.id} className="app-site-row">
+                              <div>
+                                <div
+                                  style={{ fontSize: "13px", fontWeight: 700 }}
+                                >
+                                  {rule.rule_type}{" "}
+                                  {rule.site_id ? "" : "· global"}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {rule.pattern}
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <button
+                                  onClick={() => handleToggleIgnoreRule(rule)}
+                                  className="secondary-button"
+                                >
+                                  {rule.is_enabled ? "Enabled" : "Disabled"}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteIgnoreRule(rule)}
+                                  className="ghost-button"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ignoreRulesLoading && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Loading rules…
+                        </div>
+                      )}
+                      {!ignoreRulesLoading && ignoreRules.length === 0 && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          No ignore rules yet.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "sites" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">Sites</div>
+                      <div className="app-settings-card__subtitle">
+                        Select the active site, add new monitored sites, or
+                        remove old ones from the workspace.
+                      </div>
+                      <div className="app-site-list">
+                        {sites.map((site) => {
+                          const isSelected = site.id === selectedSiteId;
+                          const isDeleting = deletingSiteId === site.id;
+                          return (
+                            <div key={site.id} className="app-site-row">
+                              <button
+                                onClick={() => void handleSelectSite(site)}
+                                style={{
+                                  textAlign: "left",
+                                  border: "none",
+                                  background: "transparent",
+                                  color: "var(--text)",
+                                  cursor: "pointer",
+                                  padding: 0,
+                                }}
+                              >
+                                <div
+                                  style={{ fontWeight: 700, fontSize: "14px" }}
+                                >
+                                  {siteNameById[site.id] ?? site.url}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  {site.url}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  Created {formatDate(site.created_at)}
+                                </div>
+                              </button>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <button
+                                  className={
+                                    isSelected
+                                      ? "primary-button"
+                                      : "secondary-button"
+                                  }
+                                  onClick={() => void handleSelectSite(site)}
+                                >
+                                  {isSelected ? "Selected" : "Select"}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteSite(site.id)}
+                                  disabled={isDeleting}
+                                  className="ghost-button"
+                                  style={{ color: "var(--danger)" }}
+                                >
+                                  {isDeleting ? "Deleting..." : "Delete"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {!hasSites && (
-                  <div className="card" style={{ padding: "24px" }}>
-                    <div
-                      style={{
-                        fontSize: "18px",
-                        fontWeight: 600,
-                        fontFamily: "var(--font-display)",
-                        marginBottom: "8px",
-                      }}
-                    >
-                      Add your first site
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Scan for broken links, track changes, and get alerts.
-                    </div>
-                    <div
-                      style={{
-                        marginTop: "16px",
-                        display: "flex",
-                        gap: "10px",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <button
-                        onClick={() => {
-                          setCreateError(null);
-                          setAddSiteOpen(true);
-                        }}
-                        style={{
-                          padding: "8px 14px",
-                          borderRadius: "999px",
-                          border: "none",
-                          background:
-                            "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                          color: "white",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Add site
-                      </button>
-                      <button
-                        onClick={() => void handleCreateSampleSite()}
-                        style={{
-                          padding: "8px 14px",
-                          borderRadius: "999px",
-                          border: "1px solid var(--border)",
-                          background: "var(--panel)",
-                          color: "var(--text)",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Try sample site
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {hasSites && (
+                {hasSites && appSection === "reports" && scanWorkspaceOpen && (
                   <div ref={scansRef} className="card" style={{ padding: "0" }}>
                     {showProgress && selectedRun && (
                       <div
@@ -13069,7 +16090,10 @@ const App: React.FC = () => {
                             Open Fix Queue
                           </button>
                           <button
-                            onClick={() => setResultsView("changes")}
+                            onClick={() => {
+                              setScanWorkspaceOpen(true);
+                              setResultsView("changes");
+                            }}
                             className="report-button"
                           >
                             View Changes
@@ -14150,6 +17174,7 @@ const App: React.FC = () => {
                               <button
                                 onClick={() => {
                                   setCompareRunId(run.id);
+                                  setScanWorkspaceOpen(true);
                                   setResultsView("changes");
                                 }}
                                 style={{
