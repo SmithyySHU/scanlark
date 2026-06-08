@@ -1,163 +1,275 @@
 # Scanlark
 
-Automated broken-link monitoring for websites.
+Passive website monitoring with reports, issue tracking, uptime checks, and shareable report links.
 
-Scanlark is a work-in-progress SaaS-style app that scans websites to detect broken/blocked links (internal + external), stores results, and presents them in a dashboard. The goal is **reliable monitoring** and a clean workflow—not a full SEO suite.
+Scanlark is a SaaS-style monorepo for monitoring a website's health without acting like a browser, logging in, executing JavaScript, or running active security exploitation. It started as broken-link monitoring and now includes broader report-oriented checks around crawl health, search access, HTTPS, security headers, homepage performance signals, issue change detection, and lightweight uptime monitoring.
 
----
+## What Scanlark does
 
-## Why this exists
+Scanlark currently supports:
 
-Broken links hurt user experience, trust, and SEO. Many site owners only notice once users complain.
+- manual and scheduled scans
+- deduplicated link monitoring with occurrence drill-down
+- passive SEO basics checks
+- `robots.txt` and sitemap checks
+- SSL/HTTPS checks
+- security header checks
+- basic homepage performance signals
+- issue generation with severity and change tracking
+- reports with category scores and client-friendly wording
+- Scanlark Learn content that explains findings
+- lightweight homepage uptime monitoring
+- email notifications and notification event tracking
+- public shareable links for completed reports
 
-Scanlark aims to make link monitoring a background task that runs automatically and surfaces clear, actionable results.
+## Product boundaries
 
----
+Scanlark is intentionally passive.
 
-## What it does today
+It does not:
 
-### ✅ Scanning + classification
+- execute JavaScript
+- submit forms
+- log in to sites
+- crawl private networks
+- scan arbitrary ports
+- exploit vulnerabilities
+- act as a full performance lab
+- replace a full SEO crawler or DAST tool
 
-- Crawls a site from a start URL
-- Extracts and normalises links
-- Validates links with timeouts + custom User-Agent
-- Classifies results into:
-  - `ok`
-  - `broken` (e.g. 404)
-  - `blocked` (e.g. 403 / forbidden)
-  - timeout / fetch-failed scenarios (recorded as “failed to fetch” / “no response”)
+Homepage uptime monitoring is also intentionally narrow in MVP:
 
-### ✅ Storage (PostgreSQL)
+- root/homepage URL only
+- fixed interval
+- no full scan runs
+- no issue creation from uptime incidents
 
-- Core tables:
-  - `sites`
-  - `scan_runs`
-- **Deduplicated link results**:
-  - `scan_links` (unique link per scan run + aggregated status + occurrence count)
-  - `scan_link_occurrences` (where each link appeared / “found on these pages” drill-down)
-- Ignore rules support (exclude specific URLs/patterns from results)
-
-### ✅ API + dashboard
-
-- API endpoints for:
-  - listing scan runs
-  - fetching results with pagination + totals
-  - filtering by classification/status
-- schedule controls to auto-scan sites (daily/weekly, UTC)
-- email notifications with deltas (optional, SMTP-backed)
-- Web dashboard (WIP but usable):
-  - browse sites + scan runs
-  - view broken/blocked results
-  - expandable drill-down to see occurrences
-  - responsive layout + dark/light theme toggle
-
-### ✅ Developer workflow
-
-- Monorepo with npm workspaces
-- Local runs:
-  - run a scan
-  - view results via API/UI
-
----
-
-## Project structure
+## Monorepo structure
 
 ```txt
 apps/
-  api/        # REST API + event endpoints
-  worker/     # queue worker + scheduler tick
-  web/        # Dashboard UI
+  api/        # Express API, auth/session handling, notifications, public share routes
+  web/        # React dashboard, reports, Learn, public shared-report view
+  worker/     # scheduled scan loop, issue generation callbacks, uptime loop
 packages/
-  crawler/    # crawling + validation + classification
-  db/         # SQL migrations + query layer
+  crawler/    # passive crawl, validation, site checks, uptime checker
+  db/         # migrations and database access layer
+docs/
+  DEV.md      # deeper local dev notes
 ```
 
----
+## Key capabilities
+
+### Scanning and validation
+
+- starts from a site URL
+- crawls pages and extracts links
+- validates links with a custom user agent and timeouts
+- classifies results into:
+  - `ok`
+  - `broken`
+  - `blocked`
+  - `no_response`
+- stores deduplicated links plus per-page occurrences
+
+### Site-level checks
+
+Scanlark also records passive site checks for:
+
+- SEO basics from stored page metadata
+- `robots.txt`
+- sitemap discovery and validation
+- HTTPS reachability and HTTP-to-HTTPS behavior
+- TLS certificate validity and hostname matching
+- common browser security headers
+- basic homepage performance signals such as response time, HTML size, asset count, image count, and script count
+- passive mixed-content findings
+
+### Reporting and issue tracking
+
+- completed scans generate reports for a single run
+- issues are grouped by category and severity
+- issue presentation includes user-facing guidance and stored evidence
+- issue change tracking marks findings as `new`, `existing`, or `resolved`
+- category scores roll findings into report-level summaries
+
+### Uptime monitoring
+
+- lightweight homepage uptime checks run separately from scans
+- tracks current status, last checked time, response time, consecutive failures, and 30-day uptime
+- supports downtime and recovery notifications
+
+### Report sharing
+
+- completed reports can be shared publicly by link
+- shared reports are read-only
+- share links can be revoked
+- the raw share URL is only returned when the share is created
+
+## Current database shape
+
+The schema has grown beyond the original MVP. Important tables now include:
+
+- `sites`
+- `scan_runs`
+- `scan_results`
+- `scan_links`
+- `scan_link_occurrences`
+- `scan_page_checks`
+- `scan_site_checks`
+- `scan_issues`
+- `site_issue_states`
+- `ignore_rules`
+- `scan_ignored_links`
+- `scan_ignored_occurrences`
+- `link_notes`
+- `notification_events`
+- `email_outbox`
+- `site_uptime_settings`
+- `uptime_checks`
+- `uptime_incidents`
+- `report_shares`
 
 ## Local development
 
-### 1) Requirements
+### Requirements
 
-- Node.js (see `.nvmrc` if present)
+- Node.js
 - PostgreSQL
-- `DATABASE_URL` set (API + scripts use it)
-- Auth (beta gate):
-  - `DEV_BYPASS_AUTH=true` auto-auths the demo user in dev
-  - `AUTH_COOKIE_NAME`, `SESSION_SECRET` (required when bypass is off), `WEB_ORIGIN`, `API_ORIGIN`
-  - TODO: replace with a hosted auth provider before public release
-- Worker notify:
-  - `API_INTERNAL_TOKEN` must match between API and worker so scheduled scans can trigger notifications
-- Email (optional):
-  - `EMAIL_ENABLED=true`
-  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
-  - `EMAIL_FROM` (optional)
-  - `EMAIL_TEST_TO` (optional override for test emails)
+- a root `.env` with `DATABASE_URL`
 
-### Realtime updates (SSE)
+Common environment variables:
 
-The dashboard subscribes to `/events/stream` for scan + schedule updates. To test
-scheduled scan UI updates locally:
+- `DATABASE_URL`
+- `WEB_ORIGIN`
+- `API_ORIGIN`
+- `AUTH_COOKIE_NAME`
+- `SESSION_SECRET`
+- `DEV_BYPASS_AUTH=true` for local auto-auth
+- `API_INTERNAL_TOKEN` shared between API and worker
 
-- Open the dashboard and enable a schedule for a site 1–2 minutes ahead.
-- Keep the page open; you should see the scan move to in-progress and complete
-  without a refresh.
-- If you switch tabs, the UI syncs once when you return.
+Optional email settings:
 
-### 2) Install
+- `EMAIL_ENABLED=true`
+- `EMAIL_FROM`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USER`
+- `SMTP_PASS`
+- `EMAIL_TEST_TO`
+
+Optional app URL settings used in links:
+
+- `APP_URL`
+- `APP_BASE_URL`
+
+### Install
 
 ```bash
 npm ci
 ```
 
-### 3) Run migrations
+### Run migrations
+
+Apply all SQL migrations in filename order:
 
 ```bash
-# Example (adjust to your repo’s migration command if different)
-psql "$DATABASE_URL" -f packages/db/migrations/001_init.sql
-psql "$DATABASE_URL" -f packages/db/migrations/002_add_scan_links.sql
-psql "$DATABASE_URL" -f packages/db/migrations/003_add_ignore_rules.sql
-psql "$DATABASE_URL" -f packages/db/migrations/004_add_users_auth_and_ownership.sql
-psql "$DATABASE_URL" -f packages/db/migrations/005_fix_users_updated_at.sql
-psql "$DATABASE_URL" -f packages/db/migrations/006_add_ignore_rules_user_id.sql
+for f in packages/db/migrations/*.sql; do
+  psql "$DATABASE_URL" -f "$f"
+done
 ```
 
-Apply every migration file explicitly by filename in order. Do not assume the
-numeric prefix is unique: this repo currently contains both
-`015_add_performance_basic_site_check.sql` and
-`015_schedule_reliability_improvements.sql`, and both must be applied.
+That includes recent migrations such as:
 
-### 4) Start the apps
+- `017_issue_change_detection.sql`
+- `018_scan_run_issue_generation_status.sql`
+- `019_add_mixed_content_to_scan_page_checks.sql`
+- `020_add_uptime_monitoring.sql`
+- `021_add_report_shares.sql`
+
+If a feature appears to exist in code but fails at runtime, missing migrations are the first thing to check.
+
+### Start services
 
 ```bash
-# Example (adjust to your scripts if different)
-npm -w apps/api run dev
-npm -w apps/web run dev
-npm -w apps/worker run dev
+npm run dev:api
+npm run dev:web
+npm run dev:worker
 ```
 
----
+Optional helpers:
 
-## CI
+```bash
+npm run dev:db
+npm run scan:once -- <siteId> <startUrl>
+npm run demo:latest-scan
+npm run demo:site-history -- <siteId>
+```
 
-GitHub Actions runs on pushes + PRs:
+### Useful local URLs
 
-- install (`npm ci`)
-- typecheck / lint / build across workspaces
-- formatting check (Prettier) to fail PRs with unformatted code
+- API: `http://localhost:3001`
+- Web app: Vite default, usually `http://localhost:5173`
 
-Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the build still completes successfully.
+## Important runtime behaviour
 
----
+- scheduled scans require the worker to be running
+- scan progress and some dashboard updates use SSE
+- email delivery only happens when `EMAIL_ENABLED=true`
+- uptime monitoring is processed by the worker loop
+- public shared reports depend on the `report_shares` table and corresponding migration
 
-## Roadmap (near-term)
+## Core routes and surfaces
 
-- Better scan progress reporting (UI progress indicator + streaming updates)
-- More filters (status-code groups, timeouts, ignored)
-- Export (CSV), copy actions, bulk ignore, retry scan
-- Scheduling / recurring scans + notifications (email)
+Examples of current API/report surfaces:
 
----
+- `POST /sites/:siteId/scans`
+- `GET /scan-runs/:scanRunId`
+- `GET /scan-runs/:scanRunId/issues`
+- `GET /scan-runs/:scanRunId/links`
+- `GET /scan-runs/:scanRunId/technical-diagnostics`
+- `GET /sites/:siteId/dashboard-summary`
+- `GET /sites/:siteId/uptime`
+- `POST /scan-runs/:scanRunId/share`
+- `GET /scan-runs/:scanRunId/share`
+- `DELETE /scan-runs/:scanRunId/share`
+- `GET /public/reports/:token`
+
+## Scripts
+
+Workspace-level scripts from the repo root:
+
+```bash
+npm run dev:api
+npm run dev:web
+npm run dev:worker
+npm run dev:db
+npm run scan:once -- <siteId> <startUrl>
+npm run typecheck
+npm run format
+npm run format:check
+```
+
+Per-workspace typechecks:
+
+```bash
+npm run -w @scanlark/api typecheck
+npm run -w @scanlark/web typecheck
+npm run -w @scanlark/worker typecheck
+npm run -w @scanlark/db typecheck
+npm run -w @scanlark/crawler typecheck
+```
+
+## Troubleshooting
+
+- Missing tables or columns usually means migrations were not applied.
+- If scheduled scans do not advance, confirm the worker is running and `API_INTERNAL_TOKEN` matches.
+- If report sharing fails, confirm `021_add_report_shares.sql` was applied.
+- If email appears in `email_outbox` but is not sent, check `EMAIL_ENABLED` and SMTP settings.
+- If a report is stuck with pending issue generation, inspect API and worker logs for that scan run.
 
 ## Notes
 
-This repository is under active development and will change as the MVP gets hardened.
+- This repository is under active development.
+- Some compiled `.js` files may exist alongside TypeScript sources in `packages/db`; treat the TypeScript sources as the primary code for changes.
+- For deeper setup and troubleshooting details, see [docs/DEV.md](/home/smithyy/Projects/scanlark/docs/DEV.md).
