@@ -52,6 +52,7 @@ import {
   getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
+  getUptimeStatusForSiteForUser,
   getTimeoutCountForRunForUser,
   getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
@@ -74,6 +75,7 @@ import {
   upsertLinkNoteForSiteForUser,
   updateSiteNotificationSettingsForUser,
   updateSiteScheduleForUser,
+  updateUptimeMonitorSettingsForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
   validateSafeRegexPattern,
@@ -83,6 +85,7 @@ import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
+import { sendUptimeNotification } from "./notifyOnUptime";
 import { authMiddleware, initDemoAuth } from "./authMiddleware";
 import { sessionMiddleware } from "./auth";
 import { mountAuthRoutes } from "./routes/auth";
@@ -404,6 +407,57 @@ function parseBooleanParam(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+function isValidHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function serializeTimestamp(value: Date | string | null) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function serializeUptimeSummary(
+  uptime: Awaited<ReturnType<typeof getUptimeStatusForSiteForUser>>,
+) {
+  return {
+    settingsId: uptime.settingsId,
+    siteId: uptime.siteId,
+    enabled: uptime.enabled,
+    checkUrl: uptime.checkUrl,
+    intervalMinutes: uptime.intervalMinutes,
+    failureThreshold: uptime.failureThreshold,
+    status: uptime.status,
+    consecutiveFailures: uptime.consecutiveFailures,
+    lastCheckedAt: serializeTimestamp(uptime.lastCheckedAt),
+    lastUpAt: serializeTimestamp(uptime.lastUpAt),
+    lastDownAt: serializeTimestamp(uptime.lastDownAt),
+    lastRecoveredAt: serializeTimestamp(uptime.lastRecoveredAt),
+    lastResponseTimeMs: uptime.lastResponseTimeMs,
+    lastStatusCode: uptime.lastStatusCode,
+    lastError: uptime.lastError,
+    uptime30d: uptime.uptime30d,
+    activeIncidentId: uptime.activeIncidentId,
+    recentChecks: uptime.recentChecks.map((check) => ({
+      id: check.id,
+      settings_id: check.settings_id,
+      site_id: check.site_id,
+      checked_url: check.checked_url,
+      status: check.status,
+      status_code: check.status_code,
+      response_time_ms: check.response_time_ms,
+      redirect_count: check.redirect_count,
+      error_code: check.error_code,
+      error_message: check.error_message,
+      checked_at: serializeTimestamp(check.checked_at),
+    })),
+  };
+}
+
 function parseDiffChangeTypes(value: unknown): ScanDiffChangeType[] | null {
   if (typeof value !== "string" || value.trim().length === 0) return null;
   const parts = value
@@ -596,6 +650,91 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in PUT /sites/:siteId/schedule", err);
     sendInternalError(res, "Failed to update schedule", err);
+  }
+});
+
+app.get("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const uptime = await getUptimeStatusForSiteForUser(userId, siteId, 20);
+    res.json(serializeUptimeSummary(uptime));
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in GET /sites/:siteId/uptime", err);
+    sendInternalError(res, "Failed to fetch uptime", err);
+  }
+});
+
+app.patch("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  const { enabled, checkUrl, failureThreshold } = req.body ?? {};
+  const patch: {
+    enabled?: boolean;
+    checkUrl?: string;
+    failureThreshold?: number;
+  } = {};
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_enabled",
+        "enabled must be boolean",
+      );
+    }
+    patch.enabled = enabled;
+  }
+  if (checkUrl !== undefined) {
+    if (typeof checkUrl !== "string" || !isValidHttpUrl(checkUrl)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_check_url",
+        "checkUrl must be a valid http or https URL",
+      );
+    }
+    patch.checkUrl = checkUrl;
+  }
+  if (failureThreshold !== undefined) {
+    if (
+      typeof failureThreshold !== "number" ||
+      !Number.isInteger(failureThreshold) ||
+      failureThreshold < 1
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_failure_threshold",
+        "failureThreshold must be an integer >= 1",
+      );
+    }
+    patch.failureThreshold = failureThreshold;
+  }
+  if (Object.keys(patch).length === 0) {
+    return sendApiError(res, 400, "empty_patch", "No fields to update");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    await updateUptimeMonitorSettingsForUser(userId, siteId, patch);
+    const uptime = await getUptimeStatusForSiteForUser(userId, siteId, 20);
+    res.json(serializeUptimeSummary(uptime));
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in PATCH /sites/:siteId/uptime", err);
+    sendInternalError(res, "Failed to update uptime", err);
   }
 });
 
@@ -813,6 +952,35 @@ app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/notify", err);
     sendInternalError(res, "Failed to notify", err);
+  }
+});
+
+app.post("/uptime-incidents/:incidentId/notify", async (req, res) => {
+  const incidentId = req.params.incidentId;
+  const internalToken =
+    typeof req.headers["x-internal-token"] === "string"
+      ? req.headers["x-internal-token"]
+      : "";
+  if (!API_INTERNAL_TOKEN || internalToken !== API_INTERNAL_TOKEN) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+
+  const kind = req.body?.kind;
+  if (kind !== "uptime_down" && kind !== "uptime_recovered") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_kind",
+      "kind must be uptime_down or uptime_recovered",
+    );
+  }
+
+  try {
+    const sent = await sendUptimeNotification(incidentId, kind);
+    res.json({ ok: true, sent });
+  } catch (err: unknown) {
+    console.error("Error in POST /uptime-incidents/:incidentId/notify", err);
+    sendInternalError(res, "Failed to notify uptime state", err);
   }
 });
 
@@ -1376,11 +1544,13 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
 
-    const [latestRun, history, notificationSettings] = await Promise.all([
-      getLatestScanForSiteForUser(userId, siteId),
-      getRecentScanRunsForSiteForUser(userId, siteId, 8),
-      getSiteNotificationSettingsForUser(userId, siteId),
-    ]);
+    const [latestRun, history, notificationSettings, uptime] =
+      await Promise.all([
+        getLatestScanForSiteForUser(userId, siteId),
+        getRecentScanRunsForSiteForUser(userId, siteId, 8),
+        getSiteNotificationSettingsForUser(userId, siteId),
+        getUptimeStatusForSiteForUser(userId, siteId, 10),
+      ]);
 
     if (!latestRun) {
       return res.json({
@@ -1396,6 +1566,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
         baselineRun: null,
         history: history.map(serializeScanRun),
         notificationSettings,
+        uptime: serializeUptimeSummary(uptime),
       });
     }
 
@@ -1453,6 +1624,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       baselineRun,
       history: history.map(serializeScanRun),
       notificationSettings,
+      uptime: serializeUptimeSummary(uptime),
     });
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/dashboard-summary", err);

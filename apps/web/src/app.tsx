@@ -578,6 +578,42 @@ interface DashboardSummaryResponse {
     notifyIncludeCsv: boolean;
     summaryEnabled: boolean;
   } | null;
+  uptime: UptimeSummaryResponse;
+}
+
+interface UptimeCheckResponse {
+  id: string;
+  settings_id: string;
+  site_id: string;
+  checked_url: string;
+  status: "up" | "degraded" | "down";
+  status_code: number | null;
+  response_time_ms: number | null;
+  redirect_count: number;
+  error_code: string | null;
+  error_message: string | null;
+  checked_at: string;
+}
+
+interface UptimeSummaryResponse {
+  settingsId: string;
+  siteId: string;
+  enabled: boolean;
+  checkUrl: string;
+  intervalMinutes: number;
+  failureThreshold: number;
+  status: "unknown" | "up" | "degraded" | "down";
+  consecutiveFailures: number;
+  lastCheckedAt: string | null;
+  lastUpAt: string | null;
+  lastDownAt: string | null;
+  lastRecoveredAt: string | null;
+  lastResponseTimeMs: number | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  uptime30d: number | null;
+  activeIncidentId: string | null;
+  recentChecks: UptimeCheckResponse[];
 }
 
 type ReportIssuesState = {
@@ -1028,6 +1064,30 @@ function getCategoryScoreDetail(score: ScanCategoryScore | null | undefined) {
   if (!score) return "Score unavailable";
   if (score.status === "not_checked") return "No diagnostic evidence recorded";
   return `${score.findingCount} finding${score.findingCount === 1 ? "" : "s"} · ${score.checkCount} check${score.checkCount === 1 ? "" : "s"}`;
+}
+
+function getUptimeTone(
+  uptime: UptimeSummaryResponse | null | undefined,
+): "default" | "success" | "warning" | "danger" {
+  if (!uptime?.enabled || uptime.status === "unknown") return "default";
+  if (uptime.status === "up") return "success";
+  if (uptime.status === "degraded") return "warning";
+  return "danger";
+}
+
+function getUptimeStatusLabel(
+  uptime: UptimeSummaryResponse | null | undefined,
+) {
+  if (!uptime?.enabled) return "Monitoring off";
+  if (uptime.status === "unknown") return "Unknown";
+  if (uptime.status === "up") return "Up";
+  if (uptime.status === "degraded") return "Degraded";
+  return "Down";
+}
+
+function formatUptimePercentage(value: number | null | undefined) {
+  if (value == null) return "N/A";
+  return `${value.toFixed(2)}%`;
 }
 
 function getSearchAccessCategoryDetail(
@@ -2354,6 +2414,11 @@ const App: React.FC = () => {
   const [notifySaving, setNotifySaving] = useState(false);
   const [notifyTestSending, setNotifyTestSending] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
+  const [uptimeEnabled, setUptimeEnabled] = useState(false);
+  const [uptimeCheckUrl, setUptimeCheckUrl] = useState("");
+  const [uptimeFailureThreshold, setUptimeFailureThreshold] = useState(3);
+  const [uptimeSaving, setUptimeSaving] = useState(false);
+  const [uptimeError, setUptimeError] = useState<string | null>(null);
   const [newRuleType, setNewRuleType] =
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
@@ -4018,6 +4083,7 @@ const App: React.FC = () => {
     [fetchDashboardSummary, queryClient],
   );
   const dashboardSummary = dashboardSummaryQuery.data ?? null;
+  const dashboardUptime = dashboardSummary?.uptime ?? null;
   const dashboardObservedRun =
     selectedRun && dashboardObservedScanRunId === selectedRun.id
       ? selectedRun
@@ -6247,6 +6313,21 @@ const App: React.FC = () => {
   }, [selectedSiteId]);
 
   useEffect(() => {
+    if (!selectedSiteId) {
+      setUptimeEnabled(false);
+      setUptimeCheckUrl("");
+      setUptimeFailureThreshold(3);
+      setUptimeError(null);
+      return;
+    }
+    if (!dashboardUptime) return;
+    setUptimeEnabled(dashboardUptime.enabled);
+    setUptimeCheckUrl(dashboardUptime.checkUrl);
+    setUptimeFailureThreshold(dashboardUptime.failureThreshold);
+    setUptimeError(null);
+  }, [dashboardUptime, selectedSiteId]);
+
+  useEffect(() => {
     if (!selectedRunId || history.length === 0) {
       setCompareRunId(null);
       return;
@@ -6891,6 +6972,48 @@ const App: React.FC = () => {
       setNotifyError(getErrorMessage(err, "Failed to update notifications"));
     } finally {
       setNotifySaving(false);
+    }
+  }
+
+  async function handleSaveUptime() {
+    if (!selectedSiteId) return;
+    if (!uptimeCheckUrl.trim()) {
+      setUptimeError("Homepage URL is required.");
+      return;
+    }
+    setUptimeSaving(true);
+    setUptimeError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/uptime`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: uptimeEnabled,
+            checkUrl: uptimeCheckUrl.trim(),
+            failureThreshold: uptimeFailureThreshold,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Uptime update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as UptimeSummaryResponse;
+      setUptimeEnabled(data.enabled);
+      setUptimeCheckUrl(data.checkUrl);
+      setUptimeFailureThreshold(data.failureThreshold);
+      await refreshDashboardSummary(selectedSiteId, "uptime_save");
+      pushToast("Availability monitoring updated", "success");
+    } catch (err: unknown) {
+      setUptimeError(getErrorMessage(err, "Failed to update availability"));
+    } finally {
+      setUptimeSaving(false);
     }
   }
 
@@ -9409,7 +9532,7 @@ const App: React.FC = () => {
         }
         .dashboard-score-grid {
           display: grid;
-          grid-template-columns: 1.2fr 1fr 1fr 1fr;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
           gap: 14px;
           align-items: stretch;
         }
@@ -14326,6 +14449,20 @@ const App: React.FC = () => {
                               : "default"
                           }
                         />
+                        <MetricCard
+                          label="Availability"
+                          value={getUptimeStatusLabel(dashboardUptime)}
+                          detail={
+                            dashboardUptime?.enabled
+                              ? `${formatUptimePercentage(
+                                  dashboardUptime.uptime30d,
+                                )} over 30d · last ${formatDate(
+                                  dashboardUptime.lastCheckedAt,
+                                )}`
+                              : "Homepage monitoring is currently disabled."
+                          }
+                          tone={getUptimeTone(dashboardUptime)}
+                        />
                       </div>
 
                       <div className="dashboard-category-grid">
@@ -14487,6 +14624,143 @@ const App: React.FC = () => {
                             </div>
                           </div>
                         </div>
+                      </div>
+
+                      <div className="app-settings-card">
+                        <div className="app-settings-card__title">
+                          Availability Monitoring
+                        </div>
+                        <div className="app-settings-card__subtitle">
+                          Lightweight homepage checks stay separate from scans
+                          and reports. This monitors the root URL only.
+                        </div>
+                        {!selectedSite ? (
+                          <div
+                            style={{ fontSize: "13px", color: "var(--muted)" }}
+                          >
+                            Select a site to configure availability checks.
+                          </div>
+                        ) : (
+                          <div className="app-form-grid">
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "10px",
+                                fontSize: "13px",
+                              }}
+                            >
+                              <span>Homepage monitoring</span>
+                              <input
+                                type="checkbox"
+                                checked={uptimeEnabled}
+                                onChange={(event) =>
+                                  setUptimeEnabled(event.target.checked)
+                                }
+                              />
+                            </label>
+                            <div className="app-form-grid app-form-grid--two">
+                              <label className="field-label">
+                                Check URL
+                                <input
+                                  type="url"
+                                  value={uptimeCheckUrl}
+                                  onChange={(event) =>
+                                    setUptimeCheckUrl(event.target.value)
+                                  }
+                                  className="app-input"
+                                  placeholder={selectedSite.url}
+                                />
+                              </label>
+                              <label className="field-label">
+                                Failure threshold
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={uptimeFailureThreshold}
+                                  onChange={(event) =>
+                                    setUptimeFailureThreshold(
+                                      Math.max(
+                                        1,
+                                        Number(event.target.value) || 1,
+                                      ),
+                                    )
+                                  }
+                                  className="app-input"
+                                />
+                              </label>
+                            </div>
+                            <div
+                              style={{
+                                display: "grid",
+                                gap: "6px",
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              <div>
+                                Current status:{" "}
+                                {getUptimeStatusLabel(dashboardUptime)}
+                              </div>
+                              <div>
+                                Last checked:{" "}
+                                {formatDate(
+                                  dashboardUptime?.lastCheckedAt ?? null,
+                                )}
+                              </div>
+                              <div>
+                                30-day uptime:{" "}
+                                {formatUptimePercentage(
+                                  dashboardUptime?.uptime30d,
+                                )}
+                              </div>
+                              <div>
+                                Response time:{" "}
+                                {dashboardUptime?.lastResponseTimeMs == null
+                                  ? "N/A"
+                                  : `${dashboardUptime.lastResponseTimeMs} ms`}
+                              </div>
+                              <div>
+                                Consecutive failures:{" "}
+                                {dashboardUptime?.consecutiveFailures ?? 0}
+                              </div>
+                            </div>
+                            {uptimeError && (
+                              <div
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--warning)",
+                                }}
+                              >
+                                {uptimeError}
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "10px",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <button
+                                onClick={() => void handleSaveUptime()}
+                                disabled={
+                                  uptimeSaving || !uptimeCheckUrl.trim()
+                                }
+                                className="primary-button"
+                              >
+                                {uptimeSaving ? "Saving..." : "Save monitoring"}
+                              </button>
+                              <button
+                                onClick={() => setAppSection("dashboard")}
+                                className="ghost-button"
+                              >
+                                Stay on dashboard
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}

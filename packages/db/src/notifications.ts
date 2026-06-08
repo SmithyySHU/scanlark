@@ -21,7 +21,9 @@ export type NotificationEventKind =
   | "scan_failed"
   | "high_priority_issues_found"
   | "weekly_scan_summary"
-  | "test";
+  | "test"
+  | "uptime_down"
+  | "uptime_recovered";
 
 export type NotificationEventInput = {
   siteId: string;
