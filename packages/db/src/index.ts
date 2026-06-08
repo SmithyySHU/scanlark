@@ -124,6 +124,7 @@ export type {
 export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
 
 export {
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   replaceIssuesForScanRun,
 } from "./scanIssues";
@@ -154,7 +155,10 @@ export type {
   ScanSiteCheckType,
 } from "./scanSiteChecks";
 
-export { getScanTechnicalDiagnosticsForUser } from "./scanTechnicalDiagnostics";
+export {
+  getScanTechnicalDiagnostics,
+  getScanTechnicalDiagnosticsForUser,
+} from "./scanTechnicalDiagnostics";
 export type { ScanTechnicalDiagnosticsSummary } from "./scanTechnicalDiagnostics";
 
 export {
@@ -240,6 +244,19 @@ export type {
 } from "./notifications";
 
 export {
+  createOrRotateReportShareForRunForUser,
+  disableReportShareForRunForUser,
+  getReportShareForRunForUser,
+  getSharedReportAccessByToken,
+  recordReportShareView,
+} from "./reportShares";
+export type {
+  ReportShareRow,
+  ReportShareWithToken,
+  SharedReportAccess,
+} from "./reportShares";
+
+export {
   claimDueUptimeMonitors,
   getOrCreateUptimeMonitorForSite,
   getOrCreateUptimeMonitorForSiteForUser,
@@ -266,6 +283,7 @@ export type {
 export {
   computeSeverityScore,
   createEmptySeverityCounts,
+  getScanCategoryScores,
   getScanCategoryScoresForUser,
   getScoreBand,
 } from "./scanCategoryScores";

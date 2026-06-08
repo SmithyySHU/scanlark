@@ -1958,3 +1958,220 @@ export async function listIssuesForScanRunForUser(
     summary,
   };
 }
+
+export async function listIssuesForScanRun(
+  scanRunId: string,
+  options?: {
+    status?: ScanIssueStatus | null;
+    severity?: ScanIssueSeverity | null;
+    category?: ScanIssueCategory | null;
+    limit?: number;
+    offset?: number;
+  },
+): Promise<{
+  issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
+  countReturned: number;
+  totalMatching: number;
+  resolvedCount: number;
+  summary: ScanIssuesSummary;
+}> {
+  const client = await ensureConnected();
+  const limit = options?.limit ?? 50;
+  const offset = options?.offset ?? 0;
+  const params: Array<string | number> = [scanRunId];
+  const filters = ["si.scan_run_id = $1"];
+
+  if (options?.status) {
+    params.push(options.status);
+    filters.push(`si.status = $${params.length}`);
+  }
+  if (options?.severity) {
+    params.push(options.severity);
+    filters.push(`si.severity = $${params.length}`);
+  }
+  if (options?.category) {
+    params.push(options.category);
+    filters.push(`si.category = $${params.length}`);
+  }
+
+  const whereClause = `WHERE ${filters.join(" AND ")}`;
+  const includeOpen = options?.status !== "resolved";
+  const includeResolved = options?.status !== "open";
+
+  const countRes = includeOpen
+    ? await client.query<{ count: string }>(
+        `
+          SELECT COUNT(*) AS count
+          FROM scan_issues si
+          ${whereClause}
+        `,
+        params,
+      )
+    : { rows: [{ count: "0" }] };
+
+  const summaryRes = includeOpen
+    ? await client.query<{
+        severity: ScanIssueSeverity;
+        issue_type: string;
+        change_status: ScanIssueChangeStatus | null;
+        count: string;
+      }>(
+        `
+          SELECT severity, issue_type, change_status, COUNT(*) AS count
+          FROM scan_issues si
+          ${whereClause}
+          GROUP BY severity, issue_type, change_status
+        `,
+        params,
+      )
+    : {
+        rows: [] as Array<{
+          severity: ScanIssueSeverity;
+          issue_type: string;
+          change_status: ScanIssueChangeStatus | null;
+          count: string;
+        }>,
+      };
+
+  const resolvedParams: Array<string | number> = [scanRunId];
+  const resolvedFilters = ["sis.resolved_scan_run_id = $1"];
+  if (options?.severity) {
+    resolvedParams.push(options.severity);
+    resolvedFilters.push(`sis.latest_severity = $${resolvedParams.length}`);
+  }
+  if (options?.category) {
+    resolvedParams.push(options.category);
+    resolvedFilters.push(`sis.category = $${resolvedParams.length}`);
+  }
+  const resolvedWhereClause = `WHERE ${resolvedFilters.join(" AND ")}`;
+  const resolvedCountRes = includeResolved
+    ? await client.query<{ count: string }>(
+        `
+          SELECT COUNT(*) AS count
+          FROM site_issue_states sis
+          ${resolvedWhereClause}
+        `,
+        resolvedParams,
+      )
+    : { rows: [{ count: "0" }] };
+
+  const totalMatching = Number(countRes.rows[0]?.count ?? 0);
+  const resolvedCount = Number(resolvedCountRes.rows[0]?.count ?? 0);
+  const summary: ScanIssuesSummary = {
+    total: totalMatching,
+    bySeverity: {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      info: 0,
+    },
+    byIssueType: {},
+    byChangeStatus: {
+      new: 0,
+      existing: 0,
+      resolved: resolvedCount,
+    },
+  };
+
+  for (const row of summaryRes.rows) {
+    const count = Number(row.count);
+    summary.bySeverity[row.severity] += count;
+    summary.byIssueType[row.issue_type] =
+      (summary.byIssueType[row.issue_type] ?? 0) + count;
+    if (row.change_status === "new" || row.change_status === "existing") {
+      summary.byChangeStatus[row.change_status] += count;
+    }
+  }
+
+  const pageParams = [...params, limit, offset];
+  const issuesRes = includeOpen
+    ? await client.query<ScanIssue>(
+        `
+          SELECT
+            si.id,
+            si.scan_run_id,
+            si.site_id,
+            si.category,
+            si.severity,
+            si.status,
+            si.issue_type,
+            si.affected_url,
+            si.source_url,
+            si.title,
+            si.description,
+            si.evidence_json,
+            si.change_status,
+            si.first_seen_at,
+            si.last_seen_at,
+            si.resolved_at
+          FROM scan_issues si
+          ${whereClause}
+          ORDER BY
+            CASE si.severity
+              WHEN 'critical' THEN 0
+              WHEN 'high' THEN 1
+              WHEN 'medium' THEN 2
+              WHEN 'low' THEN 3
+              ELSE 4
+            END,
+            CASE si.change_status
+              WHEN 'new' THEN 0
+              WHEN 'existing' THEN 1
+              ELSE 2
+            END,
+            si.last_seen_at DESC,
+            si.affected_url ASC
+          LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+        `,
+        pageParams,
+      )
+    : { rows: [] as ScanIssue[] };
+
+  const resolvedIssuesRes = includeResolved
+    ? await client.query<ResolvedScanIssue>(
+        `
+          SELECT
+            sis.id,
+            sis.site_id,
+            sis.category,
+            sis.latest_severity AS severity,
+            sis.issue_type,
+            sis.affected_url,
+            sis.latest_source_url AS source_url,
+            sis.latest_title AS title,
+            sis.latest_description AS description,
+            sis.latest_evidence_json AS evidence_json,
+            sis.first_seen_at,
+            sis.last_seen_at,
+            sis.resolved_at,
+            sis.resolved_scan_run_id,
+            'resolved'::text AS change_status,
+            'resolved'::text AS status
+          FROM site_issue_states sis
+          ${resolvedWhereClause}
+          ORDER BY
+            CASE sis.latest_severity
+              WHEN 'critical' THEN 0
+              WHEN 'high' THEN 1
+              WHEN 'medium' THEN 2
+              WHEN 'low' THEN 3
+              ELSE 4
+            END,
+            sis.resolved_at DESC,
+            sis.affected_url ASC
+        `,
+        resolvedParams,
+      )
+    : { rows: [] as ResolvedScanIssue[] };
+
+  return {
+    issues: issuesRes.rows,
+    resolvedIssues: resolvedIssuesRes.rows,
+    countReturned: issuesRes.rows.length,
+    totalMatching,
+    resolvedCount,
+    summary,
+  };
+}

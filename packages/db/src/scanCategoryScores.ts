@@ -113,9 +113,9 @@ export function getScoreBand(score: number): ScanScoreBand {
   return "Critical";
 }
 
-export async function getScanCategoryScoresForUser(
-  userId: string,
+async function getScanCategoryScoresInternal(
   scanRunId: string,
+  userId?: string,
 ): Promise<ScanCategoryScore[]> {
   const client = await ensureConnected();
 
@@ -125,33 +125,45 @@ export async function getScanCategoryScoresForUser(
         `
           SELECT sr.checked_links
           FROM scan_runs sr
-          JOIN sites s ON s.id = sr.site_id
           WHERE sr.id = $1
-            AND s.user_id = $2
+            AND ($2::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM sites s
+              WHERE s.id = sr.site_id
+                AND s.user_id = $2
+            ))
           LIMIT 1
         `,
-        [scanRunId, userId],
+        [scanRunId, userId ?? null],
       ),
       client.query<{ count: string }>(
         `
           SELECT COUNT(*) AS count
           FROM scan_page_checks pc
-          JOIN sites s ON s.id = pc.site_id
           WHERE pc.scan_run_id = $1
-            AND s.user_id = $2
+            AND ($2::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM sites s
+              WHERE s.id = pc.site_id
+                AND s.user_id = $2
+            ))
         `,
-        [scanRunId, userId],
+        [scanRunId, userId ?? null],
       ),
       client.query<{ check_type: string; count: string }>(
         `
           SELECT sc.check_type, COUNT(*) AS count
           FROM scan_site_checks sc
-          JOIN sites s ON s.id = sc.site_id
           WHERE sc.scan_run_id = $1
-            AND s.user_id = $2
+            AND ($2::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM sites s
+              WHERE s.id = sc.site_id
+                AND s.user_id = $2
+            ))
           GROUP BY sc.check_type
         `,
-        [scanRunId, userId],
+        [scanRunId, userId ?? null],
       ),
       client.query<{
         category: ScanIssueCategory;
@@ -161,13 +173,17 @@ export async function getScanCategoryScoresForUser(
         `
           SELECT si.category, si.severity, COUNT(*) AS count
           FROM scan_issues si
-          JOIN sites s ON s.id = si.site_id
           WHERE si.scan_run_id = $1
-            AND s.user_id = $2
+            AND ($2::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM sites s
+              WHERE s.id = si.site_id
+                AND s.user_id = $2
+            ))
             AND si.status = 'open'
           GROUP BY si.category, si.severity
         `,
-        [scanRunId, userId],
+        [scanRunId, userId ?? null],
       ),
     ]);
 
@@ -240,4 +256,17 @@ export async function getScanCategoryScoresForUser(
       issueCategories: definition.issueCategories,
     };
   });
+}
+
+export async function getScanCategoryScores(
+  scanRunId: string,
+): Promise<ScanCategoryScore[]> {
+  return getScanCategoryScoresInternal(scanRunId);
+}
+
+export async function getScanCategoryScoresForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<ScanCategoryScore[]> {
+  return getScanCategoryScoresInternal(scanRunId, userId);
 }

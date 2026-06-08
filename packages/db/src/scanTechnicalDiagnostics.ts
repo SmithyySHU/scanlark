@@ -78,9 +78,9 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export async function getScanTechnicalDiagnosticsForUser(
-  userId: string,
+async function getScanTechnicalDiagnosticsInternal(
   scanRunId: string,
+  userId?: string,
 ): Promise<ScanTechnicalDiagnosticsSummary> {
   const client = await ensureConnected();
 
@@ -88,22 +88,30 @@ export async function getScanTechnicalDiagnosticsForUser(
     `
       SELECT COUNT(*) AS count
       FROM scan_page_checks pc
-      JOIN sites s ON s.id = pc.site_id
       WHERE pc.scan_run_id = $1
-        AND s.user_id = $2
+        AND ($2::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM sites s
+          WHERE s.id = pc.site_id
+            AND s.user_id = $2
+        ))
     `,
-    [scanRunId, userId],
+    [scanRunId, userId ?? null],
   );
 
   const siteChecksRes = await client.query<SiteCheckRow>(
     `
       SELECT sc.check_type, sc.ok, sc.facts_json
       FROM scan_site_checks sc
-      JOIN sites s ON s.id = sc.site_id
       WHERE sc.scan_run_id = $1
-        AND s.user_id = $2
+        AND ($2::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM sites s
+          WHERE s.id = sc.site_id
+            AND s.user_id = $2
+        ))
     `,
-    [scanRunId, userId],
+    [scanRunId, userId ?? null],
   );
 
   const issueCountsRes = await client.query<{
@@ -113,13 +121,17 @@ export async function getScanTechnicalDiagnosticsForUser(
     `
       SELECT si.category, COUNT(*) AS count
       FROM scan_issues si
-      JOIN sites s ON s.id = si.site_id
       WHERE si.scan_run_id = $1
-        AND s.user_id = $2
+        AND ($2::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM sites s
+          WHERE s.id = si.site_id
+            AND s.user_id = $2
+        ))
         AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')
       GROUP BY si.category
     `,
-    [scanRunId, userId],
+    [scanRunId, userId ?? null],
   );
 
   const issueCountByCategory = new Map<string, number>();
@@ -277,4 +289,17 @@ export async function getScanTechnicalDiagnosticsForUser(
         : null,
     },
   };
+}
+
+export async function getScanTechnicalDiagnostics(
+  scanRunId: string,
+): Promise<ScanTechnicalDiagnosticsSummary> {
+  return getScanTechnicalDiagnosticsInternal(scanRunId);
+}
+
+export async function getScanTechnicalDiagnosticsForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<ScanTechnicalDiagnosticsSummary> {
+  return getScanTechnicalDiagnosticsInternal(scanRunId, userId);
 }

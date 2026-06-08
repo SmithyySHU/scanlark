@@ -17,10 +17,12 @@ import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
   cancelScanRun,
+  createOrRotateReportShareForRunForUser,
   createSiteForUser,
   createIgnoreRule,
   deleteIgnoreRule,
   deleteSiteForUser,
+  disableReportShareForRunForUser,
   enqueueExistingScanRunIfIdle,
   enqueueManualScanIfIdle,
   formatIssuePresentation,
@@ -34,21 +36,27 @@ import {
   getOccurrencesForScanLinkForUser,
   getRecentScanRunsForSiteForUser,
   getRecentScansForSiteForUser,
+  getReportShareForRunForUser,
   getResultsForScanRunForUser,
   getResultsSummaryForScanRunForUser,
+  getScanCategoryScores,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
   getScanCategoryScoresForUser,
+  getScanLinksForRun,
   getScanLinksForExportFilteredForUser,
   getScanLinksForExportForUser,
   getScanLinksForRunForUser,
+  getScanLinksSummary,
   getScanLinksSummaryForUser,
   getScanDiff,
   getScanRunByIdForUser,
   getScanRunById,
+  getScanTechnicalDiagnostics,
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
+  getSharedReportAccessByToken,
   getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
@@ -61,10 +69,13 @@ import {
   getIgnoreRuleByIdForUser,
   listIgnoreRulesForUser,
   listIgnoreRulesForSiteForUser,
+  listIgnoredLinksForRun,
   listIgnoredLinksForRunForUser,
   listIgnoredOccurrencesForUser,
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  recordReportShareView,
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
@@ -301,6 +312,101 @@ function serializeIssueWithPresentation<
   };
 }
 
+type ReportShareApiRow = NonNullable<
+  Awaited<ReturnType<typeof getReportShareForRunForUser>>
+>;
+
+function serializeIgnoredLinkRow<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    created_at: Date | string;
+  },
+>(link: T) {
+  return {
+    ...link,
+    first_seen_at:
+      link.first_seen_at instanceof Date
+        ? link.first_seen_at.toISOString()
+        : link.first_seen_at,
+    last_seen_at:
+      link.last_seen_at instanceof Date
+        ? link.last_seen_at.toISOString()
+        : link.last_seen_at,
+    created_at:
+      link.created_at instanceof Date
+        ? link.created_at.toISOString()
+        : link.created_at,
+  };
+}
+
+function serializeScanLinkRow<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    created_at: Date | string;
+    updated_at: Date | string;
+    ignored_at: Date | string | null;
+  },
+>(link: T) {
+  return {
+    ...link,
+    first_seen_at:
+      link.first_seen_at instanceof Date
+        ? link.first_seen_at.toISOString()
+        : link.first_seen_at,
+    last_seen_at:
+      link.last_seen_at instanceof Date
+        ? link.last_seen_at.toISOString()
+        : link.last_seen_at,
+    created_at:
+      link.created_at instanceof Date
+        ? link.created_at.toISOString()
+        : link.created_at,
+    updated_at:
+      link.updated_at instanceof Date
+        ? link.updated_at.toISOString()
+        : link.updated_at,
+    ignored_at:
+      link.ignored_at instanceof Date
+        ? link.ignored_at.toISOString()
+        : link.ignored_at,
+  };
+}
+
+function serializeReportShare(share: ReportShareApiRow) {
+  return {
+    id: share.id,
+    scanRunId: share.scan_run_id,
+    siteId: share.site_id,
+    enabled: share.enabled,
+    createdAt:
+      share.created_at instanceof Date
+        ? share.created_at.toISOString()
+        : share.created_at,
+    disabledAt:
+      share.disabled_at instanceof Date
+        ? share.disabled_at.toISOString()
+        : share.disabled_at,
+    lastViewedAt:
+      share.last_viewed_at instanceof Date
+        ? share.last_viewed_at.toISOString()
+        : share.last_viewed_at,
+    viewCount: share.view_count,
+  };
+}
+
+function setPublicReportHeaders(res: Response) {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+}
+
+function buildSharedReportUrl(token: string) {
+  const appUrl =
+    process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
+  const base = appUrl.replace(/\/+$/, "");
+  return `${base}/shared-reports/${encodeURIComponent(token)}`;
+}
+
 async function rebuildIssuesForRun(scanRunId: string) {
   await setScanRunIssueGenerationStatus(scanRunId, "pending");
   try {
@@ -516,6 +622,238 @@ mountAuthRoutes(app);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "scanlark-api" });
+});
+
+async function requireSharedReportAccess(
+  req: express.Request,
+  res: express.Response,
+) {
+  const token = req.params.token;
+  if (!token) {
+    sendNotFound(res);
+    return null;
+  }
+  const access = await getSharedReportAccessByToken(token);
+  if (!access) {
+    sendNotFound(res);
+    return null;
+  }
+  return access;
+}
+
+app.get("/public/reports/:token", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    await recordReportShareView(access.share.id);
+    return res.json(serializeScanRun(access.run));
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token", err);
+    return sendInternalError(res, "Failed to fetch shared report", err);
+  }
+});
+
+app.get("/public/reports/:token/issues", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const status = parseIssueStatus(req.query.status);
+  const severity = parseIssueSeverity(req.query.severity);
+  const category = parseIssueCategory(req.query.category);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const issues = await listIssuesForScanRun(access.run.id, {
+      status,
+      severity,
+      category,
+      limit,
+      offset,
+    });
+    return res.json({
+      scanRunId: access.run.id,
+      summary: issues.summary,
+      countReturned: issues.countReturned,
+      totalMatching: issues.totalMatching,
+      resolvedCount: issues.resolvedCount,
+      issues: issues.issues.map(serializeIssueWithPresentation),
+      resolvedIssues: issues.resolvedIssues.map(serializeIssueWithPresentation),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/issues", err);
+    return sendInternalError(res, "Failed to fetch shared report issues", err);
+  }
+});
+
+app.get("/public/reports/:token/links/summary", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const summary = await getScanLinksSummary(access.run.id);
+    const noResponse = summary
+      .filter((row) => row.status_code == null)
+      .reduce((acc, row) => acc + row.count, 0);
+    return res.json({ scanRunId: access.run.id, summary, no_response: noResponse });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/links/summary", err);
+    return sendInternalError(
+      res,
+      "Failed to fetch shared report link summary",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/technical-diagnostics", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const diagnostics = await getScanTechnicalDiagnostics(access.run.id);
+    const categoryScores = await getScanCategoryScores(access.run.id);
+    return res.json({
+      ...diagnostics,
+      categoryScores,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /public/reports/:token/technical-diagnostics",
+      err,
+    );
+    return sendInternalError(
+      res,
+      "Failed to fetch shared technical diagnostics",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/ignored", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const ignoredResult = await listIgnoredLinksForRun(
+      access.run.id,
+      limit,
+      offset,
+    );
+    return res.json({
+      scanRunId: access.run.id,
+      countReturned: ignoredResult.countReturned,
+      totalMatching: ignoredResult.totalMatching,
+      links: ignoredResult.links.map(serializeIgnoredLinkRow),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/ignored", err);
+    return sendInternalError(
+      res,
+      "Failed to fetch shared ignored links",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/links", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const classificationRaw = req.query.classification;
+  const statusGroupRaw = req.query.statusGroup;
+  const showIgnoredRaw = req.query.showIgnored;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const classification = parseClassification(classificationRaw);
+  const statusGroup = parseStatusGroup(statusGroupRaw);
+  const showIgnored = parseShowIgnored(showIgnoredRaw);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    await applyIgnoreRulesForScanRun(access.run.id);
+    const paginatedLinks = await getScanLinksForRun(access.run.id, {
+      limit,
+      offset,
+      classification,
+      statusGroup,
+      includeIgnored: showIgnored,
+    });
+    return res.json({
+      scanRunId: access.run.id,
+      classification,
+      statusGroup,
+      showIgnored,
+      countReturned: paginatedLinks.countReturned,
+      totalMatching: paginatedLinks.totalMatching,
+      links: paginatedLinks.links.map(serializeScanLinkRow),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/links", err);
+    return sendInternalError(res, "Failed to fetch shared scan links", err);
+  }
 });
 
 app.use(authMiddleware);
@@ -1811,6 +2149,97 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/report", err);
     return sendInternalError(res, "Failed to build report", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const share = await getReportShareForRunForUser(userId, scanRunId);
+    return res.json({
+      scanRunId,
+      eligible: result.run.status === "completed",
+      share: share ? serializeReportShare(share) : null,
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in GET /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to fetch report share", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    if (result.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_shareable",
+        "Only completed scan runs can be shared",
+      );
+    }
+    const resultShare = await createOrRotateReportShareForRunForUser(
+      userId,
+      scanRunId,
+    );
+    return res.status(201).json({
+      scanRunId,
+      created: resultShare.created,
+      share: serializeReportShare(resultShare.share),
+      shareUrl:
+        resultShare.created && resultShare.shareToken
+          ? buildSharedReportUrl(resultShare.shareToken)
+          : null,
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    if (err instanceof Error && err.message === "scan_run_not_shareable") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_shareable",
+        "Only completed scan runs can be shared",
+      );
+    }
+    console.error("Error in POST /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to create report share", err);
+  }
+});
+
+app.delete("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    await disableReportShareForRunForUser(userId, scanRunId);
+    return res.status(204).send();
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in DELETE /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to revoke report share", err);
   }
 });
 

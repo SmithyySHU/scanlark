@@ -57,7 +57,13 @@ type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
 type LinkNoteStatus = "open" | "snoozed" | "resolved";
 type FixQueueStatusFilter = LinkNoteStatus | "all";
 type FixQueueView = "results" | "changes" | "fix_queue";
-type AppRoute = "landing" | "login" | "app" | "report" | "learn";
+type AppRoute =
+  | "landing"
+  | "login"
+  | "app"
+  | "report"
+  | "shared_report"
+  | "learn";
 type AppSection =
   | "dashboard"
   | "reports"
@@ -614,6 +620,23 @@ interface UptimeSummaryResponse {
   uptime30d: number | null;
   activeIncidentId: string | null;
   recentChecks: UptimeCheckResponse[];
+}
+
+interface ReportShare {
+  id: string;
+  scanRunId: string;
+  siteId: string;
+  enabled: boolean;
+  createdAt: string;
+  disabledAt: string | null;
+  lastViewedAt: string | null;
+  viewCount: number;
+}
+
+interface ReportShareResponse {
+  scanRunId: string;
+  eligible: boolean;
+  share: ReportShare | null;
 }
 
 type ReportIssuesState = {
@@ -1626,12 +1649,26 @@ function getReportScanRunIdFromLocation() {
   return null;
 }
 
+function getSharedReportTokenFromLocation() {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (!path.startsWith("/shared-reports/")) return null;
+  const rawToken = path.slice("/shared-reports/".length);
+  if (!rawToken) return null;
+  try {
+    return decodeURIComponent(rawToken);
+  } catch {
+    return rawToken;
+  }
+}
+
 function getRouteFromLocation(): AppRoute {
   if (typeof window === "undefined") return "landing";
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
   if (path === "/" || path === "/landing") return "landing";
   if (path === "/login") return "login";
   if (path === "/report") return "report";
+  if (path.startsWith("/shared-reports/")) return "shared_report";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
   return "app";
 }
@@ -1841,6 +1878,10 @@ function buildIgnoredLinksUrl(
   limit = LINKS_PAGE_SIZE,
 ) {
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/ignored?limit=${limit}&offset=${offset}`;
+}
+
+function buildSharedReportApiBase(token: string) {
+  return `${API_BASE}/public/reports/${encodeURIComponent(token)}`;
 }
 
 function getSummaryCount(
@@ -2194,6 +2235,13 @@ const App: React.FC = () => {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authWorking, setAuthWorking] = useState(false);
+  const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const [sharedReportToken, setSharedReportToken] = useState<string | null>(
+    () => getSharedReportTokenFromLocation(),
+  );
+  const [learnSlug, setLearnSlug] = useState<string | null>(() =>
+    getLearnSlugFromLocation(),
+  );
 
   const apiFetch = useCallback(
     async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -2204,6 +2252,16 @@ const App: React.FC = () => {
       return res;
     },
     [setAuthUser],
+  );
+
+  const reportFetch = useCallback(
+    async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (sharedReportToken) {
+        return fetch(input, init);
+      }
+      return apiFetch(input, init);
+    },
+    [apiFetch, sharedReportToken],
   );
 
   const selectedSiteIdRef = useRef<string | null>(null);
@@ -2236,16 +2294,14 @@ const App: React.FC = () => {
   const [results, setResults] = useState<ScanLink[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
-  const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
-  const [learnSlug, setLearnSlug] = useState<string | null>(() =>
-    getLearnSlugFromLocation(),
-  );
   const [learnSearchQuery, setLearnSearchQuery] = useState("");
   const [learnCategoryFilter, setLearnCategoryFilter] =
     useState<LearnCategoryFilter>("all");
   const [appSection, setAppSection] = useState<AppSection>("dashboard");
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
-    getReportScanRunIdFromLocation() ? "report" : "dashboard",
+    getReportScanRunIdFromLocation() || getSharedReportTokenFromLocation()
+      ? "report"
+      : "dashboard",
   );
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
@@ -2294,6 +2350,13 @@ const App: React.FC = () => {
     useState<Phase0Diagnostics | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportShare, setReportShare] = useState<ReportShare | null>(null);
+  const [reportShareEligible, setReportShareEligible] = useState(false);
+  const [reportShareLoading, setReportShareLoading] = useState(false);
+  const [reportShareBusy, setReportShareBusy] = useState(false);
+  const [reportShareRevealUrl, setReportShareRevealUrl] = useState<string | null>(
+    null,
+  );
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -2494,11 +2557,15 @@ const App: React.FC = () => {
     const handlePopState = () => {
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
+      const nextSharedToken = getSharedReportTokenFromLocation();
       setRoute(nextRoute);
       setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
+      setSharedReportToken(nextSharedToken);
       setViewMode(
-        nextRoute === "report" && nextReportId ? "report" : "dashboard",
+        nextRoute === "report" || nextRoute === "shared_report"
+          ? "report"
+          : "dashboard",
       );
     };
     window.addEventListener("popstate", handlePopState);
@@ -2579,8 +2646,11 @@ const App: React.FC = () => {
       classification: LinkClassification,
       offset: number,
     ): Promise<ScanLinksResponse> => {
-      const res = await apiFetch(
-        buildScanLinksUrl(runId, classification, offset, "all", false),
+      const url = sharedReportToken
+        ? `${buildSharedReportApiBase(sharedReportToken)}/links?classification=${encodeURIComponent(classification)}&limit=${LINKS_PAGE_SIZE}&offset=${offset}`
+        : buildScanLinksUrl(runId, classification, offset, "all", false);
+      const res = await reportFetch(
+        url,
         { cache: "no-store" },
       );
       if (!res.ok) {
@@ -2590,25 +2660,30 @@ const App: React.FC = () => {
       }
       return (await res.json()) as ScanLinksResponse;
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
   );
 
   const loadReportOverview = useCallback(
     async (scanRunId: string) => {
+      const reportBase = sharedReportToken
+        ? buildSharedReportApiBase(sharedReportToken)
+        : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
       const [runRes, summaryRes, ignoredRes, diagnosticsRes] =
         await Promise.all([
-          apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
+          reportFetch(reportBase, {
             cache: "no-store",
           }),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
-            { cache: "no-store" },
+          reportFetch(`${reportBase}/links/summary`, { cache: "no-store" }),
+          reportFetch(
+            sharedReportToken
+              ? `${reportBase}/ignored?limit=1&offset=0`
+              : buildIgnoredLinksUrl(scanRunId, 0, 1),
+            {
+              cache: "no-store",
+            },
           ),
-          apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), {
-            cache: "no-store",
-          }),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/technical-diagnostics`,
+          reportFetch(
+            `${reportBase}/technical-diagnostics`,
             { cache: "no-store" },
           ),
         ]);
@@ -2644,11 +2719,12 @@ const App: React.FC = () => {
         (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
 
       setReportRunData(run);
+      setReportScanRunId(run.id);
       setReportSummaryRows(summaryData.summary ?? []);
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
       setReportTechnicalDiagnostics({
-        scanRunId,
+        scanRunId: run.id,
         ok: null,
         broken: null,
         blocked: null,
@@ -2669,7 +2745,7 @@ const App: React.FC = () => {
 
       return run;
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
   );
 
   const loadInitialReportSections = useCallback(
@@ -2726,8 +2802,10 @@ const App: React.FC = () => {
       });
 
       try {
-        const ignoredRes = await apiFetch(
-          buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
+        const ignoredRes = await reportFetch(
+          sharedReportToken
+            ? `${buildSharedReportApiBase(sharedReportToken)}/ignored?limit=${LINKS_PAGE_SIZE}&offset=0`
+            : buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
           {
             cache: "no-store",
           },
@@ -2752,12 +2830,15 @@ const App: React.FC = () => {
       }
       setReportSectionsLoaded(true);
     },
-    [apiFetch, fetchReportScanLinksPage],
+    [fetchReportScanLinksPage, reportFetch, sharedReportToken],
   );
 
   const loadInitialReportIssues = useCallback(
     async (scanRunId: string) => {
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      const reportIssuesBase = sharedReportToken
+        ? `${buildSharedReportApiBase(sharedReportToken)}/issues`
+        : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues`;
       try {
         const [
           allRes,
@@ -2769,38 +2850,16 @@ const App: React.FC = () => {
           securityRes,
           performanceRes,
         ] = await Promise.all([
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=link_integrity&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=seo_basic&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=robots&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=sitemap&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=ssl_https&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=security_header&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=performance_basic&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
+          reportFetch(`${reportIssuesBase}?limit=${LINKS_PAGE_SIZE}&offset=0`, {
+            cache: "no-store",
+          }),
+          reportFetch(`${reportIssuesBase}?category=link_integrity&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=seo_basic&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=robots&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=sitemap&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=ssl_https&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=security_header&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=performance_basic&limit=1&offset=0`, { cache: "no-store" }),
         ]);
         if (!allRes.ok) {
           throw new Error(`Failed to load issues: ${allRes.status}`);
@@ -2872,7 +2931,7 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
   );
 
   const buildReportIssuesUrl = useCallback(
@@ -2899,9 +2958,12 @@ const App: React.FC = () => {
       ) {
         params.set("category", filter);
       }
+      if (sharedReportToken) {
+        return `${buildSharedReportApiBase(sharedReportToken)}/issues?${params.toString()}`;
+      }
       return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?${params.toString()}`;
     },
-    [],
+    [sharedReportToken],
   );
 
   const loadFilteredReportIssues = useCallback(
@@ -2916,7 +2978,7 @@ const App: React.FC = () => {
         },
       }));
       try {
-        const res = await apiFetch(
+        const res = await reportFetch(
           buildReportIssuesUrl(scanRunId, filter, offset),
           { cache: "no-store" },
         );
@@ -2961,7 +3023,7 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch, buildReportIssuesUrl],
+    [buildReportIssuesUrl, reportFetch],
   );
 
   const loadMoreReportIssues = useCallback(
@@ -2969,8 +3031,11 @@ const App: React.FC = () => {
       if (reportIssues.loading || !reportIssues.hasMore) return;
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
-        const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
+        const base = sharedReportToken
+          ? `${buildSharedReportApiBase(sharedReportToken)}/issues`
+          : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues`;
+        const res = await reportFetch(
+          `${base}?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
           { cache: "no-store" },
         );
         if (!res.ok) {
@@ -2999,7 +3064,7 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch, reportIssues],
+    [reportFetch, reportIssues, sharedReportToken],
   );
 
   const loadMoreReportSection = useCallback(
@@ -3050,12 +3115,14 @@ const App: React.FC = () => {
         error: null,
       }));
       try {
-        const res = await apiFetch(
-          buildIgnoredLinksUrl(
-            scanRunId,
-            reportIgnoredSection.offset,
-            LINKS_PAGE_SIZE,
-          ),
+        const res = await reportFetch(
+          sharedReportToken
+            ? `${buildSharedReportApiBase(sharedReportToken)}/ignored?limit=${LINKS_PAGE_SIZE}&offset=${reportIgnoredSection.offset}`
+            : buildIgnoredLinksUrl(
+                scanRunId,
+                reportIgnoredSection.offset,
+                LINKS_PAGE_SIZE,
+              ),
           { cache: "no-store" },
         );
         if (!res.ok)
@@ -3076,18 +3143,18 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch, reportIgnoredSection],
+    [reportFetch, reportIgnoredSection, sharedReportToken],
   );
 
   useEffect(() => {
     if (viewMode !== "report") return;
-    if (!reportScanRunId) {
+    if (!reportScanRunId && !sharedReportToken) {
       setReportRunData(null);
       setReportSummaryRows([]);
       setReportIgnoredTotal(null);
       setReportLastLoadedAt(null);
       resetReportSections();
-      setReportError("Missing scan run id");
+      setReportError("Missing report reference");
       return;
     }
     let cancelled = false;
@@ -3096,7 +3163,7 @@ const App: React.FC = () => {
       setReportError(null);
       try {
         resetReportSections();
-        await loadReportOverview(reportScanRunId);
+        await loadReportOverview(reportScanRunId ?? sharedReportToken ?? "");
       } catch (err) {
         if (!cancelled) {
           setReportError(getErrorMessage(err, "Failed to load report"));
@@ -3109,7 +3176,53 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadReportOverview, reportScanRunId, resetReportSections, viewMode]);
+  }, [
+    loadReportOverview,
+    reportScanRunId,
+    resetReportSections,
+    sharedReportToken,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (viewMode !== "report" || !reportScanRunId || sharedReportToken) {
+      setReportShare(null);
+      setReportShareEligible(false);
+      setReportShareLoading(false);
+      setReportShareRevealUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const loadShare = async () => {
+      setReportShareLoading(true);
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load report share: ${res.status}`);
+        }
+        const data = (await res.json()) as ReportShareResponse;
+        if (!cancelled) {
+          setReportShare(data.share ?? null);
+          setReportShareEligible(Boolean(data.eligible));
+          setReportShareRevealUrl(null);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setReportShare(null);
+          setReportShareEligible(false);
+        }
+      } finally {
+        if (!cancelled) setReportShareLoading(false);
+      }
+    };
+    void loadShare();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, reportScanRunId, sharedReportToken, viewMode]);
 
   useEffect(() => {
     if (
@@ -4283,7 +4396,9 @@ const App: React.FC = () => {
   const isPublicLandingRoute = route === "landing";
   const isLoginRoute = route === "login";
   const isReportRoute = route === "report";
+  const isSharedReportRoute = route === "shared_report";
   const protectedRouteRequiresAuth = route === "app" || route === "report";
+  const isReadOnlySharedReport = reportView && isSharedReportRoute;
   const authPageTitle =
     isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
   const authPageSubtitle =
@@ -7279,13 +7394,21 @@ const App: React.FC = () => {
     return buildAppUrl("/report", { scanRunId });
   }
 
+  function buildSharedReportLink(token: string) {
+    return buildAppUrl(`/shared-reports/${encodeURIComponent(token)}`);
+  }
+
   function navigateTo(pathname: string) {
     const url = buildAppUrl(pathname);
     window.history.pushState({}, "", url);
     const nextRoute = getRouteFromLocation();
     setRoute(nextRoute);
     setLearnSlug(getLearnSlugFromLocation());
-    setViewMode(nextRoute === "report" ? "report" : "dashboard");
+    setViewMode(
+      nextRoute === "report" || nextRoute === "shared_report"
+        ? "report"
+        : "dashboard",
+    );
   }
 
   function openLearnArticle(slug: string) {
@@ -7297,6 +7420,7 @@ const App: React.FC = () => {
     window.history.pushState({}, "", url);
     setRoute("report");
     setLearnSlug(null);
+    setSharedReportToken(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -7304,6 +7428,9 @@ const App: React.FC = () => {
     setReportLastLoadedAt(null);
     resetReportSections();
     setReportError(null);
+    setReportShare(null);
+    setReportShareEligible(false);
+    setReportShareRevealUrl(null);
     setViewMode("report");
   }
 
@@ -7312,6 +7439,7 @@ const App: React.FC = () => {
     window.history.pushState({}, "", url);
     setRoute("app");
     setLearnSlug(null);
+    setSharedReportToken(null);
     setReportScanRunId(null);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -7319,7 +7447,72 @@ const App: React.FC = () => {
     setReportLastLoadedAt(null);
     resetReportSections();
     setReportError(null);
+    setReportShare(null);
+    setReportShareEligible(false);
+    setReportShareRevealUrl(null);
     setViewMode("dashboard");
+  }
+
+  async function handleCreateReportShare() {
+    if (!reportScanRunId) return;
+    setReportShareBusy(true);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to create share link: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as {
+        scanRunId: string;
+        created: boolean;
+        share: ReportShare;
+        shareUrl: string | null;
+      };
+      setReportShare(data.share);
+      setReportShareEligible(true);
+      setReportShareRevealUrl(data.shareUrl);
+      if (data.shareUrl) {
+        await copyToClipboard(data.shareUrl, undefined, "Copied share link");
+      } else {
+        pushToast(
+          "A share is already active. Revoke it to generate a new one-time URL.",
+          "info",
+        );
+      }
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to create share link"), "warning");
+    } finally {
+      setReportShareBusy(false);
+    }
+  }
+
+  async function handleRevokeReportShare() {
+    if (!reportScanRunId) return;
+    setReportShareBusy(true);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        { method: "DELETE" },
+      );
+      if (!res.ok && res.status !== 204) {
+        throw new Error(`Failed to revoke share link: ${res.status}`);
+      }
+      setReportShare(null);
+      setReportShareRevealUrl(null);
+      pushToast("Share link revoked", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to revoke share link"), "warning");
+    } finally {
+      setReportShareBusy(false);
+    }
   }
 
   function triggerExport(
@@ -11962,7 +12155,7 @@ const App: React.FC = () => {
               setLearnCategoryFilter("all");
             }}
           />
-        ) : authLoading ? (
+        ) : authLoading && !isSharedReportRoute ? (
           <div
             style={{
               minHeight: "60vh",
@@ -11975,7 +12168,7 @@ const App: React.FC = () => {
           >
             Loading session...
           </div>
-        ) : !authUser ? (
+        ) : !authUser && !isSharedReportRoute ? (
           isPublicLandingRoute ? (
             <MarketingPage
               isAuthenticated={false}
@@ -12014,11 +12207,14 @@ const App: React.FC = () => {
             <div className="report-header">
               <div>
                 <div className="report-title">
-                  {selectedSiteName ?? reportHost ?? "Scan report"}
+                  {isReadOnlySharedReport
+                    ? reportHost ?? "Scan report"
+                    : selectedSiteName ?? reportHost ?? "Scan report"}
                 </div>
                 <div className="report-subtitle">
-                  Detailed scan document with summary, issue analysis, raw
-                  evidence, and diagnostics for a single run.
+                  {isReadOnlySharedReport
+                    ? "Report shared via Scanlark. This read-only view keeps the same evidence and findings without dashboard access."
+                    : "Detailed scan document with summary, issue analysis, raw evidence, and diagnostics for a single run."}
                 </div>
                 <div className="report-status-row">
                   <StatusBadge
@@ -12045,25 +12241,167 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="report-actions">
-                <button className="report-button" onClick={backToDashboard}>
-                  Back to dashboard
-                </button>
+                {!isReadOnlySharedReport && (
+                  <button className="report-button" onClick={backToDashboard}>
+                    Back to dashboard
+                  </button>
+                )}
                 <button
                   className="report-button"
-                  onClick={() =>
-                    reportScanRunId &&
-                    copyToClipboard(
-                      buildReportLink(reportScanRunId),
-                      undefined,
-                      "Copied link",
-                    )
+                  onClick={() => {
+                    if (isReadOnlySharedReport && sharedReportToken) {
+                      void copyToClipboard(
+                        buildSharedReportLink(sharedReportToken),
+                        undefined,
+                        "Copied share link",
+                      );
+                      return;
+                    }
+                    if (reportScanRunId) {
+                      void copyToClipboard(
+                        buildReportLink(reportScanRunId),
+                        undefined,
+                        "Copied report link",
+                      );
+                    }
+                  }}
+                  disabled={
+                    isReadOnlySharedReport
+                      ? !sharedReportToken
+                      : !reportScanRunId
                   }
-                  disabled={!reportScanRunId}
                 >
-                  Copy report link
+                  {isReadOnlySharedReport ? "Copy share link" : "Copy report link"}
                 </button>
               </div>
             </div>
+
+            {!isReadOnlySharedReport && reportRun?.status === "completed" && (
+              <div className="report-card">
+                <div className="report-card__header">
+                  <div>
+                    <div className="report-table-title">Share report</div>
+                    <div className="report-table-meta" style={{ marginTop: "4px" }}>
+                      Create a public read-only link for this completed scan run.
+                    </div>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "12px",
+                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                    alignItems: "start",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    {reportShare ? (
+                      <>
+                        <div
+                          style={{
+                            fontSize: "13px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Share link is active.
+                        </div>
+                        <div
+                          style={{
+                            marginTop: "6px",
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Views {reportShare.viewCount} • Last viewed{" "}
+                          {reportShare.lastViewedAt
+                            ? formatDate(reportShare.lastViewedAt)
+                            : "Never"}
+                        </div>
+                        {reportShareRevealUrl && (
+                          <div
+                            style={{
+                              marginTop: "10px",
+                              display: "grid",
+                              gap: "6px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              One-time share URL
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "13px",
+                                fontWeight: 600,
+                                overflowWrap: "anywhere",
+                              }}
+                            >
+                              {reportShareRevealUrl}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              This URL is only shown at creation time. Refreshing or reopening this report will hide it.
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {reportShareEligible
+                          ? reportShareLoading
+                            ? "Loading share status..."
+                            : "No public share link exists for this run yet."
+                          : "Only completed scan runs can be shared."}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {reportShare ? (
+                      <>
+                        {reportShareRevealUrl && (
+                          <button
+                            className="report-button"
+                            onClick={() =>
+                              void copyToClipboard(
+                                reportShareRevealUrl,
+                                undefined,
+                                "Copied share link",
+                              )
+                            }
+                            disabled={reportShareBusy}
+                          >
+                            Copy one-time URL
+                          </button>
+                        )}
+                        <button
+                          className="report-button"
+                          onClick={() => void handleRevokeReportShare()}
+                          disabled={reportShareBusy}
+                        >
+                          {reportShareBusy ? "Revoking..." : "Revoke link"}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="report-button"
+                        onClick={() => void handleCreateReportShare()}
+                        disabled={!reportShareEligible || reportShareBusy}
+                      >
+                        {reportShareBusy ? "Creating..." : "Create share link"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {reportLoading && !reportRun && (
               <div
@@ -12369,7 +12707,9 @@ const App: React.FC = () => {
                     <div className="report-meta-item">
                       <div className="report-label">Site</div>
                       <div className="report-value">
-                        {selectedSiteName ?? reportHost ?? "-"}
+                        {isReadOnlySharedReport
+                          ? reportHost ?? "-"
+                          : selectedSiteName ?? reportHost ?? "-"}
                       </div>
                     </div>
                     <div className="report-meta-item">
@@ -12655,7 +12995,9 @@ const App: React.FC = () => {
                     }}
                   >
                     <span>Raw status {reportRun.status}</span>
-                    <span>Site id {reportRun.site_id}</span>
+                    {!isReadOnlySharedReport && (
+                      <span>Site id {reportRun.site_id}</span>
+                    )}
                     <span>
                       Checked {reportRun.checked_links} /{" "}
                       {reportRun.total_links}
