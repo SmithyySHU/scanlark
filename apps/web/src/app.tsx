@@ -289,6 +289,7 @@ interface Phase0Diagnostics {
   blocked: number | null;
   noResponse: number | null;
   ignoredSkipped: number | null;
+  categoryScores: ScanCategoryScore[] | null;
   seoBasic: {
     pageChecksCount: number | null;
     issueCount: number | null;
@@ -351,6 +352,7 @@ interface Phase0Diagnostics {
 
 interface ScanTechnicalDiagnosticsResponse {
   scanRunId: string;
+  categoryScores: ScanCategoryScore[];
   seoBasic: NonNullable<Phase0Diagnostics["seoBasic"]>;
   robots: NonNullable<Phase0Diagnostics["robots"]>;
   sitemap: NonNullable<Phase0Diagnostics["sitemap"]>;
@@ -412,6 +414,25 @@ type IssueCategory =
   | "sitemap"
   | "robots"
   | "performance_basic";
+type ScanCategoryScoreKey =
+  | "link_integrity"
+  | "seo_basic"
+  | "search_engine_access"
+  | "ssl_https"
+  | "security_setup"
+  | "speed_basics";
+type ScanCategoryScoreStatus = "healthy" | "needs_attention" | "not_checked";
+interface ScanCategoryScore {
+  key: ScanCategoryScoreKey;
+  label: string;
+  score: number | null;
+  band: ScoreBand | null;
+  status: ScanCategoryScoreStatus;
+  findingCount: number;
+  severityCounts: Record<IssueSeverity, number>;
+  checkCount: number;
+  issueCategories: IssueCategory[];
+}
 type IssueType =
   | "broken_link"
   | "blocked_link"
@@ -519,6 +540,7 @@ interface DashboardSummaryResponse {
   latestCategoryIssueSummaries: Partial<
     Record<IssueCategory, ScanIssuesResponse["summary"]>
   >;
+  latestCategoryScores: ScanCategoryScore[];
   latestTechnicalDiagnostics: ScanTechnicalDiagnosticsResponse | null;
   latestDiffSummary: ScanDiffResponse["summary"] | null;
   baselineRun: ScanDiffRun | null;
@@ -702,7 +724,7 @@ const REPORT_ISSUE_FILTERS: Array<{
 ];
 
 const DASHBOARD_CATEGORIES: Array<{
-  key: IssueCategory;
+  key: ScanCategoryScoreKey;
   label: string;
   description: string;
 }> = [
@@ -713,31 +735,26 @@ const DASHBOARD_CATEGORIES: Array<{
   },
   {
     key: "seo_basic",
-    label: "SEO basics",
+    label: "SEO Basics",
     description: "Titles, descriptions, H1s, canonicals, noindex",
   },
   {
-    key: "robots",
-    label: "Robots.txt",
-    description: "Search engine crawl access",
-  },
-  {
-    key: "sitemap",
-    label: "Sitemap",
-    description: "Search engine page discovery",
+    key: "search_engine_access",
+    label: "Search Engine Access",
+    description: "Robots.txt and sitemap discovery",
   },
   {
     key: "ssl_https",
-    label: "SSL / HTTPS",
+    label: "SSL & HTTPS",
     description: "HTTPS reachability, redirects, and certificate checks",
   },
   {
-    key: "security_header",
+    key: "security_setup",
     label: "Security Setup",
     description: "Basic passive response-header checks",
   },
   {
-    key: "performance_basic",
+    key: "speed_basics",
     label: "Speed Basics",
     description: "Basic response size and asset-count signals",
   },
@@ -961,6 +978,44 @@ function getCategoryDetail(
   if (!checks || checks <= 0) return "Warning: no diagnostic evidence yet";
   const count = diagnosticIssues ?? issueCount;
   return `${count} finding${count === 1 ? "" : "s"}`;
+}
+
+function getCategoryScoreStatusLabel(status: ScanCategoryScoreStatus) {
+  if (status === "healthy") return "Healthy";
+  if (status === "needs_attention") return "Needs attention";
+  return "Not checked";
+}
+
+function getCategoryScoreTone(score: ScanCategoryScore | null | undefined) {
+  if (!score || score.status === "not_checked") return "default" as const;
+  if (score.status === "healthy") return "success" as const;
+  if (score.score != null && score.score < 55) return "danger" as const;
+  return "warning" as const;
+}
+
+function getCategoryScoreValue(score: ScanCategoryScore | null | undefined) {
+  if (!score || score.score == null) return "N/A";
+  return `${score.score}%`;
+}
+
+function getCategoryScoreDetail(score: ScanCategoryScore | null | undefined) {
+  if (!score) return "Score unavailable";
+  if (score.status === "not_checked") return "No diagnostic evidence recorded";
+  return `${score.findingCount} finding${score.findingCount === 1 ? "" : "s"} · ${score.checkCount} check${score.checkCount === 1 ? "" : "s"}`;
+}
+
+function getSearchAccessCategoryDetail(
+  score: ScanCategoryScore | null | undefined,
+  summariesByCategory: Partial<
+    Record<IssueCategory, ScanIssuesResponse["summary"]>
+  >,
+) {
+  if (!score || score.key !== "search_engine_access") {
+    return getCategoryScoreDetail(score);
+  }
+  const robotsCount = summariesByCategory.robots?.total ?? 0;
+  const sitemapCount = summariesByCategory.sitemap?.total ?? 0;
+  return `Robots ${robotsCount} finding${robotsCount === 1 ? "" : "s"} · Sitemap ${sitemapCount} finding${sitemapCount === 1 ? "" : "s"}`;
 }
 
 function getScanStageText(run: ScanRunSummary | null | undefined) {
@@ -2191,6 +2246,7 @@ const App: React.FC = () => {
         blocked: null,
         noResponse: null,
         ignoredSkipped: null,
+        categoryScores: diagnosticsData.categoryScores ?? null,
         seoBasic: diagnosticsData.seoBasic,
         robots: diagnosticsData.robots,
         sitemap: diagnosticsData.sitemap,
@@ -2295,7 +2351,16 @@ const App: React.FC = () => {
     async (scanRunId: string) => {
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
-        const [allRes, linkRes, seoRes, performanceRes] = await Promise.all([
+        const [
+          allRes,
+          linkRes,
+          seoRes,
+          robotsRes,
+          sitemapRes,
+          sslRes,
+          securityRes,
+          performanceRes,
+        ] = await Promise.all([
           apiFetch(
             `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
             { cache: "no-store" },
@@ -2306,6 +2371,22 @@ const App: React.FC = () => {
           ),
           apiFetch(
             `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=seo_basic&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=robots&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=sitemap&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=ssl_https&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=security_header&limit=1&offset=0`,
             { cache: "no-store" },
           ),
           apiFetch(
@@ -2324,6 +2405,24 @@ const App: React.FC = () => {
         if (!seoRes.ok) {
           throw new Error(`Failed to load SEO issue summary: ${seoRes.status}`);
         }
+        if (!robotsRes.ok) {
+          throw new Error(
+            `Failed to load robots issue summary: ${robotsRes.status}`,
+          );
+        }
+        if (!sitemapRes.ok) {
+          throw new Error(
+            `Failed to load sitemap issue summary: ${sitemapRes.status}`,
+          );
+        }
+        if (!sslRes.ok) {
+          throw new Error(`Failed to load SSL issue summary: ${sslRes.status}`);
+        }
+        if (!securityRes.ok) {
+          throw new Error(
+            `Failed to load security issue summary: ${securityRes.status}`,
+          );
+        }
         if (!performanceRes.ok) {
           throw new Error(
             `Failed to load performance issue summary: ${performanceRes.status}`,
@@ -2332,6 +2431,10 @@ const App: React.FC = () => {
         const data = (await allRes.json()) as ScanIssuesResponse;
         const linkData = (await linkRes.json()) as ScanIssuesResponse;
         const seoData = (await seoRes.json()) as ScanIssuesResponse;
+        const robotsData = (await robotsRes.json()) as ScanIssuesResponse;
+        const sitemapData = (await sitemapRes.json()) as ScanIssuesResponse;
+        const sslData = (await sslRes.json()) as ScanIssuesResponse;
+        const securityData = (await securityRes.json()) as ScanIssuesResponse;
         const performanceData =
           (await performanceRes.json()) as ScanIssuesResponse;
         setReportIssues({
@@ -2342,6 +2445,10 @@ const App: React.FC = () => {
           summariesByCategory: {
             link_integrity: linkData.summary,
             seo_basic: seoData.summary,
+            robots: robotsData.summary,
+            sitemap: sitemapData.summary,
+            ssl_https: sslData.summary,
+            security_header: securityData.summary,
             performance_basic: performanceData.summary,
           },
           offset: data.countReturned,
@@ -3402,6 +3509,10 @@ const App: React.FC = () => {
     reportIssueSummary,
     reportLinkIntegrityIssueSummary,
   );
+  const reportCategoryScores = reportTechnicalDiagnostics?.categoryScores ?? [];
+  const reportCategoryScoresByKey = Object.fromEntries(
+    reportCategoryScores.map((score) => [score.key, score]),
+  ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
   const reportHighPriorityCount =
     (reportIssueSummary?.bySeverity.critical ?? 0) +
     (reportIssueSummary?.bySeverity.high ?? 0);
@@ -3604,6 +3715,12 @@ const App: React.FC = () => {
   const dashboardCategorySummaries = dashboardSummaryDataReady
     ? (dashboardSummary?.latestCategoryIssueSummaries ?? {})
     : {};
+  const dashboardCategoryScoreRows = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestCategoryScores ?? [])
+    : [];
+  const dashboardCategoryScoresByKey = Object.fromEntries(
+    dashboardCategoryScoreRows.map((score) => [score.key, score]),
+  ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
   const dashboardLatestDiffSummary = dashboardSummaryDataReady
     ? (dashboardSummary?.latestDiffSummary ?? null)
     : null;
@@ -5767,6 +5884,9 @@ const App: React.FC = () => {
           ? getSummaryCount(summaryRows, "no_response")
           : null,
         ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
+        categoryScores: technicalLoaded
+          ? (technicalDiagnostics?.categoryScores ?? null)
+          : null,
         seoBasic: technicalLoaded
           ? (technicalDiagnostics?.seoBasic ?? null)
           : null,
@@ -8657,6 +8777,9 @@ const App: React.FC = () => {
           grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
           gap: 14px;
         }
+        .report-category-score-grid {
+          margin-top: 14px;
+        }
         .dashboard-history-grid {
           display: grid;
           grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
@@ -8767,11 +8890,22 @@ const App: React.FC = () => {
           color: var(--text-muted);
           line-height: 1.6;
         }
+        .category-status-card__score {
+          color: var(--text);
+          font-size: 28px;
+          font-weight: 800;
+          line-height: 1;
+        }
         .category-status-card__summary {
           font-size: 13px;
           color: var(--text);
           line-height: 1.6;
           font-weight: 600;
+        }
+        .category-status-card__stats {
+          color: var(--text-muted);
+          font-size: 12px;
+          font-weight: 700;
         }
         .scan-hero-card {
           border: 1px solid var(--border);
@@ -11087,6 +11221,60 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
+                <div className="report-card report-category-scores">
+                  <div className="report-card__header">
+                    <div>
+                      <div className="report-table-title">Category scores</div>
+                      <div className="report-score-subtitle">
+                        Deterministic scores from open findings in this scan.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="dashboard-category-grid report-category-score-grid">
+                    {DASHBOARD_CATEGORIES.map((category) => {
+                      const score =
+                        reportCategoryScoresByKey[category.key] ?? null;
+                      const scoreValue = reportIssueSummaryPending
+                        ? "Pending"
+                        : getCategoryScoreValue(score);
+                      const statusLabel = reportIssueSummaryPending
+                        ? "Pending"
+                        : score
+                          ? getCategoryScoreStatusLabel(score.status)
+                          : "Score unavailable";
+                      return (
+                        <CategoryStatusCard
+                          key={category.key}
+                          title={category.label}
+                          statusLabel={statusLabel}
+                          tone={
+                            reportIssueSummaryPending
+                              ? "default"
+                              : getCategoryScoreTone(score)
+                          }
+                          score={scoreValue}
+                          description={category.description}
+                          detail={
+                            reportIssueSummaryPending
+                              ? "Building issue summary"
+                              : getSearchAccessCategoryDetail(
+                                  score,
+                                  reportIssues.summariesByCategory,
+                                )
+                          }
+                          stats={
+                            reportIssueSummaryPending
+                              ? null
+                              : score
+                                ? `${score.findingCount} findings · ${score.checkCount} checks`
+                                : "No score payload available"
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <div className="report-kpi-grid report-kpi-grid--expanded">
                   <div className="report-card report-summary-card">
                     <div className="report-label">Total issues</div>
@@ -13252,36 +13440,42 @@ const App: React.FC = () => {
 
                       <div className="dashboard-category-grid">
                         {DASHBOARD_CATEGORIES.map((category) => {
-                          const issueSummary =
-                            dashboardCategorySummaries[category.key] ?? null;
-                          const status = dashboardSummaryPending
-                            ? { label: "Pending", tone: "default" as const }
-                            : getCategoryStatus(
-                                category.key,
-                                issueSummary,
-                                dashboardSummary?.latestTechnicalDiagnostics,
-                              );
+                          const score =
+                            dashboardCategoryScoresByKey[category.key] ?? null;
+                          const tone = dashboardSummaryPending
+                            ? "default"
+                            : getCategoryScoreTone(score);
+                          const statusLabel = dashboardSummaryPending
+                            ? "Pending"
+                            : score
+                              ? getCategoryScoreStatusLabel(score.status)
+                              : "Score unavailable";
                           return (
                             <CategoryStatusCard
                               key={category.key}
                               title={category.label}
-                              statusLabel={status.label}
-                              tone={
-                                status.tone === "success"
-                                  ? "success"
-                                  : status.tone === "warning"
-                                    ? "warning"
-                                    : "default"
+                              statusLabel={statusLabel}
+                              tone={tone}
+                              score={
+                                dashboardSummaryPending
+                                  ? "Pending"
+                                  : getCategoryScoreValue(score)
                               }
                               description={category.description}
                               detail={
                                 dashboardSummaryPending
                                   ? "Building issue summary"
-                                  : getCategoryDetail(
-                                      category.key,
-                                      issueSummary,
-                                      dashboardSummary?.latestTechnicalDiagnostics,
+                                  : getSearchAccessCategoryDetail(
+                                      score,
+                                      dashboardCategorySummaries,
                                     )
+                              }
+                              stats={
+                                dashboardSummaryPending
+                                  ? null
+                                  : score
+                                    ? `${score.findingCount} findings · ${score.checkCount} checks`
+                                    : "No score payload available"
                               }
                             />
                           );

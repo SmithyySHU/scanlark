@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { computeSeverityScore } from "./scanCategoryScores";
 import { isValidEmailAddress } from "./validation";
 
 export type NotificationMode =
@@ -73,22 +74,6 @@ export type IssueNotificationDigest = {
     description: string;
   }>;
 };
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function computeIssueHealthScore(severityCounts: Record<string, number>) {
-  const totalPenalty = clamp(
-    Math.min(70, (severityCounts.critical ?? 0) * 25) +
-      Math.min(40, (severityCounts.high ?? 0) * 12) +
-      Math.min(30, (severityCounts.medium ?? 0) * 6) +
-      Math.min(15, (severityCounts.low ?? 0) * 1),
-    0,
-    100,
-  );
-  return clamp(Math.round(100 - totalPenalty), 0, 100);
-}
 
 export async function getSiteNotificationSettings(
   siteId: string,
@@ -435,7 +420,7 @@ export async function getIssueNotificationDigestForRun(
   return {
     totalOpenIssues,
     highPriorityCount: (bySeverity.critical ?? 0) + (bySeverity.high ?? 0),
-    healthScore: computeIssueHealthScore(bySeverity),
+    healthScore: computeSeverityScore(bySeverity),
     bySeverity,
     byCategory,
     topIssues: topIssuesRes.rows.map((row) => ({

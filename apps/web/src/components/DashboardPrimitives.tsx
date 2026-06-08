@@ -72,15 +72,27 @@ export const CategoryStatusCard: React.FC<{
   description: string;
   detail: React.ReactNode;
   statusLabel: string;
+  score?: React.ReactNode;
+  stats?: React.ReactNode;
   tone?: Tone;
-}> = ({ title, description, detail, statusLabel, tone = "default" }) => (
+}> = ({
+  title,
+  description,
+  detail,
+  statusLabel,
+  score,
+  stats,
+  tone = "default",
+}) => (
   <div className="surface-card surface-card--category" data-tone={tone}>
     <div className="category-status-card__header">
       <div className="category-status-card__title">{title}</div>
       <StatusBadge label={statusLabel} tone={tone} />
     </div>
+    {score ? <div className="category-status-card__score">{score}</div> : null}
     <div className="category-status-card__description">{description}</div>
     <div className="category-status-card__summary">{detail}</div>
+    {stats ? <div className="category-status-card__stats">{stats}</div> : null}
   </div>
 );
 

@@ -236,6 +236,20 @@ export type {
   NotificationSettings,
 } from "./notifications";
 
+export {
+  computeSeverityScore,
+  createEmptySeverityCounts,
+  getScanCategoryScoresForUser,
+  getScoreBand,
+} from "./scanCategoryScores";
+export type {
+  ScanCategoryScore,
+  ScanCategoryScoreKey,
+  ScanCategoryScoreStatus,
+  ScanScoreBand,
+  SeverityCounts,
+} from "./scanCategoryScores";
+
 export { createUser, getUserByEmail, getUserById, verifyUser } from "./auth";
 export type { AuthUser } from "./auth";
 

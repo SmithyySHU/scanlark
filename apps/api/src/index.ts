@@ -36,6 +36,7 @@ import {
   getResultsSummaryForScanRunForUser,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
+  getScanCategoryScoresForUser,
   getScanLinksForExportFilteredForUser,
   getScanLinksForExportForUser,
   getScanLinksForRunForUser,
@@ -1356,6 +1357,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
         latestIssueSummary: null,
         latestResolvedCount: 0,
         latestCategoryIssueSummaries: {},
+        latestCategoryScores: [],
         latestTechnicalDiagnostics: null,
         latestDiffSummary: null,
         baselineRun: null,
@@ -1370,6 +1372,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       latestLinkSummary,
       latestIssues,
       latestTechnicalDiagnostics,
+      latestCategoryScores,
       baselineRun,
     ] = await Promise.all([
       getScanLinksSummaryForUser(userId, latestRun.id),
@@ -1378,6 +1381,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
         offset: 0,
       }),
       getScanTechnicalDiagnosticsForUser(userId, latestRun.id),
+      getScanCategoryScoresForUser(userId, latestRun.id),
       getBaselineRunForDiff(siteId, latestRun.id),
     ]);
 
@@ -1410,6 +1414,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       latestIssueSummary: latestIssues.summary,
       latestResolvedCount: latestIssues.resolvedCount,
       latestCategoryIssueSummaries: Object.fromEntries(categoryEntries),
+      latestCategoryScores,
       latestTechnicalDiagnostics,
       latestDiffSummary,
       baselineRun,
@@ -1869,8 +1874,13 @@ app.get("/scan-runs/:scanRunId/technical-diagnostics", async (req, res) => {
       userId,
       scanRunId,
     );
+    const categoryScores = await getScanCategoryScoresForUser(
+      userId,
+      scanRunId,
+    );
     res.json({
       ...diagnostics,
+      categoryScores,
       loadedAt: new Date().toISOString(),
     });
   } catch (err: unknown) {
