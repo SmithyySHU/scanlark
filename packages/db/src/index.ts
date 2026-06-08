@@ -138,6 +138,9 @@ export type {
   ScanIssuesSummary,
 } from "./scanIssues";
 
+export { formatIssuePresentation } from "./issuePresentation";
+export type { IssuePresentation } from "./issuePresentation";
+
 export { upsertScanPageCheck } from "./scanPageChecks";
 export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
 

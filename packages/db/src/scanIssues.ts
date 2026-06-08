@@ -39,6 +39,10 @@ export type ScanIssueType =
   | "sitemap_url_broken"
   | "https_unavailable"
   | "http_not_redirecting_to_https"
+  | "mixed_content_script"
+  | "mixed_content_stylesheet"
+  | "mixed_content_image"
+  | "mixed_content_iframe"
   | "ssl_certificate_expired"
   | "ssl_certificate_expiring_soon"
   | "ssl_certificate_hostname_mismatch"
@@ -148,6 +152,14 @@ type SeoPageCheckCandidate = {
   robots_noindex: boolean;
   canonical_count: number;
   canonical_href: string | null;
+  mixed_content_json: unknown;
+};
+
+type MixedContentResourceCandidate = {
+  resourceUrl: string;
+  resourceType: "script" | "stylesheet" | "image" | "iframe";
+  tagName: "script" | "link" | "img" | "iframe";
+  attribute: "src" | "href";
 };
 
 type SiteCheckCandidate = {
@@ -216,7 +228,16 @@ function buildIssueFingerprint(
   category: ScanIssueCategory,
   issueType: ScanIssueType,
   affectedUrl: string,
+  sourceUrl?: string | null,
 ): string {
+  if (
+    issueType === "mixed_content_script" ||
+    issueType === "mixed_content_stylesheet" ||
+    issueType === "mixed_content_image" ||
+    issueType === "mixed_content_iframe"
+  ) {
+    return `v2:${category}:${issueType}:${normalizeIssueFingerprintUrl(affectedUrl)}:${normalizeIssueFingerprintUrl(sourceUrl ?? "")}`;
+  }
   return `v1:${category}:${issueType}:${normalizeIssueFingerprintUrl(affectedUrl)}`;
 }
 
@@ -395,6 +416,46 @@ function buildSiteIssue(
   };
 }
 
+function asMixedContentResources(
+  value: unknown,
+): MixedContentResourceCandidate[] {
+  if (!Array.isArray(value)) return [];
+  const resources: MixedContentResourceCandidate[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const resourceUrl =
+      typeof item.resourceUrl === "string" ? item.resourceUrl.trim() : "";
+    const resourceType = item.resourceType;
+    const tagName = item.tagName;
+    const attribute = item.attribute;
+    if (!resourceUrl.startsWith("http://")) continue;
+    if (
+      resourceType !== "script" &&
+      resourceType !== "stylesheet" &&
+      resourceType !== "image" &&
+      resourceType !== "iframe"
+    ) {
+      continue;
+    }
+    if (
+      tagName !== "script" &&
+      tagName !== "link" &&
+      tagName !== "img" &&
+      tagName !== "iframe"
+    ) {
+      continue;
+    }
+    if (attribute !== "src" && attribute !== "href") continue;
+    resources.push({
+      resourceUrl,
+      resourceType,
+      tagName,
+      attribute,
+    });
+  }
+  return resources;
+}
+
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
@@ -548,6 +609,7 @@ async function reconcileIssueStatesForScanRun(
       issue.category,
       issue.issue_type,
       issue.affected_url,
+      issue.source_url,
     );
     const existingState = statesByFingerprint.get(fingerprint);
     const nextChangeStatus: ScanIssueChangeStatus =
@@ -745,7 +807,8 @@ export async function replaceIssuesForScanRun(
           robots_meta,
           robots_noindex,
           canonical_count,
-          canonical_href
+          canonical_href,
+          mixed_content_json
         FROM scan_page_checks
         WHERE scan_run_id = $1
       `,
@@ -906,6 +969,63 @@ export async function replaceIssuesForScanRun(
             "low",
           ),
         );
+      }
+
+      const mixedContentResources = asMixedContentResources(
+        row.mixed_content_json,
+      );
+      for (const resource of mixedContentResources) {
+        const issueType =
+          resource.resourceType === "script"
+            ? "mixed_content_script"
+            : resource.resourceType === "stylesheet"
+              ? "mixed_content_stylesheet"
+              : resource.resourceType === "iframe"
+                ? "mixed_content_iframe"
+                : "mixed_content_image";
+        const severity: ScanIssueSeverity =
+          resource.resourceType === "script"
+            ? "high"
+            : resource.resourceType === "image"
+              ? "low"
+              : "medium";
+        const title =
+          resource.resourceType === "script"
+            ? "HTTP script referenced from HTTPS page"
+            : resource.resourceType === "stylesheet"
+              ? "HTTP stylesheet referenced from HTTPS page"
+              : resource.resourceType === "iframe"
+                ? "HTTP iframe referenced from HTTPS page"
+                : "HTTP image referenced from HTTPS page";
+        const description =
+          resource.resourceType === "script"
+            ? "This HTTPS page references a script over HTTP, which may be blocked or make the page behave inconsistently."
+            : resource.resourceType === "stylesheet"
+              ? "This HTTPS page references a stylesheet over HTTP, which may be blocked or leave the page looking incomplete."
+              : resource.resourceType === "iframe"
+                ? "This HTTPS page references an iframe over HTTP, which may be blocked or behave inconsistently in secure browsers."
+                : "This HTTPS page references an image over HTTP, which may load insecurely or be blocked by some browsers.";
+
+        seoIssues.push({
+          scan_run_id: scanRunId,
+          site_id: run.site_id,
+          category: "ssl_https",
+          severity,
+          status: "open",
+          issue_type: issueType,
+          affected_url: resource.resourceUrl,
+          source_url: row.page_url,
+          title,
+          description,
+          evidence_json: {
+            page_url: row.page_url,
+            resource_url: resource.resourceUrl,
+            resource_type: resource.resourceType,
+            tag_name: resource.tagName,
+            attribute: resource.attribute,
+          },
+          change_status: null,
+        });
       }
     }
 

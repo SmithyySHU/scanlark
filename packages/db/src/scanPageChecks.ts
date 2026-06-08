@@ -1,5 +1,18 @@
 import { ensureConnected } from "./client";
 
+export type MixedContentResourceType =
+  | "script"
+  | "stylesheet"
+  | "image"
+  | "iframe";
+
+export interface MixedContentResourceRecord {
+  resourceUrl: string;
+  resourceType: MixedContentResourceType;
+  tagName: "script" | "link" | "img" | "iframe";
+  attribute: "src" | "href";
+}
+
 export interface ScanPageCheckInput {
   scanRunId: string;
   siteId: string;
@@ -11,6 +24,7 @@ export interface ScanPageCheckInput {
   robotsNoindex: boolean;
   canonicalCount: number;
   canonicalHref: string | null;
+  mixedContentResources: MixedContentResourceRecord[];
 }
 
 export interface ScanPageCheckRow extends ScanPageCheckInput {
@@ -35,9 +49,10 @@ export async function upsertScanPageCheck(
         robots_noindex,
         canonical_count,
         canonical_href,
+        mixed_content_json,
         fetched_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, now())
       ON CONFLICT (scan_run_id, page_url)
       DO UPDATE SET
         title = EXCLUDED.title,
@@ -47,6 +62,7 @@ export async function upsertScanPageCheck(
         robots_noindex = EXCLUDED.robots_noindex,
         canonical_count = EXCLUDED.canonical_count,
         canonical_href = EXCLUDED.canonical_href,
+        mixed_content_json = EXCLUDED.mixed_content_json,
         fetched_at = now()
     `,
     [
@@ -60,6 +76,7 @@ export async function upsertScanPageCheck(
       input.robotsNoindex,
       input.canonicalCount,
       input.canonicalHref,
+      JSON.stringify(input.mixedContentResources),
     ],
   );
 }

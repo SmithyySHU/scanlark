@@ -7,6 +7,7 @@ import type {
   IgnoreRuleType,
   LinkClassification,
   ScanIssueCategory,
+  ScanIssueType,
   ScanIssueSeverity,
   ScanIssueStatus,
   ScanDiffChangeType,
@@ -22,6 +23,7 @@ import {
   deleteSiteForUser,
   enqueueExistingScanRunIfIdle,
   enqueueManualScanIfIdle,
+  formatIssuePresentation,
   getDiffBetweenRunsForUser,
   getBaselineRunForDiff,
   getCompletedRunForSite,
@@ -263,6 +265,37 @@ function parseIssueCategory(value: unknown): ScanIssueCategory | null {
 function normalizeNotifyOn(value: string): string {
   if (value === "issues") return "issues_exist";
   return value;
+}
+
+function serializeIssueWithPresentation<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    resolved_at: Date | string | null;
+    title: string;
+    description: string;
+    issue_type: ScanIssueType;
+    affected_url: string;
+    source_url: string | null;
+    evidence_json: Record<string, unknown>;
+  },
+>(issue: T) {
+  return {
+    ...issue,
+    presentation: formatIssuePresentation(issue),
+    first_seen_at:
+      issue.first_seen_at instanceof Date
+        ? issue.first_seen_at.toISOString()
+        : issue.first_seen_at,
+    last_seen_at:
+      issue.last_seen_at instanceof Date
+        ? issue.last_seen_at.toISOString()
+        : issue.last_seen_at,
+    resolved_at:
+      issue.resolved_at instanceof Date
+        ? issue.resolved_at.toISOString()
+        : issue.resolved_at,
+  };
 }
 
 async function rebuildIssuesForRun(scanRunId: string) {
@@ -1525,36 +1558,8 @@ app.get("/scan-runs/:scanRunId/issues", async (req, res) => {
       countReturned: issues.countReturned,
       totalMatching: issues.totalMatching,
       resolvedCount: issues.resolvedCount,
-      issues: issues.issues.map((issue) => ({
-        ...issue,
-        first_seen_at:
-          issue.first_seen_at instanceof Date
-            ? issue.first_seen_at.toISOString()
-            : issue.first_seen_at,
-        last_seen_at:
-          issue.last_seen_at instanceof Date
-            ? issue.last_seen_at.toISOString()
-            : issue.last_seen_at,
-        resolved_at:
-          issue.resolved_at instanceof Date
-            ? issue.resolved_at.toISOString()
-            : issue.resolved_at,
-      })),
-      resolvedIssues: issues.resolvedIssues.map((issue) => ({
-        ...issue,
-        first_seen_at:
-          issue.first_seen_at instanceof Date
-            ? issue.first_seen_at.toISOString()
-            : issue.first_seen_at,
-        last_seen_at:
-          issue.last_seen_at instanceof Date
-            ? issue.last_seen_at.toISOString()
-            : issue.last_seen_at,
-        resolved_at:
-          issue.resolved_at instanceof Date
-            ? issue.resolved_at.toISOString()
-            : issue.resolved_at,
-      })),
+      issues: issues.issues.map(serializeIssueWithPresentation),
+      resolvedIssues: issues.resolvedIssues.map(serializeIssueWithPresentation),
     });
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/issues", err);

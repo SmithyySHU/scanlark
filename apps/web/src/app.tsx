@@ -18,6 +18,15 @@ import {
   StatusBadge,
 } from "./components/DashboardPrimitives";
 import { MarketingPage } from "./components/MarketingPage";
+import {
+  FEATURED_LEARN_ARTICLE_SLUGS,
+  LEARN_ARTICLES,
+  LEARN_ARTICLES_BY_SLUG,
+  LEARN_CATEGORY_ORDER,
+  getLearnCategoryLabel,
+  type LearnArticle,
+  type LearnArticleCategory,
+} from "./learnArticles";
 import { ScanProgressHero } from "./components/ScanProgressHero";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
@@ -56,6 +65,7 @@ type AppSection =
   | "alerts"
   | "ignore_rules"
   | "sites";
+type LearnCategoryFilter = LearnArticleCategory | "all";
 
 interface Site {
   id: string;
@@ -458,6 +468,10 @@ type IssueType =
   | "sitemap_url_broken"
   | "https_unavailable"
   | "http_not_redirecting_to_https"
+  | "mixed_content_script"
+  | "mixed_content_stylesheet"
+  | "mixed_content_image"
+  | "mixed_content_iframe"
   | "ssl_certificate_expired"
   | "ssl_certificate_expiring_soon"
   | "ssl_certificate_hostname_mismatch"
@@ -490,6 +504,7 @@ interface ScanIssue {
   source_url: string | null;
   title: string;
   description: string;
+  presentation: IssuePresentation;
   evidence_json: Record<string, unknown>;
   change_status: Exclude<IssueChangeStatus, "resolved"> | null;
   first_seen_at: string;
@@ -507,6 +522,7 @@ interface ResolvedScanIssue {
   source_url: string | null;
   title: string;
   description: string;
+  presentation: IssuePresentation;
   evidence_json: Record<string, unknown>;
   first_seen_at: string;
   last_seen_at: string;
@@ -514,6 +530,16 @@ interface ResolvedScanIssue {
   resolved_scan_run_id: string;
   change_status: "resolved";
   status: "resolved";
+}
+
+interface IssuePresentation {
+  userTitle: string;
+  shortSummary: string;
+  whatItMeans: string;
+  whyItMatters: string;
+  suggestedFix: string;
+  technicalDetail: string;
+  learnSlug: string | null;
 }
 
 interface ScanIssuesResponse {
@@ -1546,8 +1572,22 @@ function getRouteFromLocation(): AppRoute {
   if (path === "/" || path === "/landing") return "landing";
   if (path === "/login") return "login";
   if (path === "/report") return "report";
-  if (path === "/learn") return "learn";
+  if (path === "/learn" || path.startsWith("/learn/")) return "learn";
   return "app";
+}
+
+function getLearnSlugFromLocation() {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/learn") return null;
+  if (!path.startsWith("/learn/")) return null;
+  const rawSlug = path.slice("/learn/".length);
+  if (!rawSlug) return null;
+  try {
+    return decodeURIComponent(rawSlug);
+  } catch {
+    return rawSlug;
+  }
 }
 
 function getErrorMessage(err: unknown, fallback: string) {
@@ -1707,6 +1747,10 @@ function buildAppUrl(
   return url.toString();
 }
 
+function buildLearnArticlePath(slug: string) {
+  return `/learn/${encodeURIComponent(slug)}`;
+}
+
 function buildScanLinksUrl(
   runId: string,
   classification: LinkClassification,
@@ -1761,6 +1805,298 @@ function createEmptyReportSections(): Record<
 
 function createEmptyReportIgnoredSection(): ReportIgnoredSectionState {
   return { ...EMPTY_REPORT_IGNORED_SECTION, links: [] };
+}
+
+function matchesLearnArticleQuery(article: LearnArticle, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  const haystack = [
+    article.title,
+    article.summary,
+    article.whatItMeans,
+    article.whyItMatters,
+    article.howToFix,
+    article.technicalDetail,
+    getLearnCategoryLabel(article.category),
+    ...article.keywords,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(normalizedQuery);
+}
+
+type LearnExperienceProps = {
+  isAuthenticated: boolean;
+  currentArticle: LearnArticle | null;
+  articleMissing: boolean;
+  featuredArticles: LearnArticle[];
+  filteredArticles: LearnArticle[];
+  searchQuery: string;
+  selectedCategory: LearnCategoryFilter;
+  onSearchChange: (value: string) => void;
+  onSelectCategory: (value: LearnCategoryFilter) => void;
+  onOpenArticle: (slug: string) => void;
+  onBackToIndex: () => void;
+  onBackToLanding: () => void;
+  onOpenApp: () => void;
+  onOpenLogin: () => void;
+  onClearFilters: () => void;
+};
+
+function LearnExperience({
+  isAuthenticated,
+  currentArticle,
+  articleMissing,
+  featuredArticles,
+  filteredArticles,
+  searchQuery,
+  selectedCategory,
+  onSearchChange,
+  onSelectCategory,
+  onOpenArticle,
+  onBackToIndex,
+  onBackToLanding,
+  onOpenApp,
+  onOpenLogin,
+  onClearFilters,
+}: LearnExperienceProps) {
+  const relatedArticles = currentArticle
+    ? currentArticle.relatedArticleSlugs
+        .map((slug) => LEARN_ARTICLES_BY_SLUG[slug])
+        .filter((article): article is LearnArticle => Boolean(article))
+    : [];
+
+  return (
+    <div className="learn-page">
+      <div className="learn-page__shell">
+        <section className="learn-hero">
+          <div className="learn-hero__copy">
+            <div className="marketing-kicker">Scanlark Learn</div>
+            <h1>
+              {currentArticle
+                ? currentArticle.title
+                : "Plain-English guides for website health and monitoring reports."}
+            </h1>
+            <p>
+              {currentArticle
+                ? currentArticle.summary
+                : "Search practical explanations for broken links, SEO basics, search access, security setup, speed checks, and report terminology."}
+            </p>
+          </div>
+          <div className="learn-hero__actions">
+            {currentArticle ? (
+              <button className="secondary-button" onClick={onBackToIndex}>
+                Back to Learn
+              </button>
+            ) : (
+              <button className="secondary-button" onClick={onBackToLanding}>
+                Back to landing
+              </button>
+            )}
+            <button
+              className="primary-button"
+              onClick={isAuthenticated ? onOpenApp : onOpenLogin}
+            >
+              {isAuthenticated ? "Open dashboard" : "Sign in"}
+            </button>
+          </div>
+        </section>
+
+        {currentArticle ? (
+          <section className="learn-detail">
+            <div className="learn-detail__meta">
+              <span className="marketing-chip">
+                {getLearnCategoryLabel(currentArticle.category)}
+              </span>
+              <span className="marketing-chip">
+                Audience:{" "}
+                {currentArticle.audience === "mixed"
+                  ? "Mixed"
+                  : "Non-technical"}
+              </span>
+            </div>
+
+            <div className="learn-detail__grid">
+              <article className="learn-surface learn-detail__main">
+                <div className="learn-detail__section">
+                  <h2>What it means</h2>
+                  <p>{currentArticle.whatItMeans}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>Why it matters</h2>
+                  <p>{currentArticle.whyItMatters}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>What to do next</h2>
+                  <p>{currentArticle.howToFix}</p>
+                </div>
+                <details className="learn-detail__technical">
+                  <summary>Technical detail</summary>
+                  <p>{currentArticle.technicalDetail}</p>
+                </details>
+              </article>
+
+              <aside className="learn-surface learn-detail__side">
+                <div className="learn-detail__side-block">
+                  <div className="learn-detail__eyebrow">Related topics</div>
+                  <div className="learn-related-list">
+                    {relatedArticles.length > 0 ? (
+                      relatedArticles.map((article) => (
+                        <button
+                          key={article.slug}
+                          className="learn-related-card"
+                          onClick={() => onOpenArticle(article.slug)}
+                        >
+                          <strong>{article.title}</strong>
+                          <span>{article.summary}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="learn-empty-note">
+                        More related topics will appear here as the library
+                        grows.
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="learn-detail__side-block">
+                  <div className="learn-detail__eyebrow">Coverage</div>
+                  <div className="learn-keyword-list">
+                    {currentArticle.keywords.map((keyword) => (
+                      <span key={keyword} className="learn-keyword">
+                        {keyword}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+        ) : articleMissing ? (
+          <section className="learn-surface learn-state">
+            <div className="learn-detail__eyebrow">Article not found</div>
+            <h2>This Learn article does not exist yet.</h2>
+            <p>
+              The slug is valid as a route, but there is no matching article in
+              the current MVP catalogue. Use the index to continue browsing the
+              available guides.
+            </p>
+            <div className="learn-state__actions">
+              <button className="primary-button" onClick={onBackToIndex}>
+                Browse Learn articles
+              </button>
+              <button className="secondary-button" onClick={onBackToLanding}>
+                Back to landing
+              </button>
+            </div>
+          </section>
+        ) : (
+          <>
+            <section className="learn-surface learn-controls">
+              <label className="field-label">
+                Search topics
+                <input
+                  className="app-input"
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => onSearchChange(event.target.value)}
+                  placeholder="Search reports, SEO, security, speed, and monitoring terms"
+                />
+              </label>
+
+              <div className="learn-filter-row">
+                <button
+                  className={`learn-filter-chip ${selectedCategory === "all" ? "active" : ""}`}
+                  onClick={() => onSelectCategory("all")}
+                >
+                  All topics
+                </button>
+                {LEARN_CATEGORY_ORDER.map((category) => (
+                  <button
+                    key={category}
+                    className={`learn-filter-chip ${selectedCategory === category ? "active" : ""}`}
+                    onClick={() => onSelectCategory(category)}
+                  >
+                    {getLearnCategoryLabel(category)}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="learn-section">
+              <div className="learn-section__header">
+                <div>
+                  <div className="learn-detail__eyebrow">Start here</div>
+                  <h2>Popular guides</h2>
+                </div>
+              </div>
+              <div className="learn-feature-grid">
+                {featuredArticles.map((article) => (
+                  <button
+                    key={article.slug}
+                    className="learn-feature-card"
+                    onClick={() => onOpenArticle(article.slug)}
+                  >
+                    <span className="learn-feature-card__category">
+                      {getLearnCategoryLabel(article.category)}
+                    </span>
+                    <strong>{article.title}</strong>
+                    <p>{article.summary}</p>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="learn-section">
+              <div className="learn-section__header">
+                <div>
+                  <div className="learn-detail__eyebrow">Knowledge base</div>
+                  <h2>{filteredArticles.length} article(s)</h2>
+                </div>
+                {(searchQuery.trim() || selectedCategory !== "all") && (
+                  <button className="ghost-button" onClick={onClearFilters}>
+                    Clear filters
+                  </button>
+                )}
+              </div>
+
+              {filteredArticles.length === 0 ? (
+                <div className="learn-surface learn-empty-state">
+                  <h3>No articles match those filters.</h3>
+                  <p>
+                    Try a broader search term or switch back to all categories.
+                  </p>
+                </div>
+              ) : (
+                <div className="learn-article-grid">
+                  {filteredArticles.map((article) => (
+                    <button
+                      key={article.slug}
+                      className="learn-article-card"
+                      onClick={() => onOpenArticle(article.slug)}
+                    >
+                      <div className="learn-article-card__top">
+                        <span className="learn-article-card__category">
+                          {getLearnCategoryLabel(article.category)}
+                        </span>
+                        <span className="learn-article-card__audience">
+                          {article.audience === "mixed"
+                            ? "Mixed audience"
+                            : "Non-technical"}
+                        </span>
+                      </div>
+                      <strong>{article.title}</strong>
+                      <p>{article.summary}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type LoadHistoryOpts = {
@@ -1841,6 +2177,12 @@ const App: React.FC = () => {
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const [learnSlug, setLearnSlug] = useState<string | null>(() =>
+    getLearnSlugFromLocation(),
+  );
+  const [learnSearchQuery, setLearnSearchQuery] = useState("");
+  const [learnCategoryFilter, setLearnCategoryFilter] =
+    useState<LearnCategoryFilter>("all");
   const [appSection, setAppSection] = useState<AppSection>("dashboard");
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
     getReportScanRunIdFromLocation() ? "report" : "dashboard",
@@ -2088,6 +2430,7 @@ const App: React.FC = () => {
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
       setRoute(nextRoute);
+      setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
       setViewMode(
         nextRoute === "report" && nextReportId ? "report" : "dashboard",
@@ -3582,6 +3925,32 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+  const currentLearnArticle = useMemo(
+    () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
+    [learnSlug],
+  );
+  const featuredLearnArticles = useMemo(
+    () =>
+      FEATURED_LEARN_ARTICLE_SLUGS.map(
+        (slug) => LEARN_ARTICLES_BY_SLUG[slug],
+      ).filter((article): article is LearnArticle => Boolean(article)),
+    [],
+  );
+  const filteredLearnArticles = useMemo(
+    () =>
+      LEARN_ARTICLES.filter((article) => {
+        if (
+          learnCategoryFilter !== "all" &&
+          article.category !== learnCategoryFilter
+        ) {
+          return false;
+        }
+        return matchesLearnArticleQuery(article, learnSearchQuery);
+      }),
+    [learnCategoryFilter, learnSearchQuery],
+  );
+  const learnArticleMissing =
+    route === "learn" && !!learnSlug && !currentLearnArticle;
   const fetchDashboardSummary = useCallback(
     async (siteId: string) => {
       const res = await apiFetch(
@@ -3885,6 +4254,98 @@ const App: React.FC = () => {
   const formatIssueSupportText = (description: string) => {
     if (description.length <= 84) return description;
     return `${description.slice(0, 84).trimEnd()}…`;
+  };
+
+  const formatEvidenceValue = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+    if (value == null) return "null";
+    if (Array.isArray(value)) {
+      const rendered = value
+        .slice(0, 4)
+        .map((entry) => formatEvidenceValue(entry))
+        .join(", ");
+      return value.length > 4 ? `${rendered}, ...` : rendered;
+    }
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  };
+
+  const formatEvidenceLabel = (key: string) =>
+    key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const getIssueSummaryText = (
+    issue: { description: string; presentation?: IssuePresentation | null },
+    maxLength = 84,
+  ) => {
+    const source = issue.presentation?.shortSummary ?? issue.description;
+    if (source.length <= maxLength) return source;
+    return `${source.slice(0, maxLength).trimEnd()}…`;
+  };
+
+  const getIssueDisplayTitle = (issue: {
+    title: string;
+    presentation?: IssuePresentation | null;
+  }) => issue.presentation?.userTitle ?? issue.title;
+
+  const renderIssueGuidanceDetails = (
+    issue: {
+      description: string;
+      evidence_json: Record<string, unknown>;
+      presentation?: IssuePresentation | null;
+    },
+    contextLabel = "View guidance",
+  ) => {
+    const presentation = issue.presentation;
+    if (!presentation) return null;
+    const evidenceEntries = Object.entries(issue.evidence_json ?? {});
+
+    return (
+      <details className="report-issue-guidance">
+        <summary>{contextLabel}</summary>
+        <div className="report-issue-guidance__body">
+          <div className="report-issue-guidance__section">
+            <div className="report-label">What it means</div>
+            <p>{presentation.whatItMeans}</p>
+          </div>
+          <div className="report-issue-guidance__section">
+            <div className="report-label">Why it matters</div>
+            <p>{presentation.whyItMatters}</p>
+          </div>
+          <div className="report-issue-guidance__section">
+            <div className="report-label">What to do next</div>
+            <p>{presentation.suggestedFix}</p>
+          </div>
+          <details className="report-issue-tech">
+            <summary>Technical detail</summary>
+            <div className="report-issue-guidance__section">
+              <p>{presentation.technicalDetail}</p>
+            </div>
+            <div className="report-issue-guidance__section">
+              <div className="report-label">Stored summary</div>
+              <p>{issue.description}</p>
+            </div>
+            <div className="report-issue-guidance__section">
+              <div className="report-label">Raw evidence</div>
+              {evidenceEntries.length === 0 ? (
+                <p>No raw evidence was stored for this issue.</p>
+              ) : (
+                <div className="report-evidence-list">
+                  {evidenceEntries.map(([key, value]) => (
+                    <div key={key} className="report-evidence-item">
+                      <strong>{formatEvidenceLabel(key)}</strong>
+                      <span>{formatEvidenceValue(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
+        </div>
+      </details>
+    );
   };
 
   const formatSeoDiagnostics = (
@@ -4386,17 +4847,20 @@ const App: React.FC = () => {
                         flexWrap: "wrap",
                       }}
                     >
-                      <span>{issue.title}</span>
+                      <span>{getIssueDisplayTitle(issue)}</span>
                       <span className="report-issue-category">
                         {formatIssueCategoryLabel(issue.category)}
                       </span>
                     </div>
                     <div
                       className="report-issue-support"
-                      title={issue.description}
+                      title={
+                        issue.presentation?.shortSummary ?? issue.description
+                      }
                     >
-                      {formatIssueSupportText(issue.description)}
+                      {getIssueSummaryText(issue)}
                     </div>
+                    {renderIssueGuidanceDetails(issue)}
                   </td>
                   <td>
                     {renderReportUrlCell(issue.affected_url, {
@@ -4495,17 +4959,21 @@ const App: React.FC = () => {
                             flexWrap: "wrap",
                           }}
                         >
-                          <span>{issue.title}</span>
+                          <span>{getIssueDisplayTitle(issue)}</span>
                           <span className="report-issue-category">
                             {formatIssueCategoryLabel(issue.category)}
                           </span>
                         </div>
                         <div
                           className="report-issue-support"
-                          title={issue.description}
+                          title={
+                            issue.presentation?.shortSummary ??
+                            issue.description
+                          }
                         >
-                          {formatIssueSupportText(issue.description)}
+                          {getIssueSummaryText(issue)}
                         </div>
+                        {renderIssueGuidanceDetails(issue)}
                       </td>
                       <td>
                         {renderReportUrlCell(issue.affected_url, {
@@ -4553,7 +5021,9 @@ const App: React.FC = () => {
           {topPriorityIssues.map((issue) => (
             <div key={`priority:${issue.id}`} className="report-priority-item">
               <div className="report-priority-item__top">
-                <div className="report-priority-item__title">{issue.title}</div>
+                <div className="report-priority-item__title">
+                  {getIssueDisplayTitle(issue)}
+                </div>
                 <div className="report-issue-badges">
                   <span
                     className={`report-badge report-badge--severity severity-${issue.severity}`}
@@ -4576,7 +5046,13 @@ const App: React.FC = () => {
                 <span>{formatDate(issue.last_seen_at)}</span>
               </div>
               <div className="report-priority-item__desc">
-                {formatIssueSupportText(issue.description)}
+                {getIssueSummaryText(issue, 120)}
+              </div>
+              <div className="report-priority-item__next-step">
+                <div className="report-label">What to do next</div>
+                <div>
+                  {issue.presentation?.suggestedFix ?? issue.description}
+                </div>
               </div>
               <div className="report-priority-item__urls">
                 <div>
@@ -4592,6 +5068,7 @@ const App: React.FC = () => {
                   })}
                 </div>
               </div>
+              {renderIssueGuidanceDetails(issue, "Open guidance")}
             </div>
           ))}
         </div>
@@ -6684,13 +7161,19 @@ const App: React.FC = () => {
     window.history.pushState({}, "", url);
     const nextRoute = getRouteFromLocation();
     setRoute(nextRoute);
+    setLearnSlug(getLearnSlugFromLocation());
     setViewMode(nextRoute === "report" ? "report" : "dashboard");
+  }
+
+  function openLearnArticle(slug: string) {
+    navigateTo(buildLearnArticlePath(slug));
   }
 
   function openReport(scanRunId: string) {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
     setRoute("report");
+    setLearnSlug(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -6705,6 +7188,7 @@ const App: React.FC = () => {
     const url = buildAppUrl("/app");
     window.history.pushState({}, "", url);
     setRoute("app");
+    setLearnSlug(null);
     setReportScanRunId(null);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -8114,6 +8598,57 @@ const App: React.FC = () => {
           background: color-mix(in srgb, var(--panel) 72%, transparent);
           color: var(--text-muted);
           font-size: 12px;
+          white-space: nowrap;
+        }
+        .marketing-hero {
+          display: grid;
+          grid-template-columns: minmax(0, 1.05fr) minmax(420px, 0.95fr);
+          gap: clamp(44px, 5vw, 88px);
+          align-items: center;
+          min-height: min(78vh, 820px);
+          padding: clamp(24px, 5vh, 56px) 0 clamp(36px, 6vh, 72px);
+        }
+        .marketing-hero__content {
+          display: grid;
+          gap: 22px;
+          align-content: center;
+          min-width: 0;
+          max-width: 620px;
+        }
+        .marketing-hero__headline {
+          margin: 0;
+          font-family: var(--font-display);
+          font-size: clamp(54px, 5.2vw, 86px);
+          line-height: 0.94;
+          font-weight: 700;
+          max-width: 9.8ch;
+          text-wrap: balance;
+        }
+        .marketing-hero__body {
+          font-size: clamp(17px, 1.55vw, 19px);
+          line-height: 1.7;
+          color: var(--text-muted);
+          max-width: 56ch;
+        }
+        .marketing-hero__actions {
+          display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          padding-top: 4px;
+        }
+        .marketing-hero__chips {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, max-content));
+          gap: 10px 14px;
+          align-items: start;
+          padding-top: 8px;
+        }
+        .marketing-hero__preview-shell {
+          position: relative;
+          min-height: 0;
+          display: grid;
+          place-items: center;
+          padding: clamp(12px, 2vw, 24px) 0;
         }
         .marketing-glow {
           position: absolute;
@@ -8135,7 +8670,8 @@ const App: React.FC = () => {
         }
         .marketing-mockup {
           position: relative;
-          width: min(100%, 540px);
+          width: min(100%, 520px);
+          min-width: 0;
           border-radius: 24px;
           border: 1px solid color-mix(in srgb, var(--border) 82%, white 10%);
           background: color-mix(in srgb, var(--panel) 90%, rgba(15, 23, 42, 0.12));
@@ -8156,7 +8692,8 @@ const App: React.FC = () => {
           gap: 12px;
         }
         .marketing-mockup__toolbar {
-          grid-template-columns: repeat(auto-fit, minmax(110px, max-content));
+          display: flex;
+          flex-wrap: wrap;
         }
         .marketing-badge {
           display: inline-flex;
@@ -8171,11 +8708,20 @@ const App: React.FC = () => {
           font-weight: 700;
         }
         .marketing-badge--success {
-          color: var(--success);
+          color: color-mix(in srgb, var(--success) 94%, white 6%);
+          border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+          background: color-mix(in srgb, var(--success) 14%, var(--panel-elev));
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 8%, transparent);
+        }
+        .marketing-badge--warning {
+          color: color-mix(in srgb, var(--warning) 88%, white 12%);
+          border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+          background: color-mix(in srgb, var(--warning) 12%, var(--panel-elev));
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 8%, transparent);
         }
         .marketing-mockup__hero {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          grid-template-columns: minmax(0, 1fr) minmax(136px, 164px);
           gap: 16px;
           align-items: center;
         }
@@ -8224,10 +8770,11 @@ const App: React.FC = () => {
         .marketing-score-ring {
           display: grid;
           place-items: center;
+          min-width: 0;
         }
         .marketing-score-ring__inner {
-          width: 154px;
-          height: 154px;
+          width: clamp(132px, 30vw, 154px);
+          aspect-ratio: 1;
           border-radius: 50%;
           display: grid;
           place-items: center;
@@ -8244,21 +8791,36 @@ const App: React.FC = () => {
           background: var(--panel);
           border: 1px solid var(--border);
         }
-        .marketing-score-ring__inner strong,
-        .marketing-score-ring__inner span {
+        .marketing-score-ring__content {
           position: relative;
           z-index: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 2px;
+          width: 100%;
+          padding: 0 24px 2px;
+          text-align: center;
+          transform: translateY(2px);
         }
-        .marketing-score-ring__inner strong {
-          font-size: 42px;
+        .marketing-score-ring__content strong,
+        .marketing-score-ring__content span {
+          position: relative;
+        }
+        .marketing-score-ring__content strong {
+          font-size: clamp(34px, 8vw, 42px);
           font-family: var(--font-display);
+          line-height: 0.9;
         }
-        .marketing-score-ring__inner span {
-          font-size: 12px;
+        .marketing-score-ring__content span {
+          font-size: 11px;
+          line-height: 1.1;
           color: var(--text-muted);
+          max-width: 7ch;
         }
         .marketing-category-grid {
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .marketing-category-card {
           padding: 14px;
@@ -8278,6 +8840,87 @@ const App: React.FC = () => {
           margin-top: 10px;
           border-top: 1px solid var(--border);
           font-size: 12px;
+        }
+        @media (max-width: 1180px) {
+          .marketing-hero {
+            grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
+            gap: 40px;
+            padding-top: 24px;
+          }
+          .marketing-hero__content {
+            max-width: 560px;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(48px, 5vw, 72px);
+            max-width: 10.6ch;
+          }
+          .marketing-hero__chips {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .marketing-mockup {
+            width: min(100%, 480px);
+          }
+        }
+        @media (max-width: 960px) {
+          .marketing-hero {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 36px;
+            min-height: auto;
+            padding: 20px 0 36px;
+          }
+          .marketing-hero__content {
+            max-width: 100%;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(44px, 7vw, 64px);
+            max-width: 11ch;
+          }
+          .marketing-hero__preview-shell {
+            justify-items: start;
+            padding: 0;
+          }
+          .marketing-mockup {
+            width: min(100%, 560px);
+          }
+        }
+        @media (max-width: 520px) {
+          .marketing-hero {
+            gap: 28px;
+            padding: 12px 0 28px;
+          }
+          .marketing-hero__content {
+            gap: 18px;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(36px, 12vw, 52px);
+            line-height: 0.97;
+            max-width: 11.5ch;
+          }
+          .marketing-hero__body {
+            font-size: 16px;
+          }
+          .marketing-hero__chips {
+            grid-template-columns: 1fr;
+          }
+          .marketing-hero__preview-shell {
+            justify-items: stretch;
+          }
+          .marketing-mockup {
+            padding: 16px;
+            border-radius: 18px;
+            width: 100%;
+          }
+          .marketing-mockup__hero,
+          .marketing-score-row,
+          .marketing-category-grid {
+            grid-template-columns: 1fr;
+          }
+          .marketing-score-ring {
+            justify-self: center;
+          }
+          .marketing-history-row {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
         }
         .marketing-band {
           display: grid;
@@ -8313,8 +8956,7 @@ const App: React.FC = () => {
         }
         .marketing-section__heading h2,
         .marketing-boundary-card h2,
-        .marketing-pricing-card h2,
-        .learn-preview-page__inner h1 {
+        .marketing-pricing-card h2 {
           margin: 0;
           font-family: var(--font-display);
           font-size: clamp(28px, 4vw, 42px);
@@ -8323,8 +8965,7 @@ const App: React.FC = () => {
         .marketing-section__heading p,
         .marketing-boundary-card p,
         .marketing-pricing-card p,
-        .marketing-faq-card p,
-        .learn-preview-page__inner p {
+        .marketing-faq-card p {
           margin: 0;
           color: var(--text-muted);
           line-height: 1.7;
@@ -9162,21 +9803,250 @@ const App: React.FC = () => {
             transform: rotate(360deg);
           }
         }
-        .learn-preview-page {
-          min-height: 72vh;
-          display: grid;
-          place-items: center;
+        .learn-page {
+          min-height: 100vh;
+          background:
+            radial-gradient(1200px 560px at 10% -10%, rgba(56, 189, 248, 0.18), transparent 55%),
+            radial-gradient(880px 420px at 88% 0%, rgba(139, 92, 246, 0.12), transparent 55%),
+            linear-gradient(180deg, color-mix(in srgb, var(--bg) 90%, black 10%) 0%, var(--bg) 100%);
         }
-        .learn-preview-page__inner {
-          width: min(760px, 100%);
-          padding: 28px;
+        .learn-page__shell {
+          width: min(1240px, 100%);
+          margin: 0 auto;
+          padding: 24px;
+          display: grid;
+          gap: 28px;
+        }
+        .learn-hero,
+        .learn-surface {
           border-radius: 20px;
           border: 1px solid var(--border);
-          background: color-mix(in srgb, var(--panel) 92%, transparent);
           box-shadow: var(--shadow);
+        }
+        .learn-hero {
+          padding: clamp(28px, 5vw, 48px);
+          background:
+            linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.06)) 0%, color-mix(in srgb, var(--panel-elev) 90%, rgba(139, 92, 246, 0.06)) 100%);
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 18px;
+          align-items: end;
+        }
+        .learn-hero__copy {
+          display: grid;
+          gap: 12px;
+          max-width: 70ch;
+        }
+        .learn-hero__copy h1,
+        .learn-section__header h2,
+        .learn-state h2,
+        .learn-empty-state h3,
+        .learn-detail__section h2 {
+          margin: 0;
+          font-family: var(--font-display);
+        }
+        .learn-hero__copy h1 {
+          font-size: clamp(34px, 4vw, 58px);
+          line-height: 1.02;
+          max-width: 14ch;
+        }
+        .learn-hero__copy p,
+        .learn-state p,
+        .learn-empty-state p,
+        .learn-detail__section p,
+        .learn-detail__technical p,
+        .learn-related-card span,
+        .learn-empty-note,
+        .learn-feature-card p,
+        .learn-article-card p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+        }
+        .learn-hero__actions,
+        .learn-state__actions,
+        .learn-filter-row,
+        .learn-detail__meta {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .learn-surface {
+          background: color-mix(in srgb, var(--panel) 94%, rgba(15, 23, 42, 0.06));
+          padding: 20px;
+        }
+        .learn-controls {
+          display: grid;
+          gap: 18px;
+        }
+        .learn-filter-chip {
+          min-height: 36px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 86%, transparent);
+          color: var(--text);
+          font: inherit;
+          cursor: pointer;
+        }
+        .learn-filter-chip.active {
+          background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+          border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+        }
+        .learn-section {
           display: grid;
           gap: 16px;
+        }
+        .learn-section__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: end;
+          flex-wrap: wrap;
+        }
+        .learn-feature-grid,
+        .learn-article-grid {
+          display: grid;
+          gap: 14px;
+        }
+        .learn-feature-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .learn-article-grid {
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        }
+        .learn-feature-card,
+        .learn-article-card,
+        .learn-related-card {
+          width: 100%;
           text-align: left;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, rgba(255, 255, 255, 0.02));
+          color: inherit;
+          padding: 16px;
+          display: grid;
+          gap: 10px;
+          cursor: pointer;
+          font: inherit;
+          transition:
+            transform 150ms ease,
+            border-color 150ms ease,
+            background 150ms ease;
+        }
+        .learn-feature-card:hover,
+        .learn-article-card:hover,
+        .learn-related-card:hover {
+          transform: translateY(-1px);
+          border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+          background: color-mix(in srgb, var(--panel-elev) 88%, rgba(56, 189, 248, 0.04));
+        }
+        .learn-feature-card strong,
+        .learn-article-card strong,
+        .learn-related-card strong {
+          font-size: 17px;
+          line-height: 1.35;
+        }
+        .learn-feature-card__category,
+        .learn-article-card__category,
+        .learn-detail__eyebrow {
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--accent);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .learn-article-card__top {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .learn-article-card__audience {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .learn-empty-state,
+        .learn-state {
+          display: grid;
+          gap: 12px;
+        }
+        .learn-detail {
+          display: grid;
+          gap: 16px;
+        }
+        .learn-detail__grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+          gap: 16px;
+          align-items: start;
+        }
+        .learn-detail__main,
+        .learn-detail__side {
+          display: grid;
+          gap: 18px;
+        }
+        .learn-detail__section {
+          display: grid;
+          gap: 8px;
+        }
+        .learn-detail__technical {
+          border-top: 1px solid var(--border);
+          padding-top: 16px;
+        }
+        .learn-detail__technical summary {
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .learn-detail__side-block {
+          display: grid;
+          gap: 12px;
+        }
+        .learn-related-list,
+        .learn-keyword-list {
+          display: grid;
+          gap: 10px;
+        }
+        .learn-keyword-list {
+          grid-template-columns: repeat(auto-fit, minmax(120px, max-content));
+        }
+        .learn-keyword {
+          display: inline-flex;
+          align-items: center;
+          min-height: 32px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .learn-empty-note {
+          font-size: 13px;
+        }
+        @media (max-width: 960px) {
+          .learn-hero,
+          .learn-detail__grid {
+            grid-template-columns: 1fr;
+          }
+          .learn-hero__copy h1 {
+            max-width: 16ch;
+          }
+        }
+        @media (max-width: 640px) {
+          .learn-page__shell {
+            padding: 16px;
+          }
+          .learn-surface,
+          .learn-hero {
+            padding: 16px;
+            border-radius: 16px;
+          }
+          .learn-article-grid,
+          .learn-feature-grid {
+            grid-template-columns: 1fr;
+          }
         }
         .shell {
           display: block;
@@ -10728,6 +11598,56 @@ const App: React.FC = () => {
           overflow: hidden;
           text-overflow: ellipsis;
         }
+        .report-issue-guidance {
+          margin-top: 10px;
+        }
+        .report-issue-guidance summary,
+        .report-issue-tech summary {
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--text);
+        }
+        .report-issue-guidance__body {
+          display: grid;
+          gap: 10px;
+          margin-top: 10px;
+        }
+        .report-issue-guidance__section {
+          display: grid;
+          gap: 6px;
+        }
+        .report-issue-guidance__section p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .report-issue-tech {
+          display: grid;
+          gap: 8px;
+          padding-top: 2px;
+        }
+        .report-evidence-list {
+          display: grid;
+          gap: 8px;
+        }
+        .report-evidence-item {
+          display: grid;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+        }
+        .report-evidence-item strong {
+          font-size: 11px;
+          color: var(--text);
+        }
+        .report-evidence-item span {
+          font-size: 12px;
+          color: var(--text-muted);
+          overflow-wrap: anywhere;
+        }
         .report-issue-category {
           font-size: 11px;
           padding: 3px 8px;
@@ -10848,6 +11768,13 @@ const App: React.FC = () => {
           color: var(--text-muted);
           line-height: 1.6;
         }
+        .report-priority-item__next-step {
+          display: grid;
+          gap: 6px;
+          color: var(--text-muted);
+          font-size: 13px;
+          line-height: 1.6;
+        }
         .report-priority-item__urls {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -10891,7 +11818,28 @@ const App: React.FC = () => {
         }
       `}</style>
       <div className="app-container">
-        {authLoading ? (
+        {route === "learn" ? (
+          <LearnExperience
+            isAuthenticated={!!authUser}
+            currentArticle={currentLearnArticle}
+            articleMissing={learnArticleMissing}
+            featuredArticles={featuredLearnArticles}
+            filteredArticles={filteredLearnArticles}
+            searchQuery={learnSearchQuery}
+            selectedCategory={learnCategoryFilter}
+            onSearchChange={setLearnSearchQuery}
+            onSelectCategory={setLearnCategoryFilter}
+            onOpenArticle={openLearnArticle}
+            onBackToIndex={() => navigateTo("/learn")}
+            onBackToLanding={() => navigateTo("/landing")}
+            onOpenApp={() => navigateTo("/app")}
+            onOpenLogin={() => navigateTo("/login")}
+            onClearFilters={() => {
+              setLearnSearchQuery("");
+              setLearnCategoryFilter("all");
+            }}
+          />
+        ) : authLoading ? (
           <div
             style={{
               minHeight: "60vh",
@@ -10930,36 +11878,7 @@ const App: React.FC = () => {
                 void handleAuthSubmit();
               }}
             />
-          ) : (
-            <div className="learn-preview-page">
-              <div className="learn-preview-page__inner">
-                <div className="marketing-kicker">Scanlark Learn</div>
-                <h1>
-                  Plain-English help for reports, issues, and monitoring
-                  decisions.
-                </h1>
-                <p>
-                  The knowledge base route is reserved and visually aligned with
-                  the public site. Deep issue guides and glossary content land
-                  here in a later phase.
-                </p>
-                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                  <button
-                    className="primary-button"
-                    onClick={() => navigateTo("/landing")}
-                  >
-                    Back to landing
-                  </button>
-                  <button
-                    className="secondary-button"
-                    onClick={() => navigateTo("/login")}
-                  >
-                    Sign in
-                  </button>
-                </div>
-              </div>
-            </div>
-          )
+          ) : null
         ) : isPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
@@ -10967,35 +11886,6 @@ const App: React.FC = () => {
             onOpenLogin={() => navigateTo("/app")}
             onOpenLearn={() => navigateTo("/learn")}
           />
-        ) : route === "learn" ? (
-          <div className="learn-preview-page">
-            <div className="learn-preview-page__inner">
-              <div className="marketing-kicker">Scanlark Learn</div>
-              <h1>
-                Knowledge base structure is ready for glossary and issue
-                explanations.
-              </h1>
-              <p>
-                This route keeps the same visual system as the landing page
-                while staying distinct from the operational dashboard and
-                detailed report views.
-              </p>
-              <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                <button
-                  className="primary-button"
-                  onClick={() => navigateTo("/app")}
-                >
-                  Open dashboard
-                </button>
-                <button
-                  className="secondary-button"
-                  onClick={() => navigateTo("/landing")}
-                >
-                  Back to landing
-                </button>
-              </div>
-            </div>
-          </div>
         ) : reportView ? (
           <div className="report-page">
             <div className="report-header">

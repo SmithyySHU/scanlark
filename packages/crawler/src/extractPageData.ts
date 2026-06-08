@@ -11,9 +11,23 @@ export interface PageSeoFacts {
   canonicalHref: string | null;
 }
 
+export type MixedContentResourceType =
+  | "script"
+  | "stylesheet"
+  | "image"
+  | "iframe";
+
+export interface MixedContentResource {
+  resourceUrl: string;
+  resourceType: MixedContentResourceType;
+  tagName: "script" | "link" | "img" | "iframe";
+  attribute: "src" | "href";
+}
+
 export interface ExtractedPageData {
   links: string[];
   seo: PageSeoFacts;
+  mixedContentResources: MixedContentResource[];
 }
 
 function normalizeTagText(
@@ -27,6 +41,7 @@ function normalizeTagText(
 export default function extractPageData(html: string): ExtractedPageData {
   const $ = cheerio.load(html);
   const links: string[] = [];
+  const mixedContentResources: MixedContentResource[] = [];
 
   $("a").each((_: number, element: AnyNode) => {
     const link = $(element).attr("href");
@@ -69,6 +84,50 @@ export default function extractPageData(html: string): ExtractedPageData {
       ? normalizeTagText($(canonicalTags[0]).attr("href"), true)
       : null;
 
+  const pushMixedContentResources = (
+    selector: string,
+    resourceType: MixedContentResourceType,
+    tagName: MixedContentResource["tagName"],
+    attribute: MixedContentResource["attribute"],
+  ) => {
+    $(selector).each((_: number, element: AnyNode) => {
+      const resourceUrl = normalizeTagText($(element).attr(attribute), true);
+      if (!resourceUrl?.startsWith("http://")) return;
+      mixedContentResources.push({
+        resourceUrl,
+        resourceType,
+        tagName,
+        attribute,
+      });
+    });
+  };
+
+  pushMixedContentResources(
+    'script[src^="http://"]',
+    "script",
+    "script",
+    "src",
+  );
+  $('link[rel][href^="http://"]').each((_: number, element: AnyNode) => {
+    const rel = ($(element).attr("rel") ?? "").toLowerCase();
+    if (!rel.split(/\s+/).includes("stylesheet")) return;
+    const resourceUrl = normalizeTagText($(element).attr("href"), true);
+    if (!resourceUrl?.startsWith("http://")) return;
+    mixedContentResources.push({
+      resourceUrl,
+      resourceType: "stylesheet",
+      tagName: "link",
+      attribute: "href",
+    });
+  });
+  pushMixedContentResources('img[src^="http://"]', "image", "img", "src");
+  pushMixedContentResources(
+    'iframe[src^="http://"]',
+    "iframe",
+    "iframe",
+    "src",
+  );
+
   return {
     links,
     seo: {
@@ -80,5 +139,6 @@ export default function extractPageData(html: string): ExtractedPageData {
       canonicalCount,
       canonicalHref,
     },
+    mixedContentResources,
   };
 }

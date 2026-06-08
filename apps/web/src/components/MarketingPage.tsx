@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 
 type MarketingPageProps = {
   isAuthenticated: boolean;
@@ -52,6 +52,36 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
   onOpenLearn,
 }) => {
   const primaryLabel = isAuthenticated ? "Open dashboard" : "Start monitoring";
+  const finalIssueCount = 18;
+  const [animatedIssueCount, setAnimatedIssueCount] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      setAnimatedIssueCount(finalIssueCount);
+      return;
+    }
+
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (motionQuery.matches) {
+      setAnimatedIssueCount(finalIssueCount);
+      return;
+    }
+
+    setAnimatedIssueCount(0);
+    const stepMs = 45;
+    let currentValue = 0;
+    const timer = window.setInterval(() => {
+      currentValue += 1;
+      if (currentValue >= finalIssueCount) {
+        window.clearInterval(timer);
+        setAnimatedIssueCount(finalIssueCount);
+        return;
+      }
+      setAnimatedIssueCount(currentValue);
+    }, stepMs);
+
+    return () => window.clearInterval(timer);
+  }, []);
 
   return (
     <div
@@ -75,7 +105,8 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
           style={{
             display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
+            alignItems: "flex-start",
+            flexWrap: "wrap",
             gap: "16px",
             padding: "12px 0",
           }}
@@ -118,16 +149,8 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
           </div>
         </nav>
 
-        <section
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-            gap: "28px",
-            alignItems: "center",
-            minHeight: "min(74vh, 760px)",
-          }}
-        >
-          <div style={{ display: "grid", gap: "18px" }}>
+        <section className="marketing-hero">
+          <div className="marketing-hero__content">
             <div
               style={{
                 display: "inline-flex",
@@ -144,32 +167,17 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             >
               External-only monitoring
             </div>
-            <div
-              style={{
-                fontFamily: "var(--font-display)",
-                fontSize: "clamp(42px, 6vw, 72px)",
-                lineHeight: 1,
-                fontWeight: 700,
-                maxWidth: "11ch",
-              }}
-            >
+            <div className="marketing-hero__headline">
               Monitor site health with clear reports, alerts, and change
               tracking.
             </div>
-            <div
-              style={{
-                fontSize: "18px",
-                lineHeight: 1.6,
-                color: "var(--text-muted)",
-                maxWidth: "58ch",
-              }}
-            >
+            <div className="marketing-hero__body">
               Scanlark checks your public website like a careful external
               visitor. Track trust signals, scan issues, and report history
               without mixing marketing pages with operational monitoring
               workflows.
             </div>
-            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <div className="marketing-hero__actions">
               <button
                 className="primary-button primary-button--large"
                 onClick={onOpenApp}
@@ -189,14 +197,7 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
                 Learn more
               </button>
             </div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-                gap: "10px",
-                marginTop: "10px",
-              }}
-            >
+            <div className="marketing-hero__chips">
               {[
                 "Manual and scheduled scans",
                 "Issue change detection",
@@ -210,23 +211,20 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             </div>
           </div>
 
-          <div
-            style={{
-              position: "relative",
-              minHeight: "420px",
-              display: "grid",
-              placeItems: "center",
-            }}
-          >
+          <div className="marketing-hero__preview-shell">
             <div className="marketing-glow marketing-glow--primary" />
             <div className="marketing-glow marketing-glow--secondary" />
             <div className="marketing-mockup">
               <div className="marketing-mockup__toolbar">
-                <span className="marketing-badge marketing-badge--success">
-                  Healthy baseline
+                <span className="marketing-badge marketing-badge--warning">
+                  18 active issues
                 </span>
-                <span className="marketing-badge">Daily scan</span>
-                <span className="marketing-badge">Alerts on</span>
+                <span className="marketing-badge marketing-badge--success">
+                  Daily scan
+                </span>
+                <span className="marketing-badge marketing-badge--success">
+                  Alerts on
+                </span>
               </div>
               <div className="marketing-mockup__hero">
                 <div>
@@ -236,31 +234,33 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
                       <div className="marketing-score-card__label">
                         Overall score
                       </div>
-                      <div className="marketing-score-card__value">92%</div>
+                      <div className="marketing-score-card__value">78%</div>
                     </div>
                     <div className="marketing-score-card">
                       <div className="marketing-score-card__label">
                         Link integrity
                       </div>
-                      <div className="marketing-score-card__value">96%</div>
+                      <div className="marketing-score-card__value">81%</div>
                     </div>
                   </div>
                 </div>
                 <div className="marketing-score-ring">
                   <div className="marketing-score-ring__inner">
-                    <strong>3</strong>
-                    <span>new issues</span>
+                    <div className="marketing-score-ring__content">
+                      <strong>{animatedIssueCount}</strong>
+                      <span>new issues</span>
+                    </div>
                   </div>
                 </div>
               </div>
               <div className="marketing-category-grid">
                 {[
-                  ["Link integrity", "2 issues"],
-                  ["SEO basics", "Healthy"],
-                  ["Robots / sitemap", "Healthy"],
+                  ["Link integrity", "9 issues"],
+                  ["SEO basics", "4 issues"],
+                  ["Robots / sitemap", "2 issues"],
                   ["SSL / HTTPS", "1 warning"],
-                  ["Security setup", "Healthy"],
-                  ["Speed basics", "Needs review"],
+                  ["Security setup", "1 issue"],
+                  ["Speed basics", "1 warning"],
                 ].map(([title, status]) => (
                   <div key={title} className="marketing-category-card">
                     <div>{title}</div>
@@ -272,14 +272,14 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
                 <div className="marketing-kicker">Recent report history</div>
                 <div className="marketing-history-row">
                   <span>Today</span>
-                  <span>92%</span>
-                  <span>3 new</span>
+                  <span>78%</span>
+                  <span>18 new</span>
                   <span>View report</span>
                 </div>
                 <div className="marketing-history-row">
                   <span>Yesterday</span>
-                  <span>94%</span>
-                  <span>1 fixed</span>
+                  <span>82%</span>
+                  <span>6 fixed</span>
                   <span>View report</span>
                 </div>
               </div>

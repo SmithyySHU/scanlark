@@ -735,6 +735,16 @@ export async function runScanForSite(
 
     const pageData = extractPageData(html);
     const rawLinks = pageData.links;
+    const mixedContentResources = pageUrl.startsWith("https://")
+      ? Array.from(
+          new Map(
+            pageData.mixedContentResources.map((resource) => [
+              `${resource.resourceType}:${resource.resourceUrl}:${resource.tagName}:${resource.attribute}`,
+              resource,
+            ]),
+          ).values(),
+        )
+      : [];
     try {
       await limitInsert(() =>
         upsertScanPageCheck({
@@ -748,6 +758,7 @@ export async function runScanForSite(
           robotsNoindex: pageData.seo.robotsNoindex,
           canonicalCount: pageData.seo.canonicalCount,
           canonicalHref: pageData.seo.canonicalHref,
+          mixedContentResources,
         }),
       );
     } catch (err) {
