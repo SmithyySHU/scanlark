@@ -1938,20 +1938,23 @@ const App: React.FC = () => {
 
   const loadReportOverview = useCallback(
     async (scanRunId: string) => {
-      const [runRes, summaryRes, ignoredRes, diagnosticsRes] = await Promise.all([
-        apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
-          cache: "no-store",
-        }),
-        apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
-          { cache: "no-store" },
-        ),
-        apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), { cache: "no-store" }),
-        apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/technical-diagnostics`,
-          { cache: "no-store" },
-        ),
-      ]);
+      const [runRes, summaryRes, ignoredRes, diagnosticsRes] =
+        await Promise.all([
+          apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
+            cache: "no-store",
+          }),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
+            { cache: "no-store" },
+          ),
+          apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), {
+            cache: "no-store",
+          }),
+          apiFetch(
+            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/technical-diagnostics`,
+            { cache: "no-store" },
+          ),
+        ]);
 
       if (!runRes.ok) {
         if (runRes.status === 404) {
@@ -2222,9 +2225,10 @@ const App: React.FC = () => {
               issues: isInitial
                 ? (data.issues ?? [])
                 : [...existing.issues, ...(data.issues ?? [])],
-              resolvedIssues: isInitial ? (data.resolvedIssues ?? []) : existing.resolvedIssues,
-              resolvedCount:
-                data.resolvedCount ?? existing.resolvedCount ?? 0,
+              resolvedIssues: isInitial
+                ? (data.resolvedIssues ?? [])
+                : existing.resolvedIssues,
+              resolvedCount: data.resolvedCount ?? existing.resolvedCount ?? 0,
               summary: data.summary,
               offset: isInitial
                 ? data.countReturned
@@ -3265,7 +3269,11 @@ const App: React.FC = () => {
   const formatRobotsDiagnostics = (
     diagnostics: Phase0Diagnostics["robots"] | null | undefined,
   ) => {
-    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
       return "2B Robots not recorded";
     }
     if ((diagnostics.issueCount ?? 0) > 0) {
@@ -3280,7 +3288,11 @@ const App: React.FC = () => {
   const formatSitemapDiagnostics = (
     diagnostics: Phase0Diagnostics["sitemap"] | null | undefined,
   ) => {
-    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
       return "2B Sitemap not recorded";
     }
     if ((diagnostics.issueCount ?? 0) > 0) {
@@ -3292,7 +3304,11 @@ const App: React.FC = () => {
   const formatSslDiagnostics = (
     diagnostics: Phase0Diagnostics["sslHttps"] | null | undefined,
   ) => {
-    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
       return "2C SSL / HTTPS not recorded";
     }
     if ((diagnostics.issueCount ?? 0) > 0) {
@@ -3315,7 +3331,11 @@ const App: React.FC = () => {
   const formatSecurityHeaderDiagnostics = (
     diagnostics: Phase0Diagnostics["securityHeader"] | null | undefined,
   ) => {
-    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
       return "2D Security headers not recorded";
     }
     if ((diagnostics.issueCount ?? 0) > 0) {
@@ -3341,7 +3361,11 @@ const App: React.FC = () => {
   const formatPerformanceDiagnostics = (
     diagnostics: Phase0Diagnostics["performanceBasic"] | null | undefined,
   ) => {
-    if (!diagnostics || diagnostics.checksCount == null || diagnostics.checksCount === 0) {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
       return "2E Performance not recorded";
     }
     if ((diagnostics.issueCount ?? 0) > 0) {
@@ -3635,7 +3659,8 @@ const App: React.FC = () => {
       <div className="report-table-meta" style={{ marginBottom: "8px" }}>
         New {reportIssueSummary?.byChangeStatus.new ?? 0} • Existing{" "}
         {reportIssueSummary?.byChangeStatus.existing ?? 0} • Resolved{" "}
-        {reportIssueSummary?.byChangeStatus.resolved ?? reportIssues.resolvedCount}
+        {reportIssueSummary?.byChangeStatus.resolved ??
+          reportIssues.resolvedCount}
       </div>
       <div className="report-filter-row">
         {REPORT_ISSUE_FILTERS.map((filter) => (
@@ -5144,15 +5169,21 @@ const App: React.FC = () => {
           ? getSummaryCount(summaryRows, "no_response")
           : null,
         ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
-        seoBasic: technicalLoaded ? technicalDiagnostics?.seoBasic ?? null : null,
-        robots: technicalLoaded ? technicalDiagnostics?.robots ?? null : null,
-        sitemap: technicalLoaded ? technicalDiagnostics?.sitemap ?? null : null,
-        sslHttps: technicalLoaded ? technicalDiagnostics?.sslHttps ?? null : null,
+        seoBasic: technicalLoaded
+          ? (technicalDiagnostics?.seoBasic ?? null)
+          : null,
+        robots: technicalLoaded ? (technicalDiagnostics?.robots ?? null) : null,
+        sitemap: technicalLoaded
+          ? (technicalDiagnostics?.sitemap ?? null)
+          : null,
+        sslHttps: technicalLoaded
+          ? (technicalDiagnostics?.sslHttps ?? null)
+          : null,
         securityHeader: technicalLoaded
-          ? technicalDiagnostics?.securityHeader ?? null
+          ? (technicalDiagnostics?.securityHeader ?? null)
           : null,
         performanceBasic: technicalLoaded
-          ? technicalDiagnostics?.performanceBasic ?? null
+          ? (technicalDiagnostics?.performanceBasic ?? null)
           : null,
         error: errors.length > 0 ? errors.join("; ") : null,
         loadedAt:
@@ -8916,20 +8947,29 @@ const App: React.FC = () => {
                     </span>
                     {reportRun.issue_generation_error && (
                       <span title={reportRun.issue_generation_error}>
-                        Issue generation error {reportRun.issue_generation_error}
+                        Issue generation error{" "}
+                        {reportRun.issue_generation_error}
                       </span>
                     )}
                     <span>
-                      {formatSeoDiagnostics(reportTechnicalDiagnostics?.seoBasic)}
+                      {formatSeoDiagnostics(
+                        reportTechnicalDiagnostics?.seoBasic,
+                      )}
                     </span>
                     <span>
-                      {formatRobotsDiagnostics(reportTechnicalDiagnostics?.robots)}
+                      {formatRobotsDiagnostics(
+                        reportTechnicalDiagnostics?.robots,
+                      )}
                     </span>
                     <span>
-                      {formatSitemapDiagnostics(reportTechnicalDiagnostics?.sitemap)}
+                      {formatSitemapDiagnostics(
+                        reportTechnicalDiagnostics?.sitemap,
+                      )}
                     </span>
                     <span>
-                      {formatSslDiagnostics(reportTechnicalDiagnostics?.sslHttps)}
+                      {formatSslDiagnostics(
+                        reportTechnicalDiagnostics?.sslHttps,
+                      )}
                     </span>
                     <span>
                       {formatSecurityHeaderDiagnostics(
@@ -8980,7 +9020,10 @@ const App: React.FC = () => {
                         </div>
                         {reportRun.issue_generation_error && (
                           <div
-                            style={{ fontSize: "12px", color: "var(--warning)" }}
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--warning)",
+                            }}
                           >
                             {reportRun.issue_generation_error}
                           </div>
@@ -9696,7 +9739,10 @@ const App: React.FC = () => {
                                     setScheduleDayOfMonth(
                                       Math.min(
                                         31,
-                                        Math.max(1, Number(e.target.value) || 1),
+                                        Math.max(
+                                          1,
+                                          Number(e.target.value) || 1,
+                                        ),
                                       ),
                                     )
                                   }

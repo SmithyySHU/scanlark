@@ -106,7 +106,10 @@ export async function getScanTechnicalDiagnosticsForUser(
     [scanRunId, userId],
   );
 
-  const issueCountsRes = await client.query<{ category: string; count: string }>(
+  const issueCountsRes = await client.query<{
+    category: string;
+    count: string;
+  }>(
     `
       SELECT si.category, COUNT(*) AS count
       FROM scan_issues si
@@ -124,9 +127,13 @@ export async function getScanTechnicalDiagnosticsForUser(
     issueCountByCategory.set(row.category, Number(row.count));
   }
 
-  const robotsChecks = siteChecksRes.rows.filter((row) => row.check_type === "robots_txt");
+  const robotsChecks = siteChecksRes.rows.filter(
+    (row) => row.check_type === "robots_txt",
+  );
   const sitemapChecks = siteChecksRes.rows.filter(
-    (row) => row.check_type === "sitemap_xml" || row.check_type === "sitemap_index_xml",
+    (row) =>
+      row.check_type === "sitemap_xml" ||
+      row.check_type === "sitemap_index_xml",
   );
   const sslChecks = siteChecksRes.rows.filter(
     (row) =>
@@ -146,7 +153,8 @@ export async function getScanTechnicalDiagnosticsForUser(
   const httpRow =
     siteChecksRes.rows.find((row) => row.check_type === "http_root") ?? null;
   const tlsRow =
-    siteChecksRes.rows.find((row) => row.check_type === "tls_certificate") ?? null;
+    siteChecksRes.rows.find((row) => row.check_type === "tls_certificate") ??
+    null;
 
   return {
     scanRunId,
@@ -224,9 +232,7 @@ export async function getScanTechnicalDiagnosticsForUser(
         ? asBoolean(securityHeaderChecks[0].facts_json?.has_referrer_policy)
         : null,
       hasPermissionsPolicy: securityHeaderChecks[0]
-        ? asBoolean(
-            securityHeaderChecks[0].facts_json?.has_permissions_policy,
-          )
+        ? asBoolean(securityHeaderChecks[0].facts_json?.has_permissions_policy)
         : null,
       cookiesSetCount: securityHeaderChecks[0]
         ? asNumber(securityHeaderChecks[0].facts_json?.cookies_set_count)

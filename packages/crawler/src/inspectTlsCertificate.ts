@@ -1,9 +1,6 @@
 import tls from "tls";
 import { validateCrawlTarget } from "./fetchUrl";
-import {
-  REQUEST_TIMEOUT_MS,
-  SSL_CERT_EXPIRING_SOON_DAYS,
-} from "./limits";
+import { REQUEST_TIMEOUT_MS, SSL_CERT_EXPIRING_SOON_DAYS } from "./limits";
 
 type CertificateSummary = Record<string, string>;
 
@@ -51,7 +48,8 @@ function classifyTlsError(
   const message = error.message?.toLowerCase() ?? "";
 
   if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "dns";
-  if (code === "ECONNREFUSED" || code === "ECONNRESET") return "connection_failed";
+  if (code === "ECONNREFUSED" || code === "ECONNRESET")
+    return "connection_failed";
   if (message.includes("refusing to crawl")) return "unsafe_destination";
   if (message.includes("tls") || message.includes("ssl")) return "tls";
 
@@ -63,9 +61,7 @@ function compactCertificateRecord(value: unknown): CertificateSummary {
     return {};
   }
   const compact: CertificateSummary = {};
-  for (const [key, entry] of Object.entries(
-    value as Record<string, unknown>,
-  )) {
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry === "string" && entry) compact[key] = entry;
   }
   return compact;
@@ -199,7 +195,7 @@ export default async function inspectTlsCertificate(
         const authorizationError =
           socket.authorizationError instanceof Error
             ? socket.authorizationError.message
-            : socket.authorizationError ?? null;
+            : (socket.authorizationError ?? null);
         const expiryInfo = parseDaysUntilExpiry(cert.valid_to);
         const validFrom = parseIsoDate(cert.valid_from);
         const isHostnameMismatch = Boolean(hostnameMatchError);

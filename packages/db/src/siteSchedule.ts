@@ -151,9 +151,7 @@ function buildMonthlyScheduleCandidate(
   dayOfMonth: number,
 ) {
   const clampedDay = Math.min(dayOfMonth, getDaysInMonthUtc(year, monthIndex));
-  return new Date(
-    Date.UTC(year, monthIndex, clampedDay, hours, minutes, 0, 0),
-  );
+  return new Date(Date.UTC(year, monthIndex, clampedDay, hours, minutes, 0, 0));
 }
 
 export function computeNextScheduledAt(

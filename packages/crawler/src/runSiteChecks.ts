@@ -349,8 +349,10 @@ export default async function runSiteChecks({
         permissions_policy: permissionsPolicy,
         cookies_set_count: cookieSummary.cookiesSetCount,
         cookies_missing_secure_count: cookieSummary.cookiesMissingSecureCount,
-        cookies_missing_httponly_count: cookieSummary.cookiesMissingHttpOnlyCount,
-        cookies_missing_samesite_count: cookieSummary.cookiesMissingSameSiteCount,
+        cookies_missing_httponly_count:
+          cookieSummary.cookiesMissingHttpOnlyCount,
+        cookies_missing_samesite_count:
+          cookieSummary.cookiesMissingSameSiteCount,
       },
     });
 
@@ -452,7 +454,8 @@ export default async function runSiteChecks({
 
     const remainingSampleBudget =
       MAX_SITEMAP_URLS_CHECKED - sampledEntryUrls.size;
-    const urlsToCheck = remainingSampleBudget > 0 ? locUrls.slice(0, remainingSampleBudget) : [];
+    const urlsToCheck =
+      remainingSampleBudget > 0 ? locUrls.slice(0, remainingSampleBudget) : [];
     const brokenEntries: Array<Record<string, unknown>> = [];
 
     for (const entryUrl of urlsToCheck) {

@@ -1023,7 +1023,9 @@ export async function runScanForSite(
       );
     } catch (issueErr) {
       const issueMessage =
-        issueErr instanceof Error ? issueErr.message : "issue_generation_failed";
+        issueErr instanceof Error
+          ? issueErr.message
+          : "issue_generation_failed";
       await setScanRunIssueGenerationStatus(
         actualScanRunId,
         "failed",

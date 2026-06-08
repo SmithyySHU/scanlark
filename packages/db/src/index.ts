@@ -141,7 +141,10 @@ export type {
 export { upsertScanPageCheck } from "./scanPageChecks";
 export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
 
-export { listScanSiteCheckTypesForRun, upsertScanSiteCheck } from "./scanSiteChecks";
+export {
+  listScanSiteCheckTypesForRun,
+  upsertScanSiteCheck,
+} from "./scanSiteChecks";
 export type {
   ScanSiteCheckInput,
   ScanSiteCheckRow,

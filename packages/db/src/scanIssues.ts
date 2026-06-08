@@ -203,8 +203,7 @@ function normalizeIssueFingerprintUrl(value: string): string {
     const hostname = parsed.hostname.toLowerCase();
     const isDefaultPort =
       (protocol === "http:" && (parsed.port === "" || parsed.port === "80")) ||
-      (protocol === "https:" &&
-        (parsed.port === "" || parsed.port === "443"));
+      (protocol === "https:" && (parsed.port === "" || parsed.port === "443"));
     const port = isDefaultPort || parsed.port === "" ? "" : `:${parsed.port}`;
     const pathname = parsed.pathname || "/";
     return `${protocol}//${hostname}${port}${pathname}${parsed.search}`;
@@ -1005,7 +1004,8 @@ export async function replaceIssuesForScanRun(
 
     const sitemapChecks = siteChecksRes.rows.filter(
       (row) =>
-        row.check_type === "sitemap_xml" || row.check_type === "sitemap_index_xml",
+        row.check_type === "sitemap_xml" ||
+        row.check_type === "sitemap_index_xml",
     );
     const authoritativeSitemapChecks =
       robotsSitemapReferences.length > 0
@@ -1072,7 +1072,9 @@ export async function replaceIssuesForScanRun(
 
       for (const entry of brokenEntries) {
         const entryUrl =
-          typeof entry.url === "string" && entry.url ? entry.url : row.target_url;
+          typeof entry.url === "string" && entry.url
+            ? entry.url
+            : row.target_url;
         siteIssues.push(
           buildSiteIssue(
             scanRunId,
@@ -1086,7 +1088,9 @@ export async function replaceIssuesForScanRun(
             {
               sitemap_url: row.target_url,
               status_code:
-                typeof entry.status_code === "number" ? entry.status_code : null,
+                typeof entry.status_code === "number"
+                  ? entry.status_code
+                  : null,
               error_message:
                 typeof entry.error_message === "string"
                   ? entry.error_message
@@ -1129,8 +1133,14 @@ export async function replaceIssuesForScanRun(
 
     if (httpsRootCheck) {
       const finalScheme = asString(httpsRootCheck.facts_json?.final_scheme);
-      const classification = asString(httpsRootCheck.facts_json?.classification);
-      if (!httpsRootCheck.ok || finalScheme !== "https" || classification !== "ok") {
+      const classification = asString(
+        httpsRootCheck.facts_json?.classification,
+      );
+      if (
+        !httpsRootCheck.ok ||
+        finalScheme !== "https" ||
+        classification !== "ok"
+      ) {
         siteIssues.push(
           buildSiteIssue(
             scanRunId,
@@ -1198,7 +1208,8 @@ export async function replaceIssuesForScanRun(
         hostname: tlsCertificateCheck.facts_json?.hostname,
         port: tlsCertificateCheck.facts_json?.port,
         authorized: tlsCertificateCheck.facts_json?.authorized,
-        authorization_error: tlsCertificateCheck.facts_json?.authorization_error,
+        authorization_error:
+          tlsCertificateCheck.facts_json?.authorization_error,
         subject: tlsCertificateCheck.facts_json?.subject,
         issuer: tlsCertificateCheck.facts_json?.issuer,
         valid_from: tlsCertificateCheck.facts_json?.valid_from,
@@ -1293,8 +1304,7 @@ export async function replaceIssuesForScanRun(
         csp: securityHeadersCheck.facts_json?.csp,
         x_frame_options: securityHeadersCheck.facts_json?.x_frame_options,
         referrer_policy: securityHeadersCheck.facts_json?.referrer_policy,
-        permissions_policy:
-          securityHeadersCheck.facts_json?.permissions_policy,
+        permissions_policy: securityHeadersCheck.facts_json?.permissions_policy,
         cookies_set_count: securityHeadersCheck.facts_json?.cookies_set_count,
         cookies_missing_secure_count:
           securityHeadersCheck.facts_json?.cookies_missing_secure_count,
@@ -1321,8 +1331,9 @@ export async function replaceIssuesForScanRun(
         securityHeadersCheck.facts_json?.has_permissions_policy,
       );
       const cookiesMissingSecureCount =
-        asNumber(securityHeadersCheck.facts_json?.cookies_missing_secure_count) ??
-        0;
+        asNumber(
+          securityHeadersCheck.facts_json?.cookies_missing_secure_count,
+        ) ?? 0;
       const cookiesMissingHttpOnlyCount =
         asNumber(
           securityHeadersCheck.facts_json?.cookies_missing_httponly_count,
@@ -1674,12 +1685,14 @@ export async function listIssuesForScanRunForUser(
         `,
         params,
       )
-    : { rows: [] as Array<{
-        severity: ScanIssueSeverity;
-        issue_type: string;
-        change_status: ScanIssueChangeStatus | null;
-        count: string;
-      }> };
+    : {
+        rows: [] as Array<{
+          severity: ScanIssueSeverity;
+          issue_type: string;
+          change_status: ScanIssueChangeStatus | null;
+          count: string;
+        }>,
+      };
 
   const resolvedParams: Array<string | number> = [scanRunId, userId];
   const resolvedFilters = ["sis.resolved_scan_run_id = $1", "s.user_id = $2"];

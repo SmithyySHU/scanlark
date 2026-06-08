@@ -147,7 +147,8 @@ export default async function fetchSiteResource(
 ): Promise<SiteResourceFetchResult> {
   const timeoutMs = options?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const userAgent = options?.userAgent ?? SCANLARK_USER_AGENT;
-  const accept = options?.accept ?? "text/plain,application/xml,text/xml,*/*;q=0.8";
+  const accept =
+    options?.accept ?? "text/plain,application/xml,text/xml,*/*;q=0.8";
   const maxBytes = options?.maxBytes ?? Number.POSITIVE_INFINITY;
   const readBody = options?.readBody ?? true;
 
@@ -210,7 +211,9 @@ export default async function fetchSiteResource(
             redirectCount,
           };
         }
-        currentUrl = (await validateCrawlTarget(new URL(location, currentUrl).toString())).toString();
+        currentUrl = (
+          await validateCrawlTarget(new URL(location, currentUrl).toString())
+        ).toString();
         redirectCount++;
         continue;
       }
