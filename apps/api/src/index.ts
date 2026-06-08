@@ -7,6 +7,7 @@ import type {
   IgnoreRuleType,
   LinkClassification,
   ScanIssueCategory,
+  ScanIssueType,
   ScanIssueSeverity,
   ScanIssueStatus,
   ScanDiffChangeType,
@@ -16,12 +17,15 @@ import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
   cancelScanRun,
+  createOrRotateReportShareForRunForUser,
   createSiteForUser,
   createIgnoreRule,
-  createScanRun,
   deleteIgnoreRule,
   deleteSiteForUser,
-  enqueueScanJob,
+  disableReportShareForRunForUser,
+  enqueueExistingScanRunIfIdle,
+  enqueueManualScanIfIdle,
+  formatIssuePresentation,
   getDiffBetweenRunsForUser,
   getBaselineRunForDiff,
   getCompletedRunForSite,
@@ -32,22 +36,31 @@ import {
   getOccurrencesForScanLinkForUser,
   getRecentScanRunsForSiteForUser,
   getRecentScansForSiteForUser,
+  getReportShareForRunForUser,
   getResultsForScanRunForUser,
   getResultsSummaryForScanRunForUser,
+  getScanCategoryScores,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
+  getScanCategoryScoresForUser,
+  getScanLinksForRun,
   getScanLinksForExportFilteredForUser,
   getScanLinksForExportForUser,
   getScanLinksForRunForUser,
+  getScanLinksSummary,
   getScanLinksSummaryForUser,
   getScanDiff,
   getScanRunByIdForUser,
   getScanRunById,
+  getScanTechnicalDiagnostics,
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
+  getSharedReportAccessByToken,
+  getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
+  getUptimeStatusForSiteForUser,
   getTimeoutCountForRunForUser,
   getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
@@ -56,19 +69,24 @@ import {
   getIgnoreRuleByIdForUser,
   listIgnoreRulesForUser,
   listIgnoreRulesForSiteForUser,
+  listIgnoredLinksForRun,
   listIgnoredLinksForRunForUser,
   listIgnoredOccurrencesForUser,
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  recordReportShareView,
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
+  setScanRunIssueGenerationStatus,
   setScanRunStatus,
   deleteLinkNoteForSiteForUser,
   updateLinkNoteForSiteForUser,
   upsertLinkNoteForSiteForUser,
   updateSiteNotificationSettingsForUser,
   updateSiteScheduleForUser,
+  updateUptimeMonitorSettingsForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
   validateSafeRegexPattern,
@@ -78,6 +96,7 @@ import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
+import { sendUptimeNotification } from "./notifyOnUptime";
 import { authMiddleware, initDemoAuth } from "./authMiddleware";
 import { sessionMiddleware } from "./auth";
 import { mountAuthRoutes } from "./routes/auth";
@@ -115,7 +134,7 @@ const DIFF_CHANGE_TYPES = new Set<ScanDiffChangeType>([
   "added",
   "removed",
 ]);
-const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
+const SCHEDULE_FREQUENCIES = new Set(["manual", "daily", "weekly", "monthly"]);
 const NOTIFY_ON_OPTIONS = new Set([
   "always",
   "issues",
@@ -143,6 +162,15 @@ const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
 const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const DASHBOARD_ISSUE_CATEGORIES: ScanIssueCategory[] = [
+  "link_integrity",
+  "seo_basic",
+  "robots",
+  "sitemap",
+  "ssl_https",
+  "security_header",
+  "performance_basic",
+];
 
 function isValidTimeUtc(value: string) {
   const parts = value.split(":");
@@ -253,6 +281,146 @@ function normalizeNotifyOn(value: string): string {
   return value;
 }
 
+function serializeIssueWithPresentation<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    resolved_at: Date | string | null;
+    title: string;
+    description: string;
+    issue_type: ScanIssueType;
+    affected_url: string;
+    source_url: string | null;
+    evidence_json: Record<string, unknown>;
+  },
+>(issue: T) {
+  return {
+    ...issue,
+    presentation: formatIssuePresentation(issue),
+    first_seen_at:
+      issue.first_seen_at instanceof Date
+        ? issue.first_seen_at.toISOString()
+        : issue.first_seen_at,
+    last_seen_at:
+      issue.last_seen_at instanceof Date
+        ? issue.last_seen_at.toISOString()
+        : issue.last_seen_at,
+    resolved_at:
+      issue.resolved_at instanceof Date
+        ? issue.resolved_at.toISOString()
+        : issue.resolved_at,
+  };
+}
+
+type ReportShareApiRow = NonNullable<
+  Awaited<ReturnType<typeof getReportShareForRunForUser>>
+>;
+
+function serializeIgnoredLinkRow<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    created_at: Date | string;
+  },
+>(link: T) {
+  return {
+    ...link,
+    first_seen_at:
+      link.first_seen_at instanceof Date
+        ? link.first_seen_at.toISOString()
+        : link.first_seen_at,
+    last_seen_at:
+      link.last_seen_at instanceof Date
+        ? link.last_seen_at.toISOString()
+        : link.last_seen_at,
+    created_at:
+      link.created_at instanceof Date
+        ? link.created_at.toISOString()
+        : link.created_at,
+  };
+}
+
+function serializeScanLinkRow<
+  T extends {
+    first_seen_at: Date | string;
+    last_seen_at: Date | string;
+    created_at: Date | string;
+    updated_at: Date | string;
+    ignored_at: Date | string | null;
+  },
+>(link: T) {
+  return {
+    ...link,
+    first_seen_at:
+      link.first_seen_at instanceof Date
+        ? link.first_seen_at.toISOString()
+        : link.first_seen_at,
+    last_seen_at:
+      link.last_seen_at instanceof Date
+        ? link.last_seen_at.toISOString()
+        : link.last_seen_at,
+    created_at:
+      link.created_at instanceof Date
+        ? link.created_at.toISOString()
+        : link.created_at,
+    updated_at:
+      link.updated_at instanceof Date
+        ? link.updated_at.toISOString()
+        : link.updated_at,
+    ignored_at:
+      link.ignored_at instanceof Date
+        ? link.ignored_at.toISOString()
+        : link.ignored_at,
+  };
+}
+
+function serializeReportShare(share: ReportShareApiRow) {
+  return {
+    id: share.id,
+    scanRunId: share.scan_run_id,
+    siteId: share.site_id,
+    enabled: share.enabled,
+    createdAt:
+      share.created_at instanceof Date
+        ? share.created_at.toISOString()
+        : share.created_at,
+    disabledAt:
+      share.disabled_at instanceof Date
+        ? share.disabled_at.toISOString()
+        : share.disabled_at,
+    lastViewedAt:
+      share.last_viewed_at instanceof Date
+        ? share.last_viewed_at.toISOString()
+        : share.last_viewed_at,
+    viewCount: share.view_count,
+  };
+}
+
+function setPublicReportHeaders(res: Response) {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+}
+
+function buildSharedReportUrl(token: string) {
+  const appUrl =
+    process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
+  const base = appUrl.replace(/\/+$/, "");
+  return `${base}/shared-reports/${encodeURIComponent(token)}`;
+}
+
+async function rebuildIssuesForRun(scanRunId: string) {
+  await setScanRunIssueGenerationStatus(scanRunId, "pending");
+  try {
+    const result = await replaceIssuesForScanRun(scanRunId);
+    await setScanRunIssueGenerationStatus(scanRunId, "completed", null);
+    return result;
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "issue_generation_failed";
+    await setScanRunIssueGenerationStatus(scanRunId, "failed", message);
+    throw err;
+  }
+}
+
 function validateIgnoreRulePattern(
   ruleType: IgnoreRuleType,
   pattern: string,
@@ -345,6 +513,57 @@ function parseBooleanParam(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+function isValidHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function serializeTimestamp(value: Date | string | null) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function serializeUptimeSummary(
+  uptime: Awaited<ReturnType<typeof getUptimeStatusForSiteForUser>>,
+) {
+  return {
+    settingsId: uptime.settingsId,
+    siteId: uptime.siteId,
+    enabled: uptime.enabled,
+    checkUrl: uptime.checkUrl,
+    intervalMinutes: uptime.intervalMinutes,
+    failureThreshold: uptime.failureThreshold,
+    status: uptime.status,
+    consecutiveFailures: uptime.consecutiveFailures,
+    lastCheckedAt: serializeTimestamp(uptime.lastCheckedAt),
+    lastUpAt: serializeTimestamp(uptime.lastUpAt),
+    lastDownAt: serializeTimestamp(uptime.lastDownAt),
+    lastRecoveredAt: serializeTimestamp(uptime.lastRecoveredAt),
+    lastResponseTimeMs: uptime.lastResponseTimeMs,
+    lastStatusCode: uptime.lastStatusCode,
+    lastError: uptime.lastError,
+    uptime30d: uptime.uptime30d,
+    activeIncidentId: uptime.activeIncidentId,
+    recentChecks: uptime.recentChecks.map((check) => ({
+      id: check.id,
+      settings_id: check.settings_id,
+      site_id: check.site_id,
+      checked_url: check.checked_url,
+      status: check.status,
+      status_code: check.status_code,
+      response_time_ms: check.response_time_ms,
+      redirect_count: check.redirect_count,
+      error_code: check.error_code,
+      error_message: check.error_message,
+      checked_at: serializeTimestamp(check.checked_at),
+    })),
+  };
+}
+
 function parseDiffChangeTypes(value: unknown): ScanDiffChangeType[] | null {
   if (typeof value !== "string" || value.trim().length === 0) return null;
   const parts = value
@@ -405,6 +624,238 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "scanlark-api" });
 });
 
+async function requireSharedReportAccess(
+  req: express.Request,
+  res: express.Response,
+) {
+  const token = req.params.token;
+  if (!token) {
+    sendNotFound(res);
+    return null;
+  }
+  const access = await getSharedReportAccessByToken(token);
+  if (!access) {
+    sendNotFound(res);
+    return null;
+  }
+  return access;
+}
+
+app.get("/public/reports/:token", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    await recordReportShareView(access.share.id);
+    return res.json(serializeScanRun(access.run));
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token", err);
+    return sendInternalError(res, "Failed to fetch shared report", err);
+  }
+});
+
+app.get("/public/reports/:token/issues", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const status = parseIssueStatus(req.query.status);
+  const severity = parseIssueSeverity(req.query.severity);
+  const category = parseIssueCategory(req.query.category);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const issues = await listIssuesForScanRun(access.run.id, {
+      status,
+      severity,
+      category,
+      limit,
+      offset,
+    });
+    return res.json({
+      scanRunId: access.run.id,
+      summary: issues.summary,
+      countReturned: issues.countReturned,
+      totalMatching: issues.totalMatching,
+      resolvedCount: issues.resolvedCount,
+      issues: issues.issues.map(serializeIssueWithPresentation),
+      resolvedIssues: issues.resolvedIssues.map(serializeIssueWithPresentation),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/issues", err);
+    return sendInternalError(res, "Failed to fetch shared report issues", err);
+  }
+});
+
+app.get("/public/reports/:token/links/summary", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const summary = await getScanLinksSummary(access.run.id);
+    const noResponse = summary
+      .filter((row) => row.status_code == null)
+      .reduce((acc, row) => acc + row.count, 0);
+    return res.json({ scanRunId: access.run.id, summary, no_response: noResponse });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/links/summary", err);
+    return sendInternalError(
+      res,
+      "Failed to fetch shared report link summary",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/technical-diagnostics", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const diagnostics = await getScanTechnicalDiagnostics(access.run.id);
+    const categoryScores = await getScanCategoryScores(access.run.id);
+    return res.json({
+      ...diagnostics,
+      categoryScores,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /public/reports/:token/technical-diagnostics",
+      err,
+    );
+    return sendInternalError(
+      res,
+      "Failed to fetch shared technical diagnostics",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/ignored", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    const ignoredResult = await listIgnoredLinksForRun(
+      access.run.id,
+      limit,
+      offset,
+    );
+    return res.json({
+      scanRunId: access.run.id,
+      countReturned: ignoredResult.countReturned,
+      totalMatching: ignoredResult.totalMatching,
+      links: ignoredResult.links.map(serializeIgnoredLinkRow),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/ignored", err);
+    return sendInternalError(
+      res,
+      "Failed to fetch shared ignored links",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/links", async (req, res) => {
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const classificationRaw = req.query.classification;
+  const statusGroupRaw = req.query.statusGroup;
+  const showIgnoredRaw = req.query.showIgnored;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const classification = parseClassification(classificationRaw);
+  const statusGroup = parseStatusGroup(statusGroupRaw);
+  const showIgnored = parseShowIgnored(showIgnoredRaw);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    setPublicReportHeaders(res);
+    await applyIgnoreRulesForScanRun(access.run.id);
+    const paginatedLinks = await getScanLinksForRun(access.run.id, {
+      limit,
+      offset,
+      classification,
+      statusGroup,
+      includeIgnored: showIgnored,
+    });
+    return res.json({
+      scanRunId: access.run.id,
+      classification,
+      statusGroup,
+      showIgnored,
+      countReturned: paginatedLinks.countReturned,
+      totalMatching: paginatedLinks.totalMatching,
+      links: paginatedLinks.links.map(serializeScanLinkRow),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/links", err);
+    return sendInternalError(res, "Failed to fetch shared scan links", err);
+  }
+});
+
 app.use(authMiddleware);
 
 mountEventStream(app);
@@ -460,7 +911,7 @@ app.get("/sites/:siteId/schedule", async (req, res) => {
 
 app.put("/sites/:siteId/schedule", async (req, res) => {
   const siteId = req.params.siteId;
-  const { enabled, frequency, timeUtc, dayOfWeek } = req.body ?? {};
+  const { enabled, frequency, timeUtc, dayOfWeek, dayOfMonth } = req.body ?? {};
 
   if (typeof enabled !== "boolean") {
     return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
@@ -476,8 +927,23 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
   if (typeof timeUtc !== "string" || !isValidTimeUtc(timeUtc)) {
     return sendApiError(res, 400, "invalid_time", "timeUtc must be HH:MM");
   }
-  const frequencyValue = frequency === "daily" ? "daily" : "weekly";
+  const frequencyValue =
+    frequency === "manual" ||
+    frequency === "daily" ||
+    frequency === "weekly" ||
+    frequency === "monthly"
+      ? frequency
+      : "weekly";
   let resolvedDay: number | null = null;
+  let resolvedDayOfMonth: number | null = null;
+  if (enabled && frequencyValue === "manual") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_frequency",
+      "manual frequency cannot be enabled",
+    );
+  }
   if (frequencyValue === "weekly") {
     if (typeof dayOfWeek !== "number" || dayOfWeek < 0 || dayOfWeek > 6) {
       return sendApiError(
@@ -488,6 +954,22 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
       );
     }
     resolvedDay = dayOfWeek;
+  }
+  if (frequencyValue === "monthly") {
+    if (
+      typeof dayOfMonth !== "number" ||
+      !Number.isInteger(dayOfMonth) ||
+      dayOfMonth < 1 ||
+      dayOfMonth > 31
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_day_of_month",
+        "dayOfMonth must be 1-31 for monthly schedules",
+      );
+    }
+    resolvedDayOfMonth = dayOfMonth;
   }
 
   try {
@@ -500,11 +982,97 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
       scheduleFrequency: frequencyValue,
       scheduleTimeUtc: timeUtc,
       scheduleDayOfWeek: resolvedDay,
+      scheduleDayOfMonth: resolvedDayOfMonth,
     });
     res.json({ siteId, ...schedule });
   } catch (err: unknown) {
     console.error("Error in PUT /sites/:siteId/schedule", err);
     sendInternalError(res, "Failed to update schedule", err);
+  }
+});
+
+app.get("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const uptime = await getUptimeStatusForSiteForUser(userId, siteId, 20);
+    res.json(serializeUptimeSummary(uptime));
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in GET /sites/:siteId/uptime", err);
+    sendInternalError(res, "Failed to fetch uptime", err);
+  }
+});
+
+app.patch("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  const { enabled, checkUrl, failureThreshold } = req.body ?? {};
+  const patch: {
+    enabled?: boolean;
+    checkUrl?: string;
+    failureThreshold?: number;
+  } = {};
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_enabled",
+        "enabled must be boolean",
+      );
+    }
+    patch.enabled = enabled;
+  }
+  if (checkUrl !== undefined) {
+    if (typeof checkUrl !== "string" || !isValidHttpUrl(checkUrl)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_check_url",
+        "checkUrl must be a valid http or https URL",
+      );
+    }
+    patch.checkUrl = checkUrl;
+  }
+  if (failureThreshold !== undefined) {
+    if (
+      typeof failureThreshold !== "number" ||
+      !Number.isInteger(failureThreshold) ||
+      failureThreshold < 1
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_failure_threshold",
+        "failureThreshold must be an integer >= 1",
+      );
+    }
+    patch.failureThreshold = failureThreshold;
+  }
+  if (Object.keys(patch).length === 0) {
+    return sendApiError(res, 400, "empty_patch", "No fields to update");
+  }
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    await updateUptimeMonitorSettingsForUser(userId, siteId, patch);
+    const uptime = await getUptimeStatusForSiteForUser(userId, siteId, 20);
+    res.json(serializeUptimeSummary(uptime));
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in PATCH /sites/:siteId/uptime", err);
+    sendInternalError(res, "Failed to update uptime", err);
   }
 });
 
@@ -534,13 +1102,15 @@ async function handlePatchNotificationSettings(
   res: express.Response,
 ) {
   const siteId = req.params.siteId;
-  const { enabled, email, notifyOn, includeCsv } = req.body ?? {};
+  const { enabled, email, notifyOn, includeCsv, summaryEnabled } =
+    req.body ?? {};
 
   const patch: {
     notifyEnabled?: boolean;
     notifyEmail?: string | null;
     notifyOn?: "always" | "issues_exist" | "new_issues_only" | "never";
     notifyIncludeCsv?: boolean;
+    summaryEnabled?: boolean;
   } = {};
 
   if (enabled !== undefined) {
@@ -588,6 +1158,17 @@ async function handlePatchNotificationSettings(
       );
     }
     patch.notifyIncludeCsv = includeCsv;
+  }
+  if (summaryEnabled !== undefined) {
+    if (typeof summaryEnabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_summary_enabled",
+        "summaryEnabled must be boolean",
+      );
+    }
+    patch.summaryEnabled = summaryEnabled;
   }
 
   if (Object.keys(patch).length === 0) {
@@ -709,6 +1290,35 @@ app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/notify", err);
     sendInternalError(res, "Failed to notify", err);
+  }
+});
+
+app.post("/uptime-incidents/:incidentId/notify", async (req, res) => {
+  const incidentId = req.params.incidentId;
+  const internalToken =
+    typeof req.headers["x-internal-token"] === "string"
+      ? req.headers["x-internal-token"]
+      : "";
+  if (!API_INTERNAL_TOKEN || internalToken !== API_INTERNAL_TOKEN) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+
+  const kind = req.body?.kind;
+  if (kind !== "uptime_down" && kind !== "uptime_recovered") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_kind",
+      "kind must be uptime_down or uptime_recovered",
+    );
+  }
+
+  try {
+    const sent = await sendUptimeNotification(incidentId, kind);
+    res.json({ ok: true, sent });
+  } catch (err: unknown) {
+    console.error("Error in POST /uptime-incidents/:incidentId/notify", err);
+    sendInternalError(res, "Failed to notify uptime state", err);
   }
 });
 
@@ -1261,6 +1871,105 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   }
 });
 
+app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
+  const siteId = req.params.siteId;
+
+  try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const [latestRun, history, notificationSettings, uptime] =
+      await Promise.all([
+        getLatestScanForSiteForUser(userId, siteId),
+        getRecentScanRunsForSiteForUser(userId, siteId, 8),
+        getSiteNotificationSettingsForUser(userId, siteId),
+        getUptimeStatusForSiteForUser(userId, siteId, 10),
+      ]);
+
+    if (!latestRun) {
+      return res.json({
+        site,
+        latestRun: null,
+        latestLinkSummary: [],
+        latestIssueSummary: null,
+        latestResolvedCount: 0,
+        latestCategoryIssueSummaries: {},
+        latestCategoryScores: [],
+        latestTechnicalDiagnostics: null,
+        latestDiffSummary: null,
+        baselineRun: null,
+        history: history.map(serializeScanRun),
+        notificationSettings,
+        uptime: serializeUptimeSummary(uptime),
+      });
+    }
+
+    await applyIgnoreRulesForScanRun(latestRun.id);
+
+    const [
+      latestLinkSummary,
+      latestIssues,
+      latestTechnicalDiagnostics,
+      latestCategoryScores,
+      baselineRun,
+    ] = await Promise.all([
+      getScanLinksSummaryForUser(userId, latestRun.id),
+      listIssuesForScanRunForUser(userId, latestRun.id, {
+        limit: 1,
+        offset: 0,
+      }),
+      getScanTechnicalDiagnosticsForUser(userId, latestRun.id),
+      getScanCategoryScoresForUser(userId, latestRun.id),
+      getBaselineRunForDiff(siteId, latestRun.id),
+    ]);
+
+    const categoryEntries = await Promise.all(
+      DASHBOARD_ISSUE_CATEGORIES.map(async (category) => {
+        const issues = await listIssuesForScanRunForUser(userId, latestRun.id, {
+          category,
+          limit: 1,
+          offset: 0,
+        });
+        return [category, issues.summary] as const;
+      }),
+    );
+
+    const latestDiffSummary =
+      baselineRun && latestRun.status === "completed"
+        ? (
+            await getScanDiff(latestRun.id, baselineRun.id, {
+              issuesOnly: true,
+              limit: 1,
+              offset: 0,
+            })
+          ).summary
+        : null;
+
+    return res.json({
+      site,
+      latestRun: serializeScanRun(latestRun),
+      latestLinkSummary,
+      latestIssueSummary: latestIssues.summary,
+      latestResolvedCount: latestIssues.resolvedCount,
+      latestCategoryIssueSummaries: Object.fromEntries(categoryEntries),
+      latestCategoryScores,
+      latestTechnicalDiagnostics,
+      latestDiffSummary,
+      baselineRun,
+      history: history.map(serializeScanRun),
+      notificationSettings,
+      uptime: serializeUptimeSummary(uptime),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/dashboard-summary", err);
+    return sendInternalError(res, "Failed to fetch dashboard summary", err);
+  }
+});
+
 // NEW: Get a scan run by id (live progress polling)
 app.get("/scan-runs/:scanRunId", async (req, res) => {
   const scanRunId = req.params.scanRunId;
@@ -1275,6 +1984,38 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId", err);
     return sendInternalError(res, "Failed to fetch scan run", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/rebuild-issues", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+
+    if (run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_scan_status",
+        "Only completed scan runs can rebuild issues",
+      );
+    }
+
+    const rebuild = await rebuildIssuesForRun(scanRunId);
+    const refreshed = await getScanRunByIdForUser(req.user!.id, scanRunId);
+    if (!refreshed) return sendNotFound(res);
+
+    return res.json({
+      scanRunId,
+      issueCount: rebuild.issueCount,
+      scanRun: serializeScanRun(refreshed),
+    });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/rebuild-issues", err);
+    return sendInternalError(res, "Failed to rebuild scan issues", err);
   }
 });
 
@@ -1326,21 +2067,9 @@ app.get("/scan-runs/:scanRunId/issues", async (req, res) => {
       summary: issues.summary,
       countReturned: issues.countReturned,
       totalMatching: issues.totalMatching,
-      issues: issues.issues.map((issue) => ({
-        ...issue,
-        first_seen_at:
-          issue.first_seen_at instanceof Date
-            ? issue.first_seen_at.toISOString()
-            : issue.first_seen_at,
-        last_seen_at:
-          issue.last_seen_at instanceof Date
-            ? issue.last_seen_at.toISOString()
-            : issue.last_seen_at,
-        resolved_at:
-          issue.resolved_at instanceof Date
-            ? issue.resolved_at.toISOString()
-            : issue.resolved_at,
-      })),
+      resolvedCount: issues.resolvedCount,
+      issues: issues.issues.map(serializeIssueWithPresentation),
+      resolvedIssues: issues.resolvedIssues.map(serializeIssueWithPresentation),
     });
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/issues", err);
@@ -1423,6 +2152,97 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   }
 });
 
+app.get("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const share = await getReportShareForRunForUser(userId, scanRunId);
+    return res.json({
+      scanRunId,
+      eligible: result.run.status === "completed",
+      share: share ? serializeReportShare(share) : null,
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in GET /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to fetch report share", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    if (result.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_shareable",
+        "Only completed scan runs can be shared",
+      );
+    }
+    const resultShare = await createOrRotateReportShareForRunForUser(
+      userId,
+      scanRunId,
+    );
+    return res.status(201).json({
+      scanRunId,
+      created: resultShare.created,
+      share: serializeReportShare(resultShare.share),
+      shareUrl:
+        resultShare.created && resultShare.shareToken
+          ? buildSharedReportUrl(resultShare.shareToken)
+          : null,
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    if (err instanceof Error && err.message === "scan_run_not_shareable") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_shareable",
+        "Only completed scan runs can be shared",
+      );
+    }
+    console.error("Error in POST /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to create report share", err);
+  }
+});
+
+app.delete("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    await disableReportShareForRunForUser(userId, scanRunId);
+    return res.status(204).send();
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in DELETE /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to revoke report share", err);
+  }
+});
+
 // Cancel a scan run
 // curl -X POST "http://localhost:3001/scan-runs/<scanRunId>/cancel"
 app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
@@ -1456,15 +2276,26 @@ app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
         "Scan run must be failed or cancelled to retry",
       );
     }
-    const jobId = await enqueueScanJob({
+    const enqueueResult = await enqueueExistingScanRunIfIdle({
       scanRunId,
       siteId: run.site_id,
     });
+    if (!enqueueResult.created) {
+      return res.status(409).json({
+        error: "active_scan_exists",
+        message: "This site already has queued or running scan work",
+        active: enqueueResult.active,
+      });
+    }
     await setScanRunStatus(scanRunId, "queued", {
       errorMessage: null,
       clearFinishedAt: true,
     });
-    return res.json({ scanRunId, jobId, status: "queued" });
+    return res.json({
+      scanRunId,
+      jobId: enqueueResult.jobId,
+      status: "queued",
+    });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/retry", err);
     return sendInternalError(res, "Failed to retry scan run", err);
@@ -1508,14 +2339,22 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const site = await requireSiteForUser(req, res, siteId);
-    if (!site) return;
-    const scanRunId = await createScanRun(siteId, body.startUrl);
-    const jobId = await enqueueScanJob({ scanRunId, siteId });
+    if (!(await requireSiteForUser(req, res, siteId))) return;
+    const enqueueResult = await enqueueManualScanIfIdle({
+      siteId,
+      startUrl: body.startUrl,
+    });
+    if (!enqueueResult.created) {
+      return res.status(409).json({
+        error: "active_scan_exists",
+        message: "This site already has queued or running scan work",
+        active: enqueueResult.active,
+      });
+    }
 
     res.status(201).json({
-      scanRunId,
-      jobId,
+      scanRunId: enqueueResult.scanRunId,
+      jobId: enqueueResult.jobId,
       siteId,
       startUrl: body.startUrl,
     });
@@ -1625,6 +2464,37 @@ app.get("/scan-runs/:scanRunId/links/summary", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/links/summary", err);
     return sendInternalError(res, "Failed to fetch link summary", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/technical-diagnostics", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const diagnostics = await getScanTechnicalDiagnosticsForUser(
+      userId,
+      scanRunId,
+    );
+    const categoryScores = await getScanCategoryScoresForUser(
+      userId,
+      scanRunId,
+    );
+    res.json({
+      ...diagnostics,
+      categoryScores,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /scan-runs/:scanRunId/technical-diagnostics",
+      err,
+    );
+    return sendInternalError(res, "Failed to fetch technical diagnostics", err);
   }
 });
 
@@ -2771,7 +3641,7 @@ app.post(
             });
           }
         }
-        await replaceIssuesForScanRun(scanRunId);
+        await rebuildIssuesForRun(scanRunId);
         return res.json({ scanRunId, link_url: linkUrl, ignored: true });
       }
 
@@ -2798,7 +3668,7 @@ app.post(
         linkUrl,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, rule });
     } catch (err: unknown) {
       console.error(
@@ -2866,7 +3736,7 @@ app.post(
             sourcePage: first.source_page,
           });
         }
-        await replaceIssuesForScanRun(scanRunId);
+        await rebuildIssuesForRun(scanRunId);
         return res.json({ scanRunId, link_url: link.link_url, ignored: true });
       }
 
@@ -2893,7 +3763,7 @@ app.post(
         link.link_url,
       );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, rule });
     } catch (err: unknown) {
       console.error(
@@ -2935,7 +3805,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, linkUrl, false, {
         source: "none",
       });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: linkUrl, ignored: false });
     } catch (err: unknown) {
       console.error(
@@ -2954,7 +3824,7 @@ app.post("/scan-runs/:scanRunId/reapply-ignore", async (req, res) => {
     const runCheck = await requireScanRunForUser(req, res, scanRunId);
     if (!runCheck) return;
     const result = await applyIgnoreRulesForScanRun(scanRunId, { force });
-    await replaceIssuesForScanRun(scanRunId);
+    await rebuildIssuesForRun(scanRunId);
     res.json({ scanRunId, ...result });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/reapply-ignore", err);
@@ -2989,7 +3859,7 @@ app.post(
       await setScanLinkIgnoredForRun(scanRunId, link.link_url, false, {
         source: "none",
       });
-      await replaceIssuesForScanRun(scanRunId);
+      await rebuildIssuesForRun(scanRunId);
       return res.json({ scanRunId, link_url: link.link_url, ignored: false });
     } catch (err: unknown) {
       console.error(

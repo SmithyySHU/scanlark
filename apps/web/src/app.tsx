@@ -10,6 +10,24 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { AuthPage } from "./components/AuthPage";
+import {
+  CategoryStatusCard,
+  MetricCard,
+  ScoreRingCard,
+  StatusBadge,
+} from "./components/DashboardPrimitives";
+import { MarketingPage } from "./components/MarketingPage";
+import {
+  FEATURED_LEARN_ARTICLE_SLUGS,
+  LEARN_ARTICLES,
+  LEARN_ARTICLES_BY_SLUG,
+  LEARN_CATEGORY_ORDER,
+  getLearnCategoryLabel,
+  type LearnArticle,
+  type LearnArticleCategory,
+} from "./learnArticles";
+import { ScanProgressHero } from "./components/ScanProgressHero";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
@@ -39,6 +57,21 @@ type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
 type LinkNoteStatus = "open" | "snoozed" | "resolved";
 type FixQueueStatusFilter = LinkNoteStatus | "all";
 type FixQueueView = "results" | "changes" | "fix_queue";
+type AppRoute =
+  | "landing"
+  | "login"
+  | "app"
+  | "report"
+  | "shared_report"
+  | "learn";
+type AppSection =
+  | "dashboard"
+  | "reports"
+  | "schedule"
+  | "alerts"
+  | "ignore_rules"
+  | "sites";
+type LearnCategoryFilter = LearnArticleCategory | "all";
 
 interface Site {
   id: string;
@@ -46,15 +79,17 @@ interface Site {
   url: string;
   created_at: string;
   schedule_enabled: boolean;
-  schedule_frequency: "daily" | "weekly";
+  schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: string | null;
   last_scheduled_at: string | null;
   notify_enabled: boolean;
   notify_email: string | null;
   notify_on: NotifyOnOption;
   notify_include_csv: boolean;
+  summary_enabled: boolean;
   last_notified_scan_run_id: string | null;
 }
 
@@ -82,6 +117,8 @@ interface ScanRunSummary {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  issue_generation_status?: "pending" | "completed" | "failed";
+  issue_generation_error?: string | null;
 }
 
 interface ScanHistoryResponse {
@@ -268,8 +305,77 @@ interface Phase0Diagnostics {
   blocked: number | null;
   noResponse: number | null;
   ignoredSkipped: number | null;
+  categoryScores: ScanCategoryScore[] | null;
+  seoBasic: {
+    pageChecksCount: number | null;
+    issueCount: number | null;
+  } | null;
+  robots: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    blocksAll: boolean | null;
+    sitemapReferencesCount: number | null;
+  } | null;
+  sitemap: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    parsedUrlCount: number | null;
+    sampledBrokenEntryCount: number | null;
+  } | null;
+  sslHttps: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    httpsAvailable: boolean | null;
+    httpRedirectsToHttps: boolean | null;
+    tlsAuthorized: boolean | null;
+    hostnameMatches: boolean | null;
+    daysUntilExpiry: number | null;
+    expiringSoon: boolean | null;
+  } | null;
+  securityHeader: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    hasHsts: boolean | null;
+    hasCsp: boolean | null;
+    hasFrameAncestors: boolean | null;
+    hasXFrameOptions: boolean | null;
+    hasXContentTypeOptions: boolean | null;
+    hasReferrerPolicy: boolean | null;
+    hasPermissionsPolicy: boolean | null;
+    cookiesSetCount: number | null;
+    cookiesMissingSecureCount: number | null;
+    cookiesMissingHttpOnlyCount: number | null;
+    cookiesMissingSameSiteCount: number | null;
+  } | null;
+  performanceBasic: {
+    checksCount: number | null;
+    okChecksCount: number | null;
+    issueCount: number | null;
+    responseTimeMs: number | null;
+    htmlSizeBytes: number | null;
+    imageCount: number | null;
+    scriptCount: number | null;
+    stylesheetCount: number | null;
+    assetCount: number | null;
+  } | null;
   error: string | null;
   loadedAt: number | null;
+}
+
+interface ScanTechnicalDiagnosticsResponse {
+  scanRunId: string;
+  categoryScores: ScanCategoryScore[];
+  seoBasic: NonNullable<Phase0Diagnostics["seoBasic"]>;
+  robots: NonNullable<Phase0Diagnostics["robots"]>;
+  sitemap: NonNullable<Phase0Diagnostics["sitemap"]>;
+  sslHttps: NonNullable<Phase0Diagnostics["sslHttps"]>;
+  securityHeader: NonNullable<Phase0Diagnostics["securityHeader"]>;
+  performanceBasic: NonNullable<Phase0Diagnostics["performanceBasic"]>;
+  loadedAt: string;
 }
 
 interface IgnoredOccurrencesResponse {
@@ -315,6 +421,7 @@ type ReportStatusCodeGroups = {
 
 type IssueSeverity = "critical" | "high" | "medium" | "low" | "info";
 type IssueStatus = "open" | "resolved";
+type IssueChangeStatus = "new" | "existing" | "resolved";
 type IssueCategory =
   | "link_integrity"
   | "seo_basic"
@@ -323,11 +430,73 @@ type IssueCategory =
   | "sitemap"
   | "robots"
   | "performance_basic";
+type ScanCategoryScoreKey =
+  | "link_integrity"
+  | "seo_basic"
+  | "search_engine_access"
+  | "ssl_https"
+  | "security_setup"
+  | "speed_basics";
+type ScanCategoryScoreStatus = "healthy" | "needs_attention" | "not_checked";
+interface ScanCategoryScore {
+  key: ScanCategoryScoreKey;
+  label: string;
+  score: number | null;
+  band: ScoreBand | null;
+  status: ScanCategoryScoreStatus;
+  findingCount: number;
+  severityCounts: Record<IssueSeverity, number>;
+  checkCount: number;
+  issueCategories: IssueCategory[];
+}
 type IssueType =
   | "broken_link"
   | "blocked_link"
   | "no_response"
-  | "ignored_safety_skip";
+  | "ignored_safety_skip"
+  | "missing_title"
+  | "empty_title"
+  | "duplicate_title"
+  | "missing_meta_description"
+  | "empty_meta_description"
+  | "missing_h1"
+  | "multiple_h1"
+  | "noindex_detected"
+  | "canonical_multiple"
+  | "robots_missing"
+  | "robots_unreachable"
+  | "robots_blocks_all"
+  | "robots_no_sitemap_reference"
+  | "sitemap_missing"
+  | "sitemap_unreachable"
+  | "sitemap_invalid"
+  | "sitemap_empty"
+  | "sitemap_url_broken"
+  | "https_unavailable"
+  | "http_not_redirecting_to_https"
+  | "mixed_content_script"
+  | "mixed_content_stylesheet"
+  | "mixed_content_image"
+  | "mixed_content_iframe"
+  | "ssl_certificate_expired"
+  | "ssl_certificate_expiring_soon"
+  | "ssl_certificate_hostname_mismatch"
+  | "ssl_certificate_invalid"
+  | "hsts_missing"
+  | "csp_missing"
+  | "frame_ancestors_missing"
+  | "x_frame_options_missing"
+  | "x_content_type_options_missing"
+  | "referrer_policy_missing"
+  | "permissions_policy_missing"
+  | "set_cookie_missing_secure"
+  | "set_cookie_missing_httponly"
+  | "set_cookie_missing_samesite"
+  | "homepage_response_slow"
+  | "homepage_html_too_large"
+  | "homepage_asset_count_high"
+  | "homepage_image_count_high"
+  | "homepage_script_count_high";
 
 interface ScanIssue {
   id: string;
@@ -341,10 +510,42 @@ interface ScanIssue {
   source_url: string | null;
   title: string;
   description: string;
+  presentation: IssuePresentation;
   evidence_json: Record<string, unknown>;
+  change_status: Exclude<IssueChangeStatus, "resolved"> | null;
   first_seen_at: string;
   last_seen_at: string;
   resolved_at: string | null;
+}
+
+interface ResolvedScanIssue {
+  id: string;
+  site_id: string;
+  category: IssueCategory;
+  severity: IssueSeverity;
+  issue_type: IssueType;
+  affected_url: string;
+  source_url: string | null;
+  title: string;
+  description: string;
+  presentation: IssuePresentation;
+  evidence_json: Record<string, unknown>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string;
+  resolved_scan_run_id: string;
+  change_status: "resolved";
+  status: "resolved";
+}
+
+interface IssuePresentation {
+  userTitle: string;
+  shortSummary: string;
+  whatItMeans: string;
+  whyItMatters: string;
+  suggestedFix: string;
+  technicalDetail: string;
+  learnSlug: string | null;
 }
 
 interface ScanIssuesResponse {
@@ -353,20 +554,114 @@ interface ScanIssuesResponse {
     total: number;
     bySeverity: Record<IssueSeverity, number>;
     byIssueType: Record<string, number>;
+    byChangeStatus: Record<IssueChangeStatus, number>;
   };
   countReturned: number;
   totalMatching: number;
+  resolvedCount: number;
   issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
+}
+
+interface DashboardSummaryResponse {
+  site: Site;
+  latestRun: ScanRunSummary | null;
+  latestLinkSummary: ScanLinksSummaryRow[];
+  latestIssueSummary: ScanIssuesResponse["summary"] | null;
+  latestResolvedCount: number;
+  latestCategoryIssueSummaries: Partial<
+    Record<IssueCategory, ScanIssuesResponse["summary"]>
+  >;
+  latestCategoryScores: ScanCategoryScore[];
+  latestTechnicalDiagnostics: ScanTechnicalDiagnosticsResponse | null;
+  latestDiffSummary: ScanDiffResponse["summary"] | null;
+  baselineRun: ScanDiffRun | null;
+  history: ScanRunSummary[];
+  notificationSettings: {
+    notifyEnabled: boolean;
+    notifyEmail: string | null;
+    notifyOn: NotifyOnOption;
+    notifyIncludeCsv: boolean;
+    summaryEnabled: boolean;
+  } | null;
+  uptime: UptimeSummaryResponse;
+}
+
+interface UptimeCheckResponse {
+  id: string;
+  settings_id: string;
+  site_id: string;
+  checked_url: string;
+  status: "up" | "degraded" | "down";
+  status_code: number | null;
+  response_time_ms: number | null;
+  redirect_count: number;
+  error_code: string | null;
+  error_message: string | null;
+  checked_at: string;
+}
+
+interface UptimeSummaryResponse {
+  settingsId: string;
+  siteId: string;
+  enabled: boolean;
+  checkUrl: string;
+  intervalMinutes: number;
+  failureThreshold: number;
+  status: "unknown" | "up" | "degraded" | "down";
+  consecutiveFailures: number;
+  lastCheckedAt: string | null;
+  lastUpAt: string | null;
+  lastDownAt: string | null;
+  lastRecoveredAt: string | null;
+  lastResponseTimeMs: number | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  uptime30d: number | null;
+  activeIncidentId: string | null;
+  recentChecks: UptimeCheckResponse[];
+}
+
+interface ReportShare {
+  id: string;
+  scanRunId: string;
+  siteId: string;
+  enabled: boolean;
+  createdAt: string;
+  disabledAt: string | null;
+  lastViewedAt: string | null;
+  viewCount: number;
+}
+
+interface ReportShareResponse {
+  scanRunId: string;
+  eligible: boolean;
+  share: ReportShare | null;
 }
 
 type ReportIssuesState = {
   issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
+  resolvedCount: number;
   summary: ScanIssuesResponse["summary"] | null;
+  summariesByCategory: Partial<
+    Record<IssueCategory, ScanIssuesResponse["summary"]>
+  >;
   offset: number;
   hasMore: boolean;
   loading: boolean;
   error: string | null;
 };
+
+type ReportIssueFilter =
+  | "all"
+  | "high"
+  | "medium"
+  | "low"
+  | "info"
+  | "link_integrity"
+  | "seo_basic"
+  | "performance_basic";
 
 type ScanDiffChangeType =
   | "new_issue"
@@ -444,9 +739,10 @@ type ScheduleEventPayload = {
   user_id: string;
   site_id: string;
   schedule_enabled: boolean;
-  schedule_frequency: "daily" | "weekly";
+  schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
   schedule_day_of_week: number | null;
+  schedule_day_of_month: number | null;
   next_scheduled_at: string | null;
   last_scheduled_at: string | null;
 };
@@ -456,6 +752,8 @@ type SsePayload = ScanEventPayload | ScheduleEventPayload;
 const API_BASE = "http://localhost:3001";
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
+const REPORT_INITIAL_VISIBLE_ROWS = 10;
+const REPORT_VISIBLE_ROWS_INCREMENT = 10;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
@@ -486,12 +784,66 @@ const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
 };
 const EMPTY_REPORT_ISSUES_STATE: ReportIssuesState = {
   issues: [],
+  resolvedIssues: [],
+  resolvedCount: 0,
   summary: null,
+  summariesByCategory: {},
   offset: 0,
   hasMore: false,
   loading: false,
   error: null,
 };
+
+const REPORT_ISSUE_FILTERS: Array<{
+  key: ReportIssueFilter;
+  label: string;
+}> = [
+  { key: "all", label: "All" },
+  { key: "high", label: "High" },
+  { key: "medium", label: "Medium" },
+  { key: "low", label: "Low" },
+  { key: "info", label: "Info" },
+  { key: "link_integrity", label: "Link integrity" },
+  { key: "seo_basic", label: "SEO basics" },
+  { key: "performance_basic", label: "Speed Basics" },
+];
+
+const DASHBOARD_CATEGORIES: Array<{
+  key: ScanCategoryScoreKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "link_integrity",
+    label: "Broken Links",
+    description: "Broken, blocked, and no-response links",
+  },
+  {
+    key: "seo_basic",
+    label: "SEO Basics",
+    description: "Titles, descriptions, H1s, canonicals, noindex",
+  },
+  {
+    key: "search_engine_access",
+    label: "Search Engine Access",
+    description: "Robots.txt and sitemap discovery",
+  },
+  {
+    key: "ssl_https",
+    label: "SSL & HTTPS",
+    description: "HTTPS reachability, redirects, and certificate checks",
+  },
+  {
+    key: "security_setup",
+    label: "Security Setup",
+    description: "Basic passive response-header checks",
+  },
+  {
+    key: "speed_basics",
+    label: "Speed Basics",
+    description: "Basic response size and asset-count signals",
+  },
+];
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -588,6 +940,229 @@ function issueSeverityTone(value: IssueSeverity) {
   return "var(--muted)";
 }
 
+function combineIssueSummaries(
+  summaries: Array<ScanIssuesResponse["summary"] | null | undefined>,
+): ScanIssuesResponse["summary"] {
+  const combined: ScanIssuesResponse["summary"] = {
+    total: 0,
+    bySeverity: {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      info: 0,
+    },
+    byIssueType: {},
+    byChangeStatus: {
+      new: 0,
+      existing: 0,
+      resolved: 0,
+    },
+  };
+
+  for (const summary of summaries) {
+    if (!summary) continue;
+    combined.total += summary.total ?? 0;
+    combined.bySeverity.critical += summary.bySeverity.critical ?? 0;
+    combined.bySeverity.high += summary.bySeverity.high ?? 0;
+    combined.bySeverity.medium += summary.bySeverity.medium ?? 0;
+    combined.bySeverity.low += summary.bySeverity.low ?? 0;
+    combined.bySeverity.info += summary.bySeverity.info ?? 0;
+    combined.byChangeStatus.new += summary.byChangeStatus.new ?? 0;
+    combined.byChangeStatus.existing += summary.byChangeStatus.existing ?? 0;
+    combined.byChangeStatus.resolved += summary.byChangeStatus.resolved ?? 0;
+    for (const [issueType, count] of Object.entries(
+      summary.byIssueType ?? {},
+    )) {
+      combined.byIssueType[issueType] =
+        (combined.byIssueType[issueType] ?? 0) + count;
+    }
+  }
+
+  return combined;
+}
+
+function formatIssueChangeStatus(value: IssueChangeStatus) {
+  if (value === "new") return "New";
+  if (value === "existing") return "Existing";
+  return "Resolved";
+}
+
+function formatIssueCategoryLabel(category: IssueCategory) {
+  if (category === "seo_basic") return "SEO basic";
+  if (category === "link_integrity") return "Link integrity";
+  if (category === "ssl_https") return "SSL / HTTPS";
+  if (category === "security_header") return "Security Setup";
+  if (category === "robots") return "Robots.txt";
+  if (category === "sitemap") return "Sitemap";
+  if (category === "performance_basic") return "Speed Basics";
+  return String(category).replace(/_/g, " ");
+}
+
+function getDiagnosticIssueCount(
+  category: IssueCategory,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  if (!diagnostics) return null;
+  if (category === "seo_basic") return diagnostics.seoBasic.issueCount;
+  if (category === "robots") return diagnostics.robots.issueCount;
+  if (category === "sitemap") return diagnostics.sitemap.issueCount;
+  if (category === "ssl_https") return diagnostics.sslHttps.issueCount;
+  if (category === "security_header")
+    return diagnostics.securityHeader.issueCount;
+  if (category === "performance_basic")
+    return diagnostics.performanceBasic.issueCount;
+  return null;
+}
+
+function getDiagnosticCheckCount(
+  category: IssueCategory,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  if (!diagnostics) return null;
+  if (category === "seo_basic") return diagnostics.seoBasic.pageChecksCount;
+  if (category === "robots") return diagnostics.robots.checksCount;
+  if (category === "sitemap") return diagnostics.sitemap.checksCount;
+  if (category === "ssl_https") return diagnostics.sslHttps.checksCount;
+  if (category === "security_header")
+    return diagnostics.securityHeader.checksCount;
+  if (category === "performance_basic")
+    return diagnostics.performanceBasic.checksCount;
+  return null;
+}
+
+function getCategoryStatus(
+  category: IssueCategory,
+  issueSummary: ScanIssuesResponse["summary"] | null | undefined,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  const issueCount = issueSummary?.total ?? 0;
+  const diagnosticIssues = getDiagnosticIssueCount(category, diagnostics);
+  const checks = getDiagnosticCheckCount(category, diagnostics);
+
+  if (issueCount > 0 || (diagnosticIssues ?? 0) > 0) {
+    return { label: "Needs attention", tone: "warning" as const };
+  }
+  if (category !== "link_integrity" && (!checks || checks <= 0)) {
+    return { label: "Warning", tone: "muted" as const };
+  }
+  return { label: "Healthy", tone: "success" as const };
+}
+
+function getCategoryDetail(
+  category: IssueCategory,
+  issueSummary: ScanIssuesResponse["summary"] | null | undefined,
+  diagnostics: ScanTechnicalDiagnosticsResponse | null | undefined,
+) {
+  const issueCount = issueSummary?.total ?? 0;
+  if (category === "link_integrity") {
+    return `${issueCount} open issue${issueCount === 1 ? "" : "s"}`;
+  }
+  const checks = getDiagnosticCheckCount(category, diagnostics);
+  const diagnosticIssues = getDiagnosticIssueCount(category, diagnostics);
+  if (!checks || checks <= 0) return "Warning: no diagnostic evidence yet";
+  const count = diagnosticIssues ?? issueCount;
+  return `${count} finding${count === 1 ? "" : "s"}`;
+}
+
+function getCategoryScoreStatusLabel(status: ScanCategoryScoreStatus) {
+  if (status === "healthy") return "Healthy";
+  if (status === "needs_attention") return "Needs attention";
+  return "Not checked";
+}
+
+function getCategoryScoreTone(score: ScanCategoryScore | null | undefined) {
+  if (!score || score.status === "not_checked") return "default" as const;
+  if (score.status === "healthy") return "success" as const;
+  if (score.score != null && score.score < 55) return "danger" as const;
+  return "warning" as const;
+}
+
+function getCategoryScoreValue(score: ScanCategoryScore | null | undefined) {
+  if (!score || score.score == null) return "N/A";
+  return `${score.score}%`;
+}
+
+function getCategoryScoreDetail(score: ScanCategoryScore | null | undefined) {
+  if (!score) return "Score unavailable";
+  if (score.status === "not_checked") return "No diagnostic evidence recorded";
+  return `${score.findingCount} finding${score.findingCount === 1 ? "" : "s"} · ${score.checkCount} check${score.checkCount === 1 ? "" : "s"}`;
+}
+
+function getUptimeTone(
+  uptime: UptimeSummaryResponse | null | undefined,
+): "default" | "success" | "warning" | "danger" {
+  if (!uptime?.enabled || uptime.status === "unknown") return "default";
+  if (uptime.status === "up") return "success";
+  if (uptime.status === "degraded") return "warning";
+  return "danger";
+}
+
+function getUptimeStatusLabel(
+  uptime: UptimeSummaryResponse | null | undefined,
+) {
+  if (!uptime?.enabled) return "Monitoring off";
+  if (uptime.status === "unknown") return "Unknown";
+  if (uptime.status === "up") return "Up";
+  if (uptime.status === "degraded") return "Degraded";
+  return "Down";
+}
+
+function formatUptimePercentage(value: number | null | undefined) {
+  if (value == null) return "N/A";
+  return `${value.toFixed(2)}%`;
+}
+
+function getSearchAccessCategoryDetail(
+  score: ScanCategoryScore | null | undefined,
+  summariesByCategory: Partial<
+    Record<IssueCategory, ScanIssuesResponse["summary"]>
+  >,
+) {
+  if (!score || score.key !== "search_engine_access") {
+    return getCategoryScoreDetail(score);
+  }
+  const robotsCount = summariesByCategory.robots?.total ?? 0;
+  const sitemapCount = summariesByCategory.sitemap?.total ?? 0;
+  return `Robots ${robotsCount} finding${robotsCount === 1 ? "" : "s"} · Sitemap ${sitemapCount} finding${sitemapCount === 1 ? "" : "s"}`;
+}
+
+function getScanStageText(run: ScanRunSummary | null | undefined) {
+  if (!run) return "No scan yet";
+  if (run.status === "queued") return "Queued";
+  if (run.status === "in_progress" && run.total_links <= 0) {
+    return "Discovering links";
+  }
+  if (run.status === "in_progress") return "Checking links";
+  if (
+    run.status === "completed" &&
+    run.issue_generation_status &&
+    run.issue_generation_status !== "completed"
+  ) {
+    return "Building issue summary";
+  }
+  if (run.status === "completed") return "Scan complete";
+  if (run.status === "failed") return "Scan failed";
+  if (run.status === "cancelled") return "Scan cancelled";
+  return "Scan status unavailable";
+}
+
+function matchesReportIssueFilter(
+  issue: ScanIssue,
+  filter: ReportIssueFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (
+    filter === "high" ||
+    filter === "medium" ||
+    filter === "low" ||
+    filter === "info"
+  ) {
+    return issue.severity === filter;
+  }
+  return issue.category === filter;
+}
+
 type ScoreBand = "Excellent" | "Good" | "Needs attention" | "Poor" | "Critical";
 
 type ReportScoreCard = {
@@ -656,14 +1231,22 @@ function buildScoreSummarySentence(
 
 function calculateReportScores(
   run: ScanRunSummary | null,
-  issueSummary: ScanIssuesResponse["summary"] | null,
+  overallIssueSummary: ScanIssuesResponse["summary"] | null,
+  linkIntegrityIssueSummary: ScanIssuesResponse["summary"] | null,
 ): ReportScores {
-  const severityCounts: Record<IssueSeverity, number> = {
-    critical: issueSummary?.bySeverity.critical ?? 0,
-    high: issueSummary?.bySeverity.high ?? 0,
-    medium: issueSummary?.bySeverity.medium ?? 0,
-    low: issueSummary?.bySeverity.low ?? 0,
-    info: issueSummary?.bySeverity.info ?? 0,
+  const overallSeverityCounts: Record<IssueSeverity, number> = {
+    critical: overallIssueSummary?.bySeverity.critical ?? 0,
+    high: overallIssueSummary?.bySeverity.high ?? 0,
+    medium: overallIssueSummary?.bySeverity.medium ?? 0,
+    low: overallIssueSummary?.bySeverity.low ?? 0,
+    info: overallIssueSummary?.bySeverity.info ?? 0,
+  };
+  const linkSeverityCounts: Record<IssueSeverity, number> = {
+    critical: linkIntegrityIssueSummary?.bySeverity.critical ?? 0,
+    high: linkIntegrityIssueSummary?.bySeverity.high ?? 0,
+    medium: linkIntegrityIssueSummary?.bySeverity.medium ?? 0,
+    low: linkIntegrityIssueSummary?.bySeverity.low ?? 0,
+    info: linkIntegrityIssueSummary?.bySeverity.info ?? 0,
   };
 
   if (!run) {
@@ -678,7 +1261,8 @@ function calculateReportScores(
         band: null,
         detail: "Calculating after scan completes",
       },
-      summary: "This score will be calculated when enough scan data is available.",
+      summary:
+        "This score will be calculated when enough scan data is available.",
     };
   }
 
@@ -694,7 +1278,25 @@ function calculateReportScores(
         band: null,
         detail: "Calculating after scan completes",
       },
-      summary: "This score will be calculated when enough scan data is available.",
+      summary:
+        "This score will be calculated when enough scan data is available.",
+    };
+  }
+
+  if (!overallIssueSummary && !linkIntegrityIssueSummary) {
+    return {
+      overall: {
+        score: null,
+        band: null,
+        detail: "Calculating from current issue findings",
+      },
+      linkIntegrity: {
+        score: null,
+        band: null,
+        detail: "Calculating from current issue findings",
+      },
+      summary:
+        "This score will be calculated when enough issue data is available.",
     };
   }
 
@@ -711,31 +1313,43 @@ function calculateReportScores(
         band: null,
         detail: "Not available",
       },
-      summary: "This score is not available because this run did not record checked links.",
+      summary:
+        "This score is not available because this run did not record checked links.",
     };
   }
 
-  const totalPenalty = clamp(
-    Math.min(70, severityCounts.critical * 25) +
-      Math.min(40, severityCounts.high * 12) +
-      Math.min(30, severityCounts.medium * 6) +
-      Math.min(15, severityCounts.low * 1),
-    0,
-    100,
+  const computeScore = (severityCounts: Record<IssueSeverity, number>) => {
+    const totalPenalty = clamp(
+      Math.min(70, severityCounts.critical * 25) +
+        Math.min(40, severityCounts.high * 12) +
+        Math.min(30, severityCounts.medium * 6) +
+        Math.min(15, severityCounts.low * 1),
+      0,
+      100,
+    );
+    const score = clamp(Math.round(100 - totalPenalty), 0, 100);
+    return {
+      score,
+      band: getScoreBand(score),
+    };
+  };
+
+  const overallComputed = computeScore(overallSeverityCounts);
+  const linkComputed = computeScore(linkSeverityCounts);
+  const summary = buildScoreSummarySentence(
+    overallComputed.score,
+    overallSeverityCounts,
   );
-  const score = clamp(Math.round(100 - totalPenalty), 0, 100);
-  const band = getScoreBand(score);
-  const summary = buildScoreSummarySentence(score, severityCounts);
 
   return {
     overall: {
-      score,
-      band,
-      detail: "Currently based on link integrity findings from this scan",
+      score: overallComputed.score,
+      band: overallComputed.band,
+      detail: "Currently based on issue findings from this scan",
     },
     linkIntegrity: {
-      score,
-      band,
+      score: linkComputed.score,
+      band: linkComputed.band,
       detail: "Currently based on link integrity findings from this scan",
     },
     summary,
@@ -804,12 +1418,14 @@ function parseTimeUtc(timeUtc: string) {
 }
 
 function buildUtcScheduleAnchor(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
   const parsed = parseTimeUtc(timeUtc);
   if (!parsed) return null;
+  if (frequency === "manual") return null;
   const now = new Date();
   const base = new Date(
     Date.UTC(
@@ -823,38 +1439,88 @@ function buildUtcScheduleAnchor(
     ),
   );
   if (frequency === "daily") {
-    if (base.getTime() < now.getTime()) {
+    if (base.getTime() <= now.getTime()) {
       base.setUTCDate(base.getUTCDate() + 1);
     }
     return base;
   }
-  const targetDay = dayOfWeek ?? 1;
-  const diff = (targetDay - base.getUTCDay() + 7) % 7;
-  base.setUTCDate(base.getUTCDate() + diff);
-  if (base.getTime() < now.getTime()) {
-    base.setUTCDate(base.getUTCDate() + 7);
+
+  if (frequency === "weekly") {
+    const targetDay = dayOfWeek ?? 1;
+    const diff = (targetDay - base.getUTCDay() + 7) % 7;
+    base.setUTCDate(base.getUTCDate() + diff);
+    if (base.getTime() <= now.getTime()) {
+      base.setUTCDate(base.getUTCDate() + 7);
+    }
+    return base;
   }
-  return base;
+
+  const targetDayOfMonth = dayOfMonth ?? 1;
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  const clampDay = (candidateYear: number, candidateMonth: number) =>
+    Math.min(
+      targetDayOfMonth,
+      new Date(Date.UTC(candidateYear, candidateMonth + 1, 0)).getUTCDate(),
+    );
+  let candidate = new Date(
+    Date.UTC(
+      year,
+      month,
+      clampDay(year, month),
+      parsed.hours,
+      parsed.minutes,
+      0,
+      0,
+    ),
+  );
+  if (candidate.getTime() <= now.getTime()) {
+    const nextMonth = month === 11 ? 0 : month + 1;
+    const nextYear = month === 11 ? year + 1 : year;
+    candidate = new Date(
+      Date.UTC(
+        nextYear,
+        nextMonth,
+        clampDay(nextYear, nextMonth),
+        parsed.hours,
+        parsed.minutes,
+        0,
+        0,
+      ),
+    );
+  }
+  return candidate;
 }
 
 function formatScheduleUtcLabel(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
+  if (frequency === "manual") return "Manual only";
   if (frequency === "weekly") {
     const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
     return `${dayLabel} ${timeUtc}`;
+  }
+  if (frequency === "monthly") {
+    return `Day ${dayOfMonth ?? 1} ${timeUtc}`;
   }
   return timeUtc;
 }
 
 function formatScheduleLocalLabel(
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
 ) {
-  const anchor = buildUtcScheduleAnchor(frequency, timeUtc, dayOfWeek);
+  const anchor = buildUtcScheduleAnchor(
+    frequency,
+    timeUtc,
+    dayOfWeek,
+    dayOfMonth,
+  );
   if (!anchor) return "-";
   return new Intl.DateTimeFormat(undefined, {
     weekday: "short",
@@ -892,26 +1558,34 @@ function formatDuration(
 
 function formatScheduleSummary(
   isEnabled: boolean,
-  frequency: "daily" | "weekly",
+  frequency: "manual" | "daily" | "weekly" | "monthly",
   timeUtc: string,
   dayOfWeek: number | null,
+  dayOfMonth: number | null,
   nextScheduledAt: string | null,
 ) {
-  if (!isEnabled) return "Auto-scan: Off";
-  const dayLabel =
-    frequency === "weekly"
-      ? (WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon")
-      : "Daily";
+  if (!isEnabled && frequency === "manual") return "Auto-scan: Manual only";
+  if (!isEnabled) return `Auto-scan: Paused (${frequency})`;
   const nextLabel = formatDate(nextScheduledAt);
   const localTimeZone = getLocalTimeZone();
-  const localLabel = formatScheduleLocalLabel(frequency, timeUtc, dayOfWeek);
+  const localLabel = formatScheduleLocalLabel(
+    frequency,
+    timeUtc,
+    dayOfWeek,
+    dayOfMonth,
+  );
   const localSuffix =
     localTimeZone && localTimeZone !== "UTC"
       ? ` / ${localLabel} (${localTimeZone})`
       : "";
-  return `Auto-scan: ${frequency === "weekly" ? "Weekly" : "Daily"} ${
-    frequency === "weekly" ? dayLabel : ""
-  } ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`.replace("  ", " ");
+  if (frequency === "weekly") {
+    const dayLabel = WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon";
+    return `Auto-scan: Weekly ${dayLabel} ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
+  }
+  if (frequency === "monthly") {
+    return `Auto-scan: Monthly day ${dayOfMonth ?? 1} ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
+  }
+  return `Auto-scan: Daily ${timeUtc} UTC${localSuffix} (Next: ${nextLabel})`;
 }
 
 function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
@@ -973,6 +1647,44 @@ function getReportScanRunIdFromLocation() {
     return url.searchParams.get("scanRunId");
   }
   return null;
+}
+
+function getSharedReportTokenFromLocation() {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (!path.startsWith("/shared-reports/")) return null;
+  const rawToken = path.slice("/shared-reports/".length);
+  if (!rawToken) return null;
+  try {
+    return decodeURIComponent(rawToken);
+  } catch {
+    return rawToken;
+  }
+}
+
+function getRouteFromLocation(): AppRoute {
+  if (typeof window === "undefined") return "landing";
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/" || path === "/landing") return "landing";
+  if (path === "/login") return "login";
+  if (path === "/report") return "report";
+  if (path.startsWith("/shared-reports/")) return "shared_report";
+  if (path === "/learn" || path.startsWith("/learn/")) return "learn";
+  return "app";
+}
+
+function getLearnSlugFromLocation() {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/learn") return null;
+  if (!path.startsWith("/learn/")) return null;
+  const rawSlug = path.slice("/learn/".length);
+  if (!rawSlug) return null;
+  try {
+    return decodeURIComponent(rawSlug);
+  } catch {
+    return rawSlug;
+  }
 }
 
 function getErrorMessage(err: unknown, fallback: string) {
@@ -1132,6 +1844,10 @@ function buildAppUrl(
   return url.toString();
 }
 
+function buildLearnArticlePath(slug: string) {
+  return `/learn/${encodeURIComponent(slug)}`;
+}
+
 function buildScanLinksUrl(
   runId: string,
   classification: LinkClassification,
@@ -1164,6 +1880,10 @@ function buildIgnoredLinksUrl(
   return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/ignored?limit=${limit}&offset=${offset}`;
 }
 
+function buildSharedReportApiBase(token: string) {
+  return `${API_BASE}/public/reports/${encodeURIComponent(token)}`;
+}
+
 function getSummaryCount(
   rows: ScanLinksSummaryRow[],
   classification: LinkClassification,
@@ -1186,6 +1906,298 @@ function createEmptyReportSections(): Record<
 
 function createEmptyReportIgnoredSection(): ReportIgnoredSectionState {
   return { ...EMPTY_REPORT_IGNORED_SECTION, links: [] };
+}
+
+function matchesLearnArticleQuery(article: LearnArticle, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  const haystack = [
+    article.title,
+    article.summary,
+    article.whatItMeans,
+    article.whyItMatters,
+    article.howToFix,
+    article.technicalDetail,
+    getLearnCategoryLabel(article.category),
+    ...article.keywords,
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(normalizedQuery);
+}
+
+type LearnExperienceProps = {
+  isAuthenticated: boolean;
+  currentArticle: LearnArticle | null;
+  articleMissing: boolean;
+  featuredArticles: LearnArticle[];
+  filteredArticles: LearnArticle[];
+  searchQuery: string;
+  selectedCategory: LearnCategoryFilter;
+  onSearchChange: (value: string) => void;
+  onSelectCategory: (value: LearnCategoryFilter) => void;
+  onOpenArticle: (slug: string) => void;
+  onBackToIndex: () => void;
+  onBackToLanding: () => void;
+  onOpenApp: () => void;
+  onOpenLogin: () => void;
+  onClearFilters: () => void;
+};
+
+function LearnExperience({
+  isAuthenticated,
+  currentArticle,
+  articleMissing,
+  featuredArticles,
+  filteredArticles,
+  searchQuery,
+  selectedCategory,
+  onSearchChange,
+  onSelectCategory,
+  onOpenArticle,
+  onBackToIndex,
+  onBackToLanding,
+  onOpenApp,
+  onOpenLogin,
+  onClearFilters,
+}: LearnExperienceProps) {
+  const relatedArticles = currentArticle
+    ? currentArticle.relatedArticleSlugs
+        .map((slug) => LEARN_ARTICLES_BY_SLUG[slug])
+        .filter((article): article is LearnArticle => Boolean(article))
+    : [];
+
+  return (
+    <div className="learn-page">
+      <div className="learn-page__shell">
+        <section className="learn-hero">
+          <div className="learn-hero__copy">
+            <div className="marketing-kicker">Scanlark Learn</div>
+            <h1>
+              {currentArticle
+                ? currentArticle.title
+                : "Plain-English guides for website health and monitoring reports."}
+            </h1>
+            <p>
+              {currentArticle
+                ? currentArticle.summary
+                : "Search practical explanations for broken links, SEO basics, search access, security setup, speed checks, and report terminology."}
+            </p>
+          </div>
+          <div className="learn-hero__actions">
+            {currentArticle ? (
+              <button className="secondary-button" onClick={onBackToIndex}>
+                Back to Learn
+              </button>
+            ) : (
+              <button className="secondary-button" onClick={onBackToLanding}>
+                Back to landing
+              </button>
+            )}
+            <button
+              className="primary-button"
+              onClick={isAuthenticated ? onOpenApp : onOpenLogin}
+            >
+              {isAuthenticated ? "Open dashboard" : "Sign in"}
+            </button>
+          </div>
+        </section>
+
+        {currentArticle ? (
+          <section className="learn-detail">
+            <div className="learn-detail__meta">
+              <span className="marketing-chip">
+                {getLearnCategoryLabel(currentArticle.category)}
+              </span>
+              <span className="marketing-chip">
+                Audience:{" "}
+                {currentArticle.audience === "mixed"
+                  ? "Mixed"
+                  : "Non-technical"}
+              </span>
+            </div>
+
+            <div className="learn-detail__grid">
+              <article className="learn-surface learn-detail__main">
+                <div className="learn-detail__section">
+                  <h2>What it means</h2>
+                  <p>{currentArticle.whatItMeans}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>Why it matters</h2>
+                  <p>{currentArticle.whyItMatters}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>What to do next</h2>
+                  <p>{currentArticle.howToFix}</p>
+                </div>
+                <details className="learn-detail__technical">
+                  <summary>Technical detail</summary>
+                  <p>{currentArticle.technicalDetail}</p>
+                </details>
+              </article>
+
+              <aside className="learn-surface learn-detail__side">
+                <div className="learn-detail__side-block">
+                  <div className="learn-detail__eyebrow">Related topics</div>
+                  <div className="learn-related-list">
+                    {relatedArticles.length > 0 ? (
+                      relatedArticles.map((article) => (
+                        <button
+                          key={article.slug}
+                          className="learn-related-card"
+                          onClick={() => onOpenArticle(article.slug)}
+                        >
+                          <strong>{article.title}</strong>
+                          <span>{article.summary}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="learn-empty-note">
+                        More related topics will appear here as the library
+                        grows.
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="learn-detail__side-block">
+                  <div className="learn-detail__eyebrow">Coverage</div>
+                  <div className="learn-keyword-list">
+                    {currentArticle.keywords.map((keyword) => (
+                      <span key={keyword} className="learn-keyword">
+                        {keyword}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </section>
+        ) : articleMissing ? (
+          <section className="learn-surface learn-state">
+            <div className="learn-detail__eyebrow">Article not found</div>
+            <h2>This Learn article does not exist yet.</h2>
+            <p>
+              The slug is valid as a route, but there is no matching article in
+              the current MVP catalogue. Use the index to continue browsing the
+              available guides.
+            </p>
+            <div className="learn-state__actions">
+              <button className="primary-button" onClick={onBackToIndex}>
+                Browse Learn articles
+              </button>
+              <button className="secondary-button" onClick={onBackToLanding}>
+                Back to landing
+              </button>
+            </div>
+          </section>
+        ) : (
+          <>
+            <section className="learn-surface learn-controls">
+              <label className="field-label">
+                Search topics
+                <input
+                  className="app-input"
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => onSearchChange(event.target.value)}
+                  placeholder="Search reports, SEO, security, speed, and monitoring terms"
+                />
+              </label>
+
+              <div className="learn-filter-row">
+                <button
+                  className={`learn-filter-chip ${selectedCategory === "all" ? "active" : ""}`}
+                  onClick={() => onSelectCategory("all")}
+                >
+                  All topics
+                </button>
+                {LEARN_CATEGORY_ORDER.map((category) => (
+                  <button
+                    key={category}
+                    className={`learn-filter-chip ${selectedCategory === category ? "active" : ""}`}
+                    onClick={() => onSelectCategory(category)}
+                  >
+                    {getLearnCategoryLabel(category)}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="learn-section">
+              <div className="learn-section__header">
+                <div>
+                  <div className="learn-detail__eyebrow">Start here</div>
+                  <h2>Popular guides</h2>
+                </div>
+              </div>
+              <div className="learn-feature-grid">
+                {featuredArticles.map((article) => (
+                  <button
+                    key={article.slug}
+                    className="learn-feature-card"
+                    onClick={() => onOpenArticle(article.slug)}
+                  >
+                    <span className="learn-feature-card__category">
+                      {getLearnCategoryLabel(article.category)}
+                    </span>
+                    <strong>{article.title}</strong>
+                    <p>{article.summary}</p>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="learn-section">
+              <div className="learn-section__header">
+                <div>
+                  <div className="learn-detail__eyebrow">Knowledge base</div>
+                  <h2>{filteredArticles.length} article(s)</h2>
+                </div>
+                {(searchQuery.trim() || selectedCategory !== "all") && (
+                  <button className="ghost-button" onClick={onClearFilters}>
+                    Clear filters
+                  </button>
+                )}
+              </div>
+
+              {filteredArticles.length === 0 ? (
+                <div className="learn-surface learn-empty-state">
+                  <h3>No articles match those filters.</h3>
+                  <p>
+                    Try a broader search term or switch back to all categories.
+                  </p>
+                </div>
+              ) : (
+                <div className="learn-article-grid">
+                  {filteredArticles.map((article) => (
+                    <button
+                      key={article.slug}
+                      className="learn-article-card"
+                      onClick={() => onOpenArticle(article.slug)}
+                    >
+                      <div className="learn-article-card__top">
+                        <span className="learn-article-card__category">
+                          {getLearnCategoryLabel(article.category)}
+                        </span>
+                        <span className="learn-article-card__audience">
+                          {article.audience === "mixed"
+                            ? "Mixed audience"
+                            : "Non-technical"}
+                        </span>
+                      </div>
+                      <strong>{article.title}</strong>
+                      <p>{article.summary}</p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type LoadHistoryOpts = {
@@ -1223,6 +2235,13 @@ const App: React.FC = () => {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authWorking, setAuthWorking] = useState(false);
+  const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const [sharedReportToken, setSharedReportToken] = useState<string | null>(
+    () => getSharedReportTokenFromLocation(),
+  );
+  const [learnSlug, setLearnSlug] = useState<string | null>(() =>
+    getLearnSlugFromLocation(),
+  );
 
   const apiFetch = useCallback(
     async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -1233,6 +2252,16 @@ const App: React.FC = () => {
       return res;
     },
     [setAuthUser],
+  );
+
+  const reportFetch = useCallback(
+    async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (sharedReportToken) {
+        return fetch(input, init);
+      }
+      return apiFetch(input, init);
+    },
+    [apiFetch, sharedReportToken],
   );
 
   const selectedSiteIdRef = useRef<string | null>(null);
@@ -1257,11 +2286,22 @@ const App: React.FC = () => {
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [dashboardObservedScanRunId, setDashboardObservedScanRunId] = useState<
+    string | null
+  >(null);
+  const [dashboardRecentlyFinishedRunId, setDashboardRecentlyFinishedRunId] =
+    useState<string | null>(null);
   const [results, setResults] = useState<ScanLink[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [learnSearchQuery, setLearnSearchQuery] = useState("");
+  const [learnCategoryFilter, setLearnCategoryFilter] =
+    useState<LearnCategoryFilter>("all");
+  const [appSection, setAppSection] = useState<AppSection>("dashboard");
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
-    getReportScanRunIdFromLocation() ? "report" : "dashboard",
+    getReportScanRunIdFromLocation() || getSharedReportTokenFromLocation()
+      ? "report"
+      : "dashboard",
   );
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
@@ -1283,12 +2323,40 @@ const App: React.FC = () => {
   const [reportIssues, setReportIssues] = useState<ReportIssuesState>(
     EMPTY_REPORT_ISSUES_STATE,
   );
+  const [reportIssueFilter, setReportIssueFilter] =
+    useState<ReportIssueFilter>("all");
+  const [reportFilteredIssueStates, setReportFilteredIssueStates] = useState<
+    Partial<Record<ReportIssueFilter, ReportIssuesState>>
+  >({});
+  const [reportVisibleIssueCount, setReportVisibleIssueCount] = useState(
+    REPORT_INITIAL_VISIBLE_ROWS,
+  );
+  const [reportResolvedExpanded, setReportResolvedExpanded] = useState(false);
+  const [reportVisibleSectionCounts, setReportVisibleSectionCounts] = useState<
+    Record<ReportSectionKey, number>
+  >({
+    broken: REPORT_INITIAL_VISIBLE_ROWS,
+    blocked: REPORT_INITIAL_VISIBLE_ROWS,
+    no_response: REPORT_INITIAL_VISIBLE_ROWS,
+  });
+  const [reportVisibleIgnoredCount, setReportVisibleIgnoredCount] = useState(
+    REPORT_INITIAL_VISIBLE_ROWS,
+  );
   const [reportSectionsLoaded, setReportSectionsLoaded] = useState(false);
   const [reportLastLoadedAt, setReportLastLoadedAt] = useState<number | null>(
     null,
   );
+  const [reportTechnicalDiagnostics, setReportTechnicalDiagnostics] =
+    useState<Phase0Diagnostics | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportShare, setReportShare] = useState<ReportShare | null>(null);
+  const [reportShareEligible, setReportShareEligible] = useState(false);
+  const [reportShareLoading, setReportShareLoading] = useState(false);
+  const [reportShareBusy, setReportShareBusy] = useState(false);
+  const [reportShareRevealUrl, setReportShareRevealUrl] = useState<string | null>(
+    null,
+  );
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -1393,20 +2461,27 @@ const App: React.FC = () => {
   const [ignoreRulesError, setIgnoreRulesError] = useState<string | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleFrequency, setScheduleFrequency] = useState<
-    "daily" | "weekly"
-  >("weekly");
+    "manual" | "daily" | "weekly" | "monthly"
+  >("manual");
   const [scheduleTimeUtc, setScheduleTimeUtc] = useState("02:00");
   const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState(1);
+  const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState(1);
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("new_issues_only");
   const [notifyIncludeCsv, setNotifyIncludeCsv] = useState(false);
+  const [summaryEnabled, setSummaryEnabled] = useState(false);
   const [notifyLoading, setNotifyLoading] = useState(false);
   const [notifySaving, setNotifySaving] = useState(false);
   const [notifyTestSending, setNotifyTestSending] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
+  const [uptimeEnabled, setUptimeEnabled] = useState(false);
+  const [uptimeCheckUrl, setUptimeCheckUrl] = useState("");
+  const [uptimeFailureThreshold, setUptimeFailureThreshold] = useState(3);
+  const [uptimeSaving, setUptimeSaving] = useState(false);
+  const [uptimeError, setUptimeError] = useState<string | null>(null);
   const [newRuleType, setNewRuleType] =
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
@@ -1414,6 +2489,7 @@ const App: React.FC = () => {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
   const [resultsView, setResultsView] = useState<FixQueueView>("results");
+  const [scanWorkspaceOpen, setScanWorkspaceOpen] = useState(false);
   const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
   const [includeUnchanged, setIncludeUnchanged] = useState(false);
   const [unchangedOnly, setUnchangedOnly] = useState(false);
@@ -1479,13 +2555,27 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handlePopState = () => {
+      const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
+      const nextSharedToken = getSharedReportTokenFromLocation();
+      setRoute(nextRoute);
+      setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
-      setViewMode(nextReportId ? "report" : "dashboard");
+      setSharedReportToken(nextSharedToken);
+      setViewMode(
+        nextRoute === "report" || nextRoute === "shared_report"
+          ? "report"
+          : "dashboard",
+      );
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
+
+  useEffect(() => {
+    if (!authUser || route !== "login") return;
+    navigateTo("/app");
+  }, [authUser, route]);
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -1536,6 +2626,17 @@ const App: React.FC = () => {
     setReportSections(createEmptyReportSections());
     setReportIgnoredSection(createEmptyReportIgnoredSection());
     setReportIssues(EMPTY_REPORT_ISSUES_STATE);
+    setReportTechnicalDiagnostics(null);
+    setReportFilteredIssueStates({});
+    setReportIssueFilter("all");
+    setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
+    setReportResolvedExpanded(false);
+    setReportVisibleSectionCounts({
+      broken: REPORT_INITIAL_VISIBLE_ROWS,
+      blocked: REPORT_INITIAL_VISIBLE_ROWS,
+      no_response: REPORT_INITIAL_VISIBLE_ROWS,
+    });
+    setReportVisibleIgnoredCount(REPORT_INITIAL_VISIBLE_ROWS);
     setReportSectionsLoaded(false);
   }, []);
 
@@ -1545,8 +2646,11 @@ const App: React.FC = () => {
       classification: LinkClassification,
       offset: number,
     ): Promise<ScanLinksResponse> => {
-      const res = await apiFetch(
-        buildScanLinksUrl(runId, classification, offset, "all", false),
+      const url = sharedReportToken
+        ? `${buildSharedReportApiBase(sharedReportToken)}/links?classification=${encodeURIComponent(classification)}&limit=${LINKS_PAGE_SIZE}&offset=${offset}`
+        : buildScanLinksUrl(runId, classification, offset, "all", false);
+      const res = await reportFetch(
+        url,
         { cache: "no-store" },
       );
       if (!res.ok) {
@@ -1556,21 +2660,33 @@ const App: React.FC = () => {
       }
       return (await res.json()) as ScanLinksResponse;
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
   );
 
   const loadReportOverview = useCallback(
     async (scanRunId: string) => {
-      const [runRes, summaryRes, ignoredRes] = await Promise.all([
-        apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
-          cache: "no-store",
-        }),
-        apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
-          { cache: "no-store" },
-        ),
-        apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), { cache: "no-store" }),
-      ]);
+      const reportBase = sharedReportToken
+        ? buildSharedReportApiBase(sharedReportToken)
+        : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
+      const [runRes, summaryRes, ignoredRes, diagnosticsRes] =
+        await Promise.all([
+          reportFetch(reportBase, {
+            cache: "no-store",
+          }),
+          reportFetch(`${reportBase}/links/summary`, { cache: "no-store" }),
+          reportFetch(
+            sharedReportToken
+              ? `${reportBase}/ignored?limit=1&offset=0`
+              : buildIgnoredLinksUrl(scanRunId, 0, 1),
+            {
+              cache: "no-store",
+            },
+          ),
+          reportFetch(
+            `${reportBase}/technical-diagnostics`,
+            { cache: "no-store" },
+          ),
+        ]);
 
       if (!runRes.ok) {
         if (runRes.status === 404) {
@@ -1590,19 +2706,46 @@ const App: React.FC = () => {
       if (!ignoredRes.ok) {
         throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
       }
+      if (!diagnosticsRes.ok) {
+        throw new Error(
+          `Failed to load technical diagnostics: ${diagnosticsRes.status}`,
+        );
+      }
 
       const run = (await runRes.json()) as ScanRunSummary;
       const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
       const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
+      const diagnosticsData =
+        (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
 
       setReportRunData(run);
+      setReportScanRunId(run.id);
       setReportSummaryRows(summaryData.summary ?? []);
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
+      setReportTechnicalDiagnostics({
+        scanRunId: run.id,
+        ok: null,
+        broken: null,
+        blocked: null,
+        noResponse: null,
+        ignoredSkipped: null,
+        categoryScores: diagnosticsData.categoryScores ?? null,
+        seoBasic: diagnosticsData.seoBasic,
+        robots: diagnosticsData.robots,
+        sitemap: diagnosticsData.sitemap,
+        sslHttps: diagnosticsData.sslHttps,
+        securityHeader: diagnosticsData.securityHeader,
+        performanceBasic: diagnosticsData.performanceBasic,
+        error: null,
+        loadedAt: diagnosticsData.loadedAt
+          ? new Date(diagnosticsData.loadedAt).getTime()
+          : Date.now(),
+      });
 
       return run;
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
   );
 
   const loadInitialReportSections = useCallback(
@@ -1659,8 +2802,10 @@ const App: React.FC = () => {
       });
 
       try {
-        const ignoredRes = await apiFetch(
-          buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
+        const ignoredRes = await reportFetch(
+          sharedReportToken
+            ? `${buildSharedReportApiBase(sharedReportToken)}/ignored?limit=${LINKS_PAGE_SIZE}&offset=0`
+            : buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
           {
             cache: "no-store",
           },
@@ -1685,24 +2830,94 @@ const App: React.FC = () => {
       }
       setReportSectionsLoaded(true);
     },
-    [apiFetch, fetchReportScanLinksPage],
+    [fetchReportScanLinksPage, reportFetch, sharedReportToken],
   );
 
   const loadInitialReportIssues = useCallback(
     async (scanRunId: string) => {
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
+      const reportIssuesBase = sharedReportToken
+        ? `${buildSharedReportApiBase(sharedReportToken)}/issues`
+        : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues`;
       try {
-        const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
-          { cache: "no-store" },
-        );
-        if (!res.ok) {
-          throw new Error(`Failed to load issues: ${res.status}`);
+        const [
+          allRes,
+          linkRes,
+          seoRes,
+          robotsRes,
+          sitemapRes,
+          sslRes,
+          securityRes,
+          performanceRes,
+        ] = await Promise.all([
+          reportFetch(`${reportIssuesBase}?limit=${LINKS_PAGE_SIZE}&offset=0`, {
+            cache: "no-store",
+          }),
+          reportFetch(`${reportIssuesBase}?category=link_integrity&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=seo_basic&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=robots&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=sitemap&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=ssl_https&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=security_header&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(`${reportIssuesBase}?category=performance_basic&limit=1&offset=0`, { cache: "no-store" }),
+        ]);
+        if (!allRes.ok) {
+          throw new Error(`Failed to load issues: ${allRes.status}`);
         }
-        const data = (await res.json()) as ScanIssuesResponse;
+        if (!linkRes.ok) {
+          throw new Error(
+            `Failed to load link integrity issue summary: ${linkRes.status}`,
+          );
+        }
+        if (!seoRes.ok) {
+          throw new Error(`Failed to load SEO issue summary: ${seoRes.status}`);
+        }
+        if (!robotsRes.ok) {
+          throw new Error(
+            `Failed to load robots issue summary: ${robotsRes.status}`,
+          );
+        }
+        if (!sitemapRes.ok) {
+          throw new Error(
+            `Failed to load sitemap issue summary: ${sitemapRes.status}`,
+          );
+        }
+        if (!sslRes.ok) {
+          throw new Error(`Failed to load SSL issue summary: ${sslRes.status}`);
+        }
+        if (!securityRes.ok) {
+          throw new Error(
+            `Failed to load security issue summary: ${securityRes.status}`,
+          );
+        }
+        if (!performanceRes.ok) {
+          throw new Error(
+            `Failed to load performance issue summary: ${performanceRes.status}`,
+          );
+        }
+        const data = (await allRes.json()) as ScanIssuesResponse;
+        const linkData = (await linkRes.json()) as ScanIssuesResponse;
+        const seoData = (await seoRes.json()) as ScanIssuesResponse;
+        const robotsData = (await robotsRes.json()) as ScanIssuesResponse;
+        const sitemapData = (await sitemapRes.json()) as ScanIssuesResponse;
+        const sslData = (await sslRes.json()) as ScanIssuesResponse;
+        const securityData = (await securityRes.json()) as ScanIssuesResponse;
+        const performanceData =
+          (await performanceRes.json()) as ScanIssuesResponse;
         setReportIssues({
           issues: data.issues ?? [],
+          resolvedIssues: data.resolvedIssues ?? [],
+          resolvedCount: data.resolvedCount ?? 0,
           summary: data.summary,
+          summariesByCategory: {
+            link_integrity: linkData.summary,
+            seo_basic: seoData.summary,
+            robots: robotsData.summary,
+            sitemap: sitemapData.summary,
+            ssl_https: sslData.summary,
+            security_header: securityData.summary,
+            performance_basic: performanceData.summary,
+          },
           offset: data.countReturned,
           hasMore: data.countReturned < data.totalMatching,
           loading: false,
@@ -1716,7 +2931,99 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch],
+    [reportFetch, sharedReportToken],
+  );
+
+  const buildReportIssuesUrl = useCallback(
+    (
+      scanRunId: string,
+      filter: ReportIssueFilter,
+      offset: number,
+      limit = LINKS_PAGE_SIZE,
+    ) => {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      params.set("offset", String(offset));
+      if (
+        filter === "high" ||
+        filter === "medium" ||
+        filter === "low" ||
+        filter === "info"
+      ) {
+        params.set("severity", filter);
+      } else if (
+        filter === "link_integrity" ||
+        filter === "seo_basic" ||
+        filter === "performance_basic"
+      ) {
+        params.set("category", filter);
+      }
+      if (sharedReportToken) {
+        return `${buildSharedReportApiBase(sharedReportToken)}/issues?${params.toString()}`;
+      }
+      return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?${params.toString()}`;
+    },
+    [sharedReportToken],
+  );
+
+  const loadFilteredReportIssues = useCallback(
+    async (scanRunId: string, filter: ReportIssueFilter, offset = 0) => {
+      if (filter === "all") return;
+      setReportFilteredIssueStates((prev) => ({
+        ...prev,
+        [filter]: {
+          ...(prev[filter] ?? EMPTY_REPORT_ISSUES_STATE),
+          loading: true,
+          error: null,
+        },
+      }));
+      try {
+        const res = await reportFetch(
+          buildReportIssuesUrl(scanRunId, filter, offset),
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load filtered issues: ${res.status}`);
+        }
+        const data = (await res.json()) as ScanIssuesResponse;
+        setReportFilteredIssueStates((prev) => {
+          const existing = prev[filter] ?? EMPTY_REPORT_ISSUES_STATE;
+          const isInitial = offset === 0;
+          return {
+            ...prev,
+            [filter]: {
+              ...existing,
+              issues: isInitial
+                ? (data.issues ?? [])
+                : [...existing.issues, ...(data.issues ?? [])],
+              resolvedIssues: isInitial
+                ? (data.resolvedIssues ?? [])
+                : existing.resolvedIssues,
+              resolvedCount: data.resolvedCount ?? existing.resolvedCount ?? 0,
+              summary: data.summary,
+              offset: isInitial
+                ? data.countReturned
+                : existing.offset + data.countReturned,
+              hasMore: isInitial
+                ? data.countReturned < data.totalMatching
+                : existing.offset + data.countReturned < data.totalMatching,
+              loading: false,
+              error: null,
+            },
+          };
+        });
+      } catch (err: unknown) {
+        setReportFilteredIssueStates((prev) => ({
+          ...prev,
+          [filter]: {
+            ...(prev[filter] ?? EMPTY_REPORT_ISSUES_STATE),
+            loading: false,
+            error: getErrorMessage(err, "Failed to load filtered issues"),
+          },
+        }));
+      }
+    },
+    [buildReportIssuesUrl, reportFetch],
   );
 
   const loadMoreReportIssues = useCallback(
@@ -1724,8 +3031,11 @@ const App: React.FC = () => {
       if (reportIssues.loading || !reportIssues.hasMore) return;
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
-        const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
+        const base = sharedReportToken
+          ? `${buildSharedReportApiBase(sharedReportToken)}/issues`
+          : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues`;
+        const res = await reportFetch(
+          `${base}?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
           { cache: "no-store" },
         );
         if (!res.ok) {
@@ -1733,7 +3043,13 @@ const App: React.FC = () => {
         }
         const data = (await res.json()) as ScanIssuesResponse;
         setReportIssues((prev) => ({
+          ...prev,
           issues: [...prev.issues, ...(data.issues ?? [])],
+          resolvedIssues:
+            prev.resolvedIssues.length > 0
+              ? prev.resolvedIssues
+              : (data.resolvedIssues ?? []),
+          resolvedCount: data.resolvedCount ?? prev.resolvedCount,
           summary: prev.summary ?? data.summary,
           offset: prev.offset + data.countReturned,
           hasMore: prev.offset + data.countReturned < data.totalMatching,
@@ -1748,7 +3064,7 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch, reportIssues],
+    [reportFetch, reportIssues, sharedReportToken],
   );
 
   const loadMoreReportSection = useCallback(
@@ -1799,12 +3115,14 @@ const App: React.FC = () => {
         error: null,
       }));
       try {
-        const res = await apiFetch(
-          buildIgnoredLinksUrl(
-            scanRunId,
-            reportIgnoredSection.offset,
-            LINKS_PAGE_SIZE,
-          ),
+        const res = await reportFetch(
+          sharedReportToken
+            ? `${buildSharedReportApiBase(sharedReportToken)}/ignored?limit=${LINKS_PAGE_SIZE}&offset=${reportIgnoredSection.offset}`
+            : buildIgnoredLinksUrl(
+                scanRunId,
+                reportIgnoredSection.offset,
+                LINKS_PAGE_SIZE,
+              ),
           { cache: "no-store" },
         );
         if (!res.ok)
@@ -1825,18 +3143,18 @@ const App: React.FC = () => {
         }));
       }
     },
-    [apiFetch, reportIgnoredSection],
+    [reportFetch, reportIgnoredSection, sharedReportToken],
   );
 
   useEffect(() => {
     if (viewMode !== "report") return;
-    if (!reportScanRunId) {
+    if (!reportScanRunId && !sharedReportToken) {
       setReportRunData(null);
       setReportSummaryRows([]);
       setReportIgnoredTotal(null);
       setReportLastLoadedAt(null);
       resetReportSections();
-      setReportError("Missing scan run id");
+      setReportError("Missing report reference");
       return;
     }
     let cancelled = false;
@@ -1845,7 +3163,7 @@ const App: React.FC = () => {
       setReportError(null);
       try {
         resetReportSections();
-        await loadReportOverview(reportScanRunId);
+        await loadReportOverview(reportScanRunId ?? sharedReportToken ?? "");
       } catch (err) {
         if (!cancelled) {
           setReportError(getErrorMessage(err, "Failed to load report"));
@@ -1858,7 +3176,53 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadReportOverview, reportScanRunId, resetReportSections, viewMode]);
+  }, [
+    loadReportOverview,
+    reportScanRunId,
+    resetReportSections,
+    sharedReportToken,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (viewMode !== "report" || !reportScanRunId || sharedReportToken) {
+      setReportShare(null);
+      setReportShareEligible(false);
+      setReportShareLoading(false);
+      setReportShareRevealUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const loadShare = async () => {
+      setReportShareLoading(true);
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to load report share: ${res.status}`);
+        }
+        const data = (await res.json()) as ReportShareResponse;
+        if (!cancelled) {
+          setReportShare(data.share ?? null);
+          setReportShareEligible(Boolean(data.eligible));
+          setReportShareRevealUrl(null);
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setReportShare(null);
+          setReportShareEligible(false);
+        }
+      } finally {
+        if (!cancelled) setReportShareLoading(false);
+      }
+    };
+    void loadShare();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, reportScanRunId, sharedReportToken, viewMode]);
 
   useEffect(() => {
     if (
@@ -1905,6 +3269,32 @@ const App: React.FC = () => {
     reportRunData?.status,
     reportScanRunId,
     reportSectionsLoaded,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (
+      viewMode !== "report" ||
+      !reportScanRunId ||
+      reportIssueFilter === "all" ||
+      !reportIssues.hasMore
+    ) {
+      return;
+    }
+    const filteredState = reportFilteredIssueStates[reportIssueFilter];
+    if (
+      filteredState &&
+      (filteredState.issues.length > 0 || filteredState.loading)
+    ) {
+      return;
+    }
+    void loadFilteredReportIssues(reportScanRunId, reportIssueFilter, 0);
+  }, [
+    loadFilteredReportIssues,
+    reportFilteredIssueStates,
+    reportIssueFilter,
+    reportIssues.hasMore,
+    reportScanRunId,
     viewMode,
   ]);
 
@@ -2594,7 +3984,114 @@ const App: React.FC = () => {
   const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
   const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
   const reportIssueSummary = reportIssues.summary;
-  const reportScores = calculateReportScores(reportRun, reportIssueSummary);
+  const reportLinkIntegrityIssueSummary =
+    reportIssues.summariesByCategory.link_integrity ?? null;
+  const canUseClientIssueFilter =
+    reportIssueFilter === "all" || !reportIssues.hasMore;
+  const clientFilteredIssues = useMemo(
+    () =>
+      reportIssues.issues.filter((issue) =>
+        matchesReportIssueFilter(issue, reportIssueFilter),
+      ),
+    [reportIssueFilter, reportIssues.issues],
+  );
+  const activeFilteredIssueState =
+    reportIssueFilter === "all"
+      ? reportIssues
+      : (reportFilteredIssueStates[reportIssueFilter] ??
+        EMPTY_REPORT_ISSUES_STATE);
+  const displayedIssueRows = canUseClientIssueFilter
+    ? clientFilteredIssues
+    : activeFilteredIssueState.issues;
+  const getReportIssueFilterTotal = (filter: ReportIssueFilter) => {
+    if (filter === "all")
+      return reportIssueSummary?.total ?? reportIssues.issues.length;
+    if (
+      filter === "high" ||
+      filter === "medium" ||
+      filter === "low" ||
+      filter === "info"
+    ) {
+      return reportIssueSummary?.bySeverity[filter] ?? 0;
+    }
+    if (
+      filter === "link_integrity" ||
+      filter === "seo_basic" ||
+      filter === "performance_basic"
+    ) {
+      return reportIssues.summariesByCategory[filter]?.total ?? 0;
+    }
+    return displayedIssueRows.length;
+  };
+  const displayedIssueTotal = getReportIssueFilterTotal(reportIssueFilter);
+  const visibleIssueRows = displayedIssueRows.slice(0, reportVisibleIssueCount);
+  const reportScores = calculateReportScores(
+    reportRun,
+    reportIssueSummary,
+    reportLinkIntegrityIssueSummary,
+  );
+  const reportCategoryScores = reportTechnicalDiagnostics?.categoryScores ?? [];
+  const reportCategoryScoresByKey = Object.fromEntries(
+    reportCategoryScores.map((score) => [score.key, score]),
+  ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
+  const reportHighPriorityCount =
+    (reportIssueSummary?.bySeverity.critical ?? 0) +
+    (reportIssueSummary?.bySeverity.high ?? 0);
+  const reportDateLabel = formatDate(
+    reportRun?.finished_at ?? reportRun?.started_at ?? null,
+  );
+  const reportScanIdDisplay = reportRun?.id ?? reportScanRunId ?? "-";
+  const reportScanIdShort =
+    reportScanIdDisplay && reportScanIdDisplay !== "-"
+      ? `${reportScanIdDisplay.slice(0, 8)}...`
+      : "-";
+  const reportIssueSummaryPending =
+    reportRun?.status === "completed" &&
+    reportRun.issue_generation_status !== "completed";
+  const topPriorityIssues = useMemo(() => {
+    const severityRank = (severity: IssueSeverity) => {
+      if (severity === "critical") return 0;
+      if (severity === "high") return 1;
+      if (severity === "medium") return 2;
+      if (severity === "low") return 3;
+      return 4;
+    };
+    const changeRank = (
+      changeStatus: Exclude<IssueChangeStatus, "resolved"> | null,
+    ) => {
+      if (changeStatus === "new") return 0;
+      if (changeStatus === "existing") return 1;
+      return 2;
+    };
+
+    return [...reportIssues.issues]
+      .sort((a, b) => {
+        const severityDiff =
+          severityRank(a.severity) - severityRank(b.severity);
+        if (severityDiff !== 0) return severityDiff;
+        const changeDiff =
+          changeRank(a.change_status) - changeRank(b.change_status);
+        if (changeDiff !== 0) return changeDiff;
+        return (
+          new Date(b.last_seen_at).getTime() -
+          new Date(a.last_seen_at).getTime()
+        );
+      })
+      .slice(0, 4);
+  }, [reportIssues.issues]);
+  const reportTechnicalDiagnosticsNeedsAttention =
+    !!reportRun?.issue_generation_error ||
+    reportRun?.issue_generation_status === "pending" ||
+    reportRun?.issue_generation_status === "failed" ||
+    !reportTechnicalDiagnostics ||
+    [
+      reportTechnicalDiagnostics?.seoBasic?.issueCount,
+      reportTechnicalDiagnostics?.robots?.issueCount,
+      reportTechnicalDiagnostics?.sitemap?.issueCount,
+      reportTechnicalDiagnostics?.sslHttps?.issueCount,
+      reportTechnicalDiagnostics?.securityHeader?.issueCount,
+      reportTechnicalDiagnostics?.performanceBasic?.issueCount,
+    ].some((count) => (count ?? 0) > 0);
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -2606,6 +4103,308 @@ const App: React.FC = () => {
   const selectedSiteName = selectedSite
     ? (siteNameById[selectedSite.id] ?? null)
     : null;
+  const currentLearnArticle = useMemo(
+    () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
+    [learnSlug],
+  );
+  const featuredLearnArticles = useMemo(
+    () =>
+      FEATURED_LEARN_ARTICLE_SLUGS.map(
+        (slug) => LEARN_ARTICLES_BY_SLUG[slug],
+      ).filter((article): article is LearnArticle => Boolean(article)),
+    [],
+  );
+  const filteredLearnArticles = useMemo(
+    () =>
+      LEARN_ARTICLES.filter((article) => {
+        if (
+          learnCategoryFilter !== "all" &&
+          article.category !== learnCategoryFilter
+        ) {
+          return false;
+        }
+        return matchesLearnArticleQuery(article, learnSearchQuery);
+      }),
+    [learnCategoryFilter, learnSearchQuery],
+  );
+  const learnArticleMissing =
+    route === "learn" && !!learnSlug && !currentLearnArticle;
+  const fetchDashboardSummary = useCallback(
+    async (siteId: string) => {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/dashboard-summary`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to load dashboard summary: ${res.status}`);
+      }
+      return (await res.json()) as DashboardSummaryResponse;
+    },
+    [apiFetch],
+  );
+  const dashboardSummaryQuery = useQuery({
+    queryKey: ["dashboardSummary", selectedSiteId],
+    enabled: !!selectedSiteId,
+    queryFn: async () => {
+      if (!selectedSiteId) throw new Error("site_required");
+      return await fetchDashboardSummary(selectedSiteId);
+    },
+  });
+  const refreshDashboardSummary = useCallback(
+    async (
+      siteId: string,
+      _reason: string,
+      opts?: {
+        targetRunId?: string;
+        waitForIssueSummary?: boolean;
+        maxAttempts?: number;
+      },
+    ) => {
+      const maxAttempts = opts?.maxAttempts ?? 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        try {
+          const data = await queryClient.fetchQuery({
+            queryKey: ["dashboardSummary", siteId],
+            queryFn: () => fetchDashboardSummary(siteId),
+            staleTime: 0,
+          });
+          const latestRunId = data.latestRun?.id ?? null;
+          const matchesRun =
+            !opts?.targetRunId || latestRunId === opts.targetRunId;
+          const latestIssueStatus = data.latestRun?.issue_generation_status;
+          const issueSummaryReady =
+            !opts?.waitForIssueSummary ||
+            !matchesRun ||
+            !data.latestRun ||
+            data.latestRun.status !== "completed" ||
+            (latestIssueStatus != null
+              ? latestIssueStatus === "completed" ||
+                latestIssueStatus === "failed"
+              : data.latestIssueSummary != null);
+          if (matchesRun && issueSummaryReady) {
+            return data;
+          }
+        } catch {}
+        if (attempt < maxAttempts - 1) {
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 700 * (attempt + 1));
+          });
+        }
+      }
+      return null;
+    },
+    [fetchDashboardSummary, queryClient],
+  );
+  const dashboardSummary = dashboardSummaryQuery.data ?? null;
+  const dashboardUptime = dashboardSummary?.uptime ?? null;
+  const dashboardObservedRun =
+    selectedRun && dashboardObservedScanRunId === selectedRun.id
+      ? selectedRun
+      : null;
+  const dashboardSummaryMatchesObservedRun =
+    !!dashboardObservedRun &&
+    dashboardSummary?.latestRun?.id === dashboardObservedRun.id;
+  const dashboardTerminalSummaryPending =
+    !!dashboardObservedRun &&
+    !isInProgress(dashboardObservedRun.status) &&
+    (!dashboardSummaryMatchesObservedRun ||
+      (dashboardObservedRun.status === "completed" &&
+        dashboardObservedRun.issue_generation_status != null &&
+        dashboardObservedRun.issue_generation_status !== "completed"));
+  const dashboardLatestRun =
+    selectedRun &&
+    (isInProgress(selectedRun.status) || dashboardTerminalSummaryPending)
+      ? selectedRun
+      : (dashboardSummary?.latestRun ?? selectedRun ?? null);
+  const phase0SummaryRows = currentPhase0Diagnostics
+    ? ([
+        {
+          classification: "ok",
+          status_code: 200,
+          count: currentPhase0Diagnostics.ok ?? 0,
+        },
+        {
+          classification: "broken",
+          status_code: null,
+          count: currentPhase0Diagnostics.broken ?? 0,
+        },
+        {
+          classification: "blocked",
+          status_code: null,
+          count: currentPhase0Diagnostics.blocked ?? 0,
+        },
+        {
+          classification: "no_response",
+          status_code: null,
+          count: currentPhase0Diagnostics.noResponse ?? 0,
+        },
+      ] satisfies ScanLinksSummaryRow[])
+    : [];
+  const dashboardLinkSummaryRows =
+    dashboardSummary?.latestLinkSummary ?? phase0SummaryRows;
+  const dashboardLinkSummary = summarizeReportClassifications(
+    dashboardLinkSummaryRows,
+  );
+  const dashboardSummaryMatchesLatestRun =
+    !!dashboardLatestRun &&
+    dashboardSummary?.latestRun?.id === dashboardLatestRun.id;
+  const dashboardSummaryPending =
+    !!dashboardLatestRun &&
+    dashboardLatestRun.status === "completed" &&
+    (!dashboardSummaryMatchesLatestRun ||
+      (dashboardLatestRun.issue_generation_status != null &&
+        dashboardLatestRun.issue_generation_status !== "completed"));
+  const dashboardSummaryDataReady =
+    !dashboardLatestRun ||
+    (dashboardSummaryMatchesLatestRun && !dashboardSummaryPending);
+  const dashboardIssueSummary = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestIssueSummary ?? null)
+    : null;
+  const dashboardCategorySummaries = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestCategoryIssueSummaries ?? {})
+    : {};
+  const dashboardCategoryScoreRows = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestCategoryScores ?? [])
+    : [];
+  const dashboardCategoryScoresByKey = Object.fromEntries(
+    dashboardCategoryScoreRows.map((score) => [score.key, score]),
+  ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
+  const dashboardLatestDiffSummary = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestDiffSummary ?? null)
+    : null;
+  const dashboardScores = calculateReportScores(
+    dashboardLatestRun,
+    dashboardIssueSummary,
+    dashboardCategorySummaries.link_integrity ?? null,
+  );
+  const dashboardStage = getScanStageText(dashboardLatestRun);
+  const dashboardProgress =
+    dashboardLatestRun && dashboardLatestRun.total_links > 0
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            (dashboardLatestRun.checked_links /
+              dashboardLatestRun.total_links) *
+              100,
+          ),
+        )
+      : 0;
+  const dashboardIgnoredSkipped =
+    currentPhase0Diagnostics?.ignoredSkipped ?? null;
+  const dashboardIssueMovement = dashboardIssueSummary?.byChangeStatus ?? null;
+  const dashboardHighPriority =
+    (dashboardIssueSummary?.bySeverity.critical ?? 0) +
+    (dashboardIssueSummary?.bySeverity.high ?? 0);
+  const dashboardActiveLike =
+    !!dashboardLatestRun &&
+    (isInProgress(dashboardLatestRun.status) || dashboardSummaryPending);
+  const dashboardSummaryMatchesActiveRun =
+    !!dashboardLatestRun &&
+    dashboardSummary?.latestRun?.id === dashboardLatestRun.id;
+  const dashboardPhase0MatchesActiveRun =
+    !!dashboardLatestRun &&
+    currentPhase0Diagnostics?.scanRunId === dashboardLatestRun.id;
+  const dashboardActiveCounterRows = dashboardActiveLike
+    ? dashboardPhase0MatchesActiveRun
+      ? phase0SummaryRows
+      : dashboardSummaryMatchesActiveRun
+        ? (dashboardSummary?.latestLinkSummary ?? [])
+        : []
+    : [];
+  const dashboardActiveLinkSummary = summarizeReportClassifications(
+    dashboardActiveCounterRows,
+  );
+  const dashboardTerminalLike =
+    !!dashboardLatestRun &&
+    !dashboardActiveLike &&
+    (dashboardLatestRun.status === "completed" ||
+      dashboardLatestRun.status === "failed" ||
+      dashboardLatestRun.status === "cancelled");
+  const dashboardRunningPreviewItems = [
+    dashboardActiveLinkSummary.broken > 0
+      ? {
+          label: "Broken links detected",
+          detail: `${dashboardActiveLinkSummary.broken} currently failing checks`,
+        }
+      : null,
+    dashboardActiveLinkSummary.blocked > 0
+      ? {
+          label: "Blocked responses",
+          detail: `${dashboardActiveLinkSummary.blocked} links are currently blocked`,
+        }
+      : null,
+    dashboardActiveLinkSummary.no_response > 0
+      ? {
+          label: "No response",
+          detail: `${dashboardActiveLinkSummary.no_response} links have no response yet`,
+        }
+      : null,
+    dashboardIgnoredSkipped != null && dashboardIgnoredSkipped > 0
+      ? {
+          label: "Ignored or skipped",
+          detail: `${dashboardIgnoredSkipped} links are excluded from active findings`,
+        }
+      : null,
+  ].filter((item): item is { label: string; detail: string } => item != null);
+
+  useEffect(() => {
+    if (!selectedSiteId) {
+      setDashboardObservedScanRunId(null);
+      setDashboardRecentlyFinishedRunId(null);
+    }
+  }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (!dashboardLatestRun) return;
+    if (dashboardActiveLike) {
+      if (dashboardObservedScanRunId !== dashboardLatestRun.id) {
+        setDashboardObservedScanRunId(dashboardLatestRun.id);
+      }
+      if (dashboardRecentlyFinishedRunId === dashboardLatestRun.id) {
+        setDashboardRecentlyFinishedRunId(null);
+      }
+      return;
+    }
+    if (
+      dashboardTerminalLike &&
+      dashboardObservedScanRunId === dashboardLatestRun.id &&
+      dashboardRecentlyFinishedRunId !== dashboardLatestRun.id
+    ) {
+      setDashboardRecentlyFinishedRunId(dashboardLatestRun.id);
+    }
+  }, [
+    dashboardActiveLike,
+    dashboardLatestRun,
+    dashboardObservedScanRunId,
+    dashboardRecentlyFinishedRunId,
+    dashboardTerminalLike,
+  ]);
+
+  const shouldShowDashboardTerminalPanel =
+    !!dashboardLatestRun &&
+    dashboardTerminalLike &&
+    dashboardRecentlyFinishedRunId === dashboardLatestRun.id;
+  const dashboardHistoryItems =
+    dashboardSummaryDataReady || !dashboardObservedRun
+      ? (dashboardSummary?.history ?? history)
+      : history;
+  const primaryAppSections: Array<{ key: AppSection; label: string }> = [
+    { key: "dashboard", label: "Dashboard" },
+    { key: "reports", label: "Reports" },
+  ];
+  const isPublicLandingRoute = route === "landing";
+  const isLoginRoute = route === "login";
+  const isReportRoute = route === "report";
+  const isSharedReportRoute = route === "shared_report";
+  const protectedRouteRequiresAuth = route === "app" || route === "report";
+  const isReadOnlySharedReport = reportView && isSharedReportRoute;
+  const authPageTitle =
+    isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
+  const authPageSubtitle =
+    isReportRoute && !authUser
+      ? "Reports stay behind your account so evidence and history remain private."
+      : "Use your Scanlark account to open the monitoring dashboard.";
 
   const formatReportUrlLabel = (url: string) => {
     try {
@@ -2636,6 +4435,286 @@ const App: React.FC = () => {
   const formatIssueSupportText = (description: string) => {
     if (description.length <= 84) return description;
     return `${description.slice(0, 84).trimEnd()}…`;
+  };
+
+  const formatEvidenceValue = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+    if (value == null) return "null";
+    if (Array.isArray(value)) {
+      const rendered = value
+        .slice(0, 4)
+        .map((entry) => formatEvidenceValue(entry))
+        .join(", ");
+      return value.length > 4 ? `${rendered}, ...` : rendered;
+    }
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
+  };
+
+  const formatEvidenceLabel = (key: string) =>
+    key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+
+  const getIssueSummaryText = (
+    issue: { description: string; presentation?: IssuePresentation | null },
+    maxLength = 84,
+  ) => {
+    const source = issue.presentation?.shortSummary ?? issue.description;
+    if (source.length <= maxLength) return source;
+    return `${source.slice(0, maxLength).trimEnd()}…`;
+  };
+
+  const getIssueDisplayTitle = (issue: {
+    title: string;
+    presentation?: IssuePresentation | null;
+  }) => issue.presentation?.userTitle ?? issue.title;
+
+  const renderIssueGuidanceDetails = (
+    issue: {
+      description: string;
+      evidence_json: Record<string, unknown>;
+      presentation?: IssuePresentation | null;
+    },
+    contextLabel = "View guidance",
+  ) => {
+    const presentation = issue.presentation;
+    if (!presentation) return null;
+    const evidenceEntries = Object.entries(issue.evidence_json ?? {});
+
+    return (
+      <details className="report-issue-guidance">
+        <summary>{contextLabel}</summary>
+        <div className="report-issue-guidance__body">
+          <div className="report-issue-guidance__section">
+            <div className="report-label">What it means</div>
+            <p>{presentation.whatItMeans}</p>
+          </div>
+          <div className="report-issue-guidance__section">
+            <div className="report-label">Why it matters</div>
+            <p>{presentation.whyItMatters}</p>
+          </div>
+          <div className="report-issue-guidance__section">
+            <div className="report-label">What to do next</div>
+            <p>{presentation.suggestedFix}</p>
+          </div>
+          <details className="report-issue-tech">
+            <summary>Technical detail</summary>
+            <div className="report-issue-guidance__section">
+              <p>{presentation.technicalDetail}</p>
+            </div>
+            <div className="report-issue-guidance__section">
+              <div className="report-label">Stored summary</div>
+              <p>{issue.description}</p>
+            </div>
+            <div className="report-issue-guidance__section">
+              <div className="report-label">Raw evidence</div>
+              {evidenceEntries.length === 0 ? (
+                <p>No raw evidence was stored for this issue.</p>
+              ) : (
+                <div className="report-evidence-list">
+                  {evidenceEntries.map(([key, value]) => (
+                    <div key={key} className="report-evidence-item">
+                      <strong>{formatEvidenceLabel(key)}</strong>
+                      <span>{formatEvidenceValue(value)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
+        </div>
+      </details>
+    );
+  };
+
+  const formatSeoDiagnostics = (
+    diagnostics: Phase0Diagnostics["seoBasic"] | null | undefined,
+  ) => {
+    if (!diagnostics || diagnostics.pageChecksCount == null) {
+      return "2A SEO basics not recorded";
+    }
+    if (diagnostics.pageChecksCount === 0) {
+      return "2A SEO basics recorded 0 pages";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2A SEO basics checked ${diagnostics.pageChecksCount} pages, ${diagnostics.issueCount} findings`;
+    }
+    return `2A SEO basics checked ${diagnostics.pageChecksCount} pages, positive result`;
+  };
+
+  const formatRobotsDiagnostics = (
+    diagnostics: Phase0Diagnostics["robots"] | null | undefined,
+  ) => {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
+      return "2B Robots not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2B Robots checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    if (diagnostics.blocksAll) {
+      return "2B Robots checked, blocks-all detected";
+    }
+    return `2B Robots checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSitemapDiagnostics = (
+    diagnostics: Phase0Diagnostics["sitemap"] | null | undefined,
+  ) => {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
+      return "2B Sitemap not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2B Sitemap checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    return `2B Sitemap checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSslDiagnostics = (
+    diagnostics: Phase0Diagnostics["sslHttps"] | null | undefined,
+  ) => {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
+      return "2C SSL / HTTPS not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2C SSL / HTTPS checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.httpsAvailable) parts.push("HTTPS ok");
+    if (diagnostics.httpRedirectsToHttps) parts.push("HTTP→HTTPS ok");
+    if (diagnostics.tlsAuthorized && diagnostics.hostnameMatches) {
+      parts.push("TLS ok");
+    }
+    if (diagnostics.daysUntilExpiry != null) {
+      parts.push(`cert ${diagnostics.daysUntilExpiry}d left`);
+    }
+    return parts.length > 0
+      ? `2C SSL / HTTPS positive result: ${parts.join(", ")}`
+      : `2C SSL / HTTPS checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatSecurityHeaderDiagnostics = (
+    diagnostics: Phase0Diagnostics["securityHeader"] | null | undefined,
+  ) => {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
+      return "2D Security headers not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2D Security headers checked ${diagnostics.checksCount}, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.hasHsts) parts.push("HSTS ok");
+    if (diagnostics.hasCsp) parts.push("CSP ok");
+    if (diagnostics.hasFrameAncestors || diagnostics.hasXFrameOptions) {
+      parts.push("frame protection ok");
+    }
+    if (diagnostics.hasXContentTypeOptions) parts.push("XCTO ok");
+    if (diagnostics.hasReferrerPolicy) parts.push("Referrer-Policy ok");
+    if (diagnostics.hasPermissionsPolicy) parts.push("Permissions-Policy ok");
+    if ((diagnostics.cookiesSetCount ?? 0) > 0) {
+      parts.push(`cookies ${diagnostics.cookiesSetCount}`);
+    }
+    return parts.length > 0
+      ? `2D Security headers positive result: ${parts.join(", ")}`
+      : `2D Security headers checked ${diagnostics.checksCount}, positive result`;
+  };
+
+  const formatPerformanceDiagnostics = (
+    diagnostics: Phase0Diagnostics["performanceBasic"] | null | undefined,
+  ) => {
+    if (
+      !diagnostics ||
+      diagnostics.checksCount == null ||
+      diagnostics.checksCount === 0
+    ) {
+      return "2E Performance not recorded";
+    }
+    if ((diagnostics.issueCount ?? 0) > 0) {
+      return `2E Performance checked root, ${diagnostics.issueCount} findings`;
+    }
+    const parts: string[] = [];
+    if (diagnostics.responseTimeMs != null) {
+      parts.push(`${diagnostics.responseTimeMs}ms`);
+    }
+    if (diagnostics.htmlSizeBytes != null) {
+      parts.push(`${Math.round(diagnostics.htmlSizeBytes / 1024)}KB HTML`);
+    }
+    if (diagnostics.assetCount != null) {
+      parts.push(`${diagnostics.assetCount} assets`);
+    }
+    return parts.length > 0
+      ? `2E Performance positive result: ${parts.join(", ")}`
+      : `2E Performance checked root, positive result`;
+  };
+
+  const handleShowMoreReportIssues = () => {
+    const nextVisible = reportVisibleIssueCount + REPORT_VISIBLE_ROWS_INCREMENT;
+    setReportVisibleIssueCount(nextVisible);
+    if (
+      reportScanRunId &&
+      nextVisible > displayedIssueRows.length &&
+      activeFilteredIssueState.hasMore &&
+      !activeFilteredIssueState.loading
+    ) {
+      if (canUseClientIssueFilter) {
+        void loadMoreReportIssues(reportScanRunId);
+      } else {
+        void loadFilteredReportIssues(
+          reportScanRunId,
+          reportIssueFilter,
+          activeFilteredIssueState.offset,
+        );
+      }
+    }
+  };
+
+  const handleShowMoreReportSection = (sectionKey: ReportSectionKey) => {
+    const nextVisible =
+      reportVisibleSectionCounts[sectionKey] + REPORT_VISIBLE_ROWS_INCREMENT;
+    setReportVisibleSectionCounts((prev) => ({
+      ...prev,
+      [sectionKey]: nextVisible,
+    }));
+    const section = reportSections[sectionKey];
+    if (
+      reportScanRunId &&
+      nextVisible > section.links.length &&
+      section.hasMore &&
+      !section.loading
+    ) {
+      void loadMoreReportSection(reportScanRunId, sectionKey);
+    }
+  };
+
+  const handleShowMoreReportIgnored = () => {
+    const nextVisible =
+      reportVisibleIgnoredCount + REPORT_VISIBLE_ROWS_INCREMENT;
+    setReportVisibleIgnoredCount(nextVisible);
+    if (
+      reportScanRunId &&
+      nextVisible > reportIgnoredSection.links.length &&
+      reportIgnoredSection.hasMore &&
+      !reportIgnoredSection.loading
+    ) {
+      void loadMoreReportIgnored(reportScanRunId);
+    }
   };
 
   const renderReportUrlCell = (
@@ -2689,10 +4768,17 @@ const App: React.FC = () => {
     count: number,
   ) => {
     const section = reportSections[sectionKey];
+    const visibleLinks = section.links.slice(
+      0,
+      reportVisibleSectionCounts[sectionKey],
+    );
+    const shownCount = Math.min(visibleLinks.length, count);
     return (
       <div className="report-card">
-        <div className="report-table-title">
-          {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+        <div className="report-card__header">
+          <div className="report-table-title">
+            {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+          </div>
         </div>
         {section.error && (
           <div style={{ fontSize: "12px", color: "var(--warning)" }}>
@@ -2724,7 +4810,7 @@ const App: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                section.links.map((row) => (
+                visibleLinks.map((row) => (
                   <tr key={row.id}>
                     <td>{renderReportUrlCell(row.link_url)}</td>
                     <td>{row.status_code ?? "-"}</td>
@@ -2740,107 +4826,153 @@ const App: React.FC = () => {
             </tbody>
           </table>
         </div>
-        {section.hasMore && (
+        <div className="report-table-meta">
+          Showing {shownCount} of {count} links
+        </div>
+        {(shownCount < count || section.hasMore) && (
           <button
             className="report-button"
-            onClick={() =>
-              reportScanRunId &&
-              void loadMoreReportSection(reportScanRunId, sectionKey)
-            }
+            onClick={() => handleShowMoreReportSection(sectionKey)}
             disabled={section.loading || !reportScanRunId}
           >
-            {section.loading ? "Loading..." : "Load more"}
+            {section.loading ? "Loading..." : "Show more"}
           </button>
         )}
       </div>
     );
   };
 
-  const renderReportIgnoredSection = () => (
-    <div className="report-card">
-      <div className="report-table-title">
-        Ignored / skipped links{" "}
-        <span style={{ color: "var(--muted)" }}>
-          ({reportIgnoredTotal ?? 0})
-        </span>
-      </div>
-      {reportIgnoredSection.error && (
-        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-          {reportIgnoredSection.error}
+  const renderReportIgnoredSection = () => {
+    const visibleIgnoredLinks = reportIgnoredSection.links.slice(
+      0,
+      reportVisibleIgnoredCount,
+    );
+    const shownCount = Math.min(
+      visibleIgnoredLinks.length,
+      reportIgnoredTotal ?? 0,
+    );
+    return (
+      <div className="report-card">
+        <div className="report-card__header">
+          <div className="report-table-title">
+            Ignored / skipped links{" "}
+            <span style={{ color: "var(--muted)" }}>
+              ({reportIgnoredTotal ?? 0})
+            </span>
+          </div>
         </div>
-      )}
-      <div className="report-table-wrap">
-        <table className="report-table report-links-table">
-          <thead>
-            <tr>
-              <th>Link</th>
-              <th>Status</th>
-              <th>Reason</th>
-              <th>Occurrences</th>
-              <th>Last seen</th>
-            </tr>
-          </thead>
-          <tbody>
-            {reportIgnoredSection.loading &&
-            reportIgnoredSection.links.length === 0 ? (
+        {reportIgnoredSection.error && (
+          <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+            {reportIgnoredSection.error}
+          </div>
+        )}
+        <div className="report-table-wrap">
+          <table className="report-table report-links-table">
+            <thead>
               <tr>
-                <td colSpan={5} className="report-empty">
-                  Loading…
-                </td>
+                <th>Link</th>
+                <th>Status</th>
+                <th>Reason</th>
+                <th>Occurrences</th>
+                <th>Last seen</th>
               </tr>
-            ) : reportIgnoredSection.links.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="report-empty">
-                  No ignored or skipped links were recorded for this scan.
-                </td>
-              </tr>
-            ) : (
-              reportIgnoredSection.links.map((row) => (
-                <tr key={row.id}>
-                  <td>{renderReportUrlCell(row.link_url)}</td>
-                  <td>{row.status_code ?? "-"}</td>
-                  <td>
-                    <div>{getIgnoredRowSummary(row)}</div>
-                    <div style={{ color: "var(--muted)", fontSize: "12px" }}>
-                      {row.error_message ??
-                        row.rule_pattern ??
-                        row.rule_type ??
-                        "No reason recorded"}
-                    </div>
+            </thead>
+            <tbody>
+              {reportIgnoredSection.loading &&
+              reportIgnoredSection.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    Loading…
                   </td>
-                  <td>{row.occurrence_count}</td>
-                  <td>{formatDate(row.last_seen_at)}</td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ) : reportIgnoredSection.links.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="report-empty">
+                    No ignored or skipped links were recorded for this scan.
+                  </td>
+                </tr>
+              ) : (
+                visibleIgnoredLinks.map((row) => (
+                  <tr key={row.id}>
+                    <td>{renderReportUrlCell(row.link_url)}</td>
+                    <td>{row.status_code ?? "-"}</td>
+                    <td>
+                      <div>{getIgnoredRowSummary(row)}</div>
+                      <div style={{ color: "var(--muted)", fontSize: "12px" }}>
+                        {row.error_message ??
+                          row.rule_pattern ??
+                          row.rule_type ??
+                          "No reason recorded"}
+                      </div>
+                    </td>
+                    <td>{row.occurrence_count}</td>
+                    <td>{formatDate(row.last_seen_at)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="report-table-meta">
+          Showing {shownCount} of {reportIgnoredTotal ?? 0} links
+        </div>
+        {(shownCount < (reportIgnoredTotal ?? 0) ||
+          reportIgnoredSection.hasMore) && (
+          <button
+            className="report-button"
+            onClick={handleShowMoreReportIgnored}
+            disabled={reportIgnoredSection.loading || !reportScanRunId}
+          >
+            {reportIgnoredSection.loading ? "Loading..." : "Show more"}
+          </button>
+        )}
       </div>
-      {reportIgnoredSection.hasMore && (
-        <button
-          className="report-button"
-          onClick={() =>
-            reportScanRunId && void loadMoreReportIgnored(reportScanRunId)
-          }
-          disabled={reportIgnoredSection.loading || !reportScanRunId}
-        >
-          {reportIgnoredSection.loading ? "Loading..." : "Load more"}
-        </button>
-      )}
-    </div>
-  );
+    );
+  };
 
   const renderReportIssuesSection = () => (
     <div className="report-card">
-      <div className="report-table-title">
-        Issues{" "}
-        <span style={{ color: "var(--muted)" }}>
-          ({reportIssueSummary?.total ?? reportIssues.issues.length})
-        </span>
+      <div className="report-card__header">
+        <div>
+          <div className="report-table-title">
+            Full issue table{" "}
+            <span style={{ color: "var(--muted)" }}>
+              ({reportIssueSummary?.total ?? reportIssues.issues.length})
+            </span>
+          </div>
+          <div className="report-table-meta" style={{ marginTop: "4px" }}>
+            New {reportIssueSummary?.byChangeStatus.new ?? 0} • Existing{" "}
+            {reportIssueSummary?.byChangeStatus.existing ?? 0} • Resolved{" "}
+            {reportIssueSummary?.byChangeStatus.resolved ??
+              reportIssues.resolvedCount}
+          </div>
+        </div>
+      </div>
+      <div className="report-filter-row">
+        {REPORT_ISSUE_FILTERS.map((filter) => (
+          <button
+            key={filter.key}
+            type="button"
+            className={`report-filter-chip ${
+              reportIssueFilter === filter.key ? "active" : ""
+            }`}
+            onClick={() => {
+              setReportIssueFilter(filter.key);
+              setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
+            }}
+          >
+            {filter.label}
+          </button>
+        ))}
       </div>
       {reportIssues.error && (
         <div style={{ fontSize: "12px", color: "var(--warning)" }}>
           {reportIssues.error}
+        </div>
+      )}
+      {!canUseClientIssueFilter && activeFilteredIssueState.error && (
+        <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+          {activeFilteredIssueState.error}
         </div>
       )}
       <div className="report-table-wrap">
@@ -2856,42 +4988,60 @@ const App: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {reportIssues.loading && reportIssues.issues.length === 0 ? (
+            {(canUseClientIssueFilter &&
+              reportIssues.loading &&
+              reportIssues.issues.length === 0) ||
+            (!canUseClientIssueFilter &&
+              activeFilteredIssueState.loading &&
+              displayedIssueRows.length === 0) ? (
               <tr>
                 <td colSpan={6} className="report-empty">
                   Loading…
                 </td>
               </tr>
-            ) : reportIssues.issues.length === 0 ? (
+            ) : displayedIssueRows.length === 0 ? (
               <tr>
                 <td colSpan={6} className="report-empty">
-                  No issues were generated for this scan.
+                  {reportRun?.issue_generation_status === "failed"
+                    ? "Issue generation failed for this scan. Raw scan evidence is still available below."
+                    : reportRun?.issue_generation_status === "pending"
+                      ? "Issue generation is still pending for this completed scan."
+                      : "No issues match this filter for this scan."}
                 </td>
               </tr>
             ) : (
-              reportIssues.issues.map((issue) => (
+              visibleIssueRows.map((issue) => (
                 <tr key={issue.id}>
                   <td>
                     <span
-                      className="status-chip subtle"
-                      style={{
-                        background: issueSeverityTone(issue.severity),
-                        color:
-                          issue.severity === "info" ? "var(--text)" : "white",
-                        borderColor: "transparent",
-                      }}
+                      className={`report-badge report-badge--severity severity-${issue.severity}`}
                     >
                       {formatIssueSeverity(issue.severity)}
                     </span>
                   </td>
                   <td>
-                    <div>{issue.title}</div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "6px",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <span>{getIssueDisplayTitle(issue)}</span>
+                      <span className="report-issue-category">
+                        {formatIssueCategoryLabel(issue.category)}
+                      </span>
+                    </div>
                     <div
                       className="report-issue-support"
-                      title={issue.description}
+                      title={
+                        issue.presentation?.shortSummary ?? issue.description
+                      }
                     >
-                      {formatIssueSupportText(issue.description)}
+                      {getIssueSummaryText(issue)}
                     </div>
+                    {renderIssueGuidanceDetails(issue)}
                   </td>
                   <td>
                     {renderReportUrlCell(issue.affected_url, {
@@ -2903,7 +5053,20 @@ const App: React.FC = () => {
                       copyLabel: "Copied source URL",
                     })}
                   </td>
-                  <td>{issue.status}</td>
+                  <td>
+                    <div className="report-issue-badges">
+                      <span className="report-badge report-badge--status">
+                        {issue.status}
+                      </span>
+                      {issue.change_status && (
+                        <span
+                          className={`report-badge report-badge--change change-${issue.change_status}`}
+                        >
+                          {formatIssueChangeStatus(issue.change_status)}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td>{formatDate(issue.last_seen_at)}</td>
                 </tr>
               ))
@@ -2911,19 +5074,188 @@ const App: React.FC = () => {
           </tbody>
         </table>
       </div>
-      {reportIssues.hasMore && (
+      <div className="report-table-meta">
+        Showing {Math.min(visibleIssueRows.length, displayedIssueTotal)} of{" "}
+        {displayedIssueTotal} issues
+      </div>
+      {(Math.min(visibleIssueRows.length, displayedIssueTotal) <
+        displayedIssueTotal ||
+        activeFilteredIssueState.hasMore) && (
         <button
           className="report-button"
-          onClick={() =>
-            reportScanRunId && void loadMoreReportIssues(reportScanRunId)
-          }
-          disabled={reportIssues.loading || !reportScanRunId}
+          onClick={handleShowMoreReportIssues}
+          disabled={activeFilteredIssueState.loading || !reportScanRunId}
         >
-          {reportIssues.loading ? "Loading..." : "Load more"}
+          {activeFilteredIssueState.loading ? "Loading..." : "Show more"}
         </button>
+      )}
+      {reportIssues.resolvedCount > 0 && (
+        <details
+          className="report-resolved-section"
+          open={reportResolvedExpanded}
+          onToggle={(event) =>
+            setReportResolvedExpanded(
+              (event.currentTarget as HTMLDetailsElement).open,
+            )
+          }
+        >
+          <summary>
+            Resolved in this scan ({reportIssues.resolvedCount})
+          </summary>
+          <div className="report-table-wrap" style={{ marginTop: "10px" }}>
+            <table className="report-table report-issues-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Title</th>
+                  <th>Affected URL</th>
+                  <th>Source URL</th>
+                  <th>Status</th>
+                  <th>Resolved</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reportIssues.resolvedIssues.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="report-empty">
+                      No resolved issue rows were returned for this scan.
+                    </td>
+                  </tr>
+                ) : (
+                  reportIssues.resolvedIssues.map((issue) => (
+                    <tr key={`resolved:${issue.id}`}>
+                      <td>
+                        <span
+                          className={`report-badge report-badge--severity severity-${issue.severity}`}
+                        >
+                          {formatIssueSeverity(issue.severity)}
+                        </span>
+                      </td>
+                      <td>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "6px",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <span>{getIssueDisplayTitle(issue)}</span>
+                          <span className="report-issue-category">
+                            {formatIssueCategoryLabel(issue.category)}
+                          </span>
+                        </div>
+                        <div
+                          className="report-issue-support"
+                          title={
+                            issue.presentation?.shortSummary ??
+                            issue.description
+                          }
+                        >
+                          {getIssueSummaryText(issue)}
+                        </div>
+                        {renderIssueGuidanceDetails(issue)}
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.affected_url, {
+                          copyLabel: "Copied affected URL",
+                        })}
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.source_url, {
+                          copyLabel: "Copied source URL",
+                        })}
+                      </td>
+                      <td>
+                        <span className="report-badge report-badge--change change-resolved">
+                          {formatIssueChangeStatus(issue.change_status)}
+                        </span>
+                      </td>
+                      <td>{formatDate(issue.resolved_at)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </details>
       )}
     </div>
   );
+
+  const renderTopPriorityIssues = () => {
+    if (reportIssueSummaryPending || topPriorityIssues.length === 0) {
+      return null;
+    }
+    return (
+      <div className="report-card">
+        <div className="report-card__header">
+          <div>
+            <div className="report-table-title">Top priority issues</div>
+            <div className="report-table-meta" style={{ marginTop: "4px" }}>
+              Highest-severity findings appear here first so the most important
+              changes are readable before the full issue table.
+            </div>
+          </div>
+        </div>
+        <div className="report-priority-list">
+          {topPriorityIssues.map((issue) => (
+            <div key={`priority:${issue.id}`} className="report-priority-item">
+              <div className="report-priority-item__top">
+                <div className="report-priority-item__title">
+                  {getIssueDisplayTitle(issue)}
+                </div>
+                <div className="report-issue-badges">
+                  <span
+                    className={`report-badge report-badge--severity severity-${issue.severity}`}
+                  >
+                    {formatIssueSeverity(issue.severity)}
+                  </span>
+                  {issue.change_status && (
+                    <span
+                      className={`report-badge report-badge--change change-${issue.change_status}`}
+                    >
+                      {formatIssueChangeStatus(issue.change_status)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="report-priority-item__meta">
+                <span className="report-issue-category">
+                  {formatIssueCategoryLabel(issue.category)}
+                </span>
+                <span>{formatDate(issue.last_seen_at)}</span>
+              </div>
+              <div className="report-priority-item__desc">
+                {getIssueSummaryText(issue, 120)}
+              </div>
+              <div className="report-priority-item__next-step">
+                <div className="report-label">What to do next</div>
+                <div>
+                  {issue.presentation?.suggestedFix ?? issue.description}
+                </div>
+              </div>
+              <div className="report-priority-item__urls">
+                <div>
+                  <div className="report-label">Affected URL</div>
+                  {renderReportUrlCell(issue.affected_url, {
+                    copyLabel: "Copied affected URL",
+                  })}
+                </div>
+                <div>
+                  <div className="report-label">Source URL</div>
+                  {renderReportUrlCell(issue.source_url, {
+                    copyLabel: "Copied source URL",
+                  })}
+                </div>
+              </div>
+              {renderIssueGuidanceDetails(issue, "Open guidance")}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const resultsTitleCount =
     resultsView === "changes"
@@ -3058,6 +5390,10 @@ const App: React.FC = () => {
         activeRunIdRef.current = runId;
         setSelectedRunId(runId);
         selectedRunIdRef.current = runId;
+        void refreshDashboardSummary(payload.site_id, "scan_event_active", {
+          targetRunId: runId,
+          maxAttempts: 2,
+        });
       } else if (activeRunIdRef.current === runId) {
         setActiveRunId(null);
         activeRunIdRef.current = null;
@@ -3071,7 +5407,19 @@ const App: React.FC = () => {
         void refreshSelectedRun(runId);
       }
 
-      if (payload.status === "completed" || payload.status === "failed") {
+      if (
+        payload.status === "completed" ||
+        payload.status === "failed" ||
+        payload.status === "cancelled"
+      ) {
+        void refreshDashboardSummary(payload.site_id, "scan_event_terminal", {
+          targetRunId: runId,
+          waitForIssueSummary: payload.status === "completed",
+          maxAttempts: payload.status === "completed" ? 6 : 2,
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["dashboardSummary", payload.site_id],
+        });
         queryClient.invalidateQueries({
           queryKey: ["scanDiff", payload.site_id],
         });
@@ -3083,6 +5431,9 @@ const App: React.FC = () => {
   }
 
   function handleScheduleEvent(payload: ScheduleEventPayload) {
+    queryClient.invalidateQueries({
+      queryKey: ["dashboardSummary", payload.site_id],
+    });
     setSites((prev) =>
       prev.map((site) =>
         site.id === payload.site_id
@@ -3092,6 +5443,7 @@ const App: React.FC = () => {
               schedule_frequency: payload.schedule_frequency,
               schedule_time_utc: payload.schedule_time_utc,
               schedule_day_of_week: payload.schedule_day_of_week,
+              schedule_day_of_month: payload.schedule_day_of_month,
               next_scheduled_at: payload.next_scheduled_at,
               last_scheduled_at: payload.last_scheduled_at,
             }
@@ -3495,6 +5847,9 @@ const App: React.FC = () => {
       setAuthUser(data);
       setAuthPassword("");
       setAuthError(null);
+      if (route === "login" || route === "landing") {
+        navigateTo("/app");
+      }
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, "Failed to authenticate"));
     } finally {
@@ -3510,6 +5865,7 @@ const App: React.FC = () => {
     } finally {
       setAuthUser(null);
       resetSessionState();
+      navigateTo("/landing");
     }
   }
 
@@ -4051,9 +6407,10 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!selectedSite) return;
     setScheduleEnabled(selectedSite.schedule_enabled ?? false);
-    setScheduleFrequency(selectedSite.schedule_frequency ?? "weekly");
+    setScheduleFrequency(selectedSite.schedule_frequency ?? "manual");
     setScheduleTimeUtc(normalizeTimeInput(selectedSite.schedule_time_utc));
     setScheduleDayOfWeek(selectedSite.schedule_day_of_week ?? 1);
+    setScheduleDayOfMonth(selectedSite.schedule_day_of_month ?? 1);
     setScheduleError(null);
   }, [selectedSite]);
 
@@ -4063,11 +6420,27 @@ const App: React.FC = () => {
       setNotifyEmail("");
       setNotifyOn("new_issues_only");
       setNotifyIncludeCsv(false);
+      setSummaryEnabled(false);
       setNotifyError(null);
       return;
     }
     void loadNotificationSettings(selectedSiteId);
   }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (!selectedSiteId) {
+      setUptimeEnabled(false);
+      setUptimeCheckUrl("");
+      setUptimeFailureThreshold(3);
+      setUptimeError(null);
+      return;
+    }
+    if (!dashboardUptime) return;
+    setUptimeEnabled(dashboardUptime.enabled);
+    setUptimeCheckUrl(dashboardUptime.checkUrl);
+    setUptimeFailureThreshold(dashboardUptime.failureThreshold);
+    setUptimeError(null);
+  }, [dashboardUptime, selectedSiteId]);
 
   useEffect(() => {
     if (!selectedRunId || history.length === 0) {
@@ -4114,8 +6487,10 @@ const App: React.FC = () => {
       setPhase0DiagnosticsLoading(true);
       let summaryRows: ScanLinksSummaryRow[] = [];
       let ignoredSkipped = 0;
+      let technicalDiagnostics: ScanTechnicalDiagnosticsResponse | null = null;
       let summaryLoaded = false;
       let ignoredLoaded = false;
+      let technicalLoaded = false;
       const errors: string[] = [];
 
       try {
@@ -4151,6 +6526,24 @@ const App: React.FC = () => {
         errors.push(getErrorMessage(err, "ignored summary failed"));
       }
 
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(
+            selectedRunId,
+          )}/technical-diagnostics`,
+          { cache: "no-store" },
+        );
+        if (res.ok) {
+          technicalDiagnostics =
+            (await res.json()) as ScanTechnicalDiagnosticsResponse;
+          technicalLoaded = true;
+        } else {
+          errors.push(`technical diagnostics ${res.status}`);
+        }
+      } catch (err: unknown) {
+        errors.push(getErrorMessage(err, "technical diagnostics failed"));
+      }
+
       if (cancelled) return;
 
       const ok = getSummaryCount(summaryRows, "ok");
@@ -4164,8 +6557,30 @@ const App: React.FC = () => {
           ? getSummaryCount(summaryRows, "no_response")
           : null,
         ignoredSkipped: ignoredLoaded ? ignoredSkipped : null,
+        categoryScores: technicalLoaded
+          ? (technicalDiagnostics?.categoryScores ?? null)
+          : null,
+        seoBasic: technicalLoaded
+          ? (technicalDiagnostics?.seoBasic ?? null)
+          : null,
+        robots: technicalLoaded ? (technicalDiagnostics?.robots ?? null) : null,
+        sitemap: technicalLoaded
+          ? (technicalDiagnostics?.sitemap ?? null)
+          : null,
+        sslHttps: technicalLoaded
+          ? (technicalDiagnostics?.sslHttps ?? null)
+          : null,
+        securityHeader: technicalLoaded
+          ? (technicalDiagnostics?.securityHeader ?? null)
+          : null,
+        performanceBasic: technicalLoaded
+          ? (technicalDiagnostics?.performanceBasic ?? null)
+          : null,
         error: errors.length > 0 ? errors.join("; ") : null,
-        loadedAt: Date.now(),
+        loadedAt:
+          technicalLoaded && technicalDiagnostics?.loadedAt
+            ? new Date(technicalDiagnostics.loadedAt).getTime()
+            : Date.now(),
       });
       setPhase0DiagnosticsLoading(false);
     };
@@ -4217,6 +6632,11 @@ const App: React.FC = () => {
         setActiveRunId(null);
         activeRunIdRef.current = null;
 
+        await refreshDashboardSummary(run.site_id, "refresh_selected_run", {
+          targetRunId: run.id,
+          waitForIssueSummary: run.status === "completed",
+          maxAttempts: run.status === "completed" ? 6 : 2,
+        });
         await loadHistory(run.site_id, { preserveSelection: true });
         await loadResults(run.id);
       }
@@ -4246,6 +6666,24 @@ const App: React.FC = () => {
     setStartUrl(site.url);
 
     await loadHistory(site.id, { preserveSelection: false });
+  }
+
+  async function handleSelectRunForWorkspace(run: ScanRunSummary) {
+    setResults([]);
+    resetOccurrencesState();
+    setSelectedRunId(run.id);
+    selectedRunIdRef.current = run.id;
+
+    if (isInProgress(run.status)) {
+      setActiveRunId(run.id);
+      activeRunIdRef.current = run.id;
+      await refreshSelectedRun(run.id);
+      return;
+    }
+
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    await loadResults(run.id);
   }
 
   async function handleRunScan() {
@@ -4307,6 +6745,7 @@ const App: React.FC = () => {
   }
 
   function openFixQueue() {
+    setScanWorkspaceOpen(true);
     setResultsView("fix_queue");
     setFixQueueIncludeNew(true);
     setFixQueueIncludeOutstanding(true);
@@ -4494,6 +6933,8 @@ const App: React.FC = () => {
             timeUtc: scheduleTimeUtc,
             dayOfWeek:
               scheduleFrequency === "weekly" ? scheduleDayOfWeek : null,
+            dayOfMonth:
+              scheduleFrequency === "monthly" ? scheduleDayOfMonth : null,
           }),
         },
       );
@@ -4507,9 +6948,10 @@ const App: React.FC = () => {
 
       const data = (await res.json()) as {
         scheduleEnabled: boolean;
-        scheduleFrequency: "daily" | "weekly";
+        scheduleFrequency: "manual" | "daily" | "weekly" | "monthly";
         scheduleTimeUtc: string;
         scheduleDayOfWeek: number | null;
+        scheduleDayOfMonth: number | null;
         nextScheduledAt: string | null;
         lastScheduledAt: string | null;
       };
@@ -4523,6 +6965,7 @@ const App: React.FC = () => {
                 schedule_frequency: data.scheduleFrequency,
                 schedule_time_utc: data.scheduleTimeUtc,
                 schedule_day_of_week: data.scheduleDayOfWeek,
+                schedule_day_of_month: data.scheduleDayOfMonth,
                 next_scheduled_at: data.nextScheduledAt,
                 last_scheduled_at: data.lastScheduledAt,
               }
@@ -4561,11 +7004,13 @@ const App: React.FC = () => {
         notifyEmail: string | null;
         notifyOn: NotifyOnOption;
         notifyIncludeCsv: boolean;
+        summaryEnabled: boolean;
       };
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
       setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
+      setSummaryEnabled(data.summaryEnabled);
     } catch (err: unknown) {
       setNotifyError(
         getErrorMessage(err, "Failed to load notification settings"),
@@ -4596,6 +7041,7 @@ const App: React.FC = () => {
             email: notifyEmail.trim() || null,
             notifyOn,
             includeCsv: notifyIncludeCsv,
+            summaryEnabled,
           }),
         },
       );
@@ -4612,12 +7058,14 @@ const App: React.FC = () => {
         notifyEmail: string | null;
         notifyOn: NotifyOnOption;
         notifyIncludeCsv: boolean;
+        summaryEnabled: boolean;
       };
 
       setNotifyEnabled(data.notifyEnabled);
       setNotifyEmail(data.notifyEmail ?? "");
       setNotifyOn(normalizeNotifyOn(data.notifyOn));
       setNotifyIncludeCsv(data.notifyIncludeCsv);
+      setSummaryEnabled(data.summaryEnabled);
 
       setSites((prev) =>
         prev.map((site) =>
@@ -4628,6 +7076,7 @@ const App: React.FC = () => {
                 notify_email: data.notifyEmail,
                 notify_on: normalizeNotifyOn(data.notifyOn),
                 notify_include_csv: data.notifyIncludeCsv,
+                summary_enabled: data.summaryEnabled,
               }
             : site,
         ),
@@ -4638,6 +7087,48 @@ const App: React.FC = () => {
       setNotifyError(getErrorMessage(err, "Failed to update notifications"));
     } finally {
       setNotifySaving(false);
+    }
+  }
+
+  async function handleSaveUptime() {
+    if (!selectedSiteId) return;
+    if (!uptimeCheckUrl.trim()) {
+      setUptimeError("Homepage URL is required.");
+      return;
+    }
+    setUptimeSaving(true);
+    setUptimeError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/uptime`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: uptimeEnabled,
+            checkUrl: uptimeCheckUrl.trim(),
+            failureThreshold: uptimeFailureThreshold,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Uptime update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as UptimeSummaryResponse;
+      setUptimeEnabled(data.enabled);
+      setUptimeCheckUrl(data.checkUrl);
+      setUptimeFailureThreshold(data.failureThreshold);
+      await refreshDashboardSummary(selectedSiteId, "uptime_save");
+      pushToast("Availability monitoring updated", "success");
+    } catch (err: unknown) {
+      setUptimeError(getErrorMessage(err, "Failed to update availability"));
+    } finally {
+      setUptimeSaving(false);
     }
   }
 
@@ -4903,9 +7394,33 @@ const App: React.FC = () => {
     return buildAppUrl("/report", { scanRunId });
   }
 
+  function buildSharedReportLink(token: string) {
+    return buildAppUrl(`/shared-reports/${encodeURIComponent(token)}`);
+  }
+
+  function navigateTo(pathname: string) {
+    const url = buildAppUrl(pathname);
+    window.history.pushState({}, "", url);
+    const nextRoute = getRouteFromLocation();
+    setRoute(nextRoute);
+    setLearnSlug(getLearnSlugFromLocation());
+    setViewMode(
+      nextRoute === "report" || nextRoute === "shared_report"
+        ? "report"
+        : "dashboard",
+    );
+  }
+
+  function openLearnArticle(slug: string) {
+    navigateTo(buildLearnArticlePath(slug));
+  }
+
   function openReport(scanRunId: string) {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
+    setRoute("report");
+    setLearnSlug(null);
+    setSharedReportToken(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -4913,12 +7428,18 @@ const App: React.FC = () => {
     setReportLastLoadedAt(null);
     resetReportSections();
     setReportError(null);
+    setReportShare(null);
+    setReportShareEligible(false);
+    setReportShareRevealUrl(null);
     setViewMode("report");
   }
 
   function backToDashboard() {
-    const url = buildAppUrl("/");
+    const url = buildAppUrl("/app");
     window.history.pushState({}, "", url);
+    setRoute("app");
+    setLearnSlug(null);
+    setSharedReportToken(null);
     setReportScanRunId(null);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -4926,7 +7447,72 @@ const App: React.FC = () => {
     setReportLastLoadedAt(null);
     resetReportSections();
     setReportError(null);
+    setReportShare(null);
+    setReportShareEligible(false);
+    setReportShareRevealUrl(null);
     setViewMode("dashboard");
+  }
+
+  async function handleCreateReportShare() {
+    if (!reportScanRunId) return;
+    setReportShareBusy(true);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to create share link: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as {
+        scanRunId: string;
+        created: boolean;
+        share: ReportShare;
+        shareUrl: string | null;
+      };
+      setReportShare(data.share);
+      setReportShareEligible(true);
+      setReportShareRevealUrl(data.shareUrl);
+      if (data.shareUrl) {
+        await copyToClipboard(data.shareUrl, undefined, "Copied share link");
+      } else {
+        pushToast(
+          "A share is already active. Revoke it to generate a new one-time URL.",
+          "info",
+        );
+      }
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to create share link"), "warning");
+    } finally {
+      setReportShareBusy(false);
+    }
+  }
+
+  async function handleRevokeReportShare() {
+    if (!reportScanRunId) return;
+    setReportShareBusy(true);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        { method: "DELETE" },
+      );
+      if (!res.ok && res.status !== 204) {
+        throw new Error(`Failed to revoke share link: ${res.status}`);
+      }
+      setReportShare(null);
+      setReportShareRevealUrl(null);
+      pushToast("Share link revoked", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to revoke share link"), "warning");
+    } finally {
+      setReportShareBusy(false);
+    }
   }
 
   function triggerExport(
@@ -5424,6 +8010,10 @@ const App: React.FC = () => {
         activeRunIdRef.current = scanRunId;
         markRunProgress(scanRunId);
 
+        void refreshDashboardSummary(selectedSiteId, "scan_start", {
+          targetRunId: scanRunId,
+          maxAttempts: 2,
+        });
         void refreshSelectedRun(scanRunId);
         pushToast("Scan queued", "info");
       } else {
@@ -6231,10 +8821,1551 @@ const App: React.FC = () => {
             radial-gradient(900px 340px at 90% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
             var(--bg);
         }
-        .shell {
+        .primary-button,
+        .secondary-button,
+        .ghost-button,
+        .toggle-pill {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          min-height: 40px;
+          padding: 10px 14px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          font: inherit;
+          font-size: 13px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+        }
+        .primary-button:hover,
+        .secondary-button:hover,
+        .ghost-button:hover,
+        .toggle-pill:hover {
+          transform: translateY(-1px);
+        }
+        .primary-button:disabled,
+        .secondary-button:disabled,
+        .ghost-button:disabled,
+        .toggle-pill:disabled {
+          cursor: not-allowed;
+          opacity: 0.65;
+          transform: none;
+        }
+        .primary-button {
+          background: linear-gradient(135deg, var(--accent), var(--accent-2));
+          color: white;
+          border-color: color-mix(in srgb, var(--accent) 66%, white 8%);
+          box-shadow: 0 14px 28px color-mix(in srgb, var(--accent) 22%, transparent);
+        }
+        .primary-button--large {
+          min-height: 48px;
+          padding: 12px 18px;
+          font-size: 14px;
+        }
+        .secondary-button {
+          background: color-mix(in srgb, var(--panel) 88%, white 6%);
+          color: var(--text);
+          box-shadow: var(--soft-shadow);
+        }
+        .ghost-button {
+          background: transparent;
+          color: var(--text);
+        }
+        .toggle-pill {
+          background: transparent;
+          color: var(--text-muted);
+          border-radius: 999px;
+        }
+        .toggle-pill.active {
+          background: var(--panel-elev);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+        }
+        .field-label {
+          display: grid;
+          gap: 8px;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .app-input {
+          width: 100%;
+          min-height: 42px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          color: var(--text);
+          font: inherit;
+        }
+        .app-input:focus {
+          outline: 2px solid color-mix(in srgb, var(--accent) 44%, transparent);
+          border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+        }
+        .marketing-chip {
+          display: inline-flex;
+          align-items: center;
+          width: fit-content;
+          min-height: 36px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 72%, transparent);
+          color: var(--text-muted);
+          font-size: 12px;
+          white-space: nowrap;
+        }
+        .marketing-hero {
+          display: grid;
+          grid-template-columns: minmax(0, 1.05fr) minmax(420px, 0.95fr);
+          gap: clamp(44px, 5vw, 88px);
+          align-items: center;
+          min-height: min(78vh, 820px);
+          padding: clamp(24px, 5vh, 56px) 0 clamp(36px, 6vh, 72px);
+        }
+        .marketing-hero__content {
+          display: grid;
+          gap: 22px;
+          align-content: center;
+          min-width: 0;
+          max-width: 620px;
+        }
+        .marketing-hero__headline {
+          margin: 0;
+          font-family: var(--font-display);
+          font-size: clamp(54px, 5.2vw, 86px);
+          line-height: 0.94;
+          font-weight: 700;
+          max-width: 9.8ch;
+          text-wrap: balance;
+        }
+        .marketing-hero__body {
+          font-size: clamp(17px, 1.55vw, 19px);
+          line-height: 1.7;
+          color: var(--text-muted);
+          max-width: 56ch;
+        }
+        .marketing-hero__actions {
           display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          padding-top: 4px;
+        }
+        .marketing-hero__chips {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, max-content));
+          gap: 10px 14px;
+          align-items: start;
+          padding-top: 8px;
+        }
+        .marketing-hero__preview-shell {
+          position: relative;
+          min-height: 0;
+          display: grid;
+          place-items: center;
+          padding: clamp(12px, 2vw, 24px) 0;
+        }
+        .marketing-glow {
+          position: absolute;
+          border-radius: 50%;
+          filter: blur(44px);
+          opacity: 0.75;
+        }
+        .marketing-glow--primary {
+          inset: 12% auto auto 8%;
+          width: 220px;
+          height: 220px;
+          background: rgba(56, 189, 248, 0.28);
+        }
+        .marketing-glow--secondary {
+          inset: auto 2% 8% auto;
+          width: 180px;
+          height: 180px;
+          background: rgba(139, 92, 246, 0.22);
+        }
+        .marketing-mockup {
+          position: relative;
+          width: min(100%, 520px);
+          min-width: 0;
+          border-radius: 24px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, white 10%);
+          background: color-mix(in srgb, var(--panel) 90%, rgba(15, 23, 42, 0.12));
+          box-shadow: var(--shadow);
+          backdrop-filter: blur(14px);
+          padding: 20px;
+          display: grid;
+          gap: 16px;
+        }
+        .marketing-mockup__toolbar,
+        .marketing-score-row,
+        .marketing-category-grid,
+        .marketing-pricing-grid,
+        .marketing-faq-grid,
+        .marketing-feature-grid,
+        .marketing-step-grid {
+          display: grid;
+          gap: 12px;
+        }
+        .marketing-mockup__toolbar {
+          display: flex;
+          flex-wrap: wrap;
+        }
+        .marketing-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 32px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .marketing-badge--success {
+          color: color-mix(in srgb, var(--success) 94%, white 6%);
+          border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+          background: color-mix(in srgb, var(--success) 14%, var(--panel-elev));
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--success) 8%, transparent);
+        }
+        .marketing-badge--warning {
+          color: color-mix(in srgb, var(--warning) 88%, white 12%);
+          border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+          background: color-mix(in srgb, var(--warning) 12%, var(--panel-elev));
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 8%, transparent);
+        }
+        .marketing-mockup__hero {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(136px, 164px);
+          gap: 16px;
+          align-items: center;
+        }
+        .marketing-kicker {
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--accent);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .marketing-score-row {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .marketing-score-card,
+        .marketing-category-card,
+        .marketing-history-card,
+        .marketing-feature-card,
+        .marketing-step-card,
+        .marketing-boundary-card,
+        .marketing-pricing-card,
+        .marketing-faq-card {
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, rgba(15, 23, 42, 0.06));
+          box-shadow: var(--soft-shadow);
+        }
+        .marketing-score-card,
+        .marketing-history-card,
+        .marketing-feature-card,
+        .marketing-step-card,
+        .marketing-boundary-card,
+        .marketing-pricing-card,
+        .marketing-faq-card {
+          padding: 16px;
+        }
+        .marketing-score-card__label {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .marketing-score-card__value {
+          margin-top: 8px;
+          font-size: 34px;
+          font-family: var(--font-display);
+          font-weight: 700;
+        }
+        .marketing-score-ring {
+          display: grid;
+          place-items: center;
+          min-width: 0;
+        }
+        .marketing-score-ring__inner {
+          width: clamp(132px, 30vw, 154px);
+          aspect-ratio: 1;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          background: conic-gradient(var(--accent) 0 62%, rgba(148, 163, 184, 0.16) 62% 100%);
+          box-shadow: 0 18px 48px color-mix(in srgb, var(--accent) 18%, transparent);
+          position: relative;
+        }
+        .marketing-score-ring__inner::after {
+          content: "";
+          position: absolute;
+          inset: 18px;
+          border-radius: 50%;
+          background: var(--panel);
+          border: 1px solid var(--border);
+        }
+        .marketing-score-ring__content {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 2px;
+          width: 100%;
+          padding: 0 24px 2px;
+          text-align: center;
+          transform: translateY(2px);
+        }
+        .marketing-score-ring__content strong,
+        .marketing-score-ring__content span {
+          position: relative;
+        }
+        .marketing-score-ring__content strong {
+          font-size: clamp(34px, 8vw, 42px);
+          font-family: var(--font-display);
+          line-height: 0.9;
+        }
+        .marketing-score-ring__content span {
+          font-size: 11px;
+          line-height: 1.1;
+          color: var(--text-muted);
+          max-width: 7ch;
+        }
+        .marketing-category-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .marketing-category-card {
+          padding: 14px;
+          display: grid;
+          gap: 6px;
+          font-size: 13px;
+        }
+        .marketing-category-card span,
+        .marketing-history-row span:last-child {
+          color: var(--text-muted);
+        }
+        .marketing-history-row {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+          padding-top: 10px;
+          margin-top: 10px;
+          border-top: 1px solid var(--border);
+          font-size: 12px;
+        }
+        @media (max-width: 1180px) {
+          .marketing-hero {
+            grid-template-columns: minmax(0, 1fr) minmax(360px, 0.9fr);
+            gap: 40px;
+            padding-top: 24px;
+          }
+          .marketing-hero__content {
+            max-width: 560px;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(48px, 5vw, 72px);
+            max-width: 10.6ch;
+          }
+          .marketing-hero__chips {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .marketing-mockup {
+            width: min(100%, 480px);
+          }
+        }
+        @media (max-width: 960px) {
+          .marketing-hero {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 36px;
+            min-height: auto;
+            padding: 20px 0 36px;
+          }
+          .marketing-hero__content {
+            max-width: 100%;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(44px, 7vw, 64px);
+            max-width: 11ch;
+          }
+          .marketing-hero__preview-shell {
+            justify-items: start;
+            padding: 0;
+          }
+          .marketing-mockup {
+            width: min(100%, 560px);
+          }
+        }
+        @media (max-width: 520px) {
+          .marketing-hero {
+            gap: 28px;
+            padding: 12px 0 28px;
+          }
+          .marketing-hero__content {
+            gap: 18px;
+          }
+          .marketing-hero__headline {
+            font-size: clamp(36px, 12vw, 52px);
+            line-height: 0.97;
+            max-width: 11.5ch;
+          }
+          .marketing-hero__body {
+            font-size: 16px;
+          }
+          .marketing-hero__chips {
+            grid-template-columns: 1fr;
+          }
+          .marketing-hero__preview-shell {
+            justify-items: stretch;
+          }
+          .marketing-mockup {
+            padding: 16px;
+            border-radius: 18px;
+            width: 100%;
+          }
+          .marketing-mockup__hero,
+          .marketing-score-row,
+          .marketing-category-grid {
+            grid-template-columns: 1fr;
+          }
+          .marketing-score-ring {
+            justify-self: center;
+          }
+          .marketing-history-row {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+        }
+        .marketing-band {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+        }
+        .marketing-trust-item {
+          min-height: 56px;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          padding: 12px;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 82%, transparent);
+          color: var(--text-muted);
+          font-size: 13px;
+          font-weight: 600;
+        }
+        .marketing-section {
+          display: grid;
+          gap: 20px;
+          padding: 8px 0;
+        }
+        .marketing-section--split {
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          align-items: start;
+        }
+        .marketing-section__heading {
+          display: grid;
+          gap: 10px;
+          max-width: 64ch;
+        }
+        .marketing-section__heading h2,
+        .marketing-boundary-card h2,
+        .marketing-pricing-card h2 {
+          margin: 0;
+          font-family: var(--font-display);
+          font-size: clamp(28px, 4vw, 42px);
+          line-height: 1.08;
+        }
+        .marketing-section__heading p,
+        .marketing-boundary-card p,
+        .marketing-pricing-card p,
+        .marketing-faq-card p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+          font-size: 15px;
+        }
+        .marketing-feature-grid,
+        .marketing-faq-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .marketing-step-grid {
+          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        }
+        .marketing-feature-card h3,
+        .marketing-faq-card h3 {
+          margin: 0 0 10px;
+          font-size: 18px;
+        }
+        .marketing-feature-card p,
+        .marketing-faq-card p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+          font-size: 14px;
+        }
+        .marketing-step-card__index {
+          font-family: var(--font-display);
+          font-size: 28px;
+          color: var(--accent);
+          margin-bottom: 10px;
+        }
+        .marketing-step-card p,
+        .marketing-pricing-grid span {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .marketing-boundary-card ul {
+          margin: 0;
+          padding-left: 20px;
+          display: grid;
+          gap: 8px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .marketing-pricing-grid {
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          margin-top: 14px;
+        }
+        .marketing-pricing-grid strong {
+          display: block;
+          margin-bottom: 6px;
+          font-size: 16px;
+        }
+        .marketing-footer {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 16px;
+          padding: 24px 0 8px;
+          border-top: 1px solid var(--border);
+          flex-wrap: wrap;
+        }
+        .marketing-footer__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .surface-card {
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
+          box-shadow: var(--soft-shadow);
+        }
+        .surface-card--metric,
+        .surface-card--category,
+        .surface-card--summary,
+        .surface-card--history {
+          padding: 18px;
+          display: grid;
+          gap: 12px;
+          box-shadow: var(--soft-shadow);
+        }
+        .surface-card--metric {
+          min-height: 168px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.03)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--metric.prominent {
+          min-height: 220px;
+          padding: 22px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 76%, rgba(56, 189, 248, 0.12)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 84%,
+                rgba(139, 92, 246, 0.08)
+              )
+              100%
+          );
+          box-shadow: var(--shadow);
+        }
+        .surface-card--metric.prominent .surface-card__value {
+          font-size: clamp(38px, 6vw, 54px);
+        }
+        .surface-card--metric.prominent .surface-card__detail {
+          font-size: 13px;
+        }
+        .surface-card__label {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .surface-card__value {
+          font-size: clamp(28px, 4vw, 36px);
+          line-height: 1;
+          font-weight: 700;
+          font-family: var(--font-display);
+        }
+        .surface-card__detail {
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .surface-card--category {
+          min-height: 172px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 88%,
+                rgba(56, 189, 248, 0.025)
+              )
+              100%
+          );
+        }
+        .surface-card--category[data-tone="success"] {
+          border-color: color-mix(in srgb, var(--success) 18%, var(--border));
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(52, 211, 153, 0.05)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--category[data-tone="warning"] {
+          border-color: color-mix(in srgb, var(--warning) 22%, var(--border));
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(251, 191, 36, 0.06)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .surface-card--summary,
+        .surface-card--history {
+          padding: 0;
+          overflow: hidden;
+        }
+        .score-ring-card {
+          position: relative;
+          overflow: hidden;
+        }
+        .score-ring-card::after {
+          content: "";
+          position: absolute;
+          inset: auto -18% -34% auto;
+          width: 220px;
+          height: 220px;
+          background: radial-gradient(
+            circle,
+            rgba(56, 189, 248, 0.18) 0%,
+            rgba(56, 189, 248, 0) 72%
+          );
+          pointer-events: none;
+        }
+        .score-ring-card__body {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          align-items: center;
+          gap: 18px;
+          min-height: 0;
+        }
+        .score-ring {
+          --score-progress: 0%;
+          --score-ring-color: var(--accent);
+          position: relative;
+          width: 154px;
+          height: 154px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background:
+            radial-gradient(
+              circle at 50% 50%,
+              color-mix(in srgb, var(--panel) 92%, transparent) 58%,
+              transparent 59%
+            ),
+            conic-gradient(
+              var(--score-ring-color) 0 var(--score-progress),
+              color-mix(in srgb, var(--border) 86%, transparent)
+                var(--score-progress)
+                100%
+            );
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--score-ring-color) 16%, var(--border)),
+            0 18px 34px color-mix(in srgb, var(--score-ring-color) 18%, transparent);
+        }
+        .score-ring::before {
+          content: "";
+          position: absolute;
+          inset: 12px;
+          border-radius: 50%;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.03)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+        }
+        .score-ring__inner {
+          position: relative;
+          z-index: 1;
+          display: grid;
+          gap: 6px;
+          justify-items: center;
+          text-align: center;
+          padding: 12px;
+        }
+        .score-ring__value {
+          font-size: clamp(34px, 4vw, 46px);
+          line-height: 1;
+          font-weight: 700;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .score-ring__caption {
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .score-ring-card__content {
+          display: grid;
+          gap: 8px;
+          min-width: 0;
+          position: relative;
+          z-index: 1;
+        }
+        .score-ring-card__status {
+          font-size: clamp(18px, 2vw, 24px);
+          line-height: 1.3;
+          font-weight: 700;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .score-ring-card__helper {
+          display: inline-flex;
+          align-items: center;
+          width: fit-content;
+          min-height: 32px;
+          padding: 7px 11px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(56, 189, 248, 0.06)
+          );
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .score-ring-card__stats {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 2px;
+        }
+        .score-ring-card__stat {
+          display: grid;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .score-ring-card__stat span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .score-ring-card__stat strong {
+          font-size: 18px;
+          line-height: 1.1;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .site-header-card {
+          display: grid;
+          grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+          gap: 20px;
+          padding: 20px;
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel-elev) 86%,
+                rgba(139, 92, 246, 0.06)
+              )
+              100%
+          );
+          box-shadow: var(--shadow);
+          align-items: start;
+        }
+        .site-header-card__title {
+          font-size: clamp(30px, 5vw, 40px);
+          font-weight: 700;
+          font-family: var(--font-display);
+          line-height: 1.1;
+          overflow-wrap: anywhere;
+        }
+        .site-header-card__subtitle {
+          margin-top: 6px;
+          font-size: 14px;
+          color: var(--text-muted);
+          overflow-wrap: anywhere;
+        }
+        .dashboard-health-layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
           gap: 16px;
           align-items: stretch;
+        }
+        .dashboard-hero-panel {
+          padding: 22px;
+          border-radius: 24px;
+          border: 1px solid var(--border);
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 78%, rgba(56, 189, 248, 0.09)) 0%,
+            color-mix(
+                in srgb,
+                var(--panel) 90%,
+                rgba(139, 92, 246, 0.06)
+              )
+              52%,
+            color-mix(in srgb, var(--panel-elev) 92%, transparent) 100%
+          );
+          box-shadow: var(--shadow);
+          display: grid;
+          gap: 16px;
+        }
+        .dashboard-hero-panel__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .dashboard-hero-panel__eyebrow {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: var(--accent);
+          font-weight: 700;
+        }
+        .dashboard-hero-panel__headline {
+          margin-top: 6px;
+          font-size: clamp(28px, 4vw, 38px);
+          font-family: var(--font-display);
+          font-weight: 700;
+          line-height: 1.15;
+        }
+        .dashboard-hero-panel__copy {
+          margin-top: 8px;
+          font-size: 14px;
+          color: var(--text-muted);
+          line-height: 1.6;
+          max-width: 60ch;
+        }
+        .dashboard-hero-panel__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          align-items: flex-start;
+        }
+        .dashboard-hero-panel__status-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .dashboard-hero-panel__meta {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px;
+        }
+        .dashboard-hero-meta-card {
+          padding: 14px 16px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 76%,
+            rgba(255, 255, 255, 0.035)
+          );
+          display: grid;
+          gap: 8px;
+        }
+        .dashboard-hero-meta-card span:first-child {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: var(--text-muted);
+          font-weight: 700;
+        }
+        .dashboard-hero-meta-card span:last-child {
+          font-size: 14px;
+          color: var(--text);
+          font-weight: 600;
+        }
+        .dashboard-hero-panel__footer-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .dashboard-score-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 14px;
+          align-items: stretch;
+        }
+        .dashboard-category-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+          gap: 14px;
+        }
+        .report-category-score-grid {
+          margin-top: 14px;
+        }
+        .dashboard-history-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
+          gap: 18px;
+        }
+        .dashboard-history-card__header,
+        .dashboard-summary-card__header {
+          padding: 18px 20px 14px;
+          border-bottom: 1px solid var(--border);
+          display: grid;
+          gap: 4px;
+        }
+        .dashboard-history-card__title,
+        .dashboard-summary-card__title {
+          font-size: 16px;
+          font-weight: 700;
+        }
+        .dashboard-history-card__meta,
+        .dashboard-summary-card__meta {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row {
+          padding: 18px 20px;
+          border-top: 1px solid var(--border);
+          display: grid;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.2fr) auto;
+          gap: 16px;
+          align-items: center;
+        }
+        .dashboard-history-row:first-of-type {
+          border-top: none;
+        }
+        .dashboard-history-row__title {
+          font-size: 14px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+        .dashboard-history-row__meta {
+          margin-top: 6px;
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row__meta-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .dashboard-history-row__stats {
+          display: grid;
+          gap: 4px;
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.5;
+        }
+        .dashboard-history-row__stats strong {
+          font-size: 13px;
+          color: var(--text);
+          font-weight: 600;
+        }
+        .dashboard-summary-list {
+          display: grid;
+          gap: 14px;
+          padding: 18px 20px 20px;
+        }
+        .dashboard-summary-item {
+          padding: 16px 18px;
+          border-radius: 18px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 76%,
+            rgba(255, 255, 255, 0.03)
+          );
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .dashboard-summary-item span:first-child {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .dashboard-summary-item strong {
+          font-family: var(--font-display);
+          font-size: 24px;
+          line-height: 1;
+        }
+        .category-status-card__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+        }
+        .category-status-card__title {
+          font-size: 15px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+        .category-status-card__description {
+          font-size: 12px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .category-status-card__score {
+          color: var(--text);
+          font-size: 28px;
+          font-weight: 800;
+          line-height: 1;
+        }
+        .category-status-card__summary {
+          font-size: 13px;
+          color: var(--text);
+          line-height: 1.6;
+          font-weight: 600;
+        }
+        .category-status-card__stats {
+          color: var(--text-muted);
+          font-size: 12px;
+          font-weight: 700;
+        }
+        .scan-hero-card {
+          border: 1px solid var(--border);
+          border-radius: 24px;
+          padding: 22px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel-elev) 82%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(in srgb, var(--panel) 96%, transparent) 100%
+          );
+          box-shadow: var(--shadow);
+          display: grid;
+          grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1.15fr);
+          gap: 22px;
+          align-items: center;
+        }
+        .scan-hero-card[data-tone="success"] {
+          border-color: color-mix(in srgb, var(--success) 20%, var(--border));
+        }
+        .scan-hero-card[data-tone="warning"] {
+          border-color: color-mix(in srgb, var(--warning) 24%, var(--border));
+        }
+        .scan-hero-card[data-tone="danger"] {
+          border-color: color-mix(in srgb, var(--danger) 22%, var(--border));
+        }
+        .scan-hero-card__ring {
+          display: grid;
+          place-items: center;
+          gap: 10px;
+        }
+        .scan-hero-card__ring-outer {
+          --scan-progress: 0%;
+          --scan-ring-color: var(--accent);
+          width: 196px;
+          height: 196px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          position: relative;
+          background: conic-gradient(
+            var(--scan-ring-color) 0 var(--scan-progress),
+            color-mix(in srgb, var(--border) 88%, transparent)
+              var(--scan-progress)
+              100%
+          );
+          transition: background 700ms ease;
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+            0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent);
+          animation: scanRingPulse 3s ease-in-out infinite;
+        }
+        .scan-hero-card__ring-outer.is-indeterminate {
+          background: radial-gradient(
+              circle at 50% 50%,
+              transparent 62%,
+              color-mix(in srgb, var(--scan-ring-color) 22%, transparent) 63%,
+              color-mix(in srgb, var(--scan-ring-color) 28%, transparent) 68%,
+              transparent 69%
+            ),
+            conic-gradient(
+              from 0deg,
+              color-mix(in srgb, var(--scan-ring-color) 82%, transparent) 0deg,
+              color-mix(in srgb, var(--scan-ring-color) 14%, transparent) 72deg,
+              transparent 160deg,
+              color-mix(in srgb, var(--scan-ring-color) 10%, transparent) 360deg
+            );
+          transition: none;
+        }
+        .scan-hero-card__ring-orbit {
+          position: absolute;
+          inset: 8px;
+          border-radius: 50%;
+          border: 1px solid transparent;
+          border-top-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 72%,
+            transparent
+          );
+          border-right-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 20%,
+            transparent
+          );
+          opacity: 0.95;
+          animation: scanRingOrbit 3.2s linear infinite;
+        }
+        .scan-hero-card__ring-outer:not(.is-indeterminate)
+          .scan-hero-card__ring-orbit {
+          inset: 10px;
+          border-top-color: color-mix(
+            in srgb,
+            var(--scan-ring-color) 44%,
+            transparent
+          );
+          border-right-color: transparent;
+          opacity: 0.5;
+        }
+        .scan-hero-card__ring-inner {
+          width: 142px;
+          height: 142px;
+          border-radius: 50%;
+          display: grid;
+          place-items: center;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 86%, transparent) 100%
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+          text-align: center;
+          padding: 14px;
+        }
+        .scan-hero-card__ring-inner strong {
+          font-size: 36px;
+          line-height: 1;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__ring-inner span {
+          font-size: 11px;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__ring-fallback {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-align: center;
+        }
+        .scan-hero-card__title {
+          font-size: 22px;
+          font-weight: 700;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__summary,
+        .scan-hero-card__note {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .scan-hero-card__counter-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+          gap: 10px;
+        }
+        .scan-hero-card__counter {
+          padding: 13px 14px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel) 90%,
+            rgba(255, 255, 255, 0.025)
+          );
+          display: grid;
+          gap: 6px;
+        }
+        .scan-hero-card__counter strong {
+          font-size: 20px;
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__counter span {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__preview {
+          display: grid;
+          gap: 10px;
+          padding: 14px 16px;
+          border-radius: 18px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .scan-hero-card__preview-title {
+          font-size: 12px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .scan-hero-card__preview-list {
+          display: grid;
+          gap: 10px;
+        }
+        .scan-hero-card__preview-item {
+          display: grid;
+          gap: 4px;
+        }
+        .scan-hero-card__preview-item strong {
+          font-size: 13px;
+          line-height: 1.4;
+          color: var(--text);
+        }
+        .scan-hero-card__preview-item span {
+          font-size: 12px;
+          line-height: 1.5;
+          color: var(--text-muted);
+        }
+        .scan-hero-card__summary-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+          gap: 10px;
+        }
+        .scan-hero-card__summary-item {
+          display: grid;
+          gap: 6px;
+          padding: 12px 14px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel) 90%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .scan-hero-card__summary-item span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .scan-hero-card__summary-item strong {
+          font-size: 20px;
+          line-height: 1.1;
+          color: var(--text);
+          font-family: var(--font-display);
+        }
+        .scan-hero-card__actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        @keyframes scanRingPulse {
+          0%, 100% {
+            transform: scale(1);
+            box-shadow:
+              inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+              0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent);
+          }
+          50% {
+            transform: scale(1.012);
+            box-shadow:
+              inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+              0 22px 48px color-mix(in srgb, var(--accent) 24%, transparent);
+          }
+        }
+        @keyframes scanRingOrbit {
+          from {
+            transform: rotate(0deg);
+          }
+          to {
+            transform: rotate(360deg);
+          }
+        }
+        .learn-page {
+          min-height: 100vh;
+          background:
+            radial-gradient(1200px 560px at 10% -10%, rgba(56, 189, 248, 0.18), transparent 55%),
+            radial-gradient(880px 420px at 88% 0%, rgba(139, 92, 246, 0.12), transparent 55%),
+            linear-gradient(180deg, color-mix(in srgb, var(--bg) 90%, black 10%) 0%, var(--bg) 100%);
+        }
+        .learn-page__shell {
+          width: min(1240px, 100%);
+          margin: 0 auto;
+          padding: 24px;
+          display: grid;
+          gap: 28px;
+        }
+        .learn-hero,
+        .learn-surface {
+          border-radius: 20px;
+          border: 1px solid var(--border);
+          box-shadow: var(--shadow);
+        }
+        .learn-hero {
+          padding: clamp(28px, 5vw, 48px);
+          background:
+            linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, rgba(56, 189, 248, 0.06)) 0%, color-mix(in srgb, var(--panel-elev) 90%, rgba(139, 92, 246, 0.06)) 100%);
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 18px;
+          align-items: end;
+        }
+        .learn-hero__copy {
+          display: grid;
+          gap: 12px;
+          max-width: 70ch;
+        }
+        .learn-hero__copy h1,
+        .learn-section__header h2,
+        .learn-state h2,
+        .learn-empty-state h3,
+        .learn-detail__section h2 {
+          margin: 0;
+          font-family: var(--font-display);
+        }
+        .learn-hero__copy h1 {
+          font-size: clamp(34px, 4vw, 58px);
+          line-height: 1.02;
+          max-width: 14ch;
+        }
+        .learn-hero__copy p,
+        .learn-state p,
+        .learn-empty-state p,
+        .learn-detail__section p,
+        .learn-detail__technical p,
+        .learn-related-card span,
+        .learn-empty-note,
+        .learn-feature-card p,
+        .learn-article-card p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.7;
+        }
+        .learn-hero__actions,
+        .learn-state__actions,
+        .learn-filter-row,
+        .learn-detail__meta {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .learn-surface {
+          background: color-mix(in srgb, var(--panel) 94%, rgba(15, 23, 42, 0.06));
+          padding: 20px;
+        }
+        .learn-controls {
+          display: grid;
+          gap: 18px;
+        }
+        .learn-filter-chip {
+          min-height: 36px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 86%, transparent);
+          color: var(--text);
+          font: inherit;
+          cursor: pointer;
+        }
+        .learn-filter-chip.active {
+          background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+          border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+        }
+        .learn-section {
+          display: grid;
+          gap: 16px;
+        }
+        .learn-section__header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: end;
+          flex-wrap: wrap;
+        }
+        .learn-feature-grid,
+        .learn-article-grid {
+          display: grid;
+          gap: 14px;
+        }
+        .learn-feature-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .learn-article-grid {
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        }
+        .learn-feature-card,
+        .learn-article-card,
+        .learn-related-card {
+          width: 100%;
+          text-align: left;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, rgba(255, 255, 255, 0.02));
+          color: inherit;
+          padding: 16px;
+          display: grid;
+          gap: 10px;
+          cursor: pointer;
+          font: inherit;
+          transition:
+            transform 150ms ease,
+            border-color 150ms ease,
+            background 150ms ease;
+        }
+        .learn-feature-card:hover,
+        .learn-article-card:hover,
+        .learn-related-card:hover {
+          transform: translateY(-1px);
+          border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+          background: color-mix(in srgb, var(--panel-elev) 88%, rgba(56, 189, 248, 0.04));
+        }
+        .learn-feature-card strong,
+        .learn-article-card strong,
+        .learn-related-card strong {
+          font-size: 17px;
+          line-height: 1.35;
+        }
+        .learn-feature-card__category,
+        .learn-article-card__category,
+        .learn-detail__eyebrow {
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--accent);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .learn-article-card__top {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .learn-article-card__audience {
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .learn-empty-state,
+        .learn-state {
+          display: grid;
+          gap: 12px;
+        }
+        .learn-detail {
+          display: grid;
+          gap: 16px;
+        }
+        .learn-detail__grid {
+          display: grid;
+          grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+          gap: 16px;
+          align-items: start;
+        }
+        .learn-detail__main,
+        .learn-detail__side {
+          display: grid;
+          gap: 18px;
+        }
+        .learn-detail__section {
+          display: grid;
+          gap: 8px;
+        }
+        .learn-detail__technical {
+          border-top: 1px solid var(--border);
+          padding-top: 16px;
+        }
+        .learn-detail__technical summary {
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .learn-detail__side-block {
+          display: grid;
+          gap: 12px;
+        }
+        .learn-related-list,
+        .learn-keyword-list {
+          display: grid;
+          gap: 10px;
+        }
+        .learn-keyword-list {
+          grid-template-columns: repeat(auto-fit, minmax(120px, max-content));
+        }
+        .learn-keyword {
+          display: inline-flex;
+          align-items: center;
+          min-height: 32px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .learn-empty-note {
+          font-size: 13px;
+        }
+        @media (max-width: 960px) {
+          .learn-hero,
+          .learn-detail__grid {
+            grid-template-columns: 1fr;
+          }
+          .learn-hero__copy h1 {
+            max-width: 16ch;
+          }
+        }
+        @media (max-width: 640px) {
+          .learn-page__shell {
+            padding: 16px;
+          }
+          .learn-surface,
+          .learn-hero {
+            padding: 16px;
+            border-radius: 16px;
+          }
+          .learn-article-grid,
+          .learn-feature-grid {
+            grid-template-columns: 1fr;
+          }
+        }
+        .shell {
+          display: block;
           min-height: 0;
           flex: 1;
         }
@@ -6242,15 +10373,84 @@ const App: React.FC = () => {
           position: sticky;
           top: 0;
           z-index: 20;
-          display: flex;
-          justify-content: space-between;
+          display: grid;
+          grid-template-columns: minmax(0, 0.9fr) minmax(320px, 1.1fr) auto;
           align-items: center;
-          gap: 16px;
+          gap: 18px;
           padding: 12px 16px;
           border: 1px solid var(--border);
           border-radius: 16px;
-          background: var(--panel);
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(56, 189, 248, 0.03)) 0%,
+            color-mix(in srgb, var(--panel) 96%, transparent) 100%
+          );
           box-shadow: var(--shadow);
+        }
+        .app-brand-block {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          min-width: 0;
+        }
+        .app-nav-tabs {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          padding: 4px;
+          border-radius: 999px;
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 82%,
+            rgba(255, 255, 255, 0.02)
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+        }
+        .app-nav-tab {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 38px;
+          padding: 8px 14px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--muted);
+          font: inherit;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .app-nav-tab.active {
+          background: color-mix(
+            in srgb,
+            var(--panel) 86%,
+            rgba(56, 189, 248, 0.08)
+          );
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+          box-shadow: var(--soft-shadow);
+        }
+        .app-site-switcher {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto auto;
+          align-items: center;
+          gap: 10px;
+          min-width: 0;
+        }
+        .app-site-switcher__label {
+          font-size: 11px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .app-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-wrap: wrap;
         }
         .hamburger {
           display: none;
@@ -6292,15 +10492,7 @@ const App: React.FC = () => {
           transform: translateX(0);
         }
         .sidebar {
-          width: 320px;
-          min-width: 240px;
-          max-width: 520px;
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          height: calc(100dvh - 90px);
-          overflow: hidden;
-          min-height: 0;
+          display: none !important;
         }
         .sidebar-content {
           display: flex;
@@ -6313,7 +10505,7 @@ const App: React.FC = () => {
           padding-right: 4px;
         }
         .main {
-          flex: 1;
+          width: 100%;
           min-width: 0;
           display: flex;
           flex-direction: column;
@@ -6322,11 +10514,74 @@ const App: React.FC = () => {
           height: 100%;
         }
         .resizer {
-          width: 6px;
-          cursor: col-resize;
-          background: var(--border);
-          border-radius: 999px;
-          align-self: stretch;
+          display: none !important;
+        }
+        .app-section-shell {
+          display: grid;
+          gap: 18px;
+        }
+        .app-section-heading {
+          display: grid;
+          gap: 8px;
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 94%, rgba(56, 189, 248, 0.04)) 0%, var(--panel) 100%);
+          box-shadow: var(--soft-shadow);
+        }
+        .app-section-heading__title {
+          font-family: var(--font-display);
+          font-size: 28px;
+          line-height: 1.1;
+          font-weight: 700;
+        }
+        .app-section-heading__meta {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.6;
+        }
+        .app-section-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          gap: 16px;
+        }
+        .app-settings-card {
+          padding: 18px;
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          box-shadow: var(--soft-shadow);
+          display: grid;
+          gap: 14px;
+        }
+        .app-settings-card__title {
+          font-family: var(--font-display);
+          font-size: 22px;
+          font-weight: 700;
+        }
+        .app-settings-card__subtitle {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.6;
+        }
+        .app-form-grid {
+          display: grid;
+          gap: 12px;
+        }
+        .app-form-grid--two {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .app-site-list {
+          display: grid;
+          gap: 12px;
+        }
+        .app-site-row {
+          padding: 14px;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
+          display: grid;
+          gap: 10px;
         }
         .results-layout {
           display: grid;
@@ -7113,8 +11368,45 @@ const App: React.FC = () => {
           box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12);
         }
         @media (max-width: 1100px) {
+          .top-nav {
+            grid-template-columns: 1fr;
+            align-items: stretch;
+          }
+          .app-brand-block,
+          .app-site-switcher,
+          .app-toolbar {
+            justify-content: flex-start;
+          }
+          .app-site-switcher {
+            grid-template-columns: 1fr;
+          }
           .shell {
             flex-direction: column;
+          }
+          .dashboard-health-layout,
+          .dashboard-history-grid,
+          .site-header-card {
+            grid-template-columns: 1fr;
+          }
+          .dashboard-score-grid {
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          }
+          .dashboard-history-row {
+            grid-template-columns: 1fr;
+            align-items: start;
+          }
+          .dashboard-hero-panel__actions {
+            justify-content: flex-start;
+          }
+          .scan-hero-card {
+            grid-template-columns: 1fr;
+          }
+          .score-ring-card__body {
+            grid-template-columns: 1fr;
+            justify-items: start;
+          }
+          .score-ring-card__stats {
+            width: 100%;
           }
           .sidebar {
             width: 100%;
@@ -7191,31 +11483,45 @@ const App: React.FC = () => {
         .report-page {
           display: flex;
           flex-direction: column;
-          gap: 16px;
+          gap: 18px;
         }
         .report-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          gap: 12px;
-          flex-wrap: wrap;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 16px;
+          align-items: start;
+          padding: 22px 24px;
+          border-radius: 22px;
+          border: 1px solid var(--border);
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 82%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, rgba(139, 92, 246, 0.05))
+              100%
+          );
+          box-shadow: var(--shadow);
         }
         .report-title {
-          font-size: 20px;
+          font-size: clamp(28px, 4vw, 38px);
           font-weight: 700;
           font-family: var(--font-display);
+          line-height: 1.1;
         }
         .report-subtitle {
-          font-size: 12px;
-          color: var(--muted);
+          margin-top: 6px;
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
         }
         .report-actions {
           display: flex;
           gap: 8px;
           flex-wrap: wrap;
+          justify-content: flex-end;
         }
         .report-button {
-          padding: 6px 10px;
+          min-height: 36px;
+          padding: 7px 12px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.35);
           background: var(--surface-2);
@@ -7231,97 +11537,294 @@ const App: React.FC = () => {
         }
         .report-card {
           background: var(--panel);
-          border: 1px solid var(--border);
-          border-radius: 14px;
-          padding: 12px;
-          box-shadow: var(--shadow);
+          border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+          border-radius: 18px;
+          padding: 16px;
+          box-shadow: var(--soft-shadow);
+        }
+        .report-card__header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 12px;
         }
         .report-meta {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+          gap: 14px;
+          padding-top: 14px;
         }
         .report-meta-item {
           display: flex;
           flex-direction: column;
-          gap: 4px;
+          gap: 6px;
           min-width: 0;
         }
         .report-label {
           font-size: 11px;
-          color: var(--muted);
-          letter-spacing: 0.04em;
+          color: var(--text-muted);
+          letter-spacing: 0.06em;
           text-transform: uppercase;
+          font-weight: 700;
         }
         .report-value {
           font-size: 13px;
           color: var(--text);
-          word-break: break-word;
+          overflow-wrap: anywhere;
+          line-height: 1.5;
         }
-        .report-summary-grid {
+        .report-overview-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-          gap: 12px;
+          grid-template-columns: minmax(320px, 1.2fr) minmax(320px, 0.95fr);
+          gap: 16px;
+          align-items: stretch;
+        }
+        .report-overview-stack {
+          display: grid;
+          gap: 16px;
+          min-width: 0;
+        }
+        .report-overview-score.surface-card--metric.prominent {
+          min-height: 0;
+          padding: 18px;
+          box-shadow: var(--soft-shadow);
+        }
+        .report-overview-score .score-ring-card__body {
+          gap: 14px;
+          align-items: start;
+        }
+        .report-overview-score .score-ring {
+          width: 124px;
+          height: 124px;
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--score-ring-color) 16%, var(--border)),
+            0 12px 28px color-mix(in srgb, var(--score-ring-color) 16%, transparent);
+        }
+        .report-overview-score .score-ring::before {
+          inset: 10px;
+        }
+        .report-overview-score .score-ring__value {
+          font-size: clamp(28px, 4vw, 38px);
+        }
+        .report-overview-score .score-ring__caption {
+          font-size: 10px;
+        }
+        .report-overview-score .score-ring-card__content {
+          gap: 6px;
+        }
+        .report-overview-score .score-ring-card__status {
+          font-size: clamp(16px, 2vw, 22px);
+        }
+        .report-overview-score .score-ring-card__helper {
+          min-height: 28px;
+          padding: 6px 10px;
+          font-size: 11px;
+        }
+        .report-overview-score .score-ring-card__stats {
+          gap: 8px;
+        }
+        .report-overview-score .score-ring-card__stat {
+          padding: 8px 10px;
+        }
+        .report-overview-score .score-ring-card__stat strong {
+          font-size: 16px;
         }
         .report-summary-card {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
+          min-height: 112px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
         }
         .report-score-card {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
+          min-height: 122px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 88%, rgba(56, 189, 248, 0.05)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
         }
         .report-metric {
-          font-size: 22px;
+          font-size: clamp(26px, 3vw, 34px);
           font-weight: 700;
           color: var(--text);
+          line-height: 1.1;
+          font-family: var(--font-display);
         }
         .report-score-subtitle {
-          font-size: 12px;
-          color: var(--muted);
-          line-height: 1.4;
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
         }
         .report-score-band {
           font-size: 12px;
           font-weight: 600;
         }
+        .report-status-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 12px;
+        }
+        .report-kpi-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px;
+        }
+        .report-kpi-grid--expanded {
+          grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+        }
+        .report-mini-stats {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+          gap: 10px;
+        }
+        .report-mini-stat {
+          display: grid;
+          gap: 4px;
+          min-height: 68px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .report-mini-stat span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .report-mini-stat strong {
+          font-size: 20px;
+          line-height: 1.1;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .report-kpi-card {
+          min-height: 110px;
+        }
+        .report-change-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 12px;
+        }
+        .report-change-grid--dense {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .report-meta-details {
+          padding: 14px 16px;
+        }
+        .report-meta-summary {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          cursor: pointer;
+          list-style: none;
+        }
+        .report-meta-summary::-webkit-details-marker {
+          display: none;
+        }
+        .report-meta-summary__chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .report-meta-chip {
+          display: inline-flex;
+          align-items: center;
+          min-height: 28px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--text-muted);
+          max-width: 100%;
+          overflow-wrap: anywhere;
+        }
         .report-table-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-          gap: 12px;
+          gap: 16px;
         }
         .report-table-title {
-          font-size: 13px;
+          font-size: 16px;
+          font-weight: 700;
+          font-family: var(--font-display);
+        }
+        .report-filter-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 12px;
+        }
+        .report-filter-chip {
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 92%, transparent);
+          color: var(--text-muted);
+          border-radius: 999px;
+          padding: 6px 11px;
+          font-size: 11px;
           font-weight: 600;
-          margin-bottom: 8px;
+          cursor: pointer;
+        }
+        .report-filter-chip.active {
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 84%,
+            rgba(56, 189, 248, 0.06)
+          );
+          color: var(--text);
+          border-color: var(--accent);
         }
         .report-table-wrap {
           overflow-x: auto;
           min-width: 0;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
         }
         .report-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 12px;
           table-layout: fixed;
+          background: color-mix(in srgb, var(--panel) 94%, transparent);
         }
         .report-table th,
         .report-table td {
-          padding: 8px;
+          padding: 12px 12px;
           border-bottom: 1px solid var(--border);
           text-align: left;
+          vertical-align: top;
         }
         .report-table th {
           font-size: 10px;
-          color: var(--muted);
+          color: var(--text-muted);
           text-transform: uppercase;
-          letter-spacing: 0.04em;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
         }
         .report-table td {
-          overflow-wrap: anywhere;
-          word-break: break-word;
+          overflow-wrap: normal;
+          word-break: normal;
         }
         .report-links-table th:nth-child(1),
         .report-links-table td:nth-child(1) {
@@ -7386,10 +11889,10 @@ const App: React.FC = () => {
         }
         .report-url-action {
           border: 1px solid var(--border);
-          background: transparent;
-          color: var(--muted);
+          background: color-mix(in srgb, var(--panel) 90%, transparent);
+          color: var(--text-muted);
           border-radius: 999px;
-          padding: 2px 7px;
+          padding: 3px 8px;
           font-size: 11px;
           line-height: 1.2;
           cursor: pointer;
@@ -7406,19 +11909,196 @@ const App: React.FC = () => {
         }
         .report-issue-support {
           font-size: 12px;
-          color: var(--muted);
+          color: var(--text-muted);
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
+        .report-issue-guidance {
+          margin-top: 10px;
+        }
+        .report-issue-guidance summary,
+        .report-issue-tech summary {
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--text);
+        }
+        .report-issue-guidance__body {
+          display: grid;
+          gap: 10px;
+          margin-top: 10px;
+        }
+        .report-issue-guidance__section {
+          display: grid;
+          gap: 6px;
+        }
+        .report-issue-guidance__section p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .report-issue-tech {
+          display: grid;
+          gap: 8px;
+          padding-top: 2px;
+        }
+        .report-evidence-list {
+          display: grid;
+          gap: 8px;
+        }
+        .report-evidence-item {
+          display: grid;
+          gap: 4px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+        }
+        .report-evidence-item strong {
+          font-size: 11px;
+          color: var(--text);
+        }
+        .report-evidence-item span {
+          font-size: 12px;
+          color: var(--text-muted);
+          overflow-wrap: anywhere;
+        }
+        .report-issue-category {
+          font-size: 11px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
+          color: var(--text-muted);
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          white-space: nowrap;
+        }
+        .report-issue-badges {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .report-badge {
+          display: inline-flex;
+          align-items: center;
+          min-height: 24px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .report-badge--severity.severity-critical,
+        .report-badge--severity.severity-high {
+          background: rgba(248, 113, 113, 0.18);
+          color: #fecaca;
+          border-color: rgba(248, 113, 113, 0.3);
+        }
+        .report-badge--severity.severity-medium {
+          background: rgba(251, 191, 36, 0.18);
+          color: #fde68a;
+          border-color: rgba(251, 191, 36, 0.32);
+        }
+        .report-badge--severity.severity-low {
+          background: rgba(56, 189, 248, 0.16);
+          color: #bae6fd;
+          border-color: rgba(56, 189, 248, 0.28);
+        }
+        .report-badge--severity.severity-info {
+          background: color-mix(in srgb, var(--panel-elev) 80%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+        }
+        .report-badge--status {
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+          text-transform: capitalize;
+        }
+        .report-badge--change.change-new {
+          background: rgba(56, 189, 248, 0.16);
+          color: #bae6fd;
+          border-color: rgba(56, 189, 248, 0.26);
+        }
+        .report-badge--change.change-existing {
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+        }
+        .report-badge--change.change-resolved {
+          background: rgba(52, 211, 153, 0.16);
+          color: #bbf7d0;
+          border-color: rgba(52, 211, 153, 0.28);
+        }
+        .report-table-meta {
+          margin-top: 8px;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
         .report-empty {
-          padding: 12px;
+          padding: 16px;
           text-align: center;
-          color: var(--muted);
+          color: var(--text-muted);
+        }
+        .report-priority-list {
+          display: grid;
+          gap: 12px;
+        }
+        .report-priority-item {
+          display: grid;
+          gap: 10px;
+          padding: 16px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .report-priority-item__top {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .report-priority-item__title {
+          font-size: 15px;
+          font-weight: 700;
+          color: var(--text);
+          line-height: 1.5;
+        }
+        .report-priority-item__meta {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .report-priority-item__desc {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .report-priority-item__next-step {
+          display: grid;
+          gap: 6px;
+          color: var(--text-muted);
+          font-size: 13px;
+          line-height: 1.6;
+        }
+        .report-priority-item__urls {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 10px 12px;
         }
         .report-footer {
           font-size: 12px;
-          color: var(--muted);
+          color: var(--text-muted);
           text-align: right;
         }
         @media print {
@@ -7430,6 +12110,21 @@ const App: React.FC = () => {
           }
         }
         @media (max-width: 1100px) {
+          .report-header {
+            grid-template-columns: 1fr;
+          }
+          .report-actions {
+            justify-content: flex-start;
+          }
+          .report-overview-grid {
+            grid-template-columns: 1fr;
+          }
+          .report-change-grid--dense {
+            grid-template-columns: 1fr;
+          }
+          .report-meta-summary {
+            align-items: flex-start;
+          }
           .top-grid {
             grid-template-columns: 1fr;
           }
@@ -7439,7 +12134,28 @@ const App: React.FC = () => {
         }
       `}</style>
       <div className="app-container">
-        {authLoading ? (
+        {route === "learn" ? (
+          <LearnExperience
+            isAuthenticated={!!authUser}
+            currentArticle={currentLearnArticle}
+            articleMissing={learnArticleMissing}
+            featuredArticles={featuredLearnArticles}
+            filteredArticles={filteredLearnArticles}
+            searchQuery={learnSearchQuery}
+            selectedCategory={learnCategoryFilter}
+            onSearchChange={setLearnSearchQuery}
+            onSelectCategory={setLearnCategoryFilter}
+            onOpenArticle={openLearnArticle}
+            onBackToIndex={() => navigateTo("/learn")}
+            onBackToLanding={() => navigateTo("/landing")}
+            onOpenApp={() => navigateTo("/app")}
+            onOpenLogin={() => navigateTo("/login")}
+            onClearFilters={() => {
+              setLearnSearchQuery("");
+              setLearnCategoryFilter("all");
+            }}
+          />
+        ) : authLoading && !isSharedReportRoute ? (
           <div
             style={{
               minHeight: "60vh",
@@ -7452,215 +12168,240 @@ const App: React.FC = () => {
           >
             Loading session...
           </div>
-        ) : !authUser ? (
-          <div
-            style={{
-              minHeight: "70vh",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: "24px",
-            }}
-          >
-            <form
+        ) : !authUser && !isSharedReportRoute ? (
+          isPublicLandingRoute ? (
+            <MarketingPage
+              isAuthenticated={false}
+              onOpenApp={() => navigateTo("/login")}
+              onOpenLogin={() => navigateTo("/login")}
+              onOpenLearn={() => navigateTo("/learn")}
+            />
+          ) : isLoginRoute || protectedRouteRequiresAuth ? (
+            <AuthPage
+              authMode={authMode}
+              authEmail={authEmail}
+              authPassword={authPassword}
+              authError={authError}
+              authWorking={authWorking}
+              title={authPageTitle}
+              subtitle={authPageSubtitle}
+              onAuthModeChange={setAuthMode}
+              onAuthEmailChange={setAuthEmail}
+              onAuthPasswordChange={setAuthPassword}
+              onBackToLanding={() => navigateTo("/landing")}
               onSubmit={(event) => {
                 event.preventDefault();
                 void handleAuthSubmit();
               }}
-              style={{
-                width: "min(420px, 100%)",
-                background: "var(--panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "18px",
-                padding: "20px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "14px",
-                boxShadow: "var(--shadow)",
-              }}
-            >
-              <div>
-                <div
-                  style={{
-                    fontSize: "20px",
-                    fontWeight: 700,
-                    fontFamily: "var(--font-display)",
-                  }}
-                >
-                  Scanlark
-                </div>
-                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Beta access required
-                </div>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  gap: "8px",
-                }}
-              >
-                {(["login", "register"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setAuthMode(mode)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: "999px",
-                      border: "1px solid var(--border)",
-                      background:
-                        authMode === mode ? "var(--surface-2)" : "transparent",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                      fontWeight: 600,
-                    }}
-                  >
-                    {mode === "login" ? "Login" : "Register"}
-                  </button>
-                ))}
-              </div>
-              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                Email
-                <input
-                  type="email"
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  autoComplete="email"
-                  placeholder="you@example.com"
-                  disabled={authWorking}
-                  style={{
-                    marginTop: "6px",
-                    width: "100%",
-                    padding: "8px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    color: "var(--text)",
-                  }}
-                />
-              </label>
-              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                Password
-                <input
-                  type="password"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  autoComplete={
-                    authMode === "login" ? "current-password" : "new-password"
-                  }
-                  placeholder="Enter your password"
-                  disabled={authWorking}
-                  style={{
-                    marginTop: "6px",
-                    width: "100%",
-                    padding: "8px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    color: "var(--text)",
-                  }}
-                />
-              </label>
-              {authError && (
-                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-                  {authError}
-                </div>
-              )}
-              <button
-                type="submit"
-                disabled={authWorking}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: "12px",
-                  border: "1px solid var(--border)",
-                  background: "var(--panel-elev)",
-                  cursor: authWorking ? "not-allowed" : "pointer",
-                  fontSize: "13px",
-                  fontWeight: 600,
-                }}
-              >
-                {authWorking
-                  ? "Please wait..."
-                  : authMode === "login"
-                    ? "Log in"
-                    : "Create account"}
-              </button>
-              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                TODO: Swap to managed auth provider before public launch.
-              </div>
-            </form>
-          </div>
+            />
+          ) : null
+        ) : isPublicLandingRoute ? (
+          <MarketingPage
+            isAuthenticated
+            onOpenApp={() => navigateTo("/app")}
+            onOpenLogin={() => navigateTo("/app")}
+            onOpenLearn={() => navigateTo("/learn")}
+          />
         ) : reportView ? (
           <div className="report-page">
             <div className="report-header">
               <div>
-                <div className="report-title">Scanlark</div>
-                <div className="report-subtitle">Scan Report</div>
+                <div className="report-title">
+                  {isReadOnlySharedReport
+                    ? reportHost ?? "Scan report"
+                    : selectedSiteName ?? reportHost ?? "Scan report"}
+                </div>
+                <div className="report-subtitle">
+                  {isReadOnlySharedReport
+                    ? "Report shared via Scanlark. This read-only view keeps the same evidence and findings without dashboard access."
+                    : "Detailed scan document with summary, issue analysis, raw evidence, and diagnostics for a single run."}
+                </div>
+                <div className="report-status-row">
+                  <StatusBadge
+                    label={reportRun?.status.replace("_", " ") ?? "Loading"}
+                    tone={
+                      reportRun?.status === "completed"
+                        ? "success"
+                        : reportRun?.status === "failed"
+                          ? "danger"
+                          : reportRun?.status === "cancelled"
+                            ? "warning"
+                            : "accent"
+                    }
+                  />
+                  {reportIssueSummaryPending && (
+                    <StatusBadge label="Building issue summary" tone="accent" />
+                  )}
+                  {reportHost && (
+                    <StatusBadge label={reportHost} tone="default" />
+                  )}
+                  {reportDateLabel !== "-" && (
+                    <StatusBadge label={reportDateLabel} tone="default" />
+                  )}
+                </div>
               </div>
               <div className="report-actions">
-                <button className="report-button" onClick={backToDashboard}>
-                  Back to dashboard
-                </button>
+                {!isReadOnlySharedReport && (
+                  <button className="report-button" onClick={backToDashboard}>
+                    Back to dashboard
+                  </button>
+                )}
                 <button
                   className="report-button"
-                  onClick={() =>
-                    reportScanRunId &&
-                    copyToClipboard(
-                      buildReportLink(reportScanRunId),
-                      undefined,
-                      "Copied link",
-                    )
+                  onClick={() => {
+                    if (isReadOnlySharedReport && sharedReportToken) {
+                      void copyToClipboard(
+                        buildSharedReportLink(sharedReportToken),
+                        undefined,
+                        "Copied share link",
+                      );
+                      return;
+                    }
+                    if (reportScanRunId) {
+                      void copyToClipboard(
+                        buildReportLink(reportScanRunId),
+                        undefined,
+                        "Copied report link",
+                      );
+                    }
+                  }}
+                  disabled={
+                    isReadOnlySharedReport
+                      ? !sharedReportToken
+                      : !reportScanRunId
                   }
-                  disabled={!reportScanRunId}
                 >
-                  Copy report link
+                  {isReadOnlySharedReport ? "Copy share link" : "Copy report link"}
                 </button>
               </div>
             </div>
 
-            <div className="report-card report-meta">
-              <div className="report-meta-item">
-                <div className="report-label">Scan run</div>
-                <div className="report-value">
-                  {reportRun?.id ?? reportScanRunId ?? "-"}
+            {!isReadOnlySharedReport && reportRun?.status === "completed" && (
+              <div className="report-card">
+                <div className="report-card__header">
+                  <div>
+                    <div className="report-table-title">Share report</div>
+                    <div className="report-table-meta" style={{ marginTop: "4px" }}>
+                      Create a public read-only link for this completed scan run.
+                    </div>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "12px",
+                    gridTemplateColumns: "minmax(0, 1fr) auto",
+                    alignItems: "start",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    {reportShare ? (
+                      <>
+                        <div
+                          style={{
+                            fontSize: "13px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Share link is active.
+                        </div>
+                        <div
+                          style={{
+                            marginTop: "6px",
+                            fontSize: "12px",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Views {reportShare.viewCount} • Last viewed{" "}
+                          {reportShare.lastViewedAt
+                            ? formatDate(reportShare.lastViewedAt)
+                            : "Never"}
+                        </div>
+                        {reportShareRevealUrl && (
+                          <div
+                            style={{
+                              marginTop: "10px",
+                              display: "grid",
+                              gap: "6px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              One-time share URL
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "13px",
+                                fontWeight: 600,
+                                overflowWrap: "anywhere",
+                              }}
+                            >
+                              {reportShareRevealUrl}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              This URL is only shown at creation time. Refreshing or reopening this report will hide it.
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {reportShareEligible
+                          ? reportShareLoading
+                            ? "Loading share status..."
+                            : "No public share link exists for this run yet."
+                          : "Only completed scan runs can be shared."}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {reportShare ? (
+                      <>
+                        {reportShareRevealUrl && (
+                          <button
+                            className="report-button"
+                            onClick={() =>
+                              void copyToClipboard(
+                                reportShareRevealUrl,
+                                undefined,
+                                "Copied share link",
+                              )
+                            }
+                            disabled={reportShareBusy}
+                          >
+                            Copy one-time URL
+                          </button>
+                        )}
+                        <button
+                          className="report-button"
+                          onClick={() => void handleRevokeReportShare()}
+                          disabled={reportShareBusy}
+                        >
+                          {reportShareBusy ? "Revoking..." : "Revoke link"}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="report-button"
+                        onClick={() => void handleCreateReportShare()}
+                        disabled={!reportShareEligible || reportShareBusy}
+                      >
+                        {reportShareBusy ? "Creating..." : "Create share link"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="report-meta-item">
-                <div className="report-label">Start URL</div>
-                <div className="report-value">
-                  {reportRun?.start_url ?? "-"}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Host</div>
-                <div className="report-value">{reportHost ?? "-"}</div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Started</div>
-                <div className="report-value">
-                  {formatDate(reportRun?.started_at ?? null)}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Finished</div>
-                <div className="report-value">
-                  {formatDate(reportRun?.finished_at ?? null)}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Duration</div>
-                <div className="report-value">
-                  {formatDuration(
-                    reportRun?.started_at,
-                    reportRun?.finished_at,
-                  )}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Status</div>
-                <div className="report-value">{reportRun?.status ?? "-"}</div>
-              </div>
-            </div>
+            )}
 
             {reportLoading && !reportRun && (
               <div
@@ -7690,63 +12431,202 @@ const App: React.FC = () => {
 
             {reportRun && (
               <>
-                <div className="report-summary-grid">
-                  <div className="report-card report-score-card">
-                    <div className="report-label">Overall Health Score</div>
-                    <div
-                      className="report-metric"
-                      style={{
-                        color: getScoreBandTone(reportScores.overall.score),
-                      }}
-                    >
-                      {reportScores.overall.score == null
-                        ? reportScores.overall.detail
-                        : `${reportScores.overall.score}%`}
-                    </div>
-                    {reportScores.overall.band && (
+                <div className="report-overview-grid">
+                  <ScoreRingCard
+                    label="Overall health"
+                    className="report-overview-score"
+                    caption="Health score"
+                    emptyValueText={
+                      reportIssueSummaryPending ? "Pending" : "N/A"
+                    }
+                    score={
+                      reportIssueSummaryPending
+                        ? null
+                        : reportScores.overall.score
+                    }
+                    status={
+                      reportIssueSummaryPending
+                        ? "Score pending"
+                        : reportScores.overall.score == null
+                          ? "Score unavailable"
+                          : (reportScores.overall.band ??
+                            reportScores.overall.detail)
+                    }
+                    detail={
+                      reportIssueSummaryPending
+                        ? "The crawl is complete. Final issue scoring appears when the report summary finishes."
+                        : reportScores.overall.score == null
+                          ? "Score unavailable for this run. Review the detailed findings and diagnostics below."
+                          : reportScores.overall.detail
+                    }
+                    helper={
+                      reportIssueSummaryPending
+                        ? "Final issue scoring is still being prepared"
+                        : `Links checked ${reportRun.checked_links} · Total issues ${
+                            reportIssueSummary?.total ?? 0
+                          }`
+                    }
+                    stats={[
+                      {
+                        label: "High priority",
+                        value: reportHighPriorityCount,
+                      },
+                      {
+                        label: "New issues",
+                        value: reportIssueSummary?.byChangeStatus.new ?? 0,
+                      },
+                      {
+                        label: "Resolved",
+                        value:
+                          reportIssueSummary?.byChangeStatus.resolved ??
+                          reportIssues.resolvedCount,
+                      },
+                      {
+                        label: "Links checked",
+                        value: reportRun.checked_links,
+                      },
+                    ]}
+                    tone={
+                      reportScores.overall.score == null
+                        ? "default"
+                        : reportScores.overall.score >= 90
+                          ? "success"
+                          : reportScores.overall.score >= 75
+                            ? "accent"
+                            : reportScores.overall.score >= 60
+                              ? "warning"
+                              : "danger"
+                    }
+                  />
+                  <div className="report-overview-stack">
+                    <div className="report-card report-score-card report-kpi-card">
+                      <div className="report-label">Link Integrity Score</div>
                       <div
-                        className="report-score-band"
-                        style={{
-                          color: getScoreBandTone(reportScores.overall.score),
-                        }}
-                      >
-                        {reportScores.overall.band}
-                      </div>
-                    )}
-                    <div className="report-score-subtitle">
-                      {reportScores.overall.detail}
-                    </div>
-                  </div>
-                  <div className="report-card report-score-card">
-                    <div className="report-label">Link Integrity Score</div>
-                    <div
-                      className="report-metric"
-                      style={{
-                        color: getScoreBandTone(
-                          reportScores.linkIntegrity.score,
-                        ),
-                      }}
-                    >
-                      {reportScores.linkIntegrity.score == null
-                        ? reportScores.linkIntegrity.detail
-                        : `${reportScores.linkIntegrity.score}%`}
-                    </div>
-                    {reportScores.linkIntegrity.band && (
-                      <div
-                        className="report-score-band"
+                        className="report-metric"
                         style={{
                           color: getScoreBandTone(
                             reportScores.linkIntegrity.score,
                           ),
                         }}
                       >
-                        {reportScores.linkIntegrity.band}
+                        {reportScores.linkIntegrity.score == null
+                          ? reportScores.linkIntegrity.detail
+                          : `${reportScores.linkIntegrity.score}%`}
                       </div>
-                    )}
-                    <div className="report-score-subtitle">
-                      {reportScores.linkIntegrity.detail}
+                      {reportScores.linkIntegrity.band && (
+                        <div
+                          className="report-score-band"
+                          style={{
+                            color: getScoreBandTone(
+                              reportScores.linkIntegrity.score,
+                            ),
+                          }}
+                        >
+                          {reportScores.linkIntegrity.band}
+                        </div>
+                      )}
+                      <div className="report-score-subtitle">
+                        {reportScores.linkIntegrity.detail}
+                      </div>
+                    </div>
+                    <div className="report-change-grid report-change-grid--dense">
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">What changed</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.byChangeStatus.new ?? 0}
+                        </div>
+                        <div className="report-score-subtitle">
+                          New issues in this run
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Open issues</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.total ?? 0}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Existing and newly detected findings
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Resolved issues</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.byChangeStatus.resolved ??
+                            reportIssues.resolvedCount}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Fixed since the previous baseline
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Links checked</div>
+                        <div className="report-metric">
+                          {reportRun.checked_links}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Broken {reportSummary.broken} · Blocked{" "}
+                          {reportSummary.blocked}
+                        </div>
+                      </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="report-card report-category-scores">
+                  <div className="report-card__header">
+                    <div>
+                      <div className="report-table-title">Category scores</div>
+                      <div className="report-score-subtitle">
+                        Deterministic scores from open findings in this scan.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="dashboard-category-grid report-category-score-grid">
+                    {DASHBOARD_CATEGORIES.map((category) => {
+                      const score =
+                        reportCategoryScoresByKey[category.key] ?? null;
+                      const scoreValue = reportIssueSummaryPending
+                        ? "Pending"
+                        : getCategoryScoreValue(score);
+                      const statusLabel = reportIssueSummaryPending
+                        ? "Pending"
+                        : score
+                          ? getCategoryScoreStatusLabel(score.status)
+                          : "Score unavailable";
+                      return (
+                        <CategoryStatusCard
+                          key={category.key}
+                          title={category.label}
+                          statusLabel={statusLabel}
+                          tone={
+                            reportIssueSummaryPending
+                              ? "default"
+                              : getCategoryScoreTone(score)
+                          }
+                          score={scoreValue}
+                          description={category.description}
+                          detail={
+                            reportIssueSummaryPending
+                              ? "Building issue summary"
+                              : getSearchAccessCategoryDetail(
+                                  score,
+                                  reportIssues.summariesByCategory,
+                                )
+                          }
+                          stats={
+                            reportIssueSummaryPending
+                              ? null
+                              : score
+                                ? `${score.findingCount} findings · ${score.checkCount} checks`
+                                : "No score payload available"
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="report-kpi-grid report-kpi-grid--expanded">
                   <div className="report-card report-summary-card">
                     <div className="report-label">Total issues</div>
                     <div className="report-metric">
@@ -7754,27 +12634,28 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">High</div>
+                    <div className="report-label">High priority</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.high ?? 0}
+                      {reportHighPriorityCount}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Medium</div>
+                    <div className="report-label">New issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.medium ?? 0}
+                      {reportIssueSummary?.byChangeStatus.new ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Low</div>
+                    <div className="report-label">Existing issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.low ?? 0}
+                      {reportIssueSummary?.byChangeStatus.existing ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Info</div>
+                    <div className="report-label">Resolved issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.info ?? 0}
+                      {reportIssueSummary?.byChangeStatus.resolved ??
+                        reportIssues.resolvedCount}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
@@ -7783,107 +12664,249 @@ const App: React.FC = () => {
                       {reportRun.checked_links}
                     </div>
                   </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Broken</div>
-                    <div className="report-metric">{reportSummary.broken}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Blocked</div>
-                    <div className="report-metric">{reportSummary.blocked}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">No response</div>
-                    <div className="report-metric">
-                      {reportSummary.no_response}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Ignored / skipped</div>
-                    <div className="report-metric">
-                      {reportIgnoredTotal ?? 0}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">OK</div>
-                    <div className="report-metric">{reportSummary.ok}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Pages crawled</div>
-                    <div className="report-metric">Not tracked</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Limits hit</div>
-                    <div className="report-metric">Not tracked</div>
-                  </div>
                 </div>
 
                 <div className="report-card report-score-subtitle">
                   {reportScores.summary}
                 </div>
 
-                {isInProgress(reportRun.status) && (
-                  <div
-                    className="report-card"
-                    style={{ display: "grid", gap: "12px" }}
-                  >
-                    <div style={{ fontWeight: 600 }}>
-                      Waiting for this scan to finish
+                <details className="report-card report-meta-details">
+                  <summary className="report-meta-summary">
+                    <div>
+                      <div className="report-table-title">Scan details</div>
+                      <div className="report-score-subtitle">
+                        Run metadata, timestamps, URLs, and scan identifier.
+                      </div>
                     </div>
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      This report stays focused on this exact run and will
-                      refresh as progress arrives.
+                    <div className="report-meta-summary__chips">
+                      <span className="report-meta-chip">
+                        Duration{" "}
+                        {formatDuration(
+                          reportRun?.started_at,
+                          reportRun?.finished_at,
+                        )}
+                      </span>
+                      <span className="report-meta-chip">
+                        Scan ID {reportScanIdShort}
+                      </span>
                     </div>
-                    <ScanProgressBar
-                      status={reportRun.status}
-                      totalLinks={reportRun.total_links}
-                      checkedLinks={reportRun.checked_links}
-                      brokenLinks={reportSummary.broken}
-                      blockedLinks={reportSummary.blocked}
-                      noResponseLinks={reportSummary.no_response}
-                      lastUpdateAt={reportLastLoadedAt}
-                    />
+                  </summary>
+                  <div className="report-meta">
+                    <div className="report-meta-item">
+                      <div className="report-label">Status</div>
+                      <div className="report-value">
+                        {reportRun?.status.replace("_", " ") ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Issue generation</div>
+                      <div className="report-value">
+                        {reportRun.issue_generation_status ?? "pending"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Site</div>
+                      <div className="report-value">
+                        {isReadOnlySharedReport
+                          ? reportHost ?? "-"
+                          : selectedSiteName ?? reportHost ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Checked links</div>
+                      <div className="report-value">
+                        {reportRun.checked_links} / {reportRun.total_links}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Scanned</div>
+                      <div className="report-value">{reportDateLabel}</div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Scan ID</div>
+                      <div className="report-value">
+                        <span
+                          style={{
+                            fontSize: "12px",
+                            color: "var(--text-muted)",
+                            overflowWrap: "anywhere",
+                          }}
+                        >
+                          {reportScanIdDisplay}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Start URL</div>
+                      <div className="report-value">
+                        {reportRun?.start_url ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Started</div>
+                      <div className="report-value">
+                        {formatDate(reportRun?.started_at ?? null)}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Finished</div>
+                      <div className="report-value">
+                        {formatDate(reportRun?.finished_at ?? null)}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Duration</div>
+                      <div className="report-value">
+                        {formatDuration(
+                          reportRun?.started_at,
+                          reportRun?.finished_at,
+                        )}
+                      </div>
+                    </div>
                   </div>
-                )}
+                </details>
 
-                <div
-                  className="report-card"
-                  style={{ display: "grid", gap: "10px" }}
-                >
-                  <div className="report-table-title">
-                    Technical diagnostics
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: "12px",
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                    }}
-                  >
-                    <span>Raw status {reportRun.status}</span>
-                    <span>Site id {reportRun.site_id}</span>
-                    <span>
-                      Checked {reportRun.checked_links} /{" "}
-                      {reportRun.total_links}
-                    </span>
-                    <span>404/410 {reportStatusGroups.notFound}</span>
-                    <span>401/403/429 {reportStatusGroups.blocked}</span>
-                    <span>5xx {reportStatusGroups.serverError}</span>
-                    <span>No response {reportStatusGroups.noResponse}</span>
-                    <span>Other HTTP {reportStatusGroups.otherHttp}</span>
-                    <span>
-                      Refreshed{" "}
-                      {reportLastLoadedAt
+                {isInProgress(reportRun.status) && (
+                  <ScanProgressHero
+                    progress={
+                      reportRun.total_links > 0
+                        ? (reportRun.checked_links / reportRun.total_links) *
+                          100
+                        : 0
+                    }
+                    indeterminate={reportRun.total_links <= 0}
+                    title="Scan still running"
+                    stage={getScanStageText(reportRun)}
+                    summary={`${
+                      reportRun.checked_links
+                    } / ${reportRun.total_links || "?"} links checked · Last update ${
+                      reportLastLoadedAt
                         ? formatDate(new Date(reportLastLoadedAt).toISOString())
-                        : "-"}
-                    </span>
-                  </div>
-                </div>
+                        : "-"
+                    }`}
+                    counters={[
+                      {
+                        label: "Links checked",
+                        value: reportRun.checked_links,
+                      },
+                      { label: "Broken", value: reportSummary.broken },
+                      { label: "Blocked", value: reportSummary.blocked },
+                      {
+                        label: "No response",
+                        value: reportSummary.no_response,
+                      },
+                      { label: "Ignored", value: reportIgnoredTotal ?? 0 },
+                    ]}
+                    note="This report stays locked to this exact run and refreshes as scan progress arrives."
+                    statusTone="accent"
+                  />
+                )}
 
                 {reportRun.status === "completed" && (
                   <>
+                    {reportRun.issue_generation_status !== "completed" && (
+                      <div
+                        className="report-card"
+                        style={{
+                          display: "grid",
+                          gap: "8px",
+                          borderColor:
+                            reportRun.issue_generation_status === "failed"
+                              ? "var(--warning)"
+                              : "var(--border)",
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          {reportRun.issue_generation_status === "failed"
+                            ? "Issue generation failed"
+                            : "Issue generation pending"}
+                        </div>
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Scan completed, but issue generation{" "}
+                          {reportRun.issue_generation_status === "failed"
+                            ? "failed"
+                            : "has not finished yet"}
+                          . Raw scan evidence is still available.
+                        </div>
+                        {reportRun.issue_generation_error && (
+                          <div
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--warning)",
+                            }}
+                          >
+                            {reportRun.issue_generation_error}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {renderTopPriorityIssues()}
                     {renderReportIssuesSection()}
+
+                    <div className="report-card">
+                      <div className="report-card__header">
+                        <div>
+                          <div className="report-table-title">
+                            Evidence summary
+                          </div>
+                          <div
+                            className="report-table-meta"
+                            style={{ marginTop: "4px" }}
+                          >
+                            Link outcomes and severity counts for this exact
+                            run.
+                          </div>
+                        </div>
+                      </div>
+                      <div className="report-mini-stats">
+                        <div className="report-mini-stat">
+                          <span>Broken</span>
+                          <strong>{reportSummary.broken}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Blocked</span>
+                          <strong>{reportSummary.blocked}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>No response</span>
+                          <strong>{reportSummary.no_response}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Ignored / skipped</span>
+                          <strong>{reportIgnoredTotal ?? 0}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>OK links</span>
+                          <strong>{reportSummary.ok}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>High</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.high ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Medium</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.medium ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Low</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.low ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Info</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.info ?? 0}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
 
                     <div className="report-table-grid">
                       {renderReportLinkSection(
@@ -7919,15 +12942,119 @@ const App: React.FC = () => {
 
                 {reportRun.status !== "completed" &&
                   !isInProgress(reportRun.status) && (
-                    <div
-                      className="report-card"
-                      style={{ fontSize: "13px", color: "var(--muted)" }}
-                    >
-                      This scan did not complete, so Scanlark is only showing
-                      the exact run status and any data captured before it
-                      stopped.
-                    </div>
+                    <ScanProgressHero
+                      progress={0}
+                      title={
+                        reportRun.status === "failed"
+                          ? "Scan failed"
+                          : "Scan cancelled"
+                      }
+                      stage={getScanStageText(reportRun)}
+                      summary={
+                        reportRun.error_message ??
+                        "This report only shows the exact run state and any evidence captured before the scan stopped."
+                      }
+                      counters={[
+                        {
+                          label: "Links checked",
+                          value: reportRun.checked_links,
+                        },
+                        { label: "Broken", value: reportSummary.broken },
+                        { label: "Blocked", value: reportSummary.blocked },
+                        {
+                          label: "No response",
+                          value: reportSummary.no_response,
+                        },
+                        { label: "Ignored", value: reportIgnoredTotal ?? 0 },
+                      ]}
+                      note="Detailed evidence remains available below for anything the scan captured before it stopped."
+                      statusTone={
+                        reportRun.status === "failed" ? "danger" : "warning"
+                      }
+                    />
                   )}
+
+                <details
+                  className="report-card"
+                  open={reportTechnicalDiagnosticsNeedsAttention}
+                  style={{ display: "grid", gap: "10px" }}
+                >
+                  <summary
+                    className="report-table-title"
+                    style={{ cursor: "pointer" }}
+                  >
+                    Technical diagnostics
+                  </summary>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "12px",
+                      fontSize: "12px",
+                      color: "var(--muted)",
+                    }}
+                  >
+                    <span>Raw status {reportRun.status}</span>
+                    {!isReadOnlySharedReport && (
+                      <span>Site id {reportRun.site_id}</span>
+                    )}
+                    <span>
+                      Checked {reportRun.checked_links} /{" "}
+                      {reportRun.total_links}
+                    </span>
+                    <span>404/410 {reportStatusGroups.notFound}</span>
+                    <span>401/403/429 {reportStatusGroups.blocked}</span>
+                    <span>5xx {reportStatusGroups.serverError}</span>
+                    <span>No response {reportStatusGroups.noResponse}</span>
+                    <span>Other HTTP {reportStatusGroups.otherHttp}</span>
+                    <span>
+                      Issue generation{" "}
+                      {reportRun.issue_generation_status ?? "pending"}
+                    </span>
+                    {reportRun.issue_generation_error && (
+                      <span title={reportRun.issue_generation_error}>
+                        Issue generation error{" "}
+                        {reportRun.issue_generation_error}
+                      </span>
+                    )}
+                    <span>
+                      {formatSeoDiagnostics(
+                        reportTechnicalDiagnostics?.seoBasic,
+                      )}
+                    </span>
+                    <span>
+                      {formatRobotsDiagnostics(
+                        reportTechnicalDiagnostics?.robots,
+                      )}
+                    </span>
+                    <span>
+                      {formatSitemapDiagnostics(
+                        reportTechnicalDiagnostics?.sitemap,
+                      )}
+                    </span>
+                    <span>
+                      {formatSslDiagnostics(
+                        reportTechnicalDiagnostics?.sslHttps,
+                      )}
+                    </span>
+                    <span>
+                      {formatSecurityHeaderDiagnostics(
+                        reportTechnicalDiagnostics?.securityHeader,
+                      )}
+                    </span>
+                    <span>
+                      {formatPerformanceDiagnostics(
+                        reportTechnicalDiagnostics?.performanceBasic,
+                      )}
+                    </span>
+                    <span>
+                      Refreshed{" "}
+                      {reportLastLoadedAt
+                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                        : "-"}
+                    </span>
+                  </div>
+                </details>
 
                 <div className="report-footer">
                   Last refreshed{" "}
@@ -7941,92 +13068,84 @@ const App: React.FC = () => {
         ) : (
           <>
             <nav className="top-nav">
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  minWidth: 0,
-                }}
-              >
-                <button
-                  ref={hamburgerRef}
-                  onClick={() => setIsDrawerOpen(true)}
-                  className="hamburger"
-                  aria-controls="sidebar-drawer"
-                  aria-expanded={isDrawerOpen}
-                  style={{
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    borderRadius: "10px",
-                    padding: "6px 8px",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                  }}
-                  title="Open menu"
-                >
-                  ☰
-                </button>
+              <div className="app-brand-block">
                 <div>
                   <div
                     style={{
                       fontWeight: 700,
-                      fontSize: "16px",
+                      fontSize: "18px",
                       fontFamily: "var(--font-display)",
-                      letterSpacing: "-0.02em",
                     }}
                   >
                     Scanlark
                   </div>
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                    Link integrity monitor
+                    Customer monitoring control centre
                   </div>
+                </div>
+                <div className="app-nav-tabs">
+                  {primaryAppSections.map((item) => (
+                    <button
+                      key={item.key}
+                      className={`app-nav-tab ${appSection === item.key ? "active" : ""}`}
+                      onClick={() => setAppSection(item.key)}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <div
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  textAlign: "center",
-                  fontSize: "12px",
-                  color: "var(--muted)",
-                  padding: "0 8px",
-                }}
-              >
-                {selectedSiteId
-                  ? `Selected: ${safeHost(startUrl || "")}`
-                  : "No site selected"}
+              <div className="app-site-switcher">
+                <div style={{ minWidth: 0 }}>
+                  <div className="app-site-switcher__label">Selected Site</div>
+                  <select
+                    value={selectedSiteId ?? ""}
+                    onChange={(event) => {
+                      const nextSite = sites.find(
+                        (site) => site.id === event.target.value,
+                      );
+                      if (nextSite) void handleSelectSite(nextSite);
+                    }}
+                    className="app-input"
+                    style={{ minHeight: "44px" }}
+                  >
+                    {!selectedSiteId && <option value="">Select a site</option>}
+                    {sites.map((site) => (
+                      <option key={site.id} value={site.id}>
+                        {(siteNameById[site.id] ?? site.url).slice(0, 90)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  onClick={() => {
+                    setCreateError(null);
+                    setAddSiteOpen(true);
+                  }}
+                  className="secondary-button"
+                >
+                  Add site
+                </button>
+                <button
+                  onClick={() => setAppSection("sites")}
+                  className="ghost-button"
+                >
+                  Manage
+                </button>
               </div>
 
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  flexWrap: "wrap",
-                }}
-              >
-                {hasSites && (
-                  <button
-                    onClick={() => {
-                      setCreateError(null);
-                      setAddSiteOpen(true);
-                    }}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      fontSize: "12px",
-                      cursor: "pointer",
-                      fontWeight: 600,
-                    }}
-                  >
-                    Add site
-                  </button>
-                )}
-                {authUser ? (
+              <div className="app-toolbar">
+                <button
+                  onClick={handleNewScanAction}
+                  disabled={
+                    !!selectedSiteId && (triggeringScan || canCancelRun)
+                  }
+                  className="primary-button"
+                >
+                  {triggeringScan ? "Starting..." : "Run scan"}
+                </button>
+                {authUser && (
                   <div
                     ref={userMenuRef}
                     style={{
@@ -8037,20 +13156,13 @@ const App: React.FC = () => {
                     }}
                   >
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Hi, {authUser.name ?? authUser.email}
+                      {authUser.name ?? authUser.email}
                     </div>
                     <button
                       onClick={() => setUserMenuOpen((prev) => !prev)}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
+                      className="secondary-button"
                     >
-                      Options
+                      Account
                     </button>
                     {userMenuOpen && (
                       <div className="theme-menu">
@@ -8138,33 +13250,6 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                ) : (
-                  <>
-                    <button
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Login
-                    </button>
-                    <button
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Register
-                    </button>
-                  </>
                 )}
               </div>
             </nav>
@@ -8488,10 +13573,15 @@ const App: React.FC = () => {
                             <span>Auto-scan</span>
                             <input
                               type="checkbox"
-                              checked={scheduleEnabled}
+                              checked={
+                                scheduleFrequency === "manual"
+                                  ? false
+                                  : scheduleEnabled
+                              }
                               onChange={(e) =>
                                 setScheduleEnabled(e.target.checked)
                               }
+                              disabled={scheduleFrequency === "manual"}
                             />
                           </label>
                           <div
@@ -8510,11 +13600,17 @@ const App: React.FC = () => {
                               Frequency
                               <select
                                 value={scheduleFrequency}
-                                onChange={(e) =>
-                                  setScheduleFrequency(
-                                    e.target.value as "daily" | "weekly",
-                                  )
-                                }
+                                onChange={(e) => {
+                                  const nextFrequency = e.target.value as
+                                    | "manual"
+                                    | "daily"
+                                    | "weekly"
+                                    | "monthly";
+                                  setScheduleFrequency(nextFrequency);
+                                  if (nextFrequency === "manual") {
+                                    setScheduleEnabled(false);
+                                  }
+                                }}
                                 style={{
                                   marginTop: "6px",
                                   width: "100%",
@@ -8525,8 +13621,10 @@ const App: React.FC = () => {
                                   color: "var(--text)",
                                 }}
                               >
+                                <option value="manual">Manual</option>
                                 <option value="daily">Daily</option>
                                 <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
                               </select>
                             </label>
                             {scheduleFrequency === "weekly" && (
@@ -8562,6 +13660,42 @@ const App: React.FC = () => {
                                 </select>
                               </label>
                             )}
+                            {scheduleFrequency === "monthly" && (
+                              <label
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                Day of month (UTC)
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={31}
+                                  value={scheduleDayOfMonth}
+                                  onChange={(e) =>
+                                    setScheduleDayOfMonth(
+                                      Math.min(
+                                        31,
+                                        Math.max(
+                                          1,
+                                          Number(e.target.value) || 1,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  style={{
+                                    marginTop: "6px",
+                                    width: "100%",
+                                    padding: "6px 8px",
+                                    borderRadius: "10px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                  }}
+                                />
+                              </label>
+                            )}
                             <label
                               style={{
                                 fontSize: "12px",
@@ -8595,6 +13729,7 @@ const App: React.FC = () => {
                               scheduleFrequency,
                               scheduleTimeUtc,
                               scheduleDayOfWeek,
+                              scheduleDayOfMonth,
                             )}
                           </div>
                           {showLocalTimeZone && (
@@ -8609,6 +13744,7 @@ const App: React.FC = () => {
                                 scheduleFrequency,
                                 scheduleTimeUtc,
                                 scheduleDayOfWeek,
+                                scheduleDayOfMonth,
                               )}{" "}
                               ({localTimeZone})
                             </div>
@@ -8791,6 +13927,25 @@ const App: React.FC = () => {
                               disabled={notifyLoading}
                             />
                             Include CSV attachment (coming soon)
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={summaryEnabled}
+                              onChange={(e) =>
+                                setSummaryEnabled(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Weekly summary
                           </label>
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
@@ -9048,228 +14203,1638 @@ const App: React.FC = () => {
               />
 
               <main className="main">
-                <div
-                  className="card"
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: "16px",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontSize: "22px",
-                        fontWeight: 700,
-                        fontFamily: "var(--font-display)",
-                      }}
-                    >
-                      {selectedSiteName ??
-                        (startUrl ? safeHost(startUrl) : "No site selected")}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        display: "flex",
-                        gap: "8px",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <span
-                        title={startUrl}
+                <div className="app-section-shell">
+                  {!hasSites && (
+                    <div className="app-section-heading">
+                      <div className="app-section-heading__title">
+                        Add your first site
+                      </div>
+                      <div className="app-section-heading__meta">
+                        Scanlark is ready. Add a site to start monitoring
+                        health, reports, changes, and alerts.
+                      </div>
+                      <div
                         style={{
-                          maxWidth: "520px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
+                          display: "flex",
+                          gap: "10px",
+                          flexWrap: "wrap",
                         }}
                       >
-                        {startUrl || "Select a site to begin"}
-                      </span>
+                        <button
+                          onClick={() => {
+                            setCreateError(null);
+                            setAddSiteOpen(true);
+                          }}
+                          className="primary-button"
+                        >
+                          Add site
+                        </button>
+                        <button
+                          onClick={() => void handleCreateSampleSite()}
+                          className="secondary-button"
+                        >
+                          Try sample site
+                        </button>
+                      </div>
                     </div>
+                  )}
+
+                  {hasSites && appSection === "dashboard" && (
                     <div
                       style={{
-                        marginTop: "10px",
-                        padding: "8px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
-                        maxWidth: "520px",
+                        display: "grid",
+                        gap: "22px",
                       }}
                     >
-                      <div style={{ fontWeight: 600, color: "var(--text)" }}>
-                        Automation
+                      <div className="dashboard-health-layout">
+                        <div className="dashboard-hero-panel">
+                          <div className="dashboard-hero-panel__header">
+                            <div style={{ minWidth: 0 }}>
+                              <div className="dashboard-hero-panel__eyebrow">
+                                Site health overview
+                              </div>
+                              <div className="dashboard-hero-panel__headline">
+                                {selectedSiteName ??
+                                  (selectedSite?.url
+                                    ? safeHost(selectedSite.url)
+                                    : "No site selected")}
+                              </div>
+                              <div className="dashboard-hero-panel__copy">
+                                {selectedSite?.url ??
+                                  "Select a site to monitor"}{" "}
+                                {dashboardSummaryPending
+                                  ? "· Building issue summary"
+                                  : dashboardScores.overall.band
+                                    ? `· ${dashboardScores.overall.band}`
+                                    : ""}
+                              </div>
+                            </div>
+                            <div className="dashboard-hero-panel__actions">
+                              <button
+                                onClick={handleNewScanAction}
+                                disabled={
+                                  !!selectedSiteId &&
+                                  (triggeringScan || canCancelRun)
+                                }
+                                className="primary-button primary-button--large"
+                              >
+                                {triggeringScan ? "Starting..." : "Run scan"}
+                              </button>
+                              <button
+                                onClick={() =>
+                                  dashboardLatestRun &&
+                                  openReport(dashboardLatestRun.id)
+                                }
+                                disabled={
+                                  !dashboardLatestRun ||
+                                  dashboardLatestRun.status !== "completed"
+                                }
+                                className="secondary-button primary-button--large"
+                              >
+                                View latest report
+                              </button>
+                            </div>
+                          </div>
+                          <div className="dashboard-hero-panel__status-row">
+                            <StatusBadge
+                              label={
+                                dashboardSummaryPending
+                                  ? "Score pending"
+                                  : (dashboardScores.overall.band ??
+                                    "Monitoring")
+                              }
+                              tone="accent"
+                            />
+                            <StatusBadge
+                              label={
+                                dashboardSummary?.notificationSettings
+                                  ?.notifyEnabled
+                                  ? "Alerts enabled"
+                                  : "Alerts off"
+                              }
+                              tone={
+                                dashboardSummary?.notificationSettings
+                                  ?.notifyEnabled
+                                  ? "success"
+                                  : "default"
+                              }
+                            />
+                            <StatusBadge
+                              label={`Schedule ${selectedSite?.schedule_frequency ?? "manual"}`}
+                              tone="default"
+                            />
+                          </div>
+                          <div className="dashboard-hero-panel__meta">
+                            <div className="dashboard-hero-meta-card">
+                              <span>Last scan</span>
+                              <span>
+                                {dashboardLatestRun
+                                  ? formatDate(
+                                      dashboardLatestRun.finished_at ??
+                                        dashboardLatestRun.started_at,
+                                    )
+                                  : "No scan yet"}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Next scan</span>
+                              <span>
+                                {formatDate(
+                                  selectedSite?.next_scheduled_at ?? null,
+                                )}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Status</span>
+                              <span>
+                                {dashboardLatestRun
+                                  ? dashboardLatestRun.status.replace("_", " ")
+                                  : "Ready"}
+                              </span>
+                            </div>
+                            <div className="dashboard-hero-meta-card">
+                              <span>Actions</span>
+                              <span>
+                                Schedule, alerts, ignore rules, and reports are
+                                one click away
+                              </span>
+                            </div>
+                          </div>
+                          <div className="dashboard-hero-panel__footer-actions">
+                            <button
+                              onClick={() => setAppSection("schedule")}
+                              className="secondary-button"
+                            >
+                              Configure schedule
+                            </button>
+                            <button
+                              onClick={() => setAppSection("alerts")}
+                              className="secondary-button"
+                            >
+                              Configure alerts
+                            </button>
+                            <button
+                              onClick={() => setAppSection("ignore_rules")}
+                              disabled={!selectedSiteId}
+                              className="secondary-button"
+                            >
+                              Ignore rules
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (selectedSite?.url) {
+                                  window.open(
+                                    selectedSite.url,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  );
+                                }
+                              }}
+                              disabled={!selectedSite?.url}
+                              className="ghost-button"
+                            >
+                              Open site
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAppSection("reports");
+                                setScanWorkspaceOpen(true);
+                              }}
+                              className="ghost-button"
+                            >
+                              Open reports workspace
+                            </button>
+                          </div>
+                        </div>
+                        <ScoreRingCard
+                          label="Overall score"
+                          score={
+                            dashboardSummaryPending
+                              ? null
+                              : dashboardScores.overall.score
+                          }
+                          status={
+                            dashboardSummaryPending
+                              ? "Score pending"
+                              : (dashboardScores.overall.band ??
+                                dashboardScores.overall.detail)
+                          }
+                          detail="A compact health view across site trust, link integrity, and current findings."
+                          helper={
+                            dashboardSummaryPending
+                              ? "Building issue summary"
+                              : `Link integrity ${
+                                  dashboardScores.linkIntegrity.score == null
+                                    ? "-"
+                                    : `${dashboardScores.linkIntegrity.score}%`
+                                }`
+                          }
+                          stats={[
+                            {
+                              label: "Open issues",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : (dashboardIssueSummary?.total ?? 0),
+                            },
+                            {
+                              label: "High priority",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : dashboardHighPriority,
+                            },
+                            {
+                              label: "Fixed this scan",
+                              value: dashboardSummaryPending
+                                ? "Pending"
+                                : (dashboardLatestDiffSummary?.fixedIssues ??
+                                  0),
+                            },
+                            {
+                              label: "Links checked",
+                              value: dashboardLatestRun?.checked_links ?? 0,
+                            },
+                          ]}
+                          tone={
+                            dashboardScores.overall.score == null
+                              ? "default"
+                              : dashboardScores.overall.score >= 90
+                                ? "success"
+                                : dashboardScores.overall.score >= 75
+                                  ? "accent"
+                                  : dashboardScores.overall.score >= 60
+                                    ? "warning"
+                                    : "danger"
+                          }
+                        />
                       </div>
-                      <div>
-                        {selectedSite
-                          ? formatScheduleSummary(
-                              scheduleEnabled,
-                              scheduleFrequency,
-                              scheduleTimeUtc,
-                              scheduleDayOfWeek,
-                              selectedSite.next_scheduled_at,
-                            )
-                          : "Auto-scan: —"}
+
+                      {dashboardSummaryQuery.isLoading && (
+                        <div className="skeleton" style={{ height: "80px" }} />
+                      )}
+                      {dashboardSummaryQuery.error && (
+                        <div
+                          style={{
+                            padding: "10px 12px",
+                            borderRadius: "10px",
+                            border: "1px solid var(--border)",
+                            color: "var(--warning)",
+                          }}
+                        >
+                          {getErrorMessage(
+                            dashboardSummaryQuery.error,
+                            "Failed to load dashboard summary",
+                          )}
+                        </div>
+                      )}
+
+                      {dashboardLatestRun && dashboardActiveLike && (
+                        <ScanProgressHero
+                          progress={
+                            dashboardSummaryPending ? 100 : dashboardProgress
+                          }
+                          indeterminate={
+                            dashboardLatestRun.status === "queued" ||
+                            dashboardLatestRun.total_links <= 0
+                          }
+                          title={
+                            dashboardSummaryPending
+                              ? "Finalising scan"
+                              : "Scan running"
+                          }
+                          stage={dashboardStage}
+                          summary={`${dashboardLatestRun.checked_links} / ${dashboardLatestRun.total_links || "?"} links checked · Last update ${formatRelative(dashboardLatestRun.updated_at ?? dashboardLatestRun.started_at)}`}
+                          counters={[
+                            {
+                              label: "Links checked",
+                              value: dashboardLatestRun.checked_links,
+                            },
+                            {
+                              label: "Broken",
+                              value: dashboardActiveLinkSummary.broken,
+                            },
+                            {
+                              label: "Blocked",
+                              value: dashboardActiveLinkSummary.blocked,
+                            },
+                            {
+                              label: "No response",
+                              value: dashboardActiveLinkSummary.no_response,
+                            },
+                            ...(dashboardIgnoredSkipped != null
+                              ? [
+                                  {
+                                    label: "Ignored",
+                                    value: dashboardIgnoredSkipped,
+                                  },
+                                ]
+                              : dashboardActiveLike
+                                ? [
+                                    {
+                                      label: "Ignored",
+                                      value: "Pending",
+                                    },
+                                  ]
+                                : []),
+                          ]}
+                          previewTitle="Live preview · read-only"
+                          previewItems={
+                            dashboardRunningPreviewItems.length > 0
+                              ? dashboardRunningPreviewItems.slice(0, 4)
+                              : [
+                                  {
+                                    label: "Scan is in progress",
+                                    detail:
+                                      "Counts update live as links are discovered and checked.",
+                                  },
+                                ]
+                          }
+                          note={
+                            dashboardSummaryPending
+                              ? "The crawl is complete. Scanlark is building the issue summary before the report is ready."
+                              : "Live preview stays read-only while the scan is running. Open the report after completion for raw evidence and source pages."
+                          }
+                          statusTone={
+                            dashboardSummaryPending ? "success" : "accent"
+                          }
+                          primaryAction={
+                            canCancelRun ? (
+                              <button
+                                onClick={handleCancelScan}
+                                className="secondary-button"
+                                style={{
+                                  borderColor: "var(--danger)",
+                                  color: "var(--danger)",
+                                }}
+                              >
+                                Cancel scan
+                              </button>
+                            ) : undefined
+                          }
+                        />
+                      )}
+
+                      {dashboardLatestRun &&
+                        shouldShowDashboardTerminalPanel && (
+                          <ScanProgressHero
+                            progress={
+                              dashboardLatestRun.status === "completed"
+                                ? 100
+                                : 0
+                            }
+                            title={
+                              dashboardLatestRun.status === "completed"
+                                ? "Scan complete"
+                                : dashboardLatestRun.status === "failed"
+                                  ? "Scan failed"
+                                  : "Scan cancelled"
+                            }
+                            stage={dashboardStage}
+                            summary={
+                              dashboardLatestRun.status === "completed"
+                                ? `${formatDate(dashboardLatestRun.finished_at ?? dashboardLatestRun.started_at)} · Report-ready summary is available below.`
+                                : `${
+                                    dashboardLatestRun.error_message ??
+                                    "The scan stopped before completion."
+                                  }`
+                            }
+                            counters={[
+                              {
+                                label: "Links checked",
+                                value: dashboardLatestRun.checked_links,
+                              },
+                              {
+                                label: "Broken",
+                                value: dashboardLinkSummary.broken,
+                              },
+                              {
+                                label: "Blocked",
+                                value: dashboardLinkSummary.blocked,
+                              },
+                              {
+                                label: "No response",
+                                value: dashboardLinkSummary.no_response,
+                              },
+                              ...(dashboardIgnoredSkipped != null
+                                ? [
+                                    {
+                                      label: "Ignored",
+                                      value: dashboardIgnoredSkipped,
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                            summaryStats={
+                              dashboardLatestRun.status === "completed"
+                                ? [
+                                    {
+                                      label: "Latest score",
+                                      value:
+                                        !dashboardSummaryDataReady ||
+                                        dashboardScores.overall.score == null
+                                          ? "-"
+                                          : `${dashboardScores.overall.score}%`,
+                                    },
+                                    {
+                                      label: "Open issues",
+                                      value: dashboardIssueSummary?.total ?? 0,
+                                    },
+                                    {
+                                      label: "High priority",
+                                      value: dashboardHighPriority,
+                                    },
+                                    {
+                                      label: "New",
+                                      value: dashboardIssueMovement?.new ?? 0,
+                                    },
+                                    {
+                                      label: "Existing",
+                                      value:
+                                        dashboardIssueMovement?.existing ?? 0,
+                                    },
+                                    {
+                                      label: "Resolved",
+                                      value:
+                                        dashboardIssueMovement?.resolved ?? 0,
+                                    },
+                                  ]
+                                : undefined
+                            }
+                            previewTitle={
+                              dashboardLatestRun.status === "completed"
+                                ? "Scan completion snapshot"
+                                : "Latest captured snapshot"
+                            }
+                            previewItems={
+                              dashboardLatestRun.status === "completed"
+                                ? [
+                                    {
+                                      label: "High-priority issues",
+                                      detail: `${dashboardHighPriority} critical or high-priority issues need review`,
+                                    },
+                                    {
+                                      label: "Open issues",
+                                      detail: `${dashboardIssueSummary?.total ?? 0} issues remain in the latest report`,
+                                    },
+                                    {
+                                      label: "Fixed this scan",
+                                      detail: `${dashboardLatestDiffSummary?.fixedIssues ?? 0} issues were resolved compared with the previous baseline`,
+                                    },
+                                  ]
+                                : dashboardRunningPreviewItems.slice(0, 3)
+                            }
+                            note={
+                              dashboardLatestRun.status === "completed"
+                                ? "Detailed evidence, source pages, and technical diagnostics remain in the report."
+                                : "You can start a fresh scan immediately. Existing dashboard cards and history remain available below."
+                            }
+                            statusTone={
+                              dashboardLatestRun.status === "completed"
+                                ? "success"
+                                : dashboardLatestRun.status === "failed"
+                                  ? "danger"
+                                  : "warning"
+                            }
+                            primaryAction={
+                              dashboardLatestRun.status === "completed" ? (
+                                <button
+                                  onClick={() =>
+                                    openReport(dashboardLatestRun.id)
+                                  }
+                                  className="primary-button"
+                                >
+                                  View report
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={handleNewScanAction}
+                                  disabled={
+                                    !!selectedSiteId &&
+                                    (triggeringScan || canCancelRun)
+                                  }
+                                  className="primary-button"
+                                >
+                                  {triggeringScan
+                                    ? "Starting..."
+                                    : "Run scan again"}
+                                </button>
+                              )
+                            }
+                            secondaryAction={
+                              <button
+                                onClick={() => {
+                                  setDashboardRecentlyFinishedRunId(null);
+                                }}
+                                className="secondary-button"
+                              >
+                                Back to dashboard
+                              </button>
+                            }
+                          />
+                        )}
+
+                      <div className="dashboard-score-grid">
+                        <MetricCard
+                          label="Link integrity"
+                          value={
+                            dashboardSummaryPending
+                              ? "Pending"
+                              : dashboardScores.linkIntegrity.score == null
+                                ? "-"
+                                : `${dashboardScores.linkIntegrity.score}%`
+                          }
+                          detail={
+                            dashboardSummaryPending
+                              ? "Building issue summary"
+                              : (dashboardScores.linkIntegrity.band ??
+                                dashboardScores.linkIntegrity.detail)
+                          }
+                          tone="accent"
+                        />
+                        <MetricCard
+                          label="Website changes"
+                          value={
+                            dashboardSummaryPending
+                              ? "Summary pending"
+                              : `${dashboardIssueMovement?.new ?? 0} new issues`
+                          }
+                          detail={
+                            dashboardSummaryPending
+                              ? "Issue movement updates when the latest scan summary is ready."
+                              : `${dashboardLatestDiffSummary?.fixedIssues ?? dashboardIssueMovement?.resolved ?? 0} fixed since last scan · ${dashboardIssueMovement?.existing ?? 0} still present`
+                          }
+                          tone="warning"
+                        />
+                        <MetricCard
+                          label="Last scan"
+                          value={
+                            dashboardLatestRun
+                              ? dashboardLatestRun.status.replace("_", " ")
+                              : "None"
+                          }
+                          detail={formatDate(
+                            dashboardLatestRun?.finished_at ?? null,
+                          )}
+                        />
+                        <MetricCard
+                          label="Schedule and alerts"
+                          value={
+                            dashboardSummary?.notificationSettings
+                              ?.notifyEnabled
+                              ? "Alerts on"
+                              : "Alerts off"
+                          }
+                          detail={`${selectedSite?.schedule_frequency ?? "manual"} · next ${formatDate(selectedSite?.next_scheduled_at ?? null)}`}
+                          tone={
+                            dashboardSummary?.notificationSettings
+                              ?.notifyEnabled
+                              ? "success"
+                              : "default"
+                          }
+                        />
+                        <MetricCard
+                          label="Availability"
+                          value={getUptimeStatusLabel(dashboardUptime)}
+                          detail={
+                            dashboardUptime?.enabled
+                              ? `${formatUptimePercentage(
+                                  dashboardUptime.uptime30d,
+                                )} over 30d · last ${formatDate(
+                                  dashboardUptime.lastCheckedAt,
+                                )}`
+                              : "Homepage monitoring is currently disabled."
+                          }
+                          tone={getUptimeTone(dashboardUptime)}
+                        />
                       </div>
-                      <div>
-                        {selectedSite
-                          ? formatAlertsSummary(notifyEnabled, notifyOn)
-                          : "Alerts: —"}
+
+                      <div className="dashboard-category-grid">
+                        {DASHBOARD_CATEGORIES.map((category) => {
+                          const score =
+                            dashboardCategoryScoresByKey[category.key] ?? null;
+                          const tone = dashboardSummaryPending
+                            ? "default"
+                            : getCategoryScoreTone(score);
+                          const statusLabel = dashboardSummaryPending
+                            ? "Pending"
+                            : score
+                              ? getCategoryScoreStatusLabel(score.status)
+                              : "Score unavailable";
+                          return (
+                            <CategoryStatusCard
+                              key={category.key}
+                              title={category.label}
+                              statusLabel={statusLabel}
+                              tone={tone}
+                              score={
+                                dashboardSummaryPending
+                                  ? "Pending"
+                                  : getCategoryScoreValue(score)
+                              }
+                              description={category.description}
+                              detail={
+                                dashboardSummaryPending
+                                  ? "Building issue summary"
+                                  : getSearchAccessCategoryDetail(
+                                      score,
+                                      dashboardCategorySummaries,
+                                    )
+                              }
+                              stats={
+                                dashboardSummaryPending
+                                  ? null
+                                  : score
+                                    ? `${score.findingCount} findings · ${score.checkCount} checks`
+                                    : "No score payload available"
+                              }
+                            />
+                          );
+                        })}
+                      </div>
+
+                      <div className="dashboard-history-grid">
+                        <div className="surface-card surface-card--history">
+                          <div className="dashboard-history-card__header">
+                            <div className="dashboard-history-card__title">
+                              Report history
+                            </div>
+                            <div className="dashboard-history-card__meta">
+                              Recent runs stay readable here. Open the report
+                              for detailed evidence and issue breakdown.
+                            </div>
+                          </div>
+                          {dashboardHistoryItems.slice(0, 5).map((run) => (
+                            <div key={run.id} className="dashboard-history-row">
+                              <div>
+                                <div className="dashboard-history-row__title">
+                                  {formatDate(run.started_at)}
+                                </div>
+                                <div className="dashboard-history-row__meta">
+                                  <span className="dashboard-history-row__meta-status">
+                                    <span>
+                                      {formatRelative(run.started_at)}
+                                    </span>
+                                    <StatusBadge
+                                      label={run.status.replace("_", " ")}
+                                      tone={
+                                        run.status === "completed"
+                                          ? "success"
+                                          : run.status === "failed"
+                                            ? "danger"
+                                            : run.status === "cancelled"
+                                              ? "warning"
+                                              : "accent"
+                                      }
+                                    />
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="dashboard-history-row__stats">
+                                <strong>
+                                  Checked {run.checked_links}/{run.total_links}
+                                </strong>
+                                <span>
+                                  Broken {run.broken_links} (
+                                  {percentBroken(
+                                    run.checked_links || run.total_links,
+                                    run.broken_links,
+                                  )}
+                                  )
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => openReport(run.id)}
+                                disabled={run.status !== "completed"}
+                                className="secondary-button"
+                              >
+                                View report
+                              </button>
+                            </div>
+                          ))}
+                          {dashboardHistoryItems.length === 0 && (
+                            <div
+                              style={{
+                                padding: "16px",
+                                color: "var(--muted)",
+                                fontSize: "13px",
+                              }}
+                            >
+                              No scans yet.
+                            </div>
+                          )}
+                        </div>
+                        <div className="surface-card surface-card--summary">
+                          <div className="dashboard-summary-card__header">
+                            <div className="dashboard-summary-card__title">
+                              Latest scan summary
+                            </div>
+                            <div className="dashboard-summary-card__meta">
+                              A compact snapshot of the most important numbers
+                              from the latest dashboard run.
+                            </div>
+                          </div>
+                          <div className="dashboard-summary-list">
+                            <div className="dashboard-summary-item">
+                              <span>High priority issues</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : dashboardHighPriority}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Open issues</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : (dashboardIssueSummary?.total ?? 0)}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Fixed this scan</span>
+                              <strong>
+                                {dashboardSummaryPending
+                                  ? "Pending"
+                                  : (dashboardLatestDiffSummary?.fixedIssues ??
+                                    0)}
+                              </strong>
+                            </div>
+                            <div className="dashboard-summary-item">
+                              <span>Links checked</span>
+                              <strong>
+                                {dashboardLatestRun?.checked_links ?? 0}
+                              </strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="app-settings-card">
+                        <div className="app-settings-card__title">
+                          Availability Monitoring
+                        </div>
+                        <div className="app-settings-card__subtitle">
+                          Lightweight homepage checks stay separate from scans
+                          and reports. This monitors the root URL only.
+                        </div>
+                        {!selectedSite ? (
+                          <div
+                            style={{ fontSize: "13px", color: "var(--muted)" }}
+                          >
+                            Select a site to configure availability checks.
+                          </div>
+                        ) : (
+                          <div className="app-form-grid">
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "10px",
+                                fontSize: "13px",
+                              }}
+                            >
+                              <span>Homepage monitoring</span>
+                              <input
+                                type="checkbox"
+                                checked={uptimeEnabled}
+                                onChange={(event) =>
+                                  setUptimeEnabled(event.target.checked)
+                                }
+                              />
+                            </label>
+                            <div className="app-form-grid app-form-grid--two">
+                              <label className="field-label">
+                                Check URL
+                                <input
+                                  type="url"
+                                  value={uptimeCheckUrl}
+                                  onChange={(event) =>
+                                    setUptimeCheckUrl(event.target.value)
+                                  }
+                                  className="app-input"
+                                  placeholder={selectedSite.url}
+                                />
+                              </label>
+                              <label className="field-label">
+                                Failure threshold
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={uptimeFailureThreshold}
+                                  onChange={(event) =>
+                                    setUptimeFailureThreshold(
+                                      Math.max(
+                                        1,
+                                        Number(event.target.value) || 1,
+                                      ),
+                                    )
+                                  }
+                                  className="app-input"
+                                />
+                              </label>
+                            </div>
+                            <div
+                              style={{
+                                display: "grid",
+                                gap: "6px",
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              <div>
+                                Current status:{" "}
+                                {getUptimeStatusLabel(dashboardUptime)}
+                              </div>
+                              <div>
+                                Last checked:{" "}
+                                {formatDate(
+                                  dashboardUptime?.lastCheckedAt ?? null,
+                                )}
+                              </div>
+                              <div>
+                                30-day uptime:{" "}
+                                {formatUptimePercentage(
+                                  dashboardUptime?.uptime30d,
+                                )}
+                              </div>
+                              <div>
+                                Response time:{" "}
+                                {dashboardUptime?.lastResponseTimeMs == null
+                                  ? "N/A"
+                                  : `${dashboardUptime.lastResponseTimeMs} ms`}
+                              </div>
+                              <div>
+                                Consecutive failures:{" "}
+                                {dashboardUptime?.consecutiveFailures ?? 0}
+                              </div>
+                            </div>
+                            {uptimeError && (
+                              <div
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--warning)",
+                                }}
+                              >
+                                {uptimeError}
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "10px",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <button
+                                onClick={() => void handleSaveUptime()}
+                                disabled={
+                                  uptimeSaving || !uptimeCheckUrl.trim()
+                                }
+                                className="primary-button"
+                              >
+                                {uptimeSaving ? "Saving..." : "Save monitoring"}
+                              </button>
+                              <button
+                                onClick={() => setAppSection("dashboard")}
+                                className="ghost-button"
+                              >
+                                Stay on dashboard
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  </div>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <button
-                      onClick={handleNewScanAction}
-                      disabled={
-                        !!selectedSiteId && (triggeringScan || canCancelRun)
-                      }
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "999px",
-                        border: "none",
-                        background:
-                          selectedSiteId && (triggeringScan || canCancelRun)
-                            ? "var(--panel-elev)"
-                            : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                        color: "white",
-                        fontWeight: 600,
-                        cursor:
-                          selectedSiteId && (triggeringScan || canCancelRun)
-                            ? "not-allowed"
-                            : "pointer",
-                      }}
-                      title={
-                        !hasSites
-                          ? "Add a site to start scanning"
-                          : !selectedSiteId
-                            ? "Select a site to start a scan"
-                            : "Start a new scan"
-                      }
-                    >
-                      {selectedSiteId && triggeringScan
-                        ? "Running..."
-                        : "New scan"}
-                    </button>
-                    <button
-                      onClick={() => startUrl && copyToClipboard(startUrl)}
-                      disabled={!startUrl}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: startUrl ? "pointer" : "not-allowed",
-                      }}
-                    >
-                      Copy URL
-                    </button>
-                    <button
-                      onClick={() => setIgnoreRulesOpen(true)}
-                      disabled={!selectedSiteId}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        cursor: selectedSiteId ? "pointer" : "not-allowed",
-                        opacity: selectedSiteId ? 1 : 0.6,
-                      }}
-                    >
-                      Ignore rules
-                    </button>
-                    <a
-                      href={startUrl || "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "999px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "12px",
-                        color: "var(--text)",
-                        textDecoration: "none",
-                        pointerEvents: startUrl ? "auto" : "none",
-                        opacity: startUrl ? 1 : 0.6,
-                      }}
-                    >
-                      Open site
-                    </a>
-                  </div>
+                  )}
+
+                  {hasSites && appSection === "reports" && (
+                    <div style={{ display: "grid", gap: "18px" }}>
+                      <div className="app-section-heading">
+                        <div className="app-section-heading__title">
+                          Reports and Scan History
+                        </div>
+                        <div className="app-section-heading__meta">
+                          Review recent runs, open detailed reports, and use the
+                          existing results workspace for raw evidence, changes,
+                          and fix-queue workflows.
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "10px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <button
+                            className="primary-button"
+                            onClick={handleNewScanAction}
+                            disabled={
+                              !!selectedSiteId &&
+                              (triggeringScan || canCancelRun)
+                            }
+                          >
+                            {triggeringScan ? "Starting..." : "Run scan"}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            onClick={() =>
+                              setScanWorkspaceOpen((prev) => !prev)
+                            }
+                          >
+                            {scanWorkspaceOpen
+                              ? "Hide results workspace"
+                              : "Open results workspace"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="app-section-grid">
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Scan history
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Select a run for the workspace or open the final
+                            report artifact directly.
+                          </div>
+                          <div className="app-site-list">
+                            {history.map((run) => (
+                              <div key={run.id} className="app-site-row">
+                                <div>
+                                  <div
+                                    style={{
+                                      fontWeight: 700,
+                                      fontSize: "14px",
+                                    }}
+                                  >
+                                    {formatRelative(run.started_at)}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    {run.status.replace("_", " ")} · Checked{" "}
+                                    {run.checked_links}/{run.total_links} ·
+                                    Broken {run.broken_links}
+                                  </div>
+                                </div>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <button
+                                    className="secondary-button"
+                                    onClick={() => {
+                                      void handleSelectRunForWorkspace(run);
+                                      setScanWorkspaceOpen(true);
+                                    }}
+                                  >
+                                    Open workspace
+                                  </button>
+                                  <button
+                                    className="ghost-button"
+                                    disabled={run.status !== "completed"}
+                                    onClick={() => openReport(run.id)}
+                                  >
+                                    View report
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                            {history.length === 0 && !historyLoading && (
+                              <div
+                                style={{
+                                  color: "var(--muted)",
+                                  fontSize: "13px",
+                                }}
+                              >
+                                No scans yet.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Current report context
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Keep the dashboard focused on health. Use this area
+                            when you need deeper evidence and detailed scan
+                            operations.
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <StatusBadge
+                              label={`Selected run ${selectedRun ? formatRelative(selectedRun.started_at) : "none"}`}
+                              tone="default"
+                            />
+                            <StatusBadge
+                              label={`Workspace ${scanWorkspaceOpen ? "open" : "hidden"}`}
+                              tone="accent"
+                            />
+                            <div style={{ color: "var(--muted)" }}>
+                              {selectedRun
+                                ? `Current status: ${selectedRun.status.replace("_", " ")} · ${selectedRun.checked_links}/${selectedRun.total_links} links checked`
+                                : "Select a run to load results, changes, or fix queue data."}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "schedule" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Schedule Settings
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Configure recurring scans without keeping schedules
+                        pinned in a permanent sidebar.
+                      </div>
+                      {!selectedSite ? (
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure auto-scans.
+                        </div>
+                      ) : (
+                        <div className="app-form-grid">
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <span>Auto-scan enabled</span>
+                            <input
+                              type="checkbox"
+                              checked={
+                                scheduleFrequency === "manual"
+                                  ? false
+                                  : scheduleEnabled
+                              }
+                              onChange={(e) =>
+                                setScheduleEnabled(e.target.checked)
+                              }
+                              disabled={scheduleFrequency === "manual"}
+                            />
+                          </label>
+                          <div className="app-form-grid app-form-grid--two">
+                            <label className="field-label">
+                              Frequency
+                              <select
+                                value={scheduleFrequency}
+                                onChange={(e) => {
+                                  const nextFrequency = e.target.value as
+                                    | "manual"
+                                    | "daily"
+                                    | "weekly"
+                                    | "monthly";
+                                  setScheduleFrequency(nextFrequency);
+                                  if (nextFrequency === "manual") {
+                                    setScheduleEnabled(false);
+                                  }
+                                }}
+                                className="app-input"
+                              >
+                                <option value="manual">Manual</option>
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                              </select>
+                            </label>
+                            <label className="field-label">
+                              Time (UTC)
+                              <input
+                                type="time"
+                                value={scheduleTimeUtc}
+                                onChange={(e) =>
+                                  setScheduleTimeUtc(e.target.value)
+                                }
+                                className="app-input"
+                              />
+                            </label>
+                            {scheduleFrequency === "weekly" && (
+                              <label className="field-label">
+                                Day of week (UTC)
+                                <select
+                                  value={scheduleDayOfWeek}
+                                  onChange={(e) =>
+                                    setScheduleDayOfWeek(Number(e.target.value))
+                                  }
+                                  className="app-input"
+                                >
+                                  <option value={0}>Sunday</option>
+                                  <option value={1}>Monday</option>
+                                  <option value={2}>Tuesday</option>
+                                  <option value={3}>Wednesday</option>
+                                  <option value={4}>Thursday</option>
+                                  <option value={5}>Friday</option>
+                                  <option value={6}>Saturday</option>
+                                </select>
+                              </label>
+                            )}
+                            {scheduleFrequency === "monthly" && (
+                              <label className="field-label">
+                                Day of month (UTC)
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={31}
+                                  value={scheduleDayOfMonth}
+                                  onChange={(e) =>
+                                    setScheduleDayOfMonth(
+                                      Math.min(
+                                        31,
+                                        Math.max(
+                                          1,
+                                          Number(e.target.value) || 1,
+                                        ),
+                                      ),
+                                    )
+                                  }
+                                  className="app-input"
+                                />
+                              </label>
+                            )}
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "6px",
+                              fontSize: "12px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <div>
+                              Time (UTC):{" "}
+                              {formatScheduleUtcLabel(
+                                scheduleFrequency,
+                                scheduleTimeUtc,
+                                scheduleDayOfWeek,
+                                scheduleDayOfMonth,
+                              )}
+                            </div>
+                            {showLocalTimeZone && (
+                              <div>
+                                Your time:{" "}
+                                {formatScheduleLocalLabel(
+                                  scheduleFrequency,
+                                  scheduleTimeUtc,
+                                  scheduleDayOfWeek,
+                                  scheduleDayOfMonth,
+                                )}{" "}
+                                ({localTimeZone})
+                              </div>
+                            )}
+                            <div>
+                              Next run (UTC):{" "}
+                              {formatUtcDateTime(
+                                selectedSite.next_scheduled_at,
+                              )}
+                            </div>
+                            {showLocalTimeZone && (
+                              <div>
+                                Next run (local):{" "}
+                                {formatLocalDateTime(
+                                  selectedSite.next_scheduled_at,
+                                )}{" "}
+                                ({localTimeZone})
+                              </div>
+                            )}
+                            <div>
+                              Last scheduled run:{" "}
+                              {formatDate(selectedSite.last_scheduled_at)}
+                            </div>
+                          </div>
+                          {scheduleError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {scheduleError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "10px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveSchedule()}
+                              disabled={scheduleSaving}
+                              className="primary-button"
+                            >
+                              {scheduleSaving ? "Saving..." : "Save schedule"}
+                            </button>
+                            <button
+                              onClick={() => setAppSection("dashboard")}
+                              className="ghost-button"
+                            >
+                              Back to dashboard
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "alerts" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Alert Settings
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Manage email alerts, delivery triggers, summaries, and
+                        test sends as a dedicated panel.
+                      </div>
+                      {!selectedSite ? (
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure notifications.
+                        </div>
+                      ) : (
+                        <div className="app-form-grid">
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <span>Email alerts</span>
+                            <input
+                              type="checkbox"
+                              checked={notifyEnabled}
+                              disabled={notifyLoading}
+                              onChange={(e) =>
+                                setNotifyEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <div className="app-form-grid app-form-grid--two">
+                            <label className="field-label">
+                              Email address
+                              <input
+                                type="email"
+                                value={notifyEmail}
+                                onChange={(e) => setNotifyEmail(e.target.value)}
+                                placeholder="you@example.com"
+                                disabled={notifyLoading}
+                                className="app-input"
+                              />
+                            </label>
+                            <label className="field-label">
+                              Notify on
+                              <select
+                                value={notifyOn}
+                                onChange={(e) =>
+                                  setNotifyOn(e.target.value as NotifyOnOption)
+                                }
+                                disabled={notifyLoading}
+                                className="app-input"
+                              >
+                                <option value="new_issues_only">
+                                  Only when NEW issues appear
+                                </option>
+                                <option value="issues_exist">
+                                  Only when issues exist
+                                </option>
+                                <option value="always">Always</option>
+                                <option value="never">Never</option>
+                              </select>
+                            </label>
+                          </div>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyIncludeCsv}
+                              onChange={(e) =>
+                                setNotifyIncludeCsv(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Include CSV attachment (coming soon)
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "13px",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={summaryEnabled}
+                              onChange={(e) =>
+                                setSummaryEnabled(e.target.checked)
+                              }
+                              disabled={notifyLoading}
+                            />
+                            Weekly summary
+                          </label>
+                          {notifyLoading && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Loading notification settings...
+                            </div>
+                          )}
+                          {notifyError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {notifyError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "10px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveNotifications()}
+                              disabled={
+                                notifySaving ||
+                                notifyLoading ||
+                                (notifyEnabled &&
+                                  notifyOn !== "never" &&
+                                  !notifyEmail.trim())
+                              }
+                              className="primary-button"
+                            >
+                              {notifySaving ? "Saving..." : "Save alerts"}
+                            </button>
+                            <button
+                              onClick={() => void handleSendTestEmail()}
+                              disabled={
+                                notifyTestSending ||
+                                !notifyEmail.trim() ||
+                                !notifyEnabled ||
+                                notifyOn === "never" ||
+                                notifyLoading
+                              }
+                              className="secondary-button"
+                            >
+                              {notifyTestSending
+                                ? "Sending..."
+                                : "Send test alert"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "ignore_rules" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">
+                        Ignore Rules
+                      </div>
+                      <div className="app-settings-card__subtitle">
+                        Manage site and global ignore rules as a dashboard tool
+                        instead of permanent sidebar clutter.
+                      </div>
+                      <div
+                        className="app-form-grid app-form-grid--two"
+                        style={{ alignItems: "end" }}
+                      >
+                        <label className="field-label">
+                          Scope
+                          <select
+                            value={newRuleScope}
+                            onChange={(e) =>
+                              setNewRuleScope(
+                                e.target.value as "site" | "global",
+                              )
+                            }
+                            className="app-input"
+                          >
+                            <option value="site">This site</option>
+                            <option value="global">Global</option>
+                          </select>
+                        </label>
+                        <label className="field-label">
+                          Rule type
+                          <select
+                            value={newRuleType}
+                            onChange={(e) =>
+                              setNewRuleType(
+                                e.target.value as IgnoreRule["rule_type"],
+                              )
+                            }
+                            className="app-input"
+                          >
+                            <option value="domain">domain</option>
+                            <option value="path_prefix">path_prefix</option>
+                            <option value="regex">regex</option>
+                            <option value="status_code">status_code</option>
+                          </select>
+                        </label>
+                      </div>
+                      <label className="field-label">
+                        Pattern
+                        <input
+                          value={newRulePattern}
+                          onChange={(e) => setNewRulePattern(e.target.value)}
+                          placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
+                          className="app-input"
+                        />
+                      </label>
+                      <button
+                        onClick={handleCreateIgnoreRule}
+                        disabled={!selectedSiteId || !newRulePattern.trim()}
+                        className="primary-button"
+                      >
+                        Add rule
+                      </button>
+                      {ignoreRulesError && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--warning)" }}
+                        >
+                          {ignoreRulesError}
+                        </div>
+                      )}
+                      {!ignoreRulesLoading && ignoreRules.length > 0 && (
+                        <div className="app-site-list">
+                          {ignoreRules.map((rule) => (
+                            <div key={rule.id} className="app-site-row">
+                              <div>
+                                <div
+                                  style={{ fontSize: "13px", fontWeight: 700 }}
+                                >
+                                  {rule.rule_type}{" "}
+                                  {rule.site_id ? "" : "· global"}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {rule.pattern}
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <button
+                                  onClick={() => handleToggleIgnoreRule(rule)}
+                                  className="secondary-button"
+                                >
+                                  {rule.is_enabled ? "Enabled" : "Disabled"}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteIgnoreRule(rule)}
+                                  className="ghost-button"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {ignoreRulesLoading && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Loading rules…
+                        </div>
+                      )}
+                      {!ignoreRulesLoading && ignoreRules.length === 0 && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          No ignore rules yet.
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {hasSites && appSection === "sites" && (
+                    <div className="app-settings-card">
+                      <div className="app-settings-card__title">Sites</div>
+                      <div className="app-settings-card__subtitle">
+                        Select the active site, add new monitored sites, or
+                        remove old ones from the workspace.
+                      </div>
+                      <div className="app-site-list">
+                        {sites.map((site) => {
+                          const isSelected = site.id === selectedSiteId;
+                          const isDeleting = deletingSiteId === site.id;
+                          return (
+                            <div key={site.id} className="app-site-row">
+                              <button
+                                onClick={() => void handleSelectSite(site)}
+                                style={{
+                                  textAlign: "left",
+                                  border: "none",
+                                  background: "transparent",
+                                  color: "var(--text)",
+                                  cursor: "pointer",
+                                  padding: 0,
+                                }}
+                              >
+                                <div
+                                  style={{ fontWeight: 700, fontSize: "14px" }}
+                                >
+                                  {siteNameById[site.id] ?? site.url}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  {site.url}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  Created {formatDate(site.created_at)}
+                                </div>
+                              </button>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <button
+                                  className={
+                                    isSelected
+                                      ? "primary-button"
+                                      : "secondary-button"
+                                  }
+                                  onClick={() => void handleSelectSite(site)}
+                                >
+                                  {isSelected ? "Selected" : "Select"}
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteSite(site.id)}
+                                  disabled={isDeleting}
+                                  className="ghost-button"
+                                  style={{ color: "var(--danger)" }}
+                                >
+                                  {isDeleting ? "Deleting..." : "Delete"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {!hasSites && (
-                  <div className="card" style={{ padding: "24px" }}>
-                    <div
-                      style={{
-                        fontSize: "18px",
-                        fontWeight: 600,
-                        fontFamily: "var(--font-display)",
-                        marginBottom: "8px",
-                      }}
-                    >
-                      Add your first site
-                    </div>
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Scan for broken links, track changes, and get alerts.
-                    </div>
-                    <div
-                      style={{
-                        marginTop: "16px",
-                        display: "flex",
-                        gap: "10px",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <button
-                        onClick={() => {
-                          setCreateError(null);
-                          setAddSiteOpen(true);
-                        }}
-                        style={{
-                          padding: "8px 14px",
-                          borderRadius: "999px",
-                          border: "none",
-                          background:
-                            "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                          color: "white",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Add site
-                      </button>
-                      <button
-                        onClick={() => void handleCreateSampleSite()}
-                        style={{
-                          padding: "8px 14px",
-                          borderRadius: "999px",
-                          border: "1px solid var(--border)",
-                          background: "var(--panel)",
-                          color: "var(--text)",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Try sample site
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {hasSites && (
+                {hasSites && appSection === "reports" && scanWorkspaceOpen && (
                   <div ref={scansRef} className="card" style={{ padding: "0" }}>
                     {showProgress && selectedRun && (
                       <div
@@ -9436,7 +16001,7 @@ const App: React.FC = () => {
                           <span
                             style={{ fontWeight: 600, color: "var(--text)" }}
                           >
-                            Phase 0 diagnostics
+                            Technical diagnostics
                           </span>
                           <span>
                             Status {selectedRun.status.replace("_", " ")}
@@ -9465,6 +16030,36 @@ const App: React.FC = () => {
                           <span>No response {phase0NoResponseCount}</span>
                           <span>
                             Ignored/skipped {phase0IgnoredSkippedCount}
+                          </span>
+                          <span>
+                            {formatSeoDiagnostics(
+                              currentPhase0Diagnostics?.seoBasic,
+                            )}
+                          </span>
+                          <span>
+                            {formatRobotsDiagnostics(
+                              currentPhase0Diagnostics?.robots,
+                            )}
+                          </span>
+                          <span>
+                            {formatSitemapDiagnostics(
+                              currentPhase0Diagnostics?.sitemap,
+                            )}
+                          </span>
+                          <span>
+                            {formatSslDiagnostics(
+                              currentPhase0Diagnostics?.sslHttps,
+                            )}
+                          </span>
+                          <span>
+                            {formatSecurityHeaderDiagnostics(
+                              currentPhase0Diagnostics?.securityHeader,
+                            )}
+                          </span>
+                          <span>
+                            {formatPerformanceDiagnostics(
+                              currentPhase0Diagnostics?.performanceBasic,
+                            )}
                           </span>
                           <span>Limits hit not tracked</span>
                           {phase0DiagnosticsLoading && (
@@ -11821,7 +18416,10 @@ const App: React.FC = () => {
                             Open Fix Queue
                           </button>
                           <button
-                            onClick={() => setResultsView("changes")}
+                            onClick={() => {
+                              setScanWorkspaceOpen(true);
+                              setResultsView("changes");
+                            }}
                             className="report-button"
                           >
                             View Changes
@@ -11878,10 +18476,15 @@ const App: React.FC = () => {
                           <span>Auto-scan enabled</span>
                           <input
                             type="checkbox"
-                            checked={scheduleEnabled}
+                            checked={
+                              scheduleFrequency === "manual"
+                                ? false
+                                : scheduleEnabled
+                            }
                             onChange={(event) =>
                               setScheduleEnabled(event.target.checked)
                             }
+                            disabled={scheduleFrequency === "manual"}
                           />
                         </label>
                         <div
@@ -11897,11 +18500,17 @@ const App: React.FC = () => {
                             Frequency
                             <select
                               value={scheduleFrequency}
-                              onChange={(event) =>
-                                setScheduleFrequency(
-                                  event.target.value as "daily" | "weekly",
-                                )
-                              }
+                              onChange={(event) => {
+                                const nextFrequency = event.target.value as
+                                  | "manual"
+                                  | "daily"
+                                  | "weekly"
+                                  | "monthly";
+                                setScheduleFrequency(nextFrequency);
+                                if (nextFrequency === "manual") {
+                                  setScheduleEnabled(false);
+                                }
+                              }}
                               style={{
                                 marginTop: "6px",
                                 width: "100%",
@@ -11912,8 +18521,10 @@ const App: React.FC = () => {
                                 color: "var(--text)",
                               }}
                             >
+                              <option value="manual">Manual</option>
                               <option value="daily">Daily</option>
                               <option value="weekly">Weekly</option>
+                              <option value="monthly">Monthly</option>
                             </select>
                           </label>
                           {scheduleFrequency === "weekly" && (
@@ -11951,6 +18562,42 @@ const App: React.FC = () => {
                               </select>
                             </label>
                           )}
+                          {scheduleFrequency === "monthly" && (
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Day of month (UTC)
+                              <input
+                                type="number"
+                                min={1}
+                                max={31}
+                                value={scheduleDayOfMonth}
+                                onChange={(event) =>
+                                  setScheduleDayOfMonth(
+                                    Math.min(
+                                      31,
+                                      Math.max(
+                                        1,
+                                        Number(event.target.value) || 1,
+                                      ),
+                                    ),
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              />
+                            </label>
+                          )}
                           <label
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
@@ -11981,6 +18628,7 @@ const App: React.FC = () => {
                             scheduleFrequency,
                             scheduleTimeUtc,
                             scheduleDayOfWeek,
+                            scheduleDayOfMonth,
                           )}
                         </div>
                         {showLocalTimeZone && (
@@ -11992,6 +18640,7 @@ const App: React.FC = () => {
                               scheduleFrequency,
                               scheduleTimeUtc,
                               scheduleDayOfWeek,
+                              scheduleDayOfMonth,
                             )}{" "}
                             ({localTimeZone})
                           </div>
@@ -12104,6 +18753,24 @@ const App: React.FC = () => {
                             <option value="always">Always</option>
                             <option value="never">Never</option>
                           </select>
+                        </label>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "10px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span>Weekly summary</span>
+                          <input
+                            type="checkbox"
+                            checked={summaryEnabled}
+                            onChange={(event) =>
+                              setSummaryEnabled(event.target.checked)
+                            }
+                          />
                         </label>
                         <div
                           style={{
@@ -12833,6 +19500,7 @@ const App: React.FC = () => {
                               <button
                                 onClick={() => {
                                   setCompareRunId(run.id);
+                                  setScanWorkspaceOpen(true);
                                   setResultsView("changes");
                                 }}
                                 style={{

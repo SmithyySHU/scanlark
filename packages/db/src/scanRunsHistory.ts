@@ -13,6 +13,9 @@ export interface ScanRunHistoryRow {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  trigger_type: "manual" | "scheduled";
+  issue_generation_status: "pending" | "completed" | "failed";
+  issue_generation_error: string | null;
 }
 
 export interface ScanLinkMinimalRow {
@@ -42,7 +45,10 @@ export async function getRecentScanRunsForSite(
         start_url,
         total_links,
         checked_links,
-        broken_links
+        broken_links,
+        trigger_type,
+        issue_generation_status,
+        issue_generation_error
       FROM scan_runs
       WHERE site_id = $1
       ORDER BY started_at DESC
@@ -72,7 +78,10 @@ export async function getRecentScanRunsForSiteForUser(
         r.start_url,
         r.total_links,
         r.checked_links,
-        r.broken_links
+        r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.site_id = $1 AND s.user_id = $2

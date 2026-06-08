@@ -121,6 +121,11 @@ psql "$DATABASE_URL" -f packages/db/migrations/005_fix_users_updated_at.sql
 psql "$DATABASE_URL" -f packages/db/migrations/006_add_ignore_rules_user_id.sql
 ```
 
+Apply every migration file explicitly by filename in order. Do not assume the
+numeric prefix is unique: this repo currently contains both
+`015_add_performance_basic_site_check.sql` and
+`015_schedule_reliability_improvements.sql`, and both must be applied.
+
 ### 4) Start the apps
 
 ```bash

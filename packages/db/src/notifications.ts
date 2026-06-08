@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { computeSeverityScore } from "./scanCategoryScores";
 import { isValidEmailAddress } from "./validation";
 
 export type NotificationMode =
@@ -13,9 +14,16 @@ export type NotificationSettings = {
   notifyEmail: string | null;
   notifyOn: NotificationMode;
   notifyIncludeCsv: boolean;
+  summaryEnabled: boolean;
 };
 
-export type NotificationEventKind = "scan_completed" | "scan_failed" | "test";
+export type NotificationEventKind =
+  | "scan_failed"
+  | "high_priority_issues_found"
+  | "weekly_scan_summary"
+  | "test"
+  | "uptime_down"
+  | "uptime_recovered";
 
 export type NotificationEventInput = {
   siteId: string;
@@ -38,6 +46,7 @@ type SiteNotificationRow = {
   notify_email: string | null;
   notify_on: "always" | "issues" | "issues_exist" | "new_issues_only" | "never";
   notify_include_csv: boolean;
+  summary_enabled: boolean;
 };
 
 function normalizeNotifyOn(
@@ -52,6 +61,22 @@ type LinkCountRow = {
   count: string;
 };
 
+export type IssueNotificationDigest = {
+  totalOpenIssues: number;
+  highPriorityCount: number;
+  healthScore: number;
+  bySeverity: Record<string, number>;
+  byCategory: Record<string, number>;
+  topIssues: Array<{
+    issueType: string;
+    severity: string;
+    category: string;
+    affectedUrl: string;
+    title: string;
+    description: string;
+  }>;
+};
+
 export async function getSiteNotificationSettings(
   siteId: string,
 ): Promise<NotificationSettings | null> {
@@ -61,7 +86,8 @@ export async function getSiteNotificationSettings(
       SELECT notify_enabled,
              notify_email,
              notify_on,
-             notify_include_csv
+             notify_include_csv,
+             summary_enabled
       FROM sites
       WHERE id = $1
     `,
@@ -74,6 +100,7 @@ export async function getSiteNotificationSettings(
     notifyEmail: row.notify_email,
     notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
+    summaryEnabled: row.summary_enabled,
   };
 }
 
@@ -87,7 +114,8 @@ export async function getSiteNotificationSettingsForUser(
       SELECT notify_enabled,
              notify_email,
              notify_on,
-             notify_include_csv
+             notify_include_csv,
+             summary_enabled
       FROM sites
       WHERE id = $1 AND user_id = $2
     `,
@@ -100,6 +128,7 @@ export async function getSiteNotificationSettingsForUser(
     notifyEmail: row.notify_email,
     notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
+    summaryEnabled: row.summary_enabled,
   };
 }
 
@@ -126,12 +155,14 @@ export async function updateSiteNotificationSettings(
       SET notify_enabled = $2,
           notify_email = $3,
           notify_on = $4,
-          notify_include_csv = $5
+          notify_include_csv = $5,
+          summary_enabled = $6
       WHERE id = $1
       RETURNING notify_enabled,
                 notify_email,
                 notify_on,
-                notify_include_csv
+                notify_include_csv,
+                summary_enabled
     `,
     [
       siteId,
@@ -139,6 +170,7 @@ export async function updateSiteNotificationSettings(
       next.notifyEmail,
       normalizedNotifyOn,
       next.notifyIncludeCsv,
+      next.summaryEnabled,
     ],
   );
   const row = res.rows[0];
@@ -148,6 +180,7 @@ export async function updateSiteNotificationSettings(
     notifyEmail: row.notify_email,
     notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
+    summaryEnabled: row.summary_enabled,
   };
 }
 
@@ -175,12 +208,14 @@ export async function updateSiteNotificationSettingsForUser(
       SET notify_enabled = $3,
           notify_email = $4,
           notify_on = $5,
-          notify_include_csv = $6
+          notify_include_csv = $6,
+          summary_enabled = $7
       WHERE id = $1 AND user_id = $2
       RETURNING notify_enabled,
                 notify_email,
                 notify_on,
-                notify_include_csv
+                notify_include_csv,
+                summary_enabled
     `,
     [
       siteId,
@@ -189,6 +224,7 @@ export async function updateSiteNotificationSettingsForUser(
       next.notifyEmail,
       normalizedNotifyOn,
       next.notifyIncludeCsv,
+      next.summaryEnabled,
     ],
   );
   const row = res.rows[0];
@@ -198,6 +234,7 @@ export async function updateSiteNotificationSettingsForUser(
     notifyEmail: row.notify_email,
     notifyOn: normalizeNotifyOn(row.notify_on),
     notifyIncludeCsv: row.notify_include_csv,
+    summaryEnabled: row.summary_enabled,
   };
 }
 
@@ -220,6 +257,30 @@ export async function recordNotificationEvent(
       input.payload,
     ],
   );
+}
+
+export async function tryRecordNotificationEvent(
+  input: NotificationEventInput,
+): Promise<boolean> {
+  const client = await ensureConnected();
+  const res = await client.query<{ id: string }>(
+    `
+      INSERT INTO notification_events
+        (site_id, scan_run_id, kind, to_email, subject, payload_json)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT DO NOTHING
+      RETURNING id
+    `,
+    [
+      input.siteId,
+      input.scanRunId,
+      input.kind,
+      input.toEmail,
+      input.subject,
+      input.payload,
+    ],
+  );
+  return !!res.rows[0];
 }
 
 export async function markScanRunNotified(scanRunId: string): Promise<void> {
@@ -286,6 +347,92 @@ export async function getLinkCountsForRun(scanRunId: string): Promise<{
     blockedCount: map.get("blocked") ?? 0,
     okCount: map.get("ok") ?? 0,
     noResponseCount: map.get("no_response") ?? 0,
+  };
+}
+
+export async function getIssueNotificationDigestForRun(
+  scanRunId: string,
+): Promise<IssueNotificationDigest> {
+  const client = await ensureConnected();
+  const countsRes = await client.query<{
+    severity: string;
+    category: string;
+    count: string;
+  }>(
+    `
+      SELECT severity, category, COUNT(*)::text AS count
+      FROM scan_issues
+      WHERE scan_run_id = $1
+        AND status = 'open'
+      GROUP BY severity, category
+    `,
+    [scanRunId],
+  );
+
+  const bySeverity: Record<string, number> = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0,
+  };
+  const byCategory: Record<string, number> = {};
+  let totalOpenIssues = 0;
+
+  for (const row of countsRes.rows) {
+    const count = Number(row.count);
+    bySeverity[row.severity] = (bySeverity[row.severity] ?? 0) + count;
+    byCategory[row.category] = (byCategory[row.category] ?? 0) + count;
+    totalOpenIssues += count;
+  }
+
+  const topIssuesRes = await client.query<{
+    issue_type: string;
+    severity: string;
+    category: string;
+    affected_url: string;
+    title: string;
+    description: string;
+  }>(
+    `
+      SELECT issue_type,
+             severity,
+             category,
+             affected_url,
+             title,
+             description
+      FROM scan_issues
+      WHERE scan_run_id = $1
+        AND status = 'open'
+      ORDER BY
+        CASE severity
+          WHEN 'critical' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'medium' THEN 2
+          WHEN 'low' THEN 3
+          ELSE 4
+        END,
+        last_seen_at DESC,
+        affected_url ASC
+      LIMIT 5
+    `,
+    [scanRunId],
+  );
+
+  return {
+    totalOpenIssues,
+    highPriorityCount: (bySeverity.critical ?? 0) + (bySeverity.high ?? 0),
+    healthScore: computeSeverityScore(bySeverity),
+    bySeverity,
+    byCategory,
+    topIssues: topIssuesRes.rows.map((row) => ({
+      issueType: row.issue_type,
+      severity: row.severity,
+      category: row.category,
+      affectedUrl: row.affected_url,
+      title: row.title,
+      description: row.description,
+    })),
   };
 }
 

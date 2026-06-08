@@ -20,6 +20,9 @@ export interface ScanRunRow {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  trigger_type: "manual" | "scheduled";
+  issue_generation_status: "pending" | "completed" | "failed";
+  issue_generation_error: string | null;
 }
 
 export async function getLatestScanForSite(
@@ -41,7 +44,10 @@ export async function getLatestScanForSite(
         start_url,
         total_links,
         checked_links,
-        broken_links
+        broken_links,
+        trigger_type,
+        issue_generation_status,
+        issue_generation_error
       FROM scan_runs
       WHERE site_id = $1
       ORDER BY started_at DESC
@@ -76,7 +82,10 @@ export async function getLatestScanForSiteForUser(
         r.start_url,
         r.total_links,
         r.checked_links,
-        r.broken_links
+        r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.site_id = $1 AND s.user_id = $2
@@ -112,7 +121,10 @@ export async function getLatestCompletedScanForSiteForUser(
         r.start_url,
         r.total_links,
         r.checked_links,
-        r.broken_links
+        r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.site_id = $1
@@ -152,7 +164,10 @@ export async function getRecentScansForSite(
         start_url,
         total_links,
         checked_links,
-        broken_links
+        broken_links,
+        trigger_type,
+        issue_generation_status,
+        issue_generation_error
       FROM scan_runs
       WHERE site_id = $1
       ORDER BY started_at DESC
@@ -185,7 +200,10 @@ export async function getRecentScansForSiteForUser(
         r.start_url,
         r.total_links,
         r.checked_links,
-        r.broken_links
+        r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.site_id = $1 AND s.user_id = $2
@@ -217,7 +235,10 @@ export async function getScanRunById(
         start_url,
         total_links,
         checked_links,
-        broken_links
+        broken_links,
+        trigger_type,
+        issue_generation_status,
+        issue_generation_error
       FROM scan_runs
       WHERE id = $1
       LIMIT 1
@@ -248,7 +269,10 @@ export async function getScanRunByIdForUser(
         r.start_url,
         r.total_links,
         r.checked_links,
-        r.broken_links
+        r.broken_links,
+        r.trigger_type,
+        r.issue_generation_status,
+        r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.id = $1 AND s.user_id = $2

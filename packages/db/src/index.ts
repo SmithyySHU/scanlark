@@ -13,6 +13,7 @@ export type { DbSiteRow } from "./sites";
 
 export {
   computeNextScheduledAt,
+  enqueueScheduledScanIfDue,
   getDueSites,
   getSiteSchedule,
   getSiteScheduleForUser,
@@ -39,6 +40,7 @@ export {
   completeScanRun,
   createScanRun,
   getScanRunStatus,
+  setScanRunIssueGenerationStatus,
   touchScanRun,
   setScanRunStatus,
   updateScanRunProgress,
@@ -122,17 +124,42 @@ export type {
 export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
 
 export {
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   replaceIssuesForScanRun,
 } from "./scanIssues";
 export type {
+  ResolvedScanIssue,
   ScanIssue,
   ScanIssueCategory,
+  ScanIssueChangeStatus,
   ScanIssueSeverity,
   ScanIssueStatus,
   ScanIssueType,
   ScanIssuesSummary,
 } from "./scanIssues";
+
+export { formatIssuePresentation } from "./issuePresentation";
+export type { IssuePresentation } from "./issuePresentation";
+
+export { upsertScanPageCheck } from "./scanPageChecks";
+export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
+
+export {
+  listScanSiteCheckTypesForRun,
+  upsertScanSiteCheck,
+} from "./scanSiteChecks";
+export type {
+  ScanSiteCheckInput,
+  ScanSiteCheckRow,
+  ScanSiteCheckType,
+} from "./scanSiteChecks";
+
+export {
+  getScanTechnicalDiagnostics,
+  getScanTechnicalDiagnosticsForUser,
+} from "./scanTechnicalDiagnostics";
+export type { ScanTechnicalDiagnosticsSummary } from "./scanTechnicalDiagnostics";
 
 export {
   deleteLinkNoteForSiteForUser,
@@ -151,11 +178,15 @@ export {
   cancelScanJob,
   claimNextScanJob,
   completeScanJob,
+  enqueueExistingScanRunIfIdle,
   enqueueScanJob,
+  enqueueManualScanIfIdle,
   extendScanJobLease,
   failScanJob,
+  getActiveSiteScan,
   getJobForScanRun,
   hasActiveJobForSite,
+  recoverStaleQueuedScanJobs,
   requeueExpiredScanJobs,
   setScanJobRunId,
 } from "./scanJobs";
@@ -191,6 +222,7 @@ export type { IgnoredLinkRow, IgnoredOccurrenceRow } from "./ignoredLinks";
 
 export {
   getLinkCountsForRun,
+  getIssueNotificationDigestForRun,
   getNewLinksSinceLastNotified,
   getPreviousCompletedRunId,
   getSiteNotificationSettings,
@@ -199,15 +231,69 @@ export {
   hasNotificationEvent,
   markScanRunNotified,
   recordNotificationEvent,
+  tryRecordNotificationEvent,
   setLastNotifiedScanRunId,
   updateSiteNotificationSettings,
   updateSiteNotificationSettingsForUser,
 } from "./notifications";
 export type {
+  IssueNotificationDigest,
   LinkDeltaRow,
   NotificationEventKind,
   NotificationSettings,
 } from "./notifications";
+
+export {
+  createOrRotateReportShareForRunForUser,
+  disableReportShareForRunForUser,
+  getReportShareForRunForUser,
+  getSharedReportAccessByToken,
+  recordReportShareView,
+} from "./reportShares";
+export type {
+  ReportShareRow,
+  ReportShareWithToken,
+  SharedReportAccess,
+} from "./reportShares";
+
+export {
+  claimDueUptimeMonitors,
+  getOrCreateUptimeMonitorForSite,
+  getOrCreateUptimeMonitorForSiteForUser,
+  getUptimeIncidentById,
+  getUptimeMonitorSettingsForUser,
+  getUptimeStatusForSiteForUser,
+  recordUptimeCheck,
+  updateUptimeMonitorSettingsForUser,
+} from "./uptimeMonitors";
+export type {
+  ClaimedUptimeMonitor,
+  RecordedUptimeCheck,
+  UptimeCheckInput,
+  UptimeCheckRow,
+  UptimeCheckStatus,
+  UptimeIncidentNotificationContext,
+  UptimeIncidentRow,
+  UptimeIncidentStatus,
+  UptimeSettingsRow,
+  UptimeStatus,
+  UptimeStatusSummary,
+} from "./uptimeMonitors";
+
+export {
+  computeSeverityScore,
+  createEmptySeverityCounts,
+  getScanCategoryScores,
+  getScanCategoryScoresForUser,
+  getScoreBand,
+} from "./scanCategoryScores";
+export type {
+  ScanCategoryScore,
+  ScanCategoryScoreKey,
+  ScanCategoryScoreStatus,
+  ScanScoreBand,
+  SeverityCounts,
+} from "./scanCategoryScores";
 
 export { createUser, getUserByEmail, getUserById, verifyUser } from "./auth";
 export type { AuthUser } from "./auth";

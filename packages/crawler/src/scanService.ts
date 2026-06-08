@@ -1,5 +1,6 @@
 import fetchUrl from "./fetchUrl";
-import extractLinks from "./extractLinks";
+import extractPageData from "./extractPageData";
+import runSiteChecks from "./runSiteChecks";
 import validateLink from "./validateLink";
 import { classifyStatus } from "./classifyStatus";
 import { normaliseLink } from "./normaliseLink";
@@ -25,12 +26,15 @@ import {
   insertIgnoredOccurrence,
   insertScanLinkOccurrence,
   insertScanResult,
+  listScanSiteCheckTypesForRun,
   listIgnoreRules,
   replaceIssuesForScanRun,
+  setScanRunIssueGenerationStatus,
   setScanRunStatus,
   touchScanRun,
   updateScanRunProgress,
   upsertIgnoredLink,
+  upsertScanPageCheck,
   upsertScanLink,
 } from "@scanlark/db";
 
@@ -40,6 +44,18 @@ export interface ScanExecutionSummary {
   checkedLinks: number;
   brokenLinks: number;
   ignoredLinks: number;
+}
+
+async function verifyExpectedSiteChecks(scanRunId: string): Promise<void> {
+  const checkTypes = new Set(await listScanSiteCheckTypesForRun(scanRunId));
+  if (
+    checkTypes.has("security_headers_https_root") &&
+    !checkTypes.has("performance_basic_https_root")
+  ) {
+    throw new Error(
+      "site_checks_incomplete: performance_basic_https_root missing after security_headers_https_root",
+    );
+  }
 }
 
 /**
@@ -717,7 +733,40 @@ export async function runScanForSite(
     );
     if (!html) return;
 
-    const rawLinks = extractLinks(html);
+    const pageData = extractPageData(html);
+    const rawLinks = pageData.links;
+    const mixedContentResources = pageUrl.startsWith("https://")
+      ? Array.from(
+          new Map(
+            pageData.mixedContentResources.map((resource) => [
+              `${resource.resourceType}:${resource.resourceUrl}:${resource.tagName}:${resource.attribute}`,
+              resource,
+            ]),
+          ).values(),
+        )
+      : [];
+    try {
+      await limitInsert(() =>
+        upsertScanPageCheck({
+          scanRunId: actualScanRunId,
+          siteId,
+          pageUrl,
+          title: pageData.seo.title,
+          metaDescription: pageData.seo.metaDescription,
+          h1Count: pageData.seo.h1Count,
+          robotsMeta: pageData.seo.robotsMeta,
+          robotsNoindex: pageData.seo.robotsNoindex,
+          canonicalCount: pageData.seo.canonicalCount,
+          canonicalHref: pageData.seo.canonicalHref,
+          mixedContentResources,
+        }),
+      );
+    } catch (err) {
+      console.error(
+        `[DB Error] Failed to persist page facts for ${pageUrl}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
     if (rawLinks.length > MAX_LINKS_PER_PAGE) {
       console.log(
         `[Scan] Link extraction limit page=${pageUrl} extracted=${rawLinks.length} used=${MAX_LINKS_PER_PAGE}`,
@@ -969,14 +1018,32 @@ export async function runScanForSite(
     });
 
     try {
+      await setScanRunIssueGenerationStatus(actualScanRunId, "pending");
+      await runSiteChecks({
+        scanRunId: actualScanRunId,
+        siteId,
+        startUrl,
+        signal: cancelController.signal,
+      });
+      await verifyExpectedSiteChecks(actualScanRunId);
       await applyIgnoreRulesForScanRun(actualScanRunId, { force: true });
       const issueResult = await replaceIssuesForScanRun(actualScanRunId);
+      await setScanRunIssueGenerationStatus(actualScanRunId, "completed", null);
       console.log(
         `[Scan] Issues generated run=${actualScanRunId} count=${issueResult.issueCount}`,
       );
     } catch (issueErr) {
+      const issueMessage =
+        issueErr instanceof Error
+          ? issueErr.message
+          : "issue_generation_failed";
+      await setScanRunIssueGenerationStatus(
+        actualScanRunId,
+        "failed",
+        issueMessage,
+      );
       console.warn(
-        `[Scan] Issue generation failed run=${actualScanRunId}`,
+        `[Scan] Issue generation failed run=${actualScanRunId} error=${issueMessage}`,
         issueErr,
       );
     }

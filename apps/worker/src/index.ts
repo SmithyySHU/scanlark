@@ -2,34 +2,37 @@ import dotenv from "dotenv";
 import * as os from "node:os";
 import {
   cancelScanJob,
+  claimDueUptimeMonitors,
   claimNextScanJob,
   completeScanJob,
   createScanRun,
-  enqueueScanJob,
+  enqueueScheduledScanIfDue,
   extendScanJobLease,
   failScanJob,
   getDueSites,
-  getLatestScanForSite,
   getJobForScanRun,
   getScanRunById,
   getSiteById,
-  hasActiveJobForSite,
-  markSiteScheduled,
+  recoverStaleQueuedScanJobs,
   requeueExpiredScanJobs,
+  recordUptimeCheck,
   setScanRunStatus,
   setScanJobRunId,
 } from "@scanlark/db";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
+import { checkUptime } from "../../../packages/crawler/src/checkUptime";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const workerId = `${os.hostname()}-${process.pid}`;
 const IDLE_WAIT_MS = 1200;
 const SCHEDULE_TICK_MS = 60000;
-const SCHEDULE_COOLDOWN_MS = 60000;
 const CLAIM_LEASE_SECONDS = 120;
 const LEASE_HEARTBEAT_MS = 30000;
 const REAPER_TICK_MS = 120000;
+const STALE_QUEUED_JOB_MINUTES = 15;
+const UPTIME_TICK_MS = 60000;
+const UPTIME_BATCH_SIZE = 25;
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
@@ -68,7 +71,9 @@ async function processJob() {
       }
       return true;
     }
-    scanRunId = await createScanRun(site.id, site.url);
+    scanRunId = await createScanRun(site.id, site.url, {
+      triggerType: "scheduled",
+    });
     await setScanJobRunId(job.id, scanRunId);
     run = await getScanRunById(scanRunId);
   }
@@ -216,6 +221,12 @@ async function reapLoop() {
         `attempts=${job.attempts}/${job.max_attempts}`,
       );
     }
+    const staleQueued = await recoverStaleQueuedScanJobs({
+      olderThanMinutes: STALE_QUEUED_JOB_MINUTES,
+    });
+    for (const job of staleQueued) {
+      logJobEvent("stale-queued-recovered", job);
+    }
     await sleep(REAPER_TICK_MS);
   }
 }
@@ -227,33 +238,19 @@ async function schedulerTick() {
   let skipped = 0;
 
   for (const site of dueSites) {
-    if (
-      site.last_scheduled_at &&
-      now.getTime() - site.last_scheduled_at.getTime() < SCHEDULE_COOLDOWN_MS
-    ) {
-      skipped += 1;
+    const result = await enqueueScheduledScanIfDue(site.id, now);
+    if (result.created) {
+      enqueued += 1;
+      console.log(
+        `[scheduler] enqueued site=${site.id} run=${result.scanRunId} next=${result.nextScheduledAt?.toISOString() ?? "none"}`,
+      );
       continue;
     }
 
-    const latestRun = await getLatestScanForSite(site.id);
-    if (
-      latestRun &&
-      (latestRun.status === "queued" || latestRun.status === "in_progress")
-    ) {
-      skipped += 1;
-      continue;
-    }
-
-    const hasActiveJob = await hasActiveJobForSite(site.id);
-    if (hasActiveJob) {
-      skipped += 1;
-      continue;
-    }
-
-    const scanRunId = await createScanRun(site.id, site.url);
-    await enqueueScanJob({ scanRunId, siteId: site.id });
-    await markSiteScheduled(site.id, now);
-    enqueued += 1;
+    skipped += 1;
+    console.log(
+      `[scheduler] skipped site=${site.id} reason=${result.reason}${result.active?.scanRunId ? ` activeRun=${result.active.scanRunId}` : ""}${result.active?.jobId ? ` activeJob=${result.active.jobId}` : ""}`,
+    );
   }
 
   console.log(
@@ -273,6 +270,78 @@ async function runSchedulerLoop() {
   }
 }
 
+async function notifyUptimeIncident(
+  incidentId: string,
+  kind: "uptime_down" | "uptime_recovered",
+) {
+  try {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (API_INTERNAL_TOKEN) {
+      headers["x-internal-token"] = API_INTERNAL_TOKEN;
+    }
+    const res = await fetch(
+      `${API_BASE_URL}/uptime-incidents/${encodeURIComponent(incidentId)}/notify`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind }),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn(
+        `[uptime ${workerId}] notify failed ${res.status}: ${text.slice(0, 120)}`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[uptime ${workerId}] notify error`, err);
+  }
+}
+
+async function uptimeTick() {
+  const monitors = await claimDueUptimeMonitors(UPTIME_BATCH_SIZE);
+  if (monitors.length === 0) {
+    console.log("[uptime] due=0 processed=0");
+    return;
+  }
+
+  for (const monitor of monitors) {
+    try {
+      const result = await checkUptime(monitor.check_url);
+      const recorded = await recordUptimeCheck(monitor.id, result);
+      console.log(
+        `[uptime] checked site=${monitor.site_id} settings=${monitor.id} status=${recorded.check.status} failures=${recorded.incident?.failure_count ?? 0}`,
+      );
+      if (recorded.shouldSendDownAlert && recorded.incident) {
+        await notifyUptimeIncident(recorded.incident.id, "uptime_down");
+      } else if (recorded.shouldSendRecoveryAlert && recorded.incident) {
+        await notifyUptimeIncident(recorded.incident.id, "uptime_recovered");
+      }
+    } catch (err) {
+      console.error(
+        `[uptime ${workerId}] check failed site=${monitor.site_id} monitor=${monitor.id}`,
+        err,
+      );
+    }
+  }
+
+  console.log(`[uptime] due=${monitors.length} processed=${monitors.length}`);
+}
+
+async function runUptimeLoop() {
+  console.log(`[uptime ${workerId}] started`);
+  while (true) {
+    try {
+      await uptimeTick();
+    } catch (err) {
+      console.error(`[uptime ${workerId}] error`, err);
+    }
+    await sleep(UPTIME_TICK_MS);
+  }
+}
+
 runLoop().catch((err) => {
   console.error(`[worker ${workerId}] fatal`, err);
   process.exit(1);
@@ -284,4 +353,8 @@ reapLoop().catch((err) => {
 
 runSchedulerLoop().catch((err) => {
   console.error(`[scheduler ${workerId}] fatal`, err);
+});
+
+runUptimeLoop().catch((err) => {
+  console.error(`[uptime ${workerId}] fatal`, err);
 });
