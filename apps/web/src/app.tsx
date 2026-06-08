@@ -3402,9 +3402,56 @@ const App: React.FC = () => {
     reportIssueSummary,
     reportLinkIntegrityIssueSummary,
   );
+  const reportHighPriorityCount =
+    (reportIssueSummary?.bySeverity.critical ?? 0) +
+    (reportIssueSummary?.bySeverity.high ?? 0);
+  const reportDateLabel = formatDate(
+    reportRun?.finished_at ?? reportRun?.started_at ?? null,
+  );
+  const reportScanIdDisplay = reportRun?.id ?? reportScanRunId ?? "-";
+  const reportScanIdShort =
+    reportScanIdDisplay && reportScanIdDisplay !== "-"
+      ? `${reportScanIdDisplay.slice(0, 8)}...`
+      : "-";
+  const reportIssueSummaryPending =
+    reportRun?.status === "completed" &&
+    reportRun.issue_generation_status !== "completed";
+  const topPriorityIssues = useMemo(() => {
+    const severityRank = (severity: IssueSeverity) => {
+      if (severity === "critical") return 0;
+      if (severity === "high") return 1;
+      if (severity === "medium") return 2;
+      if (severity === "low") return 3;
+      return 4;
+    };
+    const changeRank = (
+      changeStatus: Exclude<IssueChangeStatus, "resolved"> | null,
+    ) => {
+      if (changeStatus === "new") return 0;
+      if (changeStatus === "existing") return 1;
+      return 2;
+    };
+
+    return [...reportIssues.issues]
+      .sort((a, b) => {
+        const severityDiff =
+          severityRank(a.severity) - severityRank(b.severity);
+        if (severityDiff !== 0) return severityDiff;
+        const changeDiff =
+          changeRank(a.change_status) - changeRank(b.change_status);
+        if (changeDiff !== 0) return changeDiff;
+        return (
+          new Date(b.last_seen_at).getTime() -
+          new Date(a.last_seen_at).getTime()
+        );
+      })
+      .slice(0, 4);
+  }, [reportIssues.issues]);
   const reportTechnicalDiagnosticsNeedsAttention =
     !!reportRun?.issue_generation_error ||
+    reportRun?.issue_generation_status === "pending" ||
     reportRun?.issue_generation_status === "failed" ||
+    !reportTechnicalDiagnostics ||
     [
       reportTechnicalDiagnostics?.seoBasic?.issueCount,
       reportTechnicalDiagnostics?.robots?.issueCount,
@@ -3969,8 +4016,10 @@ const App: React.FC = () => {
     const shownCount = Math.min(visibleLinks.length, count);
     return (
       <div className="report-card">
-        <div className="report-table-title">
-          {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+        <div className="report-card__header">
+          <div className="report-table-title">
+            {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+          </div>
         </div>
         {section.error && (
           <div style={{ fontSize: "12px", color: "var(--warning)" }}>
@@ -4045,11 +4094,13 @@ const App: React.FC = () => {
     );
     return (
       <div className="report-card">
-        <div className="report-table-title">
-          Ignored / skipped links{" "}
-          <span style={{ color: "var(--muted)" }}>
-            ({reportIgnoredTotal ?? 0})
-          </span>
+        <div className="report-card__header">
+          <div className="report-table-title">
+            Ignored / skipped links{" "}
+            <span style={{ color: "var(--muted)" }}>
+              ({reportIgnoredTotal ?? 0})
+            </span>
+          </div>
         </div>
         {reportIgnoredSection.error && (
           <div style={{ fontSize: "12px", color: "var(--warning)" }}>
@@ -4122,17 +4173,21 @@ const App: React.FC = () => {
 
   const renderReportIssuesSection = () => (
     <div className="report-card">
-      <div className="report-table-title">
-        Issues{" "}
-        <span style={{ color: "var(--muted)" }}>
-          ({reportIssueSummary?.total ?? reportIssues.issues.length})
-        </span>
-      </div>
-      <div className="report-table-meta" style={{ marginBottom: "8px" }}>
-        New {reportIssueSummary?.byChangeStatus.new ?? 0} • Existing{" "}
-        {reportIssueSummary?.byChangeStatus.existing ?? 0} • Resolved{" "}
-        {reportIssueSummary?.byChangeStatus.resolved ??
-          reportIssues.resolvedCount}
+      <div className="report-card__header">
+        <div>
+          <div className="report-table-title">
+            Full issue table{" "}
+            <span style={{ color: "var(--muted)" }}>
+              ({reportIssueSummary?.total ?? reportIssues.issues.length})
+            </span>
+          </div>
+          <div className="report-table-meta" style={{ marginTop: "4px" }}>
+            New {reportIssueSummary?.byChangeStatus.new ?? 0} • Existing{" "}
+            {reportIssueSummary?.byChangeStatus.existing ?? 0} • Resolved{" "}
+            {reportIssueSummary?.byChangeStatus.resolved ??
+              reportIssues.resolvedCount}
+          </div>
+        </div>
       </div>
       <div className="report-filter-row">
         {REPORT_ISSUE_FILTERS.map((filter) => (
@@ -4200,13 +4255,7 @@ const App: React.FC = () => {
                 <tr key={issue.id}>
                   <td>
                     <span
-                      className="status-chip subtle"
-                      style={{
-                        background: issueSeverityTone(issue.severity),
-                        color:
-                          issue.severity === "info" ? "var(--text)" : "white",
-                        borderColor: "transparent",
-                      }}
+                      className={`report-badge report-badge--severity severity-${issue.severity}`}
                     >
                       {formatIssueSeverity(issue.severity)}
                     </span>
@@ -4243,17 +4292,14 @@ const App: React.FC = () => {
                     })}
                   </td>
                   <td>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: "6px",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <span>{issue.status}</span>
+                    <div className="report-issue-badges">
+                      <span className="report-badge report-badge--status">
+                        {issue.status}
+                      </span>
                       {issue.change_status && (
-                        <span className="report-issue-category">
+                        <span
+                          className={`report-badge report-badge--change change-${issue.change_status}`}
+                        >
                           {formatIssueChangeStatus(issue.change_status)}
                         </span>
                       )}
@@ -4318,15 +4364,7 @@ const App: React.FC = () => {
                     <tr key={`resolved:${issue.id}`}>
                       <td>
                         <span
-                          className="status-chip subtle"
-                          style={{
-                            background: issueSeverityTone(issue.severity),
-                            color:
-                              issue.severity === "info"
-                                ? "var(--text)"
-                                : "white",
-                            borderColor: "transparent",
-                          }}
+                          className={`report-badge report-badge--severity severity-${issue.severity}`}
                         >
                           {formatIssueSeverity(issue.severity)}
                         </span>
@@ -4363,7 +4401,7 @@ const App: React.FC = () => {
                         })}
                       </td>
                       <td>
-                        <span className="report-issue-category">
+                        <span className="report-badge report-badge--change change-resolved">
                           {formatIssueChangeStatus(issue.change_status)}
                         </span>
                       </td>
@@ -4378,6 +4416,71 @@ const App: React.FC = () => {
       )}
     </div>
   );
+
+  const renderTopPriorityIssues = () => {
+    if (reportIssueSummaryPending || topPriorityIssues.length === 0) {
+      return null;
+    }
+    return (
+      <div className="report-card">
+        <div className="report-card__header">
+          <div>
+            <div className="report-table-title">Top priority issues</div>
+            <div className="report-table-meta" style={{ marginTop: "4px" }}>
+              Highest-severity findings appear here first so the most important
+              changes are readable before the full issue table.
+            </div>
+          </div>
+        </div>
+        <div className="report-priority-list">
+          {topPriorityIssues.map((issue) => (
+            <div key={`priority:${issue.id}`} className="report-priority-item">
+              <div className="report-priority-item__top">
+                <div className="report-priority-item__title">{issue.title}</div>
+                <div className="report-issue-badges">
+                  <span
+                    className={`report-badge report-badge--severity severity-${issue.severity}`}
+                  >
+                    {formatIssueSeverity(issue.severity)}
+                  </span>
+                  {issue.change_status && (
+                    <span
+                      className={`report-badge report-badge--change change-${issue.change_status}`}
+                    >
+                      {formatIssueChangeStatus(issue.change_status)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="report-priority-item__meta">
+                <span className="report-issue-category">
+                  {formatIssueCategoryLabel(issue.category)}
+                </span>
+                <span>{formatDate(issue.last_seen_at)}</span>
+              </div>
+              <div className="report-priority-item__desc">
+                {formatIssueSupportText(issue.description)}
+              </div>
+              <div className="report-priority-item__urls">
+                <div>
+                  <div className="report-label">Affected URL</div>
+                  {renderReportUrlCell(issue.affected_url, {
+                    copyLabel: "Copied affected URL",
+                  })}
+                </div>
+                <div>
+                  <div className="report-label">Source URL</div>
+                  {renderReportUrlCell(issue.source_url, {
+                    copyLabel: "Copied source URL",
+                  })}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const resultsTitleCount =
     resultsView === "changes"
@@ -10060,31 +10163,45 @@ const App: React.FC = () => {
         .report-page {
           display: flex;
           flex-direction: column;
-          gap: 16px;
+          gap: 18px;
         }
         .report-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          gap: 12px;
-          flex-wrap: wrap;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 16px;
+          align-items: start;
+          padding: 22px 24px;
+          border-radius: 22px;
+          border: 1px solid var(--border);
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--panel) 82%, rgba(56, 189, 248, 0.08)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, rgba(139, 92, 246, 0.05))
+              100%
+          );
+          box-shadow: var(--shadow);
         }
         .report-title {
-          font-size: 20px;
+          font-size: clamp(28px, 4vw, 38px);
           font-weight: 700;
           font-family: var(--font-display);
+          line-height: 1.1;
         }
         .report-subtitle {
-          font-size: 12px;
-          color: var(--muted);
+          margin-top: 6px;
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
         }
         .report-actions {
           display: flex;
           gap: 8px;
           flex-wrap: wrap;
+          justify-content: flex-end;
         }
         .report-button {
-          padding: 6px 10px;
+          min-height: 36px;
+          padding: 7px 12px;
           border-radius: 999px;
           border: 1px solid rgba(148, 163, 184, 0.35);
           background: var(--surface-2);
@@ -10100,118 +10217,294 @@ const App: React.FC = () => {
         }
         .report-card {
           background: var(--panel);
-          border: 1px solid var(--border);
-          border-radius: 14px;
-          padding: 12px;
-          box-shadow: var(--shadow);
+          border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+          border-radius: 18px;
+          padding: 16px;
+          box-shadow: var(--soft-shadow);
+        }
+        .report-card__header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 12px;
         }
         .report-meta {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 12px;
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+          gap: 14px;
+          padding-top: 14px;
         }
         .report-meta-item {
           display: flex;
           flex-direction: column;
-          gap: 4px;
+          gap: 6px;
           min-width: 0;
         }
         .report-label {
           font-size: 11px;
-          color: var(--muted);
-          letter-spacing: 0.04em;
+          color: var(--text-muted);
+          letter-spacing: 0.06em;
           text-transform: uppercase;
+          font-weight: 700;
         }
         .report-value {
           font-size: 13px;
           color: var(--text);
-          word-break: break-word;
+          overflow-wrap: anywhere;
+          line-height: 1.5;
         }
-        .report-summary-grid {
+        .report-overview-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-          gap: 12px;
+          grid-template-columns: minmax(320px, 1.2fr) minmax(320px, 0.95fr);
+          gap: 16px;
+          align-items: stretch;
+        }
+        .report-overview-stack {
+          display: grid;
+          gap: 16px;
+          min-width: 0;
+        }
+        .report-overview-score.surface-card--metric.prominent {
+          min-height: 0;
+          padding: 18px;
+          box-shadow: var(--soft-shadow);
+        }
+        .report-overview-score .score-ring-card__body {
+          gap: 14px;
+          align-items: start;
+        }
+        .report-overview-score .score-ring {
+          width: 124px;
+          height: 124px;
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--score-ring-color) 16%, var(--border)),
+            0 12px 28px color-mix(in srgb, var(--score-ring-color) 16%, transparent);
+        }
+        .report-overview-score .score-ring::before {
+          inset: 10px;
+        }
+        .report-overview-score .score-ring__value {
+          font-size: clamp(28px, 4vw, 38px);
+        }
+        .report-overview-score .score-ring__caption {
+          font-size: 10px;
+        }
+        .report-overview-score .score-ring-card__content {
+          gap: 6px;
+        }
+        .report-overview-score .score-ring-card__status {
+          font-size: clamp(16px, 2vw, 22px);
+        }
+        .report-overview-score .score-ring-card__helper {
+          min-height: 28px;
+          padding: 6px 10px;
+          font-size: 11px;
+        }
+        .report-overview-score .score-ring-card__stats {
+          gap: 8px;
+        }
+        .report-overview-score .score-ring-card__stat {
+          padding: 8px 10px;
+        }
+        .report-overview-score .score-ring-card__stat strong {
+          font-size: 16px;
         }
         .report-summary-card {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
+          min-height: 112px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 92%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
         }
         .report-score-card {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 8px;
+          min-height: 122px;
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 88%, rgba(56, 189, 248, 0.05)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
         }
         .report-metric {
-          font-size: 22px;
+          font-size: clamp(26px, 3vw, 34px);
           font-weight: 700;
           color: var(--text);
+          line-height: 1.1;
+          font-family: var(--font-display);
         }
         .report-score-subtitle {
-          font-size: 12px;
-          color: var(--muted);
-          line-height: 1.4;
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
         }
         .report-score-band {
           font-size: 12px;
           font-weight: 600;
         }
+        .report-status-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 12px;
+        }
+        .report-kpi-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 12px;
+        }
+        .report-kpi-grid--expanded {
+          grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+        }
+        .report-mini-stats {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+          gap: 10px;
+        }
+        .report-mini-stat {
+          display: grid;
+          gap: 4px;
+          min-height: 68px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 78%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .report-mini-stat span {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .report-mini-stat strong {
+          font-size: 20px;
+          line-height: 1.1;
+          font-family: var(--font-display);
+          color: var(--text);
+        }
+        .report-kpi-card {
+          min-height: 110px;
+        }
+        .report-change-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+          gap: 12px;
+        }
+        .report-change-grid--dense {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .report-meta-details {
+          padding: 14px 16px;
+        }
+        .report-meta-summary {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          cursor: pointer;
+          list-style: none;
+        }
+        .report-meta-summary::-webkit-details-marker {
+          display: none;
+        }
+        .report-meta-summary__chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .report-meta-chip {
+          display: inline-flex;
+          align-items: center;
+          min-height: 28px;
+          padding: 6px 10px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--text-muted);
+          max-width: 100%;
+          overflow-wrap: anywhere;
+        }
         .report-table-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-          gap: 12px;
+          gap: 16px;
         }
         .report-table-title {
-          font-size: 13px;
-          font-weight: 600;
-          margin-bottom: 8px;
+          font-size: 16px;
+          font-weight: 700;
+          font-family: var(--font-display);
         }
         .report-filter-row {
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
-          margin-bottom: 10px;
+          margin-bottom: 12px;
         }
         .report-filter-chip {
           border: 1px solid var(--border);
-          background: transparent;
-          color: var(--muted);
+          background: color-mix(in srgb, var(--panel) 92%, transparent);
+          color: var(--text-muted);
           border-radius: 999px;
-          padding: 4px 10px;
+          padding: 6px 11px;
           font-size: 11px;
           font-weight: 600;
           cursor: pointer;
         }
         .report-filter-chip.active {
-          background: var(--surface-2);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 84%,
+            rgba(56, 189, 248, 0.06)
+          );
           color: var(--text);
           border-color: var(--accent);
         }
         .report-table-wrap {
           overflow-x: auto;
           min-width: 0;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
         }
         .report-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 12px;
           table-layout: fixed;
+          background: color-mix(in srgb, var(--panel) 94%, transparent);
         }
         .report-table th,
         .report-table td {
-          padding: 8px;
+          padding: 12px 12px;
           border-bottom: 1px solid var(--border);
           text-align: left;
+          vertical-align: top;
         }
         .report-table th {
           font-size: 10px;
-          color: var(--muted);
+          color: var(--text-muted);
           text-transform: uppercase;
-          letter-spacing: 0.04em;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
         }
         .report-table td {
-          overflow-wrap: anywhere;
-          word-break: break-word;
+          overflow-wrap: normal;
+          word-break: normal;
         }
         .report-links-table th:nth-child(1),
         .report-links-table td:nth-child(1) {
@@ -10276,10 +10569,10 @@ const App: React.FC = () => {
         }
         .report-url-action {
           border: 1px solid var(--border);
-          background: transparent;
-          color: var(--muted);
+          background: color-mix(in srgb, var(--panel) 90%, transparent);
+          color: var(--text-muted);
           border-radius: 999px;
-          padding: 2px 7px;
+          padding: 3px 8px;
           font-size: 11px;
           line-height: 1.2;
           cursor: pointer;
@@ -10296,33 +10589,139 @@ const App: React.FC = () => {
         }
         .report-issue-support {
           font-size: 12px;
-          color: var(--muted);
+          color: var(--text-muted);
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
         }
         .report-issue-category {
           font-size: 11px;
-          padding: 2px 6px;
+          padding: 3px 8px;
           border-radius: 999px;
-          background: var(--surface-2);
-          color: var(--muted);
-          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
+          color: var(--text-muted);
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
           white-space: nowrap;
+        }
+        .report-issue-badges {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .report-badge {
+          display: inline-flex;
+          align-items: center;
+          min-height: 24px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .report-badge--severity.severity-critical,
+        .report-badge--severity.severity-high {
+          background: rgba(248, 113, 113, 0.18);
+          color: #fecaca;
+          border-color: rgba(248, 113, 113, 0.3);
+        }
+        .report-badge--severity.severity-medium {
+          background: rgba(251, 191, 36, 0.18);
+          color: #fde68a;
+          border-color: rgba(251, 191, 36, 0.32);
+        }
+        .report-badge--severity.severity-low {
+          background: rgba(56, 189, 248, 0.16);
+          color: #bae6fd;
+          border-color: rgba(56, 189, 248, 0.28);
+        }
+        .report-badge--severity.severity-info {
+          background: color-mix(in srgb, var(--panel-elev) 80%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+        }
+        .report-badge--status {
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+          text-transform: capitalize;
+        }
+        .report-badge--change.change-new {
+          background: rgba(56, 189, 248, 0.16);
+          color: #bae6fd;
+          border-color: rgba(56, 189, 248, 0.26);
+        }
+        .report-badge--change.change-existing {
+          background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--border) 82%, transparent);
+        }
+        .report-badge--change.change-resolved {
+          background: rgba(52, 211, 153, 0.16);
+          color: #bbf7d0;
+          border-color: rgba(52, 211, 153, 0.28);
         }
         .report-table-meta {
           margin-top: 8px;
           font-size: 12px;
-          color: var(--muted);
+          color: var(--text-muted);
         }
         .report-empty {
-          padding: 12px;
+          padding: 16px;
           text-align: center;
-          color: var(--muted);
+          color: var(--text-muted);
+        }
+        .report-priority-list {
+          display: grid;
+          gap: 12px;
+        }
+        .report-priority-item {
+          display: grid;
+          gap: 10px;
+          padding: 16px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.02)) 0%,
+            color-mix(in srgb, var(--panel-elev) 88%, transparent) 100%
+          );
+        }
+        .report-priority-item__top {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        .report-priority-item__title {
+          font-size: 15px;
+          font-weight: 700;
+          color: var(--text);
+          line-height: 1.5;
+        }
+        .report-priority-item__meta {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+          font-size: 12px;
+          color: var(--text-muted);
+        }
+        .report-priority-item__desc {
+          font-size: 13px;
+          color: var(--text-muted);
+          line-height: 1.6;
+        }
+        .report-priority-item__urls {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 10px 12px;
         }
         .report-footer {
           font-size: 12px;
-          color: var(--muted);
+          color: var(--text-muted);
           text-align: right;
         }
         @media print {
@@ -10334,6 +10733,21 @@ const App: React.FC = () => {
           }
         }
         @media (max-width: 1100px) {
+          .report-header {
+            grid-template-columns: 1fr;
+          }
+          .report-actions {
+            justify-content: flex-start;
+          }
+          .report-overview-grid {
+            grid-template-columns: 1fr;
+          }
+          .report-change-grid--dense {
+            grid-template-columns: 1fr;
+          }
+          .report-meta-summary {
+            align-items: flex-start;
+          }
           .top-grid {
             grid-template-columns: 1fr;
           }
@@ -10452,17 +10866,35 @@ const App: React.FC = () => {
           <div className="report-page">
             <div className="report-header">
               <div>
-                <div className="report-title">Scanlark</div>
-                <div className="report-subtitle">Scan Report</div>
-                <div
-                  style={{
-                    marginTop: "8px",
-                    fontSize: "13px",
-                    color: "var(--muted)",
-                  }}
-                >
-                  Detailed breakdown, evidence, and diagnostics for a single
-                  scan run.
+                <div className="report-title">
+                  {selectedSiteName ?? reportHost ?? "Scan report"}
+                </div>
+                <div className="report-subtitle">
+                  Detailed scan document with summary, issue analysis, raw
+                  evidence, and diagnostics for a single run.
+                </div>
+                <div className="report-status-row">
+                  <StatusBadge
+                    label={reportRun?.status.replace("_", " ") ?? "Loading"}
+                    tone={
+                      reportRun?.status === "completed"
+                        ? "success"
+                        : reportRun?.status === "failed"
+                          ? "danger"
+                          : reportRun?.status === "cancelled"
+                            ? "warning"
+                            : "accent"
+                    }
+                  />
+                  {reportIssueSummaryPending && (
+                    <StatusBadge label="Building issue summary" tone="accent" />
+                  )}
+                  {reportHost && (
+                    <StatusBadge label={reportHost} tone="default" />
+                  )}
+                  {reportDateLabel !== "-" && (
+                    <StatusBadge label={reportDateLabel} tone="default" />
+                  )}
                 </div>
               </div>
               <div className="report-actions">
@@ -10483,58 +10915,6 @@ const App: React.FC = () => {
                 >
                   Copy report link
                 </button>
-              </div>
-            </div>
-
-            <div className="report-card report-meta">
-              <div className="report-meta-item">
-                <div className="report-label">Report ID</div>
-                <div className="report-value">
-                  <span
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      overflowWrap: "anywhere",
-                    }}
-                  >
-                    {reportRun?.id ?? reportScanRunId ?? "-"}
-                  </span>
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Start URL</div>
-                <div className="report-value">
-                  {reportRun?.start_url ?? "-"}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Host</div>
-                <div className="report-value">{reportHost ?? "-"}</div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Started</div>
-                <div className="report-value">
-                  {formatDate(reportRun?.started_at ?? null)}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Finished</div>
-                <div className="report-value">
-                  {formatDate(reportRun?.finished_at ?? null)}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Duration</div>
-                <div className="report-value">
-                  {formatDuration(
-                    reportRun?.started_at,
-                    reportRun?.finished_at,
-                  )}
-                </div>
-              </div>
-              <div className="report-meta-item">
-                <div className="report-label">Status</div>
-                <div className="report-value">{reportRun?.status ?? "-"}</div>
               </div>
             </div>
 
@@ -10566,63 +10946,148 @@ const App: React.FC = () => {
 
             {reportRun && (
               <>
-                <div className="report-summary-grid">
-                  <div className="report-card report-score-card">
-                    <div className="report-label">Overall Health Score</div>
-                    <div
-                      className="report-metric"
-                      style={{
-                        color: getScoreBandTone(reportScores.overall.score),
-                      }}
-                    >
-                      {reportScores.overall.score == null
-                        ? reportScores.overall.detail
-                        : `${reportScores.overall.score}%`}
-                    </div>
-                    {reportScores.overall.band && (
+                <div className="report-overview-grid">
+                  <ScoreRingCard
+                    label="Overall health"
+                    className="report-overview-score"
+                    caption="Health score"
+                    emptyValueText={
+                      reportIssueSummaryPending ? "Pending" : "N/A"
+                    }
+                    score={
+                      reportIssueSummaryPending
+                        ? null
+                        : reportScores.overall.score
+                    }
+                    status={
+                      reportIssueSummaryPending
+                        ? "Score pending"
+                        : reportScores.overall.score == null
+                          ? "Score unavailable"
+                          : (reportScores.overall.band ??
+                            reportScores.overall.detail)
+                    }
+                    detail={
+                      reportIssueSummaryPending
+                        ? "The crawl is complete. Final issue scoring appears when the report summary finishes."
+                        : reportScores.overall.score == null
+                          ? "Score unavailable for this run. Review the detailed findings and diagnostics below."
+                          : reportScores.overall.detail
+                    }
+                    helper={
+                      reportIssueSummaryPending
+                        ? "Final issue scoring is still being prepared"
+                        : `Links checked ${reportRun.checked_links} · Total issues ${
+                            reportIssueSummary?.total ?? 0
+                          }`
+                    }
+                    stats={[
+                      {
+                        label: "High priority",
+                        value: reportHighPriorityCount,
+                      },
+                      {
+                        label: "New issues",
+                        value: reportIssueSummary?.byChangeStatus.new ?? 0,
+                      },
+                      {
+                        label: "Resolved",
+                        value:
+                          reportIssueSummary?.byChangeStatus.resolved ??
+                          reportIssues.resolvedCount,
+                      },
+                      {
+                        label: "Links checked",
+                        value: reportRun.checked_links,
+                      },
+                    ]}
+                    tone={
+                      reportScores.overall.score == null
+                        ? "default"
+                        : reportScores.overall.score >= 90
+                          ? "success"
+                          : reportScores.overall.score >= 75
+                            ? "accent"
+                            : reportScores.overall.score >= 60
+                              ? "warning"
+                              : "danger"
+                    }
+                  />
+                  <div className="report-overview-stack">
+                    <div className="report-card report-score-card report-kpi-card">
+                      <div className="report-label">Link Integrity Score</div>
                       <div
-                        className="report-score-band"
-                        style={{
-                          color: getScoreBandTone(reportScores.overall.score),
-                        }}
-                      >
-                        {reportScores.overall.band}
-                      </div>
-                    )}
-                    <div className="report-score-subtitle">
-                      {reportScores.overall.detail}
-                    </div>
-                  </div>
-                  <div className="report-card report-score-card">
-                    <div className="report-label">Link Integrity Score</div>
-                    <div
-                      className="report-metric"
-                      style={{
-                        color: getScoreBandTone(
-                          reportScores.linkIntegrity.score,
-                        ),
-                      }}
-                    >
-                      {reportScores.linkIntegrity.score == null
-                        ? reportScores.linkIntegrity.detail
-                        : `${reportScores.linkIntegrity.score}%`}
-                    </div>
-                    {reportScores.linkIntegrity.band && (
-                      <div
-                        className="report-score-band"
+                        className="report-metric"
                         style={{
                           color: getScoreBandTone(
                             reportScores.linkIntegrity.score,
                           ),
                         }}
                       >
-                        {reportScores.linkIntegrity.band}
+                        {reportScores.linkIntegrity.score == null
+                          ? reportScores.linkIntegrity.detail
+                          : `${reportScores.linkIntegrity.score}%`}
                       </div>
-                    )}
-                    <div className="report-score-subtitle">
-                      {reportScores.linkIntegrity.detail}
+                      {reportScores.linkIntegrity.band && (
+                        <div
+                          className="report-score-band"
+                          style={{
+                            color: getScoreBandTone(
+                              reportScores.linkIntegrity.score,
+                            ),
+                          }}
+                        >
+                          {reportScores.linkIntegrity.band}
+                        </div>
+                      )}
+                      <div className="report-score-subtitle">
+                        {reportScores.linkIntegrity.detail}
+                      </div>
+                    </div>
+                    <div className="report-change-grid report-change-grid--dense">
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">What changed</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.byChangeStatus.new ?? 0}
+                        </div>
+                        <div className="report-score-subtitle">
+                          New issues in this run
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Open issues</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.total ?? 0}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Existing and newly detected findings
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Resolved issues</div>
+                        <div className="report-metric">
+                          {reportIssueSummary?.byChangeStatus.resolved ??
+                            reportIssues.resolvedCount}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Fixed since the previous baseline
+                        </div>
+                      </div>
+                      <div className="report-card report-summary-card">
+                        <div className="report-label">Links checked</div>
+                        <div className="report-metric">
+                          {reportRun.checked_links}
+                        </div>
+                        <div className="report-score-subtitle">
+                          Broken {reportSummary.broken} · Blocked{" "}
+                          {reportSummary.blocked}
+                        </div>
+                      </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="report-kpi-grid report-kpi-grid--expanded">
                   <div className="report-card report-summary-card">
                     <div className="report-label">Total issues</div>
                     <div className="report-metric">
@@ -10630,27 +11095,28 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">High</div>
+                    <div className="report-label">High priority</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.high ?? 0}
+                      {reportHighPriorityCount}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Medium</div>
+                    <div className="report-label">New issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.medium ?? 0}
+                      {reportIssueSummary?.byChangeStatus.new ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Low</div>
+                    <div className="report-label">Existing issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.low ?? 0}
+                      {reportIssueSummary?.byChangeStatus.existing ?? 0}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
-                    <div className="report-label">Info</div>
+                    <div className="report-label">Resolved issues</div>
                     <div className="report-metric">
-                      {reportIssueSummary?.bySeverity.info ?? 0}
+                      {reportIssueSummary?.byChangeStatus.resolved ??
+                        reportIssues.resolvedCount}
                     </div>
                   </div>
                   <div className="report-card report-summary-card">
@@ -10659,67 +11125,313 @@ const App: React.FC = () => {
                       {reportRun.checked_links}
                     </div>
                   </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Broken</div>
-                    <div className="report-metric">{reportSummary.broken}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Blocked</div>
-                    <div className="report-metric">{reportSummary.blocked}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">No response</div>
-                    <div className="report-metric">
-                      {reportSummary.no_response}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Ignored / skipped</div>
-                    <div className="report-metric">
-                      {reportIgnoredTotal ?? 0}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">OK</div>
-                    <div className="report-metric">{reportSummary.ok}</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Pages crawled</div>
-                    <div className="report-metric">Not tracked</div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Limits hit</div>
-                    <div className="report-metric">Not tracked</div>
-                  </div>
                 </div>
 
                 <div className="report-card report-score-subtitle">
                   {reportScores.summary}
                 </div>
 
-                {isInProgress(reportRun.status) && (
-                  <div
-                    className="report-card"
-                    style={{ display: "grid", gap: "12px" }}
-                  >
-                    <div style={{ fontWeight: 600 }}>
-                      Waiting for this scan to finish
+                <details className="report-card report-meta-details">
+                  <summary className="report-meta-summary">
+                    <div>
+                      <div className="report-table-title">Scan details</div>
+                      <div className="report-score-subtitle">
+                        Run metadata, timestamps, URLs, and scan identifier.
+                      </div>
                     </div>
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      This report stays focused on this exact run and will
-                      refresh as progress arrives.
+                    <div className="report-meta-summary__chips">
+                      <span className="report-meta-chip">
+                        Duration{" "}
+                        {formatDuration(
+                          reportRun?.started_at,
+                          reportRun?.finished_at,
+                        )}
+                      </span>
+                      <span className="report-meta-chip">
+                        Scan ID {reportScanIdShort}
+                      </span>
                     </div>
-                    <ScanProgressBar
-                      status={reportRun.status}
-                      totalLinks={reportRun.total_links}
-                      checkedLinks={reportRun.checked_links}
-                      brokenLinks={reportSummary.broken}
-                      blockedLinks={reportSummary.blocked}
-                      noResponseLinks={reportSummary.no_response}
-                      lastUpdateAt={reportLastLoadedAt}
-                    />
+                  </summary>
+                  <div className="report-meta">
+                    <div className="report-meta-item">
+                      <div className="report-label">Status</div>
+                      <div className="report-value">
+                        {reportRun?.status.replace("_", " ") ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Issue generation</div>
+                      <div className="report-value">
+                        {reportRun.issue_generation_status ?? "pending"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Site</div>
+                      <div className="report-value">
+                        {selectedSiteName ?? reportHost ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Checked links</div>
+                      <div className="report-value">
+                        {reportRun.checked_links} / {reportRun.total_links}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Scanned</div>
+                      <div className="report-value">{reportDateLabel}</div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Scan ID</div>
+                      <div className="report-value">
+                        <span
+                          style={{
+                            fontSize: "12px",
+                            color: "var(--text-muted)",
+                            overflowWrap: "anywhere",
+                          }}
+                        >
+                          {reportScanIdDisplay}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Start URL</div>
+                      <div className="report-value">
+                        {reportRun?.start_url ?? "-"}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Started</div>
+                      <div className="report-value">
+                        {formatDate(reportRun?.started_at ?? null)}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Finished</div>
+                      <div className="report-value">
+                        {formatDate(reportRun?.finished_at ?? null)}
+                      </div>
+                    </div>
+                    <div className="report-meta-item">
+                      <div className="report-label">Duration</div>
+                      <div className="report-value">
+                        {formatDuration(
+                          reportRun?.started_at,
+                          reportRun?.finished_at,
+                        )}
+                      </div>
+                    </div>
                   </div>
+                </details>
+
+                {isInProgress(reportRun.status) && (
+                  <ScanProgressHero
+                    progress={
+                      reportRun.total_links > 0
+                        ? (reportRun.checked_links / reportRun.total_links) *
+                          100
+                        : 0
+                    }
+                    indeterminate={reportRun.total_links <= 0}
+                    title="Scan still running"
+                    stage={getScanStageText(reportRun)}
+                    summary={`${
+                      reportRun.checked_links
+                    } / ${reportRun.total_links || "?"} links checked · Last update ${
+                      reportLastLoadedAt
+                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                        : "-"
+                    }`}
+                    counters={[
+                      {
+                        label: "Links checked",
+                        value: reportRun.checked_links,
+                      },
+                      { label: "Broken", value: reportSummary.broken },
+                      { label: "Blocked", value: reportSummary.blocked },
+                      {
+                        label: "No response",
+                        value: reportSummary.no_response,
+                      },
+                      { label: "Ignored", value: reportIgnoredTotal ?? 0 },
+                    ]}
+                    note="This report stays locked to this exact run and refreshes as scan progress arrives."
+                    statusTone="accent"
+                  />
                 )}
+
+                {reportRun.status === "completed" && (
+                  <>
+                    {reportRun.issue_generation_status !== "completed" && (
+                      <div
+                        className="report-card"
+                        style={{
+                          display: "grid",
+                          gap: "8px",
+                          borderColor:
+                            reportRun.issue_generation_status === "failed"
+                              ? "var(--warning)"
+                              : "var(--border)",
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>
+                          {reportRun.issue_generation_status === "failed"
+                            ? "Issue generation failed"
+                            : "Issue generation pending"}
+                        </div>
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Scan completed, but issue generation{" "}
+                          {reportRun.issue_generation_status === "failed"
+                            ? "failed"
+                            : "has not finished yet"}
+                          . Raw scan evidence is still available.
+                        </div>
+                        {reportRun.issue_generation_error && (
+                          <div
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--warning)",
+                            }}
+                          >
+                            {reportRun.issue_generation_error}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {renderTopPriorityIssues()}
+                    {renderReportIssuesSection()}
+
+                    <div className="report-card">
+                      <div className="report-card__header">
+                        <div>
+                          <div className="report-table-title">
+                            Evidence summary
+                          </div>
+                          <div
+                            className="report-table-meta"
+                            style={{ marginTop: "4px" }}
+                          >
+                            Link outcomes and severity counts for this exact
+                            run.
+                          </div>
+                        </div>
+                      </div>
+                      <div className="report-mini-stats">
+                        <div className="report-mini-stat">
+                          <span>Broken</span>
+                          <strong>{reportSummary.broken}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Blocked</span>
+                          <strong>{reportSummary.blocked}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>No response</span>
+                          <strong>{reportSummary.no_response}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Ignored / skipped</span>
+                          <strong>{reportIgnoredTotal ?? 0}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>OK links</span>
+                          <strong>{reportSummary.ok}</strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>High</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.high ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Medium</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.medium ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Low</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.low ?? 0}
+                          </strong>
+                        </div>
+                        <div className="report-mini-stat">
+                          <span>Info</span>
+                          <strong>
+                            {reportIssueSummary?.bySeverity.info ?? 0}
+                          </strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "Broken links",
+                        "broken",
+                        reportSummary.broken,
+                      )}
+                      {renderReportLinkSection(
+                        "Blocked links",
+                        "blocked",
+                        reportSummary.blocked,
+                      )}
+                    </div>
+
+                    <div className="report-table-grid">
+                      {renderReportLinkSection(
+                        "No response links",
+                        "no_response",
+                        reportSummary.no_response,
+                      )}
+                      {renderReportIgnoredSection()}
+                    </div>
+
+                    <div className="report-card">
+                      <div className="report-table-title">OK links</div>
+                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+                        {reportSummary.ok} OK links were recorded in this scan.
+                        Phase 1A keeps OK links as a summary-only count.
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {reportRun.status !== "completed" &&
+                  !isInProgress(reportRun.status) && (
+                    <ScanProgressHero
+                      progress={0}
+                      title={
+                        reportRun.status === "failed"
+                          ? "Scan failed"
+                          : "Scan cancelled"
+                      }
+                      stage={getScanStageText(reportRun)}
+                      summary={
+                        reportRun.error_message ??
+                        "This report only shows the exact run state and any evidence captured before the scan stopped."
+                      }
+                      counters={[
+                        {
+                          label: "Links checked",
+                          value: reportRun.checked_links,
+                        },
+                        { label: "Broken", value: reportSummary.broken },
+                        { label: "Blocked", value: reportSummary.blocked },
+                        {
+                          label: "No response",
+                          value: reportSummary.no_response,
+                        },
+                        { label: "Ignored", value: reportIgnoredTotal ?? 0 },
+                      ]}
+                      note="Detailed evidence remains available below for anything the scan captured before it stopped."
+                      statusTone={
+                        reportRun.status === "failed" ? "danger" : "warning"
+                      }
+                    />
+                  )}
 
                 <details
                   className="report-card"
@@ -10800,92 +11512,6 @@ const App: React.FC = () => {
                     </span>
                   </div>
                 </details>
-
-                {reportRun.status === "completed" && (
-                  <>
-                    {reportRun.issue_generation_status !== "completed" && (
-                      <div
-                        className="report-card"
-                        style={{
-                          display: "grid",
-                          gap: "8px",
-                          borderColor:
-                            reportRun.issue_generation_status === "failed"
-                              ? "var(--warning)"
-                              : "var(--border)",
-                        }}
-                      >
-                        <div style={{ fontWeight: 600 }}>
-                          {reportRun.issue_generation_status === "failed"
-                            ? "Issue generation failed"
-                            : "Issue generation pending"}
-                        </div>
-                        <div
-                          style={{ fontSize: "13px", color: "var(--muted)" }}
-                        >
-                          Scan completed, but issue generation{" "}
-                          {reportRun.issue_generation_status === "failed"
-                            ? "failed"
-                            : "has not finished yet"}
-                          . Raw scan evidence is still available.
-                        </div>
-                        {reportRun.issue_generation_error && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                            }}
-                          >
-                            {reportRun.issue_generation_error}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {renderReportIssuesSection()}
-
-                    <div className="report-table-grid">
-                      {renderReportLinkSection(
-                        "Broken links",
-                        "broken",
-                        reportSummary.broken,
-                      )}
-                      {renderReportLinkSection(
-                        "Blocked links",
-                        "blocked",
-                        reportSummary.blocked,
-                      )}
-                    </div>
-
-                    <div className="report-table-grid">
-                      {renderReportLinkSection(
-                        "No response links",
-                        "no_response",
-                        reportSummary.no_response,
-                      )}
-                      {renderReportIgnoredSection()}
-                    </div>
-
-                    <div className="report-card">
-                      <div className="report-table-title">OK links</div>
-                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
-                        {reportSummary.ok} OK links were recorded in this scan.
-                        Phase 1A keeps OK links as a summary-only count.
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {reportRun.status !== "completed" &&
-                  !isInProgress(reportRun.status) && (
-                    <div
-                      className="report-card"
-                      style={{ fontSize: "13px", color: "var(--muted)" }}
-                    >
-                      This scan did not complete, so Scanlark is only showing
-                      the exact run status and any data captured before it
-                      stopped.
-                    </div>
-                  )}
 
                 <div className="report-footer">
                   Last refreshed{" "}

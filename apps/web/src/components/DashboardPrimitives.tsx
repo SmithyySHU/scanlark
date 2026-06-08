@@ -92,8 +92,26 @@ export const ScoreRingCard: React.FC<{
   helper?: React.ReactNode;
   stats?: Array<{ label: string; value: React.ReactNode }>;
   tone?: Tone;
-}> = ({ label, score, status, detail, helper, stats, tone = "accent" }) => (
-  <div className="surface-card surface-card--metric prominent score-ring-card">
+  className?: string;
+  emptyValueText?: string;
+  caption?: string;
+}> = ({
+  label,
+  score,
+  status,
+  detail,
+  helper,
+  stats,
+  tone = "accent",
+  className,
+  emptyValueText = "-",
+  caption,
+}) => (
+  <div
+    className={`surface-card surface-card--metric prominent score-ring-card${
+      className ? ` ${className}` : ""
+    }`}
+  >
     <div className="surface-card__label">{label}</div>
     <div className="score-ring-card__body">
       <div
@@ -107,9 +125,9 @@ export const ScoreRingCard: React.FC<{
       >
         <div className="score-ring__inner">
           <div className="score-ring__value">
-            {score == null ? "-" : `${score}%`}
+            {score == null ? emptyValueText : `${score}%`}
           </div>
-          <div className="score-ring__caption">Overall health</div>
+          <div className="score-ring__caption">{caption ?? label}</div>
         </div>
       </div>
       <div className="score-ring-card__content">
