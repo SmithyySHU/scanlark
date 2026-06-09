@@ -5526,6 +5526,270 @@ const App: React.FC = () => {
     );
   };
 
+  const renderActionMenuTrigger = (
+    menuId: string,
+    ariaLabel: string,
+    children: React.ReactNode,
+  ) => {
+    const isOpen = actionMenuOpenId === menuId;
+    return (
+      <div
+        style={{ position: "relative", display: "inline-flex" }}
+        data-action-menu
+      >
+        <button
+          type="button"
+          className="icon-button"
+          aria-label={ariaLabel}
+          title={ariaLabel}
+          onClick={() => setActionMenuOpenId(isOpen ? null : menuId)}
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+          </svg>
+        </button>
+        {isOpen && (
+          <div
+            className="action-menu"
+            style={{
+              position: "absolute",
+              right: 0,
+              top: "calc(100% + 6px)",
+              background: "var(--panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "12px",
+              boxShadow: "var(--shadow)",
+              padding: "6px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              minWidth: "220px",
+              zIndex: 40,
+            }}
+          >
+            {children}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderReportIssueActionMenu = (issue: ScanIssue, menuId: string) => {
+    if (isReadOnlyReport) return null;
+    return renderActionMenuTrigger(
+      menuId,
+      "Issue actions",
+      <>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              window.open(issue.affected_url, "_blank", "noopener,noreferrer");
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url}
+        >
+          Open affected URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              void copyToClipboard(
+                issue.affected_url,
+                undefined,
+                "Copied affected URL",
+              );
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url}
+        >
+          Copy affected URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              openSourcePage(issue.source_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Open source page
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              void copyToClipboard(
+                issue.source_url,
+                undefined,
+                "Copied source page URL",
+              );
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Copy source page URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              void handleIgnoreLinkByUrl(issue.affected_url, reportScanRunId);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url}
+        >
+          Ignore exact URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              openNoteModal(issue.affected_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url}
+        >
+          Edit note
+        </button>
+      </>,
+    );
+  };
+
+  async function openFirstSourceForIgnoredReportLink(row: IgnoredLinkRow) {
+    const existing = ignoredOccurrences[row.id] ?? [];
+    if (existing.length > 0) {
+      openSourcePage(existing[0].source_page);
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(row.scan_run_id)}/ignored/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to fetch source page: ${res.status}`);
+      }
+      const data = (await res.json()) as IgnoredOccurrencesResponse;
+      const first = data.occurrences?.[0];
+      if (first?.source_page) {
+        openSourcePage(first.source_page);
+      } else {
+        pushToast("No source page available", "warning");
+      }
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to open source page"), "warning");
+    }
+  }
+
+  const renderReportLinkActionMenu = (
+    row: ScanLink,
+    menuId: string,
+    options?: { allowIgnore?: boolean },
+  ) => {
+    if (isReadOnlyReport) return null;
+    const hasNote = linkNotesByUrl.has(row.link_url);
+    return renderActionMenuTrigger(
+      menuId,
+      "Link actions",
+      <>
+        <button
+          onClick={() => {
+            void copyToClipboard(row.link_url, undefined, "Copied link URL");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy link URL
+        </button>
+        <button
+          onClick={() => {
+            window.open(row.link_url, "_blank", "noopener,noreferrer");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open link
+        </button>
+        <button
+          onClick={() => {
+            void openFirstSourceForResult(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open source page
+        </button>
+        {options?.allowIgnore !== false && (
+          <button
+            onClick={() => {
+              void handleIgnoreLinkByUrl(row.link_url, reportScanRunId);
+              setActionMenuOpenId(null);
+            }}
+            disabled={row.ignored}
+          >
+            {row.ignored ? "Ignored" : "Ignore this link"}
+          </button>
+        )}
+        <button
+          onClick={() => {
+            openNoteModal(row.link_url);
+            setActionMenuOpenId(null);
+          }}
+        >
+          {hasNote ? "Edit note" : "Add note"}
+        </button>
+      </>,
+    );
+  };
+
+  const renderReportIgnoredLinkActionMenu = (
+    row: IgnoredLinkRow,
+    menuId: string,
+  ) => {
+    if (isReadOnlyReport) return null;
+    const hasNote = linkNotesByUrl.has(row.link_url);
+    return renderActionMenuTrigger(
+      menuId,
+      "Ignored link actions",
+      <>
+        <button
+          onClick={() => {
+            void copyToClipboard(row.link_url, undefined, "Copied link URL");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy link URL
+        </button>
+        <button
+          onClick={() => {
+            window.open(row.link_url, "_blank", "noopener,noreferrer");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open link
+        </button>
+        <button
+          onClick={() => {
+            void openFirstSourceForIgnoredReportLink(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open source page
+        </button>
+        <button
+          onClick={() => {
+            openNoteModal(row.link_url);
+            setActionMenuOpenId(null);
+          }}
+        >
+          {hasNote ? "Edit note" : "Add note"}
+        </button>
+      </>,
+    );
+  };
+
   const renderReportLinkSection = (
     title: string,
     sectionKey: ReportSectionKey,
@@ -5538,6 +5802,8 @@ const App: React.FC = () => {
       reportVisibleSectionCounts[sectionKey],
     );
     const shownCount = Math.min(visibleLinks.length, count);
+    const showLinkActions = !isReadOnlyReport && sectionKey !== "ok";
+    const columnCount = showLinkActions ? 6 : 5;
     return (
       <div
         className={`report-card report-link-section report-link-section--${sectionKey}`}
@@ -5571,18 +5837,21 @@ const App: React.FC = () => {
                 <th>Result</th>
                 <th>Occurrences</th>
                 <th>Last seen</th>
+                {showLinkActions && (
+                  <th className="report-actions-col">Actions</th>
+                )}
               </tr>
             </thead>
             <tbody>
               {section.loading && section.links.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="report-empty">
+                  <td colSpan={columnCount} className="report-empty">
                     Loading…
                   </td>
                 </tr>
               ) : section.links.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="report-empty">
+                  <td colSpan={columnCount} className="report-empty">
                     No links in this section for this scan.
                   </td>
                 </tr>
@@ -5601,6 +5870,14 @@ const App: React.FC = () => {
                     <td data-label="Last seen">
                       {formatDate(row.last_seen_at)}
                     </td>
+                    {showLinkActions && (
+                      <td data-label="Actions" className="report-actions-col">
+                        {renderReportLinkActionMenu(
+                          row,
+                          `report-link:${sectionKey}:${row.id}`,
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
@@ -5634,6 +5911,8 @@ const App: React.FC = () => {
       visibleIgnoredLinks.length,
       reportIgnoredDisplayTotal,
     );
+    const showIgnoredActions = !isReadOnlyReport;
+    const columnCount = showIgnoredActions ? 6 : 5;
     return (
       <div className="report-card">
         <div className="report-card__header">
@@ -5658,19 +5937,22 @@ const App: React.FC = () => {
                 <th>Reason</th>
                 <th>Occurrences</th>
                 <th>Last seen</th>
+                {showIgnoredActions && (
+                  <th className="report-actions-col">Actions</th>
+                )}
               </tr>
             </thead>
             <tbody>
               {reportIgnoredSection.loading &&
               reportIgnoredSection.links.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="report-empty">
+                  <td colSpan={columnCount} className="report-empty">
                     Loading…
                   </td>
                 </tr>
               ) : reportIgnoredSection.links.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="report-empty">
+                  <td colSpan={columnCount} className="report-empty">
                     No ignored or skipped links were recorded for this scan.
                   </td>
                 </tr>
@@ -5694,6 +5976,14 @@ const App: React.FC = () => {
                     <td data-label="Last seen">
                       {formatDate(row.last_seen_at)}
                     </td>
+                    {showIgnoredActions && (
+                      <td data-label="Actions" className="report-actions-col">
+                        {renderReportIgnoredLinkActionMenu(
+                          row,
+                          `report-ignored-link:${row.id}`,
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
@@ -6309,6 +6599,10 @@ const App: React.FC = () => {
                     >
                       {formatIssueChangeStatus(issue.change_status)}
                     </span>
+                  )}
+                  {renderReportIssueActionMenu(
+                    issue,
+                    `report-priority-issue:${issue.id}`,
                   )}
                 </div>
               </div>
@@ -13642,7 +13936,8 @@ const App: React.FC = () => {
             display: none !important;
           }
           .report-issues-table th:last-child,
-          .report-issues-table td:last-child {
+          .report-issues-table td:last-child,
+          .report-actions-col {
             display: none;
           }
           .app-shell {
