@@ -116,6 +116,14 @@ Deployment requirements:
 If PDF export fails in a deployment but works locally, verify browser binaries
 and Chromium runtime dependencies first.
 
+Beta API guardrails:
+
+- public tokenized report routes send `X-Robots-Tag: noindex, nofollow`
+- public tokenized report routes send `Cache-Control: private, no-store`
+- public PDF export is rate limited more strictly than public JSON views
+- PDF generation failures return client-safe errors; production responses do not
+  expose Playwright internals or stack traces
+
 ## SMTP / Email Notes
 
 - Scanlark always attempts to write email intent to `email_outbox`
@@ -136,6 +144,21 @@ and Chromium runtime dependencies first.
 - notification request failures are logged with scan run or incident IDs; tokens
   and secrets are not logged
 
+## API Rate Limits and Errors
+
+- auth endpoints are rate limited per IP
+- site create/update, manual scan trigger, scan retry, and share create/revoke
+  are rate limited per user-scoped key
+- public shared report JSON is rate limited per token and IP
+- public shared report PDF is rate limited more strictly per token and IP
+- SSE scan progress connections are limited concurrently per user and scan run
+- rate limit responses use HTTP `429`, error code `rate_limited`, and
+  `Retry-After` where practical
+- internal errors keep full detail in server logs; production API responses omit
+  raw exception details
+- look for `event: "api.rate_limited"` in API logs when diagnosing request
+  throttling
+
 ## Beta Smoke Checklist
 
 - create a real account with dev bypass off
@@ -148,6 +171,9 @@ and Chromium runtime dependencies first.
 - enable uptime monitoring and confirm checks appear
 - send a test email
 - create and revoke a share link
+- request the shared report repeatedly and confirm the API eventually returns
+  `429`
+- request the shared PDF repeatedly and confirm the API eventually returns `429`
 - restart API and confirm `/health` and `/ready`
 - restart worker and confirm scheduled scans continue
 - stop the worker with `SIGTERM` and confirm it logs shutdown start, drains

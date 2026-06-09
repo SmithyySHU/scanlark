@@ -1,13 +1,25 @@
 import { Application, Request, Response } from "express";
 import { getScanRunByIdForUser } from "@scanlark/db";
 import { serializeScanRun } from "../serializers";
+import { createSseConnectionLimiter } from "../rateLimits";
 import { apiRuntimeConfig } from "../runtimeConfig";
 
 const WEB_ORIGIN = apiRuntimeConfig.webOrigin ?? "http://localhost:5173";
+const sseLimiter = createSseConnectionLimiter({
+  route: "scan_run_events",
+  maxConnections: 3,
+  keyGenerator(req) {
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    return req.user?.id
+      ? `user:${req.user.id}:scanRun:${req.params.scanRunId ?? "unknown"}`
+      : `ip:${ip}:scanRun:${req.params.scanRunId ?? "unknown"}`;
+  },
+});
 
 export function mountScanRunEvents(app: Application) {
   app.get(
     "/scan-runs/:scanRunId/events",
+    sseLimiter,
     async (req: Request, res: Response) => {
       const { scanRunId } = req.params;
       const user = req.user;

@@ -1,20 +1,18 @@
 import express from "express";
 import type { Request, Response } from "express";
-import rateLimit from "express-rate-limit";
 import { createUser, isValidEmailAddress, verifyUser } from "@scanlark/db";
 import { clearSession, setSession } from "../auth";
+import { createApiRateLimiter, getIpKey } from "../rateLimits";
 
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
 
-// TODO: Replace memory store with Redis in production.
-const authLimiter = rateLimit({
+const authLimiter = createApiRateLimiter({
+  route: "auth",
   windowMs: 10 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "rate_limited", message: "Too many attempts" },
+  max: 8,
+  keyGenerator: getIpKey,
 });
 
 export function mountAuthRoutes(app: express.Application) {
