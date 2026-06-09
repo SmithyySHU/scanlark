@@ -101,6 +101,11 @@ import { authMiddleware, initDemoAuth } from "./authMiddleware";
 import { sessionMiddleware } from "./auth";
 import { mountAuthRoutes } from "./routes/auth";
 import { initEventRelay, mountEventStream } from "./events";
+import {
+  buildReportPdfDocumentForSharedRun,
+  buildReportPdfDocumentForUser,
+  generateReportPdfBuffer,
+} from "./reportPdf";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -654,6 +659,34 @@ app.get("/public/reports/:token", async (req, res) => {
   }
 });
 
+app.get("/public/reports/:token/report.pdf", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    if (access.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_exportable",
+        "Only completed scan runs can be exported as PDF",
+      );
+    }
+    setPublicReportHeaders(res);
+    await recordReportShareView(access.share.id);
+    const document = await buildReportPdfDocumentForSharedRun(access.run);
+    const pdf = await generateReportPdfBuffer(document);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${document.fileName}"`,
+    );
+    return res.status(200).send(pdf);
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/report.pdf", err);
+    return sendInternalError(res, "Failed to export shared report PDF", err);
+  }
+});
+
 app.get("/public/reports/:token/issues", async (req, res) => {
   const limitRaw = req.query.limit;
   const offsetRaw = req.query.offset;
@@ -715,7 +748,11 @@ app.get("/public/reports/:token/links/summary", async (req, res) => {
     const noResponse = summary
       .filter((row) => row.status_code == null)
       .reduce((acc, row) => acc + row.count, 0);
-    return res.json({ scanRunId: access.run.id, summary, no_response: noResponse });
+    return res.json({
+      scanRunId: access.run.id,
+      summary,
+      no_response: noResponse,
+    });
   } catch (err: unknown) {
     console.error("Error in GET /public/reports/:token/links/summary", err);
     return sendInternalError(
@@ -791,11 +828,7 @@ app.get("/public/reports/:token/ignored", async (req, res) => {
     });
   } catch (err: unknown) {
     console.error("Error in GET /public/reports/:token/ignored", err);
-    return sendInternalError(
-      res,
-      "Failed to fetch shared ignored links",
-      err,
-    );
+    return sendInternalError(res, "Failed to fetch shared ignored links", err);
   }
 });
 
@@ -2149,6 +2182,39 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/report", err);
     return sendInternalError(res, "Failed to build report", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/report.pdf", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    if (result.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_exportable",
+        "Only completed scan runs can be exported as PDF",
+      );
+    }
+
+    const document = await buildReportPdfDocumentForUser(userId, result.run);
+    const pdf = await generateReportPdfBuffer(document);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${document.fileName}"`,
+    );
+    return res.status(200).send(pdf);
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/report.pdf", err);
+    return sendInternalError(res, "Failed to export report PDF", err);
   }
 });
 

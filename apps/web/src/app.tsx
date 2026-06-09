@@ -1884,6 +1884,14 @@ function buildSharedReportApiBase(token: string) {
   return `${API_BASE}/public/reports/${encodeURIComponent(token)}`;
 }
 
+function buildReportPdfUrl(runId: string) {
+  return `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/report.pdf`;
+}
+
+function buildSharedReportPdfUrl(token: string) {
+  return `${buildSharedReportApiBase(token)}/report.pdf`;
+}
+
 function getSummaryCount(
   rows: ScanLinksSummaryRow[],
   classification: LinkClassification,
@@ -2354,9 +2362,9 @@ const App: React.FC = () => {
   const [reportShareEligible, setReportShareEligible] = useState(false);
   const [reportShareLoading, setReportShareLoading] = useState(false);
   const [reportShareBusy, setReportShareBusy] = useState(false);
-  const [reportShareRevealUrl, setReportShareRevealUrl] = useState<string | null>(
-    null,
-  );
+  const [reportShareRevealUrl, setReportShareRevealUrl] = useState<
+    string | null
+  >(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -2649,10 +2657,7 @@ const App: React.FC = () => {
       const url = sharedReportToken
         ? `${buildSharedReportApiBase(sharedReportToken)}/links?classification=${encodeURIComponent(classification)}&limit=${LINKS_PAGE_SIZE}&offset=${offset}`
         : buildScanLinksUrl(runId, classification, offset, "all", false);
-      const res = await reportFetch(
-        url,
-        { cache: "no-store" },
-      );
+      const res = await reportFetch(url, { cache: "no-store" });
       if (!res.ok) {
         throw new Error(
           `Failed to load ${formatClassification(classification).toLowerCase()} links: ${res.status}`,
@@ -2682,10 +2687,9 @@ const App: React.FC = () => {
               cache: "no-store",
             },
           ),
-          reportFetch(
-            `${reportBase}/technical-diagnostics`,
-            { cache: "no-store" },
-          ),
+          reportFetch(`${reportBase}/technical-diagnostics`, {
+            cache: "no-store",
+          }),
         ]);
 
       if (!runRes.ok) {
@@ -2853,13 +2857,32 @@ const App: React.FC = () => {
           reportFetch(`${reportIssuesBase}?limit=${LINKS_PAGE_SIZE}&offset=0`, {
             cache: "no-store",
           }),
-          reportFetch(`${reportIssuesBase}?category=link_integrity&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=seo_basic&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=robots&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=sitemap&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=ssl_https&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=security_header&limit=1&offset=0`, { cache: "no-store" }),
-          reportFetch(`${reportIssuesBase}?category=performance_basic&limit=1&offset=0`, { cache: "no-store" }),
+          reportFetch(
+            `${reportIssuesBase}?category=link_integrity&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          reportFetch(
+            `${reportIssuesBase}?category=seo_basic&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          reportFetch(`${reportIssuesBase}?category=robots&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          reportFetch(`${reportIssuesBase}?category=sitemap&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          reportFetch(
+            `${reportIssuesBase}?category=ssl_https&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          reportFetch(
+            `${reportIssuesBase}?category=security_header&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          reportFetch(
+            `${reportIssuesBase}?category=performance_basic&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
         ]);
         if (!allRes.ok) {
           throw new Error(`Failed to load issues: ${allRes.status}`);
@@ -11520,6 +11543,9 @@ const App: React.FC = () => {
           justify-content: flex-end;
         }
         .report-button {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
           min-height: 36px;
           padding: 7px 12px;
           border-radius: 999px;
@@ -11529,6 +11555,7 @@ const App: React.FC = () => {
           cursor: pointer;
           font-size: 12px;
           font-weight: 600;
+          text-decoration: none;
           transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
         }
         .report-button:hover {
@@ -12208,8 +12235,8 @@ const App: React.FC = () => {
               <div>
                 <div className="report-title">
                   {isReadOnlySharedReport
-                    ? reportHost ?? "Scan report"
-                    : selectedSiteName ?? reportHost ?? "Scan report"}
+                    ? (reportHost ?? "Scan report")
+                    : (selectedSiteName ?? reportHost ?? "Scan report")}
                 </div>
                 <div className="report-subtitle">
                   {isReadOnlySharedReport
@@ -12241,6 +12268,21 @@ const App: React.FC = () => {
                 </div>
               </div>
               <div className="report-actions">
+                {reportRun?.status === "completed" &&
+                  (isReadOnlySharedReport
+                    ? sharedReportToken
+                    : reportScanRunId) && (
+                    <a
+                      className="report-button"
+                      href={
+                        isReadOnlySharedReport && sharedReportToken
+                          ? buildSharedReportPdfUrl(sharedReportToken)
+                          : buildReportPdfUrl(reportScanRunId!)
+                      }
+                    >
+                      {isReadOnlySharedReport ? "Download PDF" : "Export PDF"}
+                    </a>
+                  )}
                 {!isReadOnlySharedReport && (
                   <button className="report-button" onClick={backToDashboard}>
                     Back to dashboard
@@ -12271,7 +12313,9 @@ const App: React.FC = () => {
                       : !reportScanRunId
                   }
                 >
-                  {isReadOnlySharedReport ? "Copy share link" : "Copy report link"}
+                  {isReadOnlySharedReport
+                    ? "Copy share link"
+                    : "Copy report link"}
                 </button>
               </div>
             </div>
@@ -12281,8 +12325,12 @@ const App: React.FC = () => {
                 <div className="report-card__header">
                   <div>
                     <div className="report-table-title">Share report</div>
-                    <div className="report-table-meta" style={{ marginTop: "4px" }}>
-                      Create a public read-only link for this completed scan run.
+                    <div
+                      className="report-table-meta"
+                      style={{ marginTop: "4px" }}
+                    >
+                      Create a public read-only link for this completed scan
+                      run.
                     </div>
                   </div>
                 </div>
@@ -12348,7 +12396,8 @@ const App: React.FC = () => {
                                 color: "var(--muted)",
                               }}
                             >
-                              This URL is only shown at creation time. Refreshing or reopening this report will hide it.
+                              This URL is only shown at creation time.
+                              Refreshing or reopening this report will hide it.
                             </div>
                           </div>
                         )}
@@ -12363,7 +12412,9 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <div
+                    style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}
+                  >
                     {reportShare ? (
                       <>
                         {reportShareRevealUrl && (
@@ -12708,8 +12759,8 @@ const App: React.FC = () => {
                       <div className="report-label">Site</div>
                       <div className="report-value">
                         {isReadOnlySharedReport
-                          ? reportHost ?? "-"
-                          : selectedSiteName ?? reportHost ?? "-"}
+                          ? (reportHost ?? "-")
+                          : (selectedSiteName ?? reportHost ?? "-")}
                       </div>
                     </div>
                     <div className="report-meta-item">
