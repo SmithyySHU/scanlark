@@ -1,8 +1,13 @@
 import { chromium, type Browser } from "playwright";
 import {
+  formatSiteChangeCategoryLabel,
+  formatSiteChangeImportanceLabel,
   formatIssuePresentation,
+  getSiteById,
+  getSiteByIdForUser,
   getScanCategoryScores,
   getScanCategoryScoresForUser,
+  getSiteChangeEvents,
   getScanLinksSummary,
   getScanLinksSummaryForUser,
   getScanTechnicalDiagnostics,
@@ -15,6 +20,7 @@ import {
   listIgnoredLinksForRunForUser,
   listIssuesForScanRun,
   listIssuesForScanRunForUser,
+  type DbSiteRow,
   type LinkClassification,
   type ResolvedScanIssue,
   type ScanCategoryScore,
@@ -24,6 +30,9 @@ import {
   type ScanIssueSeverity,
   type ScanIssuesSummary,
   type ScanRunRow,
+  type SiteChangeEventCategory,
+  type SiteChangeEventRow,
+  type SiteChangeSummary,
   type ScanTechnicalDiagnosticsSummary,
 } from "@scanlark/db";
 
@@ -54,11 +63,18 @@ type ReportScores = {
 
 type ReportSummaryCounts = Record<LinkClassification, number>;
 
+type ReportPdfSiteMetadata = Pick<
+  DbSiteRow,
+  "site_display_name" | "client_name" | "report_display_name"
+>;
+
 export type ReportPdfDocument = {
   fileName: string;
   title: string;
   generatedAt: string;
   host: string;
+  displayTitle: string;
+  clientName: string | null;
   run: ScanRunRow;
   summaryRows: ScanLinkSummaryRow[];
   summaryCounts: ReportSummaryCounts;
@@ -69,6 +85,8 @@ export type ReportPdfDocument = {
   categoryScores: ScanCategoryScore[];
   technicalDiagnostics: ScanTechnicalDiagnosticsSummary;
   scores: ReportScores;
+  websiteChangesSummary: SiteChangeSummary;
+  websiteChanges: SiteChangeEventRow[];
   topPriorityIssues: IssueWithPresentation[];
   resolvedIssues: IssueWithPresentation[];
   topLinks: Record<"broken" | "blocked" | "no_response", TopLinkRow[]>;
@@ -80,6 +98,7 @@ const PDF_NO_RESPONSE_LINK_LIMIT = 25;
 const PDF_OPEN_ISSUE_LIMIT = 200;
 const PDF_RESOLVED_ISSUE_LIMIT = 20;
 const PDF_URL_DISPLAY_MAX_LENGTH = 48;
+const PDF_WEBSITE_CHANGE_LIMIT = 8;
 const PDF_CATEGORIES: Array<{
   key: ScanCategoryScoreKey;
   label: string;
@@ -225,6 +244,17 @@ function safeHost(url: string) {
   } catch {
     return "unknown";
   }
+}
+
+function getReportDisplayTitle(
+  run: ScanRunRow,
+  site: ReportPdfSiteMetadata | null,
+) {
+  const reportDisplayName = site?.report_display_name?.trim();
+  if (reportDisplayName) return reportDisplayName;
+  const siteDisplayName = site?.site_display_name?.trim();
+  if (siteDisplayName) return siteDisplayName;
+  return safeHost(run.start_url);
 }
 
 function sanitizeFilenameSegment(value: string) {
@@ -381,11 +411,15 @@ function sortPriorityIssues(a: ScanIssue, b: ScanIssue) {
 
 async function buildDocument(
   run: ScanRunRow,
+  site: ReportPdfSiteMetadata | null,
   readers: {
     getSummary(): Promise<ScanLinkSummaryRow[]>;
     getIgnoredTotal(): Promise<number>;
     getTimeoutCount(): Promise<number>;
     getIssues(): Promise<Awaited<ReturnType<typeof listIssuesForScanRun>>>;
+    getWebsiteChanges(): Promise<
+      Awaited<ReturnType<typeof getSiteChangeEvents>>
+    >;
     getCategorySummary(category: ScanIssueCategory): Promise<ScanIssuesSummary>;
     getCategoryScores(): Promise<ScanCategoryScore[]>;
     getDiagnostics(): Promise<ScanTechnicalDiagnosticsSummary>;
@@ -399,6 +433,7 @@ async function buildDocument(
     ignoredTotal,
     timeoutCount,
     issuesResult,
+    websiteChangesResult,
     categoryScores,
     diagnostics,
     brokenLinks,
@@ -410,6 +445,7 @@ async function buildDocument(
     readers.getIgnoredTotal(),
     readers.getTimeoutCount(),
     readers.getIssues(),
+    readers.getWebsiteChanges(),
     readers.getCategoryScores(),
     readers.getDiagnostics(),
     readers.getTopLinks("broken"),
@@ -440,12 +476,16 @@ async function buildDocument(
   const resolvedIssues = issuesResult.resolvedIssues
     .slice(0, PDF_RESOLVED_ISSUE_LIMIT)
     .map(withPresentation);
+  const displayTitle = getReportDisplayTitle(run, site);
+  const clientName = site?.client_name?.trim() || null;
 
   return {
     fileName: buildFileName(run),
-    title: `Scanlark Report for ${safeHost(run.start_url)}`,
+    title: `Scanlark Report for ${displayTitle}`,
     generatedAt: new Date().toISOString(),
     host: safeHost(run.start_url),
+    displayTitle,
+    clientName,
     run,
     summaryRows,
     summaryCounts,
@@ -456,6 +496,11 @@ async function buildDocument(
     categoryScores,
     technicalDiagnostics: diagnostics,
     scores,
+    websiteChangesSummary: websiteChangesResult.summary,
+    websiteChanges: websiteChangesResult.changes.slice(
+      0,
+      PDF_WEBSITE_CHANGE_LIMIT,
+    ),
     topPriorityIssues,
     resolvedIssues,
     topLinks: {
@@ -470,7 +515,8 @@ export async function buildReportPdfDocumentForUser(
   userId: string,
   run: ScanRunRow,
 ) {
-  return buildDocument(run, {
+  const site = await getSiteByIdForUser(userId, run.site_id);
+  return buildDocument(run, site, {
     getSummary: () => getScanLinksSummaryForUser(userId, run.id),
     getIgnoredTotal: async () =>
       (await listIgnoredLinksForRunForUser(userId, run.id, 1, 0)).totalMatching,
@@ -480,6 +526,7 @@ export async function buildReportPdfDocumentForUser(
         limit: PDF_OPEN_ISSUE_LIMIT,
         offset: 0,
       }),
+    getWebsiteChanges: () => getSiteChangeEvents(run.id),
     getCategorySummary: async (category) =>
       (
         await listIssuesForScanRunForUser(userId, run.id, {
@@ -501,7 +548,8 @@ export async function buildReportPdfDocumentForUser(
 }
 
 export async function buildReportPdfDocumentForSharedRun(run: ScanRunRow) {
-  return buildDocument(run, {
+  const site = await getSiteById(run.site_id);
+  return buildDocument(run, site, {
     getSummary: () => getScanLinksSummary(run.id),
     getIgnoredTotal: async () =>
       (await listIgnoredLinksForRun(run.id, 1, 0)).totalMatching,
@@ -511,6 +559,7 @@ export async function buildReportPdfDocumentForSharedRun(run: ScanRunRow) {
         limit: PDF_OPEN_ISSUE_LIMIT,
         offset: 0,
       }),
+    getWebsiteChanges: () => getSiteChangeEvents(run.id),
     getCategorySummary: async (category) =>
       (
         await listIssuesForScanRun(run.id, {
@@ -669,6 +718,88 @@ function renderTopPrioritySection(document: ReportPdfDocument) {
   `;
 }
 
+function renderWebsiteChangesSection(document: ReportPdfDocument) {
+  if (
+    document.websiteChangesSummary.total === 0 &&
+    !document.websiteChangesSummary.highPriorityCount
+  ) {
+    return `
+      <section class="section">
+        <div class="section-heading-group">
+          <div class="section-heading"><h2>Website Changes</h2></div>
+          <div class="section-copy">
+            No structured website changes were recorded between this scan and the previous completed scan.
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  const categoryRows = Object.entries(document.websiteChangesSummary.byCategory)
+    .filter(([, count]) => count > 0)
+    .map(([category, count]) => [
+      escapeHtml(
+        formatSiteChangeCategoryLabel(category as SiteChangeEventCategory),
+      ),
+      escapeHtml(count),
+    ]);
+
+  const changeItems = document.websiteChanges
+    .map(
+      (event) => `
+        <div class="change-item">
+          <div class="change-item__top">
+            <span class="change-pill change-pill--${escapeHtml(event.importance)}">${escapeHtml(
+              formatSiteChangeImportanceLabel(event.importance),
+            )}</span>
+            <span class="change-pill">${escapeHtml(
+              formatSiteChangeCategoryLabel(event.category),
+            )}</span>
+          </div>
+          <div class="change-item__summary">${escapeHtml(event.summary)}</div>
+          ${
+            event.subject_url
+              ? `<div class="change-item__url">${escapeHtml(
+                  formatUrlDisplay(event.subject_url),
+                )}</div>`
+              : ""
+          }
+        </div>
+      `,
+    )
+    .join("");
+
+  return `
+    <section class="section">
+      <div class="section-heading-group">
+        <div class="section-heading"><h2>Website Changes</h2></div>
+        <div class="section-copy">
+          Structured changes detected between this scan and the previous completed scan.
+        </div>
+      </div>
+      <div class="grid metrics metrics--changes">
+        ${renderMetricCard("Total changes", document.websiteChangesSummary.total)}
+        ${renderMetricCard(
+          "High priority",
+          document.websiteChangesSummary.highPriorityCount,
+        )}
+        ${renderMetricCard("Medium", document.websiteChangesSummary.byImportance.medium)}
+        ${renderMetricCard("Low / info", document.websiteChangesSummary.byImportance.low + document.websiteChangesSummary.byImportance.info)}
+      </div>
+      <div class="website-change-grid">
+        <div class="website-change-card">
+          <div class="table-card-title">By category</div>
+          ${renderTable(["Category", "Count"], categoryRows, "No category changes were recorded.")}
+        </div>
+        <div class="website-change-card">
+          <div class="table-card-title">Highlights</div>
+          ${changeItems || `<div class="empty-state">No change highlights were recorded.</div>`}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 export function renderReportPdfHtml(document: ReportPdfDocument) {
   const categoryScoresByKey = new Map(
     document.categoryScores.map((score) => [score.key, score]),
@@ -778,6 +909,12 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
           font-size: 26px;
           line-height: 1.15;
         }
+        .hero-client {
+          margin-top: 6px;
+          color: var(--muted);
+          font-size: 12px;
+          font-weight: 600;
+        }
         .hero-subtitle {
           margin-top: 10px;
           color: var(--muted);
@@ -809,6 +946,9 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
         }
         .grid.metrics {
           grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .grid.metrics--changes {
+          margin-top: 0;
         }
         .metric-card {
           border: 1px solid var(--border);
@@ -874,6 +1014,70 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
         }
         .section-copy {
           color: var(--muted);
+        }
+        .website-change-grid {
+          display: grid;
+          grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+          gap: 12px;
+          margin-top: 12px;
+        }
+        .website-change-card {
+          display: grid;
+          gap: 8px;
+        }
+        .table-card-title {
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--ink);
+        }
+        .change-item {
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          padding: 10px 12px;
+          background: var(--panel);
+          display: grid;
+          gap: 6px;
+        }
+        .change-item + .change-item {
+          margin-top: 8px;
+        }
+        .change-item__top {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .change-item__summary {
+          font-weight: 600;
+          color: var(--ink);
+        }
+        .change-item__url {
+          color: var(--muted);
+          font-size: 10px;
+          word-break: break-word;
+        }
+        .change-pill {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 8px;
+          border-radius: 999px;
+          font-size: 9px;
+          font-weight: 700;
+          border: 1px solid var(--border);
+          background: #fff;
+          color: var(--ink);
+        }
+        .change-pill--high {
+          color: var(--danger);
+          border-color: rgba(180, 35, 24, 0.2);
+        }
+        .change-pill--medium {
+          color: var(--warning);
+          border-color: rgba(181, 71, 8, 0.2);
+        }
+        .change-pill--low,
+        .change-pill--info {
+          color: var(--accent);
+          border-color: rgba(31, 111, 235, 0.18);
         }
         .score-summary {
           margin-top: 14px;
@@ -983,7 +1187,12 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
           <div class="hero-top">
             <div>
               <div class="brand">Scanlark Report</div>
-              <h1>${escapeHtml(document.host)}</h1>
+              <h1>${escapeHtml(document.displayTitle)}</h1>
+              ${
+                document.clientName
+                  ? `<div class="hero-client">${escapeHtml(document.clientName)}</div>`
+                  : ""
+              }
               <div class="hero-subtitle">
                 Client-friendly export of the completed scan report, including issue priorities, scoring, evidence summary, and capped raw link evidence.
               </div>
@@ -1077,6 +1286,7 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
           )}
         </section>
 
+        ${renderWebsiteChangesSection(document)}
         ${renderTopPrioritySection(document)}
 
         <section class="section">

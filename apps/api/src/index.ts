@@ -3,9 +3,12 @@ import express from "express";
 import type { Response } from "express";
 import cors from "cors";
 import type {
+  DbSiteRow,
   ExportClassification,
   IgnoreRuleType,
   LinkClassification,
+  SiteChangeEventCategory,
+  SiteChangeEventImportance,
   ScanIssueCategory,
   ScanIssueType,
   ScanIssueSeverity,
@@ -25,6 +28,8 @@ import {
   disableReportShareForRunForUser,
   enqueueExistingScanRunIfIdle,
   enqueueManualScanIfIdle,
+  formatSiteChangeCategoryLabel,
+  formatSiteChangeImportanceLabel,
   formatIssuePresentation,
   getDiffBetweenRunsForUser,
   getBaselineRunForDiff,
@@ -52,6 +57,7 @@ import {
   getScanDiff,
   getScanRunByIdForUser,
   getScanRunById,
+  getSiteChangeEvents,
   getScanTechnicalDiagnostics,
   getSiteByIdForUser,
   getSiteById,
@@ -88,6 +94,7 @@ import {
   updateSiteScheduleForUser,
   updateUptimeMonitorSettingsForUser,
   updateScanLinkAfterRecheck,
+  updateSiteMetadataForUser,
   upsertIgnoredLink,
   validateSafeRegexPattern,
 } from "@scanlark/db";
@@ -401,6 +408,63 @@ function serializeReportShare(share: ReportShareApiRow) {
   };
 }
 
+type ReportSafeSiteMetadata = Pick<
+  DbSiteRow,
+  "site_display_name" | "client_name" | "report_display_name"
+>;
+
+function serializeReportSafeSiteMetadata(site: ReportSafeSiteMetadata | null) {
+  if (!site) return null;
+  return {
+    site_display_name: site.site_display_name ?? null,
+    client_name: site.client_name ?? null,
+    report_display_name: site.report_display_name ?? null,
+  };
+}
+
+function serializeBaselineRun(
+  run: {
+    id: string;
+    started_at: Date;
+    finished_at: Date | null;
+  } | null,
+) {
+  if (!run) return null;
+  return {
+    id: run.id,
+    started_at: run.started_at.toISOString(),
+    finished_at: run.finished_at ? run.finished_at.toISOString() : null,
+  };
+}
+
+function serializeSiteChangeEvent(event: {
+  id: string;
+  category: SiteChangeEventCategory;
+  change_type: string;
+  importance: SiteChangeEventImportance;
+  subject_key: string;
+  subject_url: string | null;
+  previous_value_json: Record<string, unknown> | null;
+  current_value_json: Record<string, unknown> | null;
+  summary: string;
+  created_at: Date;
+}) {
+  return {
+    id: event.id,
+    category: event.category,
+    categoryLabel: formatSiteChangeCategoryLabel(event.category),
+    change_type: event.change_type,
+    importance: event.importance,
+    importanceLabel: formatSiteChangeImportanceLabel(event.importance),
+    subject_key: event.subject_key,
+    subject_url: event.subject_url,
+    previous_value_json: event.previous_value_json ?? null,
+    current_value_json: event.current_value_json ?? null,
+    summary: event.summary,
+    created_at: event.created_at.toISOString(),
+  };
+}
+
 function setPublicReportHeaders(res: Response) {
   res.setHeader("X-Robots-Tag", "noindex, nofollow");
 }
@@ -410,6 +474,14 @@ function buildSharedReportUrl(token: string) {
     process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
   const base = appUrl.replace(/\/+$/, "");
   return `${base}/shared-reports/${encodeURIComponent(token)}`;
+}
+
+function parseOptionalTextBodyValue(value: unknown) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
 }
 
 async function rebuildIssuesForRun(scanRunId: string) {
@@ -652,7 +724,11 @@ app.get("/public/reports/:token", async (req, res) => {
     if (!access) return;
     setPublicReportHeaders(res);
     await recordReportShareView(access.share.id);
-    return res.json(serializeScanRun(access.run));
+    const site = await getSiteById(access.run.site_id);
+    return res.json({
+      scanRun: serializeScanRun(access.run),
+      site: serializeReportSafeSiteMetadata(site),
+    });
   } catch (err: unknown) {
     console.error("Error in GET /public/reports/:token", err);
     return sendInternalError(res, "Failed to fetch shared report", err);
@@ -783,6 +859,37 @@ app.get("/public/reports/:token/technical-diagnostics", async (req, res) => {
     return sendInternalError(
       res,
       "Failed to fetch shared technical diagnostics",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/changes", async (req, res) => {
+  try {
+    const access = await requireSharedReportAccess(req, res);
+    if (!access) return;
+    if (access.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_ready",
+        "Only completed scan runs can show website changes",
+      );
+    }
+    setPublicReportHeaders(res);
+    const changes = await getSiteChangeEvents(access.run.id);
+    return res.json({
+      scanRun: serializeScanRun(access.run),
+      baselineRun: serializeBaselineRun(changes.baselineRun),
+      summary: changes.summary,
+      changes: changes.changes.map(serializeSiteChangeEvent),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/changes", err);
+    return sendInternalError(
+      res,
+      "Failed to fetch shared website changes",
       err,
     );
   }
@@ -1934,6 +2041,8 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
         latestCategoryScores: [],
         latestTechnicalDiagnostics: null,
         latestDiffSummary: null,
+        latestWebsiteChangeSummary: null,
+        latestWebsiteChanges: [],
         baselineRun: null,
         history: history.map(serializeScanRun),
         notificationSettings,
@@ -1949,6 +2058,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       latestTechnicalDiagnostics,
       latestCategoryScores,
       baselineRun,
+      latestWebsiteChanges,
     ] = await Promise.all([
       getScanLinksSummaryForUser(userId, latestRun.id),
       listIssuesForScanRunForUser(userId, latestRun.id, {
@@ -1958,6 +2068,9 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       getScanTechnicalDiagnosticsForUser(userId, latestRun.id),
       getScanCategoryScoresForUser(userId, latestRun.id),
       getBaselineRunForDiff(siteId, latestRun.id),
+      latestRun.status === "completed"
+        ? getSiteChangeEvents(latestRun.id)
+        : Promise.resolve(null),
     ]);
 
     const categoryEntries = await Promise.all(
@@ -1992,6 +2105,11 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
       latestCategoryScores,
       latestTechnicalDiagnostics,
       latestDiffSummary,
+      latestWebsiteChangeSummary: latestWebsiteChanges?.summary ?? null,
+      latestWebsiteChanges:
+        latestWebsiteChanges?.changes
+          .slice(0, 3)
+          .map(serializeSiteChangeEvent) ?? [],
       baselineRun,
       history: history.map(serializeScanRun),
       notificationSettings,
@@ -2171,9 +2289,11 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
       "blocked",
       20,
     );
+    const site = await getSiteByIdForUser(userId, run.site_id);
 
     return res.json({
       scanRun: serializeScanRun(run),
+      site: serializeReportSafeSiteMetadata(site),
       summary: { byClassification, byStatusCode },
       topBroken: topBroken.map(serializeTopRow),
       topBlocked: topBlocked.map(serializeTopRow),
@@ -2182,6 +2302,35 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/report", err);
     return sendInternalError(res, "Failed to build report", err);
+  }
+});
+
+app.get("/scan-runs/:scanRunId/changes", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    if (result.run.status !== "completed") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_ready",
+        "Only completed scan runs can show website changes",
+      );
+    }
+
+    const changes = await getSiteChangeEvents(scanRunId);
+    return res.json({
+      scanRun: serializeScanRun(result.run),
+      baselineRun: serializeBaselineRun(changes.baselineRun),
+      summary: changes.summary,
+      changes: changes.changes.map(serializeSiteChangeEvent),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/changes", err);
+    return sendInternalError(res, "Failed to fetch website changes", err);
   }
 });
 
@@ -2376,17 +2525,108 @@ app.post("/sites", async (req, res) => {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
     const url = req.body.url as string | undefined;
+    const siteDisplayName = parseOptionalTextBodyValue(
+      req.body.siteDisplayName,
+    );
+    const clientName = parseOptionalTextBodyValue(req.body.clientName);
+    const reportDisplayName = parseOptionalTextBodyValue(
+      req.body.reportDisplayName,
+    );
+    const internalNotes = parseOptionalTextBodyValue(req.body.internalNotes);
+    const hasInvalidMetadataField =
+      (Object.prototype.hasOwnProperty.call(
+        req.body ?? {},
+        "siteDisplayName",
+      ) &&
+        siteDisplayName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(req.body ?? {}, "clientName") &&
+        clientName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(
+        req.body ?? {},
+        "reportDisplayName",
+      ) &&
+        reportDisplayName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(req.body ?? {}, "internalNotes") &&
+        internalNotes === undefined);
 
     if (!url) {
       return sendApiError(res, 400, "missing_url", "Missing 'url' in body");
     }
+    if (hasInvalidMetadataField) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_site_metadata",
+        "Optional site metadata fields must be strings when provided",
+      );
+    }
 
-    const site = await createSiteForUser(userId, url);
+    const site = await createSiteForUser(userId, url, {
+      siteDisplayName,
+      clientName,
+      reportDisplayName,
+      internalNotes,
+    });
 
     res.status(201).json({ site });
   } catch (err: unknown) {
     console.error("Error creating site", err);
     return sendInternalError(res, "Failed to create site", err);
+  }
+});
+
+app.patch("/sites/:siteId", async (req, res) => {
+  const siteId = req.params.siteId;
+
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const siteDisplayName = parseOptionalTextBodyValue(
+      req.body.siteDisplayName,
+    );
+    const clientName = parseOptionalTextBodyValue(req.body.clientName);
+    const reportDisplayName = parseOptionalTextBodyValue(
+      req.body.reportDisplayName,
+    );
+    const internalNotes = parseOptionalTextBodyValue(req.body.internalNotes);
+    const hasInvalidMetadataField =
+      (Object.prototype.hasOwnProperty.call(
+        req.body ?? {},
+        "siteDisplayName",
+      ) &&
+        siteDisplayName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(req.body ?? {}, "clientName") &&
+        clientName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(
+        req.body ?? {},
+        "reportDisplayName",
+      ) &&
+        reportDisplayName === undefined) ||
+      (Object.prototype.hasOwnProperty.call(req.body ?? {}, "internalNotes") &&
+        internalNotes === undefined);
+    if (hasInvalidMetadataField) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_site_metadata",
+        "Optional site metadata fields must be strings when provided",
+      );
+    }
+    const site = await updateSiteMetadataForUser(userId, siteId, {
+      siteDisplayName,
+      clientName,
+      reportDisplayName,
+      internalNotes,
+    });
+    if (!site) {
+      return sendNotFound(res);
+    }
+    return res.json({ site });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /sites/:siteId", err);
+    return sendInternalError(res, "Failed to update site", err);
   }
 });
 

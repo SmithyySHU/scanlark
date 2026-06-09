@@ -77,6 +77,10 @@ interface Site {
   id: string;
   user_id: string;
   url: string;
+  site_display_name: string | null;
+  client_name: string | null;
+  report_display_name: string | null;
+  internal_notes: string | null;
   created_at: string;
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
@@ -103,6 +107,58 @@ interface SitesResponse {
   userId?: string;
   count: number;
   sites: Site[];
+}
+
+interface ReportSitePublicMetadata {
+  site_display_name: string | null;
+  client_name: string | null;
+  report_display_name: string | null;
+}
+
+interface ReportOverviewResponse {
+  scanRun: ScanRunSummary;
+  site: ReportSitePublicMetadata | null;
+}
+
+type WebsiteChangeCategory =
+  | "page_metadata"
+  | "page_inventory"
+  | "robots"
+  | "sitemap"
+  | "ssl_https"
+  | "security_headers"
+  | "performance_basic";
+
+type WebsiteChangeImportance = "high" | "medium" | "low" | "info";
+
+interface WebsiteChangeEvent {
+  id: string;
+  category: WebsiteChangeCategory;
+  categoryLabel: string;
+  change_type: string;
+  importance: WebsiteChangeImportance;
+  importanceLabel: string;
+  subject_key: string;
+  subject_url: string | null;
+  previous_value_json: Record<string, unknown> | null;
+  current_value_json: Record<string, unknown> | null;
+  summary: string;
+  created_at: string;
+}
+
+interface WebsiteChangeSummary {
+  total: number;
+  byImportance: Record<WebsiteChangeImportance, number>;
+  byCategory: Record<WebsiteChangeCategory, number>;
+  highPriorityCount: number;
+}
+
+interface WebsiteChangesResponse {
+  scanRun: ScanRunSummary;
+  baselineRun: ScanDiffRun | null;
+  summary: WebsiteChangeSummary;
+  changes: WebsiteChangeEvent[];
+  generatedAt: string;
 }
 
 interface ScanRunSummary {
@@ -575,6 +631,8 @@ interface DashboardSummaryResponse {
   latestCategoryScores: ScanCategoryScore[];
   latestTechnicalDiagnostics: ScanTechnicalDiagnosticsResponse | null;
   latestDiffSummary: ScanDiffResponse["summary"] | null;
+  latestWebsiteChangeSummary: WebsiteChangeSummary | null;
+  latestWebsiteChanges: WebsiteChangeEvent[];
   baselineRun: ScanDiffRun | null;
   history: ScanRunSummary[];
   notificationSettings: {
@@ -1617,6 +1675,49 @@ function normalizeSiteNotifyOn(site: Site): Site {
   };
 }
 
+function getPersistedSiteDisplayName(site: {
+  site_display_name?: string | null;
+}) {
+  const value = site.site_display_name?.trim();
+  return value ? value : null;
+}
+
+function getSiteClientName(site: { client_name?: string | null }) {
+  const value = site.client_name?.trim();
+  return value ? value : null;
+}
+
+function getSiteLabel(
+  site: Pick<Site, "id" | "url" | "site_display_name">,
+  fallbackNames: Record<string, string>,
+) {
+  const persisted = getPersistedSiteDisplayName(site);
+  if (persisted) return persisted;
+  const fallback = fallbackNames[site.id]?.trim();
+  if (fallback) return fallback;
+  return site.url;
+}
+
+function getSiteSelectorLabel(
+  site: Pick<Site, "id" | "url" | "site_display_name" | "client_name">,
+  fallbackNames: Record<string, string>,
+) {
+  const siteLabel = getSiteLabel(site, fallbackNames);
+  const clientName = getSiteClientName(site);
+  return clientName ? `${clientName} - ${siteLabel}` : siteLabel;
+}
+
+function getReportDisplayTitle(
+  site: ReportSitePublicMetadata | null,
+  host: string | null,
+) {
+  const reportDisplayName = site?.report_display_name?.trim();
+  if (reportDisplayName) return reportDisplayName;
+  const siteDisplayName = site?.site_display_name?.trim();
+  if (siteDisplayName) return siteDisplayName;
+  return host;
+}
+
 function getStorageKey(prefix: string, userId: string) {
   return `${prefix}${userId}`;
 }
@@ -2281,6 +2382,15 @@ const App: React.FC = () => {
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
+  const [siteSearchQuery, setSiteSearchQuery] = useState("");
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
+  const [siteEditorDisplayName, setSiteEditorDisplayName] = useState("");
+  const [siteEditorClientName, setSiteEditorClientName] = useState("");
+  const [siteEditorReportDisplayName, setSiteEditorReportDisplayName] =
+    useState("");
+  const [siteEditorInternalNotes, setSiteEditorInternalNotes] = useState("");
+  const [siteEditorError, setSiteEditorError] = useState<string | null>(null);
+  const [siteEditorSaving, setSiteEditorSaving] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingSiteUrl, setOnboardingSiteUrl] = useState("");
@@ -2317,6 +2427,8 @@ const App: React.FC = () => {
   const [reportRunData, setReportRunData] = useState<ScanRunSummary | null>(
     null,
   );
+  const [reportSiteMeta, setReportSiteMeta] =
+    useState<ReportSitePublicMetadata | null>(null);
   const [reportSummaryRows, setReportSummaryRows] = useState<
     ScanLinksSummaryRow[]
   >([]);
@@ -2356,6 +2468,8 @@ const App: React.FC = () => {
   );
   const [reportTechnicalDiagnostics, setReportTechnicalDiagnostics] =
     useState<Phase0Diagnostics | null>(null);
+  const [reportWebsiteChanges, setReportWebsiteChanges] =
+    useState<WebsiteChangesResponse | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportShare, setReportShare] = useState<ReportShare | null>(null);
@@ -2635,6 +2749,7 @@ const App: React.FC = () => {
     setReportIgnoredSection(createEmptyReportIgnoredSection());
     setReportIssues(EMPTY_REPORT_ISSUES_STATE);
     setReportTechnicalDiagnostics(null);
+    setReportWebsiteChanges(null);
     setReportFilteredIssueStates({});
     setReportIssueFilter("all");
     setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
@@ -2673,9 +2788,12 @@ const App: React.FC = () => {
       const reportBase = sharedReportToken
         ? buildSharedReportApiBase(sharedReportToken)
         : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
-      const [runRes, summaryRes, ignoredRes, diagnosticsRes] =
+      const overviewUrl = sharedReportToken
+        ? reportBase
+        : `${reportBase}/report`;
+      const [runRes, summaryRes, ignoredRes, diagnosticsRes, changesRes] =
         await Promise.all([
-          reportFetch(reportBase, {
+          reportFetch(overviewUrl, {
             cache: "no-store",
           }),
           reportFetch(`${reportBase}/links/summary`, { cache: "no-store" }),
@@ -2688,6 +2806,9 @@ const App: React.FC = () => {
             },
           ),
           reportFetch(`${reportBase}/technical-diagnostics`, {
+            cache: "no-store",
+          }),
+          reportFetch(`${reportBase}/changes`, {
             cache: "no-store",
           }),
         ]);
@@ -2715,20 +2836,27 @@ const App: React.FC = () => {
           `Failed to load technical diagnostics: ${diagnosticsRes.status}`,
         );
       }
+      if (!changesRes.ok && changesRes.status !== 400) {
+        throw new Error(`Failed to load website changes: ${changesRes.status}`);
+      }
 
-      const run = (await runRes.json()) as ScanRunSummary;
+      const overview = (await runRes.json()) as ReportOverviewResponse;
       const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
       const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
       const diagnosticsData =
         (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
+      const changesData = changesRes.ok
+        ? ((await changesRes.json()) as WebsiteChangesResponse)
+        : null;
 
-      setReportRunData(run);
-      setReportScanRunId(run.id);
+      setReportRunData(overview.scanRun);
+      setReportSiteMeta(overview.site ?? null);
+      setReportScanRunId(overview.scanRun.id);
       setReportSummaryRows(summaryData.summary ?? []);
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
       setReportTechnicalDiagnostics({
-        scanRunId: run.id,
+        scanRunId: overview.scanRun.id,
         ok: null,
         broken: null,
         blocked: null,
@@ -2746,8 +2874,9 @@ const App: React.FC = () => {
           ? new Date(diagnosticsData.loadedAt).getTime()
           : Date.now(),
       });
+      setReportWebsiteChanges(changesData);
 
-      return run;
+      return overview.scanRun;
     },
     [reportFetch, sharedReportToken],
   );
@@ -3173,6 +3302,7 @@ const App: React.FC = () => {
     if (viewMode !== "report") return;
     if (!reportScanRunId && !sharedReportToken) {
       setReportRunData(null);
+      setReportSiteMeta(null);
       setReportSummaryRows([]);
       setReportIgnoredTotal(null);
       setReportLastLoadedAt(null);
@@ -4006,6 +4136,9 @@ const App: React.FC = () => {
   const reportSummary = summarizeReportClassifications(reportSummaryRows);
   const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
   const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
+  const reportDisplayTitle =
+    getReportDisplayTitle(reportSiteMeta, reportHost) ?? "Scan report";
+  const reportClientName = getSiteClientName(reportSiteMeta ?? {});
   const reportIssueSummary = reportIssues.summary;
   const reportLinkIntegrityIssueSummary =
     reportIssues.summariesByCategory.link_integrity ?? null;
@@ -4057,6 +4190,8 @@ const App: React.FC = () => {
   const reportCategoryScoresByKey = Object.fromEntries(
     reportCategoryScores.map((score) => [score.key, score]),
   ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
+  const reportWebsiteChangeSummary = reportWebsiteChanges?.summary ?? null;
+  const reportWebsiteChangeRows = reportWebsiteChanges?.changes ?? [];
   const reportHighPriorityCount =
     (reportIssueSummary?.bySeverity.critical ?? 0) +
     (reportIssueSummary?.bySeverity.high ?? 0);
@@ -4124,8 +4259,23 @@ const App: React.FC = () => {
     [sites, selectedSiteId],
   );
   const selectedSiteName = selectedSite
-    ? (siteNameById[selectedSite.id] ?? null)
+    ? getSiteLabel(selectedSite, siteNameById)
     : null;
+  const filteredManagedSites = useMemo(() => {
+    const query = siteSearchQuery.trim().toLowerCase();
+    if (!query) return sites;
+    return sites.filter((site) => {
+      const haystack = [
+        getSiteLabel(site, siteNameById),
+        getSiteClientName(site),
+        site.url,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [siteNameById, siteSearchQuery, sites]);
   const currentLearnArticle = useMemo(
     () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
     [learnSlug],
@@ -4295,6 +4445,12 @@ const App: React.FC = () => {
   const dashboardLatestDiffSummary = dashboardSummaryDataReady
     ? (dashboardSummary?.latestDiffSummary ?? null)
     : null;
+  const dashboardLatestWebsiteChangeSummary = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestWebsiteChangeSummary ?? null)
+    : null;
+  const dashboardLatestWebsiteChanges = dashboardSummaryDataReady
+    ? (dashboardSummary?.latestWebsiteChanges ?? [])
+    : [];
   const dashboardScores = calculateReportScores(
     dashboardLatestRun,
     dashboardIssueSummary,
@@ -5280,6 +5436,125 @@ const App: React.FC = () => {
     );
   };
 
+  const renderReportWebsiteChanges = () => {
+    if (!reportRun || reportRun.status !== "completed") {
+      return null;
+    }
+
+    if (!reportWebsiteChanges) {
+      return (
+        <div className="report-card">
+          <div className="report-card__header">
+            <div>
+              <div className="report-table-title">Website changes</div>
+              <div className="report-table-meta" style={{ marginTop: "4px" }}>
+                Loading structured changes from the previous completed scan.
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (!reportWebsiteChanges.baselineRun) {
+      return (
+        <div className="report-card">
+          <div className="report-card__header">
+            <div>
+              <div className="report-table-title">Website changes</div>
+              <div className="report-table-meta" style={{ marginTop: "4px" }}>
+                No baseline scan yet. Website changes will appear once this site
+                has at least two completed scans.
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const baselineRun = reportWebsiteChanges.baselineRun;
+
+    return (
+      <div className="report-card">
+        <div className="report-card__header">
+          <div>
+            <div className="report-table-title">Website changes</div>
+            <div className="report-table-meta" style={{ marginTop: "4px" }}>
+              Passive changes detected between this scan and the previous
+              completed scan.
+            </div>
+          </div>
+        </div>
+        <div className="report-mini-stats">
+          <div className="report-mini-stat">
+            <span>Total changes</span>
+            <strong>{reportWebsiteChangeSummary?.total ?? 0}</strong>
+          </div>
+          <div className="report-mini-stat">
+            <span>High priority</span>
+            <strong>
+              {reportWebsiteChangeSummary?.highPriorityCount ?? 0}
+            </strong>
+          </div>
+          <div className="report-mini-stat">
+            <span>Medium</span>
+            <strong>
+              {reportWebsiteChangeSummary?.byImportance.medium ?? 0}
+            </strong>
+          </div>
+          <div className="report-mini-stat">
+            <span>Low / info</span>
+            <strong>
+              {(reportWebsiteChangeSummary?.byImportance.low ?? 0) +
+                (reportWebsiteChangeSummary?.byImportance.info ?? 0)}
+            </strong>
+          </div>
+        </div>
+        {reportWebsiteChangeRows.length === 0 ? (
+          <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+            No structured website changes were recorded for this comparison.
+          </div>
+        ) : (
+          <div className="report-priority-list">
+            {reportWebsiteChangeRows.map((change) => (
+              <div
+                key={`website-change:${change.id}`}
+                className="report-priority-item"
+              >
+                <div className="report-priority-item__top">
+                  <div className="report-priority-item__title">
+                    {change.summary}
+                  </div>
+                  <div className="report-issue-badges">
+                    <span className="report-badge report-badge--status">
+                      {change.categoryLabel}
+                    </span>
+                    <span
+                      className={`report-badge report-badge--change change-${change.importance === "high" ? "new" : change.importance === "medium" ? "existing" : "resolved"}`}
+                    >
+                      {change.importanceLabel}
+                    </span>
+                  </div>
+                </div>
+                <div className="report-priority-item__meta">
+                  <span>Baseline {formatDate(baselineRun.finished_at)}</span>
+                  <span>{formatDate(change.created_at)}</span>
+                </div>
+                {change.subject_url && (
+                  <div className="report-priority-item__desc">
+                    {renderReportUrlCell(change.subject_url, {
+                      copyLabel: "Copied changed URL",
+                    })}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const resultsTitleCount =
     resultsView === "changes"
       ? diffChangeItems.length +
@@ -5797,6 +6072,7 @@ const App: React.FC = () => {
     setResults([]);
     setIgnoredResults([]);
     setReportRunData(null);
+    setReportSiteMeta(null);
     setReportSummaryRows([]);
     setReportIgnoredTotal(null);
     setReportLastLoadedAt(null);
@@ -5899,6 +6175,36 @@ const App: React.FC = () => {
       saveStorageMap(siteNamesStorageKey, next);
       return next;
     });
+  }
+
+  function clearPersistedSiteName(siteId: string) {
+    if (!siteNamesStorageKey) return;
+    setSiteNameById((prev) => {
+      if (!(siteId in prev)) return prev;
+      const next = { ...prev };
+      delete next[siteId];
+      saveStorageMap(siteNamesStorageKey, next);
+      return next;
+    });
+  }
+
+  function beginEditingSite(site: Site) {
+    setEditingSiteId(site.id);
+    setSiteEditorDisplayName(site.site_display_name ?? "");
+    setSiteEditorClientName(site.client_name ?? "");
+    setSiteEditorReportDisplayName(site.report_display_name ?? "");
+    setSiteEditorInternalNotes(site.internal_notes ?? "");
+    setSiteEditorError(null);
+  }
+
+  function resetSiteEditor() {
+    setEditingSiteId(null);
+    setSiteEditorDisplayName("");
+    setSiteEditorClientName("");
+    setSiteEditorReportDisplayName("");
+    setSiteEditorInternalNotes("");
+    setSiteEditorError(null);
+    setSiteEditorSaving(false);
   }
 
   function clearOnboardingState() {
@@ -6717,7 +7023,10 @@ const App: React.FC = () => {
     const res = await apiFetch(`${API_BASE}/sites`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url, name: name?.trim() || undefined }),
+      body: JSON.stringify({
+        url,
+        siteDisplayName: name?.trim() || undefined,
+      }),
     });
 
     if (!res.ok) {
@@ -6748,8 +7057,57 @@ const App: React.FC = () => {
     resetOccurrencesState();
     setHistory([]);
     void loadHistory(site.id, { preserveSelection: false });
-    if (name) {
+    if (normalized.site_display_name) {
+      clearPersistedSiteName(normalized.id);
+    } else if (name) {
       persistSiteName(site.id, name);
+    }
+  }
+
+  async function handleSaveSiteMetadata(siteId: string) {
+    setSiteEditorSaving(true);
+    setSiteEditorError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            siteDisplayName: siteEditorDisplayName,
+            clientName: siteEditorClientName,
+            reportDisplayName: siteEditorReportDisplayName,
+            internalNotes: siteEditorInternalNotes,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to update site: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as { site: Site };
+      const normalized = normalizeSiteNotifyOn(data.site);
+      setSites((prev) =>
+        prev.map((site) => (site.id === normalized.id ? normalized : site)),
+      );
+      if (normalized.site_display_name) {
+        clearPersistedSiteName(normalized.id);
+      }
+      if (!sharedReportToken && reportRunData?.site_id === normalized.id) {
+        setReportSiteMeta({
+          site_display_name: normalized.site_display_name,
+          client_name: normalized.client_name,
+          report_display_name: normalized.report_display_name,
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["dashboardSummary", siteId] });
+      resetSiteEditor();
+      pushToast("Site details saved", "success");
+    } catch (err: unknown) {
+      setSiteEditorError(getErrorMessage(err, "Failed to update site"));
+      setSiteEditorSaving(false);
     }
   }
 
@@ -6822,16 +7180,32 @@ const App: React.FC = () => {
     }
   }
 
-  async function handleCreateSampleSite() {
+  async function ensureSampleSiteSelected() {
     const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
     if (existing) {
       await handleSelectSite(existing);
-      return;
+      return existing;
     }
+    const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+    applyCreatedSite(site, SAMPLE_SITE_NAME);
+    return site;
+  }
+
+  function openDashboardWorkspace() {
+    setViewMode("dashboard");
+    setRoute("app");
+    setAppSection("dashboard");
+    setSharedReportToken(null);
+    setLearnSlug(null);
+  }
+
+  async function handleCreateSampleSite() {
     try {
       setCreatingSite(true);
-      const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
-      applyCreatedSite(site, SAMPLE_SITE_NAME);
+      setCreateError(null);
+      await ensureSampleSiteSelected();
+      openDashboardWorkspace();
+      setAddSiteOpen(false);
       pushToast("Sample site added", "success");
     } catch (err: unknown) {
       setCreateError(getErrorMessage(err, "Failed to add sample site"));
@@ -6862,13 +7236,8 @@ const App: React.FC = () => {
     setOnboardingWorking(true);
     setOnboardingError(null);
     try {
-      const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
-      if (existing) {
-        await handleSelectSite(existing);
-      } else {
-        const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
-        applyCreatedSite(site, SAMPLE_SITE_NAME);
-      }
+      await ensureSampleSiteSelected();
+      openDashboardWorkspace();
       setOnboardingStep(1);
     } catch (err: unknown) {
       setOnboardingError(getErrorMessage(err, "Failed to add sample site"));
@@ -6931,6 +7300,10 @@ const App: React.FC = () => {
         setActiveRunId(null);
         activeRunIdRef.current = null;
       }
+      if (editingSiteId === siteId) {
+        resetSiteEditor();
+      }
+      clearPersistedSiteName(siteId);
 
       await loadSites();
     } catch (err: unknown) {
@@ -7446,6 +7819,7 @@ const App: React.FC = () => {
     setSharedReportToken(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
+    setReportSiteMeta(null);
     setReportSummaryRows([]);
     setReportIgnoredTotal(null);
     setReportLastLoadedAt(null);
@@ -7465,6 +7839,7 @@ const App: React.FC = () => {
     setSharedReportToken(null);
     setReportScanRunId(null);
     setReportRunData(null);
+    setReportSiteMeta(null);
     setReportSummaryRows([]);
     setReportIgnoredTotal(null);
     setReportLastLoadedAt(null);
@@ -9854,6 +10229,37 @@ const App: React.FC = () => {
           font-size: 24px;
           line-height: 1;
         }
+        .dashboard-website-change-list {
+          display: grid;
+          gap: 10px;
+        }
+        .dashboard-website-change-item {
+          padding: 12px 14px;
+          border-radius: 14px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 76%,
+            rgba(255, 255, 255, 0.03)
+          );
+          font-size: 12px;
+          line-height: 1.5;
+          color: var(--text);
+        }
+        .dashboard-website-change-item__meta {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          margin-bottom: 4px;
+          color: var(--text-muted);
+          font-size: 11px;
+        }
+        .dashboard-website-change-item__meta strong {
+          color: var(--text);
+          font-size: 11px;
+          font-family: inherit;
+          line-height: 1.4;
+        }
         .category-status-card__header {
           display: flex;
           justify-content: space-between;
@@ -12233,11 +12639,19 @@ const App: React.FC = () => {
           <div className="report-page">
             <div className="report-header">
               <div>
-                <div className="report-title">
-                  {isReadOnlySharedReport
-                    ? (reportHost ?? "Scan report")
-                    : (selectedSiteName ?? reportHost ?? "Scan report")}
-                </div>
+                <div className="report-title">{reportDisplayTitle}</div>
+                {reportClientName && (
+                  <div
+                    style={{
+                      marginTop: "6px",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      color: "var(--muted)",
+                    }}
+                  >
+                    {reportClientName}
+                  </div>
+                )}
                 <div className="report-subtitle">
                   {isReadOnlySharedReport
                     ? "Report shared via Scanlark. This read-only view keeps the same evidence and findings without dashboard access."
@@ -12261,6 +12675,9 @@ const App: React.FC = () => {
                   )}
                   {reportHost && (
                     <StatusBadge label={reportHost} tone="default" />
+                  )}
+                  {reportClientName && (
+                    <StatusBadge label={reportClientName} tone="default" />
                   )}
                   {reportDateLabel !== "-" && (
                     <StatusBadge label={reportDateLabel} tone="default" />
@@ -12757,12 +13174,14 @@ const App: React.FC = () => {
                     </div>
                     <div className="report-meta-item">
                       <div className="report-label">Site</div>
-                      <div className="report-value">
-                        {isReadOnlySharedReport
-                          ? (reportHost ?? "-")
-                          : (selectedSiteName ?? reportHost ?? "-")}
-                      </div>
+                      <div className="report-value">{reportDisplayTitle}</div>
                     </div>
+                    {reportClientName && (
+                      <div className="report-meta-item">
+                        <div className="report-label">Client</div>
+                        <div className="report-value">{reportClientName}</div>
+                      </div>
+                    )}
                     <div className="report-meta-item">
                       <div className="report-label">Checked links</div>
                       <div className="report-value">
@@ -12894,6 +13313,7 @@ const App: React.FC = () => {
                       </div>
                     )}
                     {renderTopPriorityIssues()}
+                    {renderReportWebsiteChanges()}
                     {renderReportIssuesSection()}
 
                     <div className="report-card">
@@ -13164,7 +13584,7 @@ const App: React.FC = () => {
                     {!selectedSiteId && <option value="">Select a site</option>}
                     {sites.map((site) => (
                       <option key={site.id} value={site.id}>
-                        {(siteNameById[site.id] ?? site.url).slice(0, 90)}
+                        {getSiteSelectorLabel(site, siteNameById).slice(0, 90)}
                       </option>
                     ))}
                   </select>
@@ -13456,9 +13876,21 @@ const App: React.FC = () => {
                                   whiteSpace: "nowrap",
                                 }}
                               >
-                                {siteNameById[site.id] ?? site.url}
+                                {getSiteLabel(site, siteNameById)}
                               </div>
-                              {siteNameById[site.id] && (
+                              {getSiteClientName(site) && (
+                                <div
+                                  style={{
+                                    fontSize: "11px",
+                                    color: "var(--muted)",
+                                    marginTop: "2px",
+                                  }}
+                                >
+                                  {getSiteClientName(site)}
+                                </div>
+                              )}
+                              {getPersistedSiteDisplayName(site) ||
+                              siteNameById[site.id] ? (
                                 <div
                                   style={{
                                     fontSize: "11px",
@@ -13468,7 +13900,7 @@ const App: React.FC = () => {
                                 >
                                   {site.url}
                                 </div>
-                              )}
+                              ) : null}
                               {site.url === SAMPLE_SITE_URL && (
                                 <div
                                   style={{
@@ -13559,10 +13991,13 @@ const App: React.FC = () => {
                                   border: "1px solid var(--border)",
                                   background: "var(--panel)",
                                   fontSize: "11px",
-                                  cursor: "pointer",
+                                  cursor: creatingSite
+                                    ? "not-allowed"
+                                    : "pointer",
                                 }}
+                                disabled={creatingSite}
                               >
-                                Try sample
+                                {creatingSite ? "Loading..." : "Try sample"}
                               </button>
                             </div>
                           )}
@@ -14277,16 +14712,31 @@ const App: React.FC = () => {
                             setAddSiteOpen(true);
                           }}
                           className="primary-button"
+                          disabled={creatingSite}
                         >
                           Add site
                         </button>
                         <button
                           onClick={() => void handleCreateSampleSite()}
                           className="secondary-button"
+                          disabled={creatingSite}
                         >
-                          Try sample site
+                          {creatingSite
+                            ? "Loading sample..."
+                            : "Try sample site"}
                         </button>
                       </div>
+                      {createError && (
+                        <div
+                          style={{
+                            marginTop: "10px",
+                            fontSize: "12px",
+                            color: "var(--warning)",
+                          }}
+                        >
+                          {createError}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -14805,13 +15255,17 @@ const App: React.FC = () => {
                           label="Website changes"
                           value={
                             dashboardSummaryPending
-                              ? "Summary pending"
-                              : `${dashboardIssueMovement?.new ?? 0} new issues`
+                              ? "Pending"
+                              : !dashboardLatestWebsiteChangeSummary
+                                ? "No baseline yet"
+                                : `${dashboardLatestWebsiteChangeSummary.total} changes`
                           }
                           detail={
                             dashboardSummaryPending
-                              ? "Issue movement updates when the latest scan summary is ready."
-                              : `${dashboardLatestDiffSummary?.fixedIssues ?? dashboardIssueMovement?.resolved ?? 0} fixed since last scan · ${dashboardIssueMovement?.existing ?? 0} still present`
+                              ? "Website changes appear when the latest scan summary is ready."
+                              : !dashboardLatestWebsiteChangeSummary
+                                ? "Website changes start after the second completed scan."
+                                : `${dashboardLatestWebsiteChangeSummary.highPriorityCount} high priority · ${dashboardLatestWebsiteChangeSummary.byImportance.medium ?? 0} medium`
                           }
                           tone="warning"
                         />
@@ -14973,47 +15427,111 @@ const App: React.FC = () => {
                             </div>
                           )}
                         </div>
-                        <div className="surface-card surface-card--summary">
-                          <div className="dashboard-summary-card__header">
-                            <div className="dashboard-summary-card__title">
-                              Latest scan summary
+                        <div
+                          style={{
+                            display: "grid",
+                            gap: "18px",
+                          }}
+                        >
+                          <div className="surface-card surface-card--summary">
+                            <div className="dashboard-summary-card__header">
+                              <div className="dashboard-summary-card__title">
+                                Latest scan summary
+                              </div>
+                              <div className="dashboard-summary-card__meta">
+                                A compact snapshot of the most important numbers
+                                from the latest dashboard run.
+                              </div>
                             </div>
-                            <div className="dashboard-summary-card__meta">
-                              A compact snapshot of the most important numbers
-                              from the latest dashboard run.
+                            <div className="dashboard-summary-list">
+                              <div className="dashboard-summary-item">
+                                <span>High priority issues</span>
+                                <strong>
+                                  {dashboardSummaryPending
+                                    ? "Pending"
+                                    : dashboardHighPriority}
+                                </strong>
+                              </div>
+                              <div className="dashboard-summary-item">
+                                <span>Open issues</span>
+                                <strong>
+                                  {dashboardSummaryPending
+                                    ? "Pending"
+                                    : (dashboardIssueSummary?.total ?? 0)}
+                                </strong>
+                              </div>
+                              <div className="dashboard-summary-item">
+                                <span>Fixed this scan</span>
+                                <strong>
+                                  {dashboardSummaryPending
+                                    ? "Pending"
+                                    : (dashboardLatestDiffSummary?.fixedIssues ??
+                                      0)}
+                                </strong>
+                              </div>
+                              <div className="dashboard-summary-item">
+                                <span>Links checked</span>
+                                <strong>
+                                  {dashboardLatestRun?.checked_links ?? 0}
+                                </strong>
+                              </div>
                             </div>
                           </div>
-                          <div className="dashboard-summary-list">
-                            <div className="dashboard-summary-item">
-                              <span>High priority issues</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : dashboardHighPriority}
-                              </strong>
+                          <div className="surface-card surface-card--summary">
+                            <div className="dashboard-summary-card__header">
+                              <div className="dashboard-summary-card__title">
+                                Website changes
+                              </div>
+                              <div className="dashboard-summary-card__meta">
+                                Structured changes between this scan and the
+                                previous completed scan.
+                              </div>
                             </div>
-                            <div className="dashboard-summary-item">
-                              <span>Open issues</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : (dashboardIssueSummary?.total ?? 0)}
-                              </strong>
-                            </div>
-                            <div className="dashboard-summary-item">
-                              <span>Fixed this scan</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : (dashboardLatestDiffSummary?.fixedIssues ??
-                                    0)}
-                              </strong>
-                            </div>
-                            <div className="dashboard-summary-item">
-                              <span>Links checked</span>
-                              <strong>
-                                {dashboardLatestRun?.checked_links ?? 0}
-                              </strong>
+                            <div className="dashboard-summary-list">
+                              {!dashboardLatestWebsiteChangeSummary ? (
+                                <div className="dashboard-summary-item">
+                                  <span>Baseline</span>
+                                  <strong style={{ fontSize: "16px" }}>
+                                    No baseline yet
+                                  </strong>
+                                </div>
+                              ) : dashboardLatestWebsiteChanges.length === 0 ? (
+                                <div className="dashboard-summary-item">
+                                  <span>Changes</span>
+                                  <strong style={{ fontSize: "16px" }}>
+                                    No structured changes
+                                  </strong>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="dashboard-summary-item">
+                                    <span>Total changes</span>
+                                    <strong>
+                                      {
+                                        dashboardLatestWebsiteChangeSummary.total
+                                      }
+                                    </strong>
+                                  </div>
+                                  <div className="dashboard-website-change-list">
+                                    {dashboardLatestWebsiteChanges.map(
+                                      (change) => (
+                                        <div
+                                          key={`dashboard-change:${change.id}`}
+                                          className="dashboard-website-change-item"
+                                        >
+                                          <div className="dashboard-website-change-item__meta">
+                                            <strong>
+                                              {change.importanceLabel}
+                                            </strong>
+                                            <span>{change.categoryLabel}</span>
+                                          </div>
+                                          <div>{change.summary}</div>
+                                        </div>
+                                      ),
+                                    )}
+                                  </div>
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -15809,78 +16327,242 @@ const App: React.FC = () => {
                     <div className="app-settings-card">
                       <div className="app-settings-card__title">Sites</div>
                       <div className="app-settings-card__subtitle">
-                        Select the active site, add new monitored sites, or
+                        Select the active site, manage client-facing labels, or
                         remove old ones from the workspace.
                       </div>
+                      <label className="field-label">
+                        Search sites or clients
+                        <input
+                          value={siteSearchQuery}
+                          onChange={(event) =>
+                            setSiteSearchQuery(event.target.value)
+                          }
+                          placeholder="Filter by client, site name, or URL"
+                          className="app-input"
+                        />
+                      </label>
                       <div className="app-site-list">
-                        {sites.map((site) => {
+                        {filteredManagedSites.map((site) => {
                           const isSelected = site.id === selectedSiteId;
                           const isDeleting = deletingSiteId === site.id;
+                          const isEditing = editingSiteId === site.id;
                           return (
                             <div key={site.id} className="app-site-row">
-                              <button
-                                onClick={() => void handleSelectSite(site)}
-                                style={{
-                                  textAlign: "left",
-                                  border: "none",
-                                  background: "transparent",
-                                  color: "var(--text)",
-                                  cursor: "pointer",
-                                  padding: 0,
-                                }}
-                              >
-                                <div
-                                  style={{ fontWeight: 700, fontSize: "14px" }}
-                                >
-                                  {siteNameById[site.id] ?? site.url}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  {site.url}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  Created {formatDate(site.created_at)}
-                                </div>
-                              </button>
                               <div
                                 style={{
-                                  display: "flex",
-                                  gap: "8px",
-                                  flexWrap: "wrap",
+                                  display: "grid",
+                                  gap: "12px",
+                                  width: "100%",
                                 }}
                               >
                                 <button
-                                  className={
-                                    isSelected
-                                      ? "primary-button"
-                                      : "secondary-button"
-                                  }
                                   onClick={() => void handleSelectSite(site)}
+                                  style={{
+                                    textAlign: "left",
+                                    border: "none",
+                                    background: "transparent",
+                                    color: "var(--text)",
+                                    cursor: "pointer",
+                                    padding: 0,
+                                  }}
                                 >
-                                  {isSelected ? "Selected" : "Select"}
+                                  <div
+                                    style={{
+                                      fontWeight: 700,
+                                      fontSize: "14px",
+                                    }}
+                                  >
+                                    {getSiteLabel(site, siteNameById)}
+                                  </div>
+                                  {getSiteClientName(site) && (
+                                    <div
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      {getSiteClientName(site)}
+                                    </div>
+                                  )}
+                                  <div
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    {site.url}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    Created {formatDate(site.created_at)}
+                                  </div>
                                 </button>
-                                <button
-                                  onClick={() => handleDeleteSite(site.id)}
-                                  disabled={isDeleting}
-                                  className="ghost-button"
-                                  style={{ color: "var(--danger)" }}
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                  }}
                                 >
-                                  {isDeleting ? "Deleting..." : "Delete"}
-                                </button>
+                                  <button
+                                    className={
+                                      isSelected
+                                        ? "primary-button"
+                                        : "secondary-button"
+                                    }
+                                    onClick={() => void handleSelectSite(site)}
+                                  >
+                                    {isSelected ? "Selected" : "Select"}
+                                  </button>
+                                  <button
+                                    className="secondary-button"
+                                    onClick={() =>
+                                      isEditing
+                                        ? resetSiteEditor()
+                                        : beginEditingSite(site)
+                                    }
+                                  >
+                                    {isEditing
+                                      ? "Close details"
+                                      : "Edit details"}
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteSite(site.id)}
+                                    disabled={isDeleting}
+                                    className="ghost-button"
+                                    style={{ color: "var(--danger)" }}
+                                  >
+                                    {isDeleting ? "Deleting..." : "Delete"}
+                                  </button>
+                                </div>
+                                {isEditing && (
+                                  <div
+                                    style={{
+                                      display: "grid",
+                                      gap: "12px",
+                                      paddingTop: "12px",
+                                      borderTop: "1px solid var(--border)",
+                                    }}
+                                  >
+                                    <div className="app-form-grid app-form-grid--two">
+                                      <label className="field-label">
+                                        Site display name
+                                        <input
+                                          value={siteEditorDisplayName}
+                                          onChange={(event) =>
+                                            setSiteEditorDisplayName(
+                                              event.target.value,
+                                            )
+                                          }
+                                          placeholder="Marketing site"
+                                          className="app-input"
+                                        />
+                                      </label>
+                                      <label className="field-label">
+                                        Client name
+                                        <input
+                                          value={siteEditorClientName}
+                                          onChange={(event) =>
+                                            setSiteEditorClientName(
+                                              event.target.value,
+                                            )
+                                          }
+                                          placeholder="Acme Ltd"
+                                          className="app-input"
+                                        />
+                                      </label>
+                                    </div>
+                                    <label className="field-label">
+                                      Report display name
+                                      <input
+                                        value={siteEditorReportDisplayName}
+                                        onChange={(event) =>
+                                          setSiteEditorReportDisplayName(
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="Acme Ltd website report"
+                                        className="app-input"
+                                      />
+                                    </label>
+                                    <label className="field-label">
+                                      Internal notes
+                                      <textarea
+                                        value={siteEditorInternalNotes}
+                                        onChange={(event) =>
+                                          setSiteEditorInternalNotes(
+                                            event.target.value,
+                                          )
+                                        }
+                                        placeholder="Private notes for this client or site"
+                                        className="app-input"
+                                        rows={4}
+                                        style={{ resize: "vertical" }}
+                                      />
+                                    </label>
+                                    <div
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      Internal notes stay private and are never
+                                      shown in shared reports or PDFs.
+                                    </div>
+                                    {siteEditorError && (
+                                      <div
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {siteEditorError}
+                                      </div>
+                                    )}
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: "8px",
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      <button
+                                        onClick={() =>
+                                          void handleSaveSiteMetadata(site.id)
+                                        }
+                                        disabled={siteEditorSaving}
+                                        className="primary-button"
+                                      >
+                                        {siteEditorSaving
+                                          ? "Saving..."
+                                          : "Save details"}
+                                      </button>
+                                      <button
+                                        onClick={resetSiteEditor}
+                                        disabled={siteEditorSaving}
+                                        className="secondary-button"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             </div>
                           );
                         })}
                       </div>
+                      {filteredManagedSites.length === 0 && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          No sites match this filter.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

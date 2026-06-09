@@ -4,6 +4,10 @@ export interface DbSiteRow {
   id: string;
   user_id: string;
   url: string;
+  site_display_name: string | null;
+  client_name: string | null;
+  report_display_name: string | null;
+  internal_notes: string | null;
   created_at: Date;
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
@@ -23,6 +27,19 @@ export interface DbSiteRow {
   summary_enabled: boolean;
 }
 
+export type SiteMetadataInput = {
+  siteDisplayName?: string | null;
+  clientName?: string | null;
+  reportDisplayName?: string | null;
+  internalNotes?: string | null;
+};
+
+function normalizeOptionalText(value: string | null | undefined) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
   const db = await ensureConnected();
 
@@ -31,6 +48,10 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
     SELECT id,
            user_id,
            url,
+           site_display_name,
+           client_name,
+           report_display_name,
+           internal_notes,
            created_at,
            schedule_enabled,
            schedule_frequency,
@@ -70,6 +91,10 @@ export async function getAllSites(): Promise<DbSiteRow[]> {
     SELECT id,
            user_id,
            url,
+           site_display_name,
+           client_name,
+           report_display_name,
+           internal_notes,
            created_at,
            schedule_enabled,
            schedule_frequency,
@@ -103,6 +128,10 @@ export async function getSiteById(id: string): Promise<DbSiteRow | null> {
     SELECT id,
            user_id,
            url,
+           site_display_name,
+           client_name,
+           report_display_name,
+           internal_notes,
            created_at,
            schedule_enabled,
            schedule_frequency,
@@ -140,6 +169,10 @@ export async function getSiteByIdForUser(
     SELECT id,
            user_id,
            url,
+           site_display_name,
+           client_name,
+           report_display_name,
+           internal_notes,
            created_at,
            schedule_enabled,
            schedule_frequency,
@@ -169,6 +202,7 @@ export async function getSiteByIdForUser(
 export async function createSite(
   userId: string,
   url: string,
+  metadata?: SiteMetadataInput,
 ): Promise<DbSiteRow> {
   if (!userId) {
     throw new Error("userId is required");
@@ -181,11 +215,23 @@ export async function createSite(
 
   const result = await db.query<DbSiteRow>(
     `
-    INSERT INTO sites (user_id, url, schedule_day_of_week)
-    VALUES ($1, $2, $3)
+    INSERT INTO sites (
+      user_id,
+      url,
+      site_display_name,
+      client_name,
+      report_display_name,
+      internal_notes,
+      schedule_day_of_week
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
     RETURNING id,
               user_id,
               url,
+              site_display_name,
+              client_name,
+              report_display_name,
+              internal_notes,
               created_at,
               schedule_enabled,
               schedule_frequency,
@@ -204,7 +250,15 @@ export async function createSite(
               last_notified_scan_run_id,
               summary_enabled
     `,
-    [userId, url.trim(), 1],
+    [
+      userId,
+      url.trim(),
+      normalizeOptionalText(metadata?.siteDisplayName),
+      normalizeOptionalText(metadata?.clientName),
+      normalizeOptionalText(metadata?.reportDisplayName),
+      normalizeOptionalText(metadata?.internalNotes),
+      1,
+    ],
   );
 
   return result.rows[0];
@@ -213,8 +267,82 @@ export async function createSite(
 export async function createSiteForUser(
   userId: string,
   url: string,
+  metadata?: SiteMetadataInput,
 ): Promise<DbSiteRow> {
-  return createSite(userId, url);
+  return createSite(userId, url, metadata);
+}
+
+export async function updateSiteMetadataForUser(
+  userId: string,
+  siteId: string,
+  metadata: SiteMetadataInput,
+): Promise<DbSiteRow | null> {
+  const db = await ensureConnected();
+  const nextSiteDisplayName =
+    metadata.siteDisplayName === undefined
+      ? null
+      : normalizeOptionalText(metadata.siteDisplayName);
+  const nextClientName =
+    metadata.clientName === undefined
+      ? null
+      : normalizeOptionalText(metadata.clientName);
+  const nextReportDisplayName =
+    metadata.reportDisplayName === undefined
+      ? null
+      : normalizeOptionalText(metadata.reportDisplayName);
+  const nextInternalNotes =
+    metadata.internalNotes === undefined
+      ? null
+      : normalizeOptionalText(metadata.internalNotes);
+  const result = await db.query<DbSiteRow>(
+    `
+    UPDATE sites
+    SET site_display_name = CASE WHEN $3 THEN $4 ELSE site_display_name END,
+        client_name = CASE WHEN $5 THEN $6 ELSE client_name END,
+        report_display_name = CASE WHEN $7 THEN $8 ELSE report_display_name END,
+        internal_notes = CASE WHEN $9 THEN $10 ELSE internal_notes END
+    WHERE id = $1
+      AND user_id = $2
+    RETURNING id,
+              user_id,
+              url,
+              site_display_name,
+              client_name,
+              report_display_name,
+              internal_notes,
+              created_at,
+              schedule_enabled,
+              schedule_frequency,
+              schedule_time_utc,
+              schedule_day_of_week,
+              schedule_day_of_month,
+              next_scheduled_at,
+              last_scheduled_at,
+              notify_enabled,
+              notify_email,
+              notify_on,
+              notify_include_csv,
+              notify_only_on_change,
+              notify_include_blocked,
+              notify_include_broken,
+              last_notified_scan_run_id,
+              summary_enabled
+    `,
+    [
+      siteId,
+      userId,
+      metadata.siteDisplayName !== undefined,
+      nextSiteDisplayName,
+      metadata.clientName !== undefined,
+      nextClientName,
+      metadata.reportDisplayName !== undefined,
+      nextReportDisplayName,
+      metadata.internalNotes !== undefined,
+      nextInternalNotes,
+    ],
+  );
+
+  return result.rows[0] ?? null;
 }
 
 // Delete a site and all its scan data.

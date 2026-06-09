@@ -7,9 +7,10 @@ export {
   getSiteByIdForUser,
   getSitesForUser,
   listSitesForUser,
+  updateSiteMetadataForUser,
   backfillSitesUserId,
 } from "./sites";
-export type { DbSiteRow } from "./sites";
+export type { DbSiteRow, SiteMetadataInput } from "./sites";
 
 export {
   computeNextScheduledAt,
@@ -160,6 +161,22 @@ export {
   getScanTechnicalDiagnosticsForUser,
 } from "./scanTechnicalDiagnostics";
 export type { ScanTechnicalDiagnosticsSummary } from "./scanTechnicalDiagnostics";
+
+export {
+  ensureSiteChangeEventsForRun,
+  formatSiteChangeCategoryLabel,
+  formatSiteChangeImportanceLabel,
+  getSiteChangeEvents,
+  SITE_CHANGE_EVENT_CATEGORIES,
+  SITE_CHANGE_EVENT_IMPORTANCE,
+} from "./siteChangeEvents";
+export type {
+  SiteChangeEventCategory,
+  SiteChangeEventImportance,
+  SiteChangeEventRow,
+  SiteChangeEventsResult,
+  SiteChangeSummary,
+} from "./siteChangeEvents";
 
 export {
   deleteLinkNoteForSiteForUser,
