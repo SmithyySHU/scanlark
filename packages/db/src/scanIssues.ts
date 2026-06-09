@@ -1754,11 +1754,39 @@ export async function listIssuesForScanRunForUser(
   resolvedCount: number;
   summary: ScanIssuesSummary;
 }> {
+  return listIssuesForScanRun(scanRunId, options, userId);
+}
+
+export async function listIssuesForScanRun(
+  scanRunId: string,
+  options?: {
+    status?: ScanIssueStatus | null;
+    severity?: ScanIssueSeverity | null;
+    category?: ScanIssueCategory | null;
+    limit?: number;
+    offset?: number;
+  },
+  userId?: string,
+): Promise<{
+  issues: ScanIssue[];
+  resolvedIssues: ResolvedScanIssue[];
+  countReturned: number;
+  totalMatching: number;
+  resolvedCount: number;
+  summary: ScanIssuesSummary;
+}> {
   const client = await ensureConnected();
   const limit = options?.limit ?? 50;
   const offset = options?.offset ?? 0;
-  const params: Array<string | number> = [scanRunId, userId];
-  const filters = ["si.scan_run_id = $1", "s.user_id = $2"];
+  const params: Array<string | number> = [scanRunId];
+  const filters = ["si.scan_run_id = $1"];
+  const issuesJoin = userId ? "JOIN sites s ON s.id = si.site_id" : "";
+  const resolvedJoin = userId ? "JOIN sites s ON s.id = sis.site_id" : "";
+
+  if (userId) {
+    params.push(userId);
+    filters.push("s.user_id = $2");
+  }
 
   if (options?.status) {
     params.push(options.status);
@@ -1782,7 +1810,7 @@ export async function listIssuesForScanRunForUser(
         `
           SELECT COUNT(*) AS count
           FROM scan_issues si
-          JOIN sites s ON s.id = si.site_id
+          ${issuesJoin}
           ${whereClause}
         `,
         params,
@@ -1799,7 +1827,7 @@ export async function listIssuesForScanRunForUser(
         `
           SELECT severity, issue_type, change_status, COUNT(*) AS count
           FROM scan_issues si
-          JOIN sites s ON s.id = si.site_id
+          ${issuesJoin}
           ${whereClause}
           GROUP BY severity, issue_type, change_status
         `,
@@ -1814,8 +1842,12 @@ export async function listIssuesForScanRunForUser(
         }>,
       };
 
-  const resolvedParams: Array<string | number> = [scanRunId, userId];
-  const resolvedFilters = ["sis.resolved_scan_run_id = $1", "s.user_id = $2"];
+  const resolvedParams: Array<string | number> = [scanRunId];
+  const resolvedFilters = ["sis.resolved_scan_run_id = $1"];
+  if (userId) {
+    resolvedParams.push(userId);
+    resolvedFilters.push("s.user_id = $2");
+  }
   if (options?.severity) {
     resolvedParams.push(options.severity);
     resolvedFilters.push(`sis.latest_severity = $${resolvedParams.length}`);
@@ -1830,7 +1862,7 @@ export async function listIssuesForScanRunForUser(
         `
           SELECT COUNT(*) AS count
           FROM site_issue_states sis
-          JOIN sites s ON s.id = sis.site_id
+          ${resolvedJoin}
           ${resolvedWhereClause}
         `,
         resolvedParams,
@@ -1888,7 +1920,7 @@ export async function listIssuesForScanRunForUser(
             si.last_seen_at,
             si.resolved_at
           FROM scan_issues si
-          JOIN sites s ON s.id = si.site_id
+          ${issuesJoin}
           ${whereClause}
           ORDER BY
             CASE si.severity
@@ -1932,7 +1964,7 @@ export async function listIssuesForScanRunForUser(
             'resolved'::text AS change_status,
             'resolved'::text AS status
           FROM site_issue_states sis
-          JOIN sites s ON s.id = sis.site_id
+          ${resolvedJoin}
           ${resolvedWhereClause}
           ORDER BY
             CASE sis.latest_severity

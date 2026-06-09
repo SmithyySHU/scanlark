@@ -6,21 +6,25 @@ import type {
   ExportClassification,
   IgnoreRuleType,
   LinkClassification,
+  ReportShareWithToken,
   ScanIssueCategory,
   ScanIssueType,
   ScanIssueSeverity,
   ScanIssueStatus,
   ScanDiffChangeType,
   ScanLinkOccurrenceRow,
+  SiteMetadataFields,
 } from "@scanlark/db";
 import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
   cancelScanRun,
   createSiteForUser,
+  createOrRotateReportShareForRunForUser,
   createIgnoreRule,
   deleteIgnoreRule,
   deleteSiteForUser,
+  disableReportShareForRunForUser,
   enqueueExistingScanRunIfIdle,
   enqueueManualScanIfIdle,
   formatIssuePresentation,
@@ -34,14 +38,19 @@ import {
   getOccurrencesForScanLinkForUser,
   getRecentScanRunsForSiteForUser,
   getRecentScansForSiteForUser,
+  getReportShareForRunForUser,
   getResultsForScanRunForUser,
   getResultsSummaryForScanRunForUser,
+  getSharedReportAccessByToken,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
+  getScanCategoryScores,
   getScanCategoryScoresForUser,
+  getScanLinksForRun,
   getScanLinksForExportFilteredForUser,
   getScanLinksForExportForUser,
   getScanLinksForRunForUser,
+  getScanLinksSummary,
   getScanLinksSummaryForUser,
   getScanDiff,
   getScanRunByIdForUser,
@@ -49,10 +58,13 @@ import {
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
+  getScanTechnicalDiagnostics,
   getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
+  getTimeoutCountForRun,
   getTimeoutCountForRunForUser,
+  getTopLinksByClassification,
   getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
   isValidEmailAddress,
@@ -60,10 +72,14 @@ import {
   getIgnoreRuleByIdForUser,
   listIgnoreRulesForUser,
   listIgnoreRulesForSiteForUser,
+  listIgnoredLinksForRun,
   listIgnoredLinksForRunForUser,
+  listIgnoredOccurrences,
   listIgnoredOccurrencesForUser,
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  recordReportShareView,
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
@@ -76,6 +92,7 @@ import {
   updateSiteScheduleForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
+  updateSiteMetadataForUser,
   validateSafeRegexPattern,
 } from "@scanlark/db";
 import validateLink from "../../../packages/crawler/src/validateLink";
@@ -262,6 +279,14 @@ function parseIssueCategory(value: unknown): ScanIssueCategory | null {
     : null;
 }
 
+function parseOptionalSiteMetadataField(value: unknown) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") return "__invalid__";
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function normalizeNotifyOn(value: string): string {
   if (value === "issues") return "issues_exist";
   return value;
@@ -332,6 +357,58 @@ type ApiErrorPayload = {
   details?: string;
 };
 
+type UptimeMonitorStatus = "up" | "down" | "degraded" | "unknown";
+
+type UptimeStatusResponse = {
+  settingsId: string;
+  siteId: string;
+  enabled: boolean;
+  checkUrl: string;
+  intervalMinutes: number;
+  failureThreshold: number;
+  status: UptimeMonitorStatus;
+  consecutiveFailures: number;
+  lastCheckedAt: string | null;
+  lastUpAt: string | null;
+  lastDownAt: string | null;
+  lastRecoveredAt: string | null;
+  lastResponseTimeMs: number | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  uptime30d: number | null;
+  activeIncidentId: string | null;
+  recentChecks: Array<{
+    id: string;
+    status: UptimeMonitorStatus;
+    status_code: number | null;
+    response_time_ms: number | null;
+    error_message: string | null;
+    checked_at: string;
+  }>;
+};
+
+type UptimeModule = {
+  getUptimeStatusForSiteForUser: (
+    userId: string,
+    siteId: string,
+    recentLimit?: number,
+  ) => Promise<UptimeStatusResponse>;
+  updateUptimeMonitorSettingsForUser: (
+    userId: string,
+    siteId: string,
+    fields: {
+      enabled?: boolean;
+      checkUrl?: string;
+      failureThreshold?: number;
+    },
+  ) => Promise<unknown>;
+};
+
+async function loadUptimeModule(): Promise<UptimeModule> {
+  const modulePath = "../../../packages/db/src/uptimeMonitors.js";
+  return (await import(modulePath)) as UptimeModule;
+}
+
 function sendApiError(
   res: Response,
   status: number,
@@ -356,6 +433,64 @@ function sendInternalError(res: Response, message: string, err?: unknown) {
 
 function sendNotFound(res: Response) {
   return sendApiError(res, 404, "not_found", "Not found");
+}
+
+function serializeReportShare(
+  req: express.Request,
+  share: ReportShareWithToken,
+) {
+  const baseUrl = `${req.protocol}://${req.get("host") ?? "localhost"}`;
+  return {
+    id: share.id,
+    enabled: share.enabled,
+    created_at:
+      share.created_at instanceof Date
+        ? share.created_at.toISOString()
+        : share.created_at,
+    disabled_at:
+      share.disabled_at instanceof Date
+        ? share.disabled_at.toISOString()
+        : share.disabled_at,
+    last_viewed_at:
+      share.last_viewed_at instanceof Date
+        ? share.last_viewed_at.toISOString()
+        : share.last_viewed_at,
+    view_count: share.view_count,
+    shareToken: share.shareToken,
+    shareUrl: `${baseUrl}/shared-reports/${encodeURIComponent(share.shareToken)}`,
+  };
+}
+
+function applyPublicReportHeaders(res: Response) {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  res.setHeader("Cache-Control", "private, no-store");
+}
+
+function serializePublicReportSite(
+  site: Awaited<ReturnType<typeof getSiteById>>,
+) {
+  return site
+    ? {
+        site_display_name: site.site_display_name ?? null,
+        client_name: site.client_name ?? null,
+        report_display_name: site.report_display_name ?? null,
+        url: site.url,
+      }
+    : null;
+}
+
+async function requireSharedReportAccess(
+  req: express.Request,
+  res: express.Response,
+  token: string,
+) {
+  applyPublicReportHeaders(res);
+  const access = await getSharedReportAccessByToken(token);
+  if (!access) {
+    sendNotFound(res);
+    return null;
+  }
+  return access;
 }
 
 async function requireSiteForUser(
@@ -777,6 +912,110 @@ async function handleSendTestAlert(
 
 app.post("/sites/:siteId/notifications/test", handleSendTestAlert);
 app.post("/sites/:siteId/alerts/test", handleSendTestAlert);
+
+app.get("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const uptimeModule = await loadUptimeModule();
+    const uptime = await uptimeModule.getUptimeStatusForSiteForUser(
+      userId,
+      siteId,
+    );
+    res.json(uptime);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in GET /sites/:siteId/uptime", err);
+    return sendInternalError(res, "Failed to fetch uptime settings", err);
+  }
+});
+
+app.put("/sites/:siteId/uptime", async (req, res) => {
+  const siteId = req.params.siteId;
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+
+  const body = (req.body ?? {}) as {
+    enabled?: unknown;
+    checkUrl?: unknown;
+    failureThreshold?: unknown;
+  };
+
+  const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
+  const checkUrl =
+    typeof body.checkUrl === "string" && body.checkUrl.trim()
+      ? body.checkUrl.trim()
+      : undefined;
+  const failureThreshold =
+    typeof body.failureThreshold === "number"
+      ? body.failureThreshold
+      : typeof body.failureThreshold === "string" &&
+          body.failureThreshold.trim()
+        ? Number(body.failureThreshold)
+        : undefined;
+
+  if (checkUrl) {
+    try {
+      const parsed = new URL(checkUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return sendApiError(
+          res,
+          400,
+          "invalid_check_url",
+          "checkUrl must use http or https",
+        );
+      }
+    } catch {
+      return sendApiError(
+        res,
+        400,
+        "invalid_check_url",
+        "checkUrl must be a valid absolute URL",
+      );
+    }
+  }
+
+  if (
+    failureThreshold != null &&
+    (!Number.isInteger(failureThreshold) ||
+      failureThreshold < 1 ||
+      failureThreshold > 10)
+  ) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_failure_threshold",
+      "failureThreshold must be an integer between 1 and 10",
+    );
+  }
+
+  try {
+    const uptimeModule = await loadUptimeModule();
+    await uptimeModule.updateUptimeMonitorSettingsForUser(userId, siteId, {
+      enabled,
+      checkUrl,
+      failureThreshold,
+    });
+    const uptime = await uptimeModule.getUptimeStatusForSiteForUser(
+      userId,
+      siteId,
+    );
+    res.json(uptime);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in PUT /sites/:siteId/uptime", err);
+    return sendInternalError(res, "Failed to update uptime settings", err);
+  }
+});
 
 app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
   const scanRunId = req.params.scanRunId;
@@ -1642,6 +1881,365 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   }
 });
 
+app.get("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const share = await getReportShareForRunForUser(userId, scanRunId);
+    return res.json({
+      share: share ? serializeReportShare(req, share) : null,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to load report share", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const { share, created } = await createOrRotateReportShareForRunForUser(
+      userId,
+      scanRunId,
+    );
+    return res.json({
+      created,
+      share: serializeReportShare(req, share),
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_shareable") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_shareable",
+        "Only completed scan runs can create share links",
+      );
+    }
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in POST /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to create report share", err);
+  }
+});
+
+app.delete("/scan-runs/:scanRunId/share", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const revoked = await disableReportShareForRunForUser(userId, scanRunId);
+    return res.json({ revoked });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message === "scan_run_not_found") {
+      return sendNotFound(res);
+    }
+    console.error("Error in DELETE /scan-runs/:scanRunId/share", err);
+    return sendInternalError(res, "Failed to revoke report share", err);
+  }
+});
+
+app.get("/public/reports/:token/report", async (req, res) => {
+  const token = req.params.token;
+  try {
+    const access = await requireSharedReportAccess(req, res, token);
+    if (!access) return;
+    const { run, share } = access;
+
+    await applyIgnoreRulesForScanRun(run.id);
+    await recordReportShareView(share.id);
+
+    const [summaryRows, timeoutCount, topBroken, topBlocked, site] =
+      await Promise.all([
+        getScanLinksSummary(run.id),
+        getTimeoutCountForRun(run.id),
+        getTopLinksByClassification(run.id, "broken", 20),
+        getTopLinksByClassification(run.id, "blocked", 20),
+        getSiteById(run.site_id),
+      ]);
+
+    const byClassification: Record<string, number> = {
+      ok: 0,
+      broken: 0,
+      blocked: 0,
+      no_response: 0,
+      timeout: timeoutCount,
+    };
+    const byStatusCode: Record<string, number> = {};
+
+    summaryRows.forEach((row) => {
+      byClassification[row.classification] =
+        (byClassification[row.classification] ?? 0) + row.count;
+      const statusKey =
+        row.status_code == null ? "null" : String(row.status_code);
+      byStatusCode[statusKey] = (byStatusCode[statusKey] ?? 0) + row.count;
+    });
+
+    const serializeTopRow = (row: {
+      last_seen_at: Date;
+      first_seen_at?: Date;
+    }) => ({
+      ...row,
+      first_seen_at:
+        row.first_seen_at instanceof Date
+          ? row.first_seen_at.toISOString()
+          : row.first_seen_at,
+      last_seen_at:
+        row.last_seen_at instanceof Date
+          ? row.last_seen_at.toISOString()
+          : row.last_seen_at,
+    });
+
+    return res.json({
+      scanRun: serializeScanRun(run),
+      site: serializePublicReportSite(site),
+      summary: { byClassification, byStatusCode, rows: summaryRows },
+      topBroken: topBroken.map(serializeTopRow),
+      topBlocked: topBlocked.map(serializeTopRow),
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/report", err);
+    return sendInternalError(res, "Failed to build shared report", err);
+  }
+});
+
+app.get("/public/reports/:token/issues", async (req, res) => {
+  const token = req.params.token;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const status = parseIssueStatus(req.query.status);
+  const severity = parseIssueSeverity(req.query.severity);
+  const category = parseIssueCategory(req.query.category);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res, token);
+    if (!access) return;
+    const issues = await listIssuesForScanRun(access.run.id, {
+      status,
+      severity,
+      category,
+      limit,
+      offset,
+    });
+
+    return res.json({
+      scanRunId: access.run.id,
+      summary: issues.summary,
+      countReturned: issues.countReturned,
+      totalMatching: issues.totalMatching,
+      resolvedCount: issues.resolvedCount,
+      issues: issues.issues.map(serializeIssueWithPresentation),
+      resolvedIssues: issues.resolvedIssues.map(serializeIssueWithPresentation),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/issues", err);
+    return sendInternalError(res, "Failed to fetch shared report issues", err);
+  }
+});
+
+app.get("/public/reports/:token/technical-diagnostics", async (req, res) => {
+  const token = req.params.token;
+  try {
+    const access = await requireSharedReportAccess(req, res, token);
+    if (!access) return;
+    const [diagnostics, categoryScores] = await Promise.all([
+      getScanTechnicalDiagnostics(access.run.id),
+      getScanCategoryScores(access.run.id),
+    ]);
+    return res.json({
+      ...diagnostics,
+      categoryScores,
+      loadedAt: new Date().toISOString(),
+    });
+  } catch (err: unknown) {
+    console.error(
+      "Error in GET /public/reports/:token/technical-diagnostics",
+      err,
+    );
+    return sendInternalError(
+      res,
+      "Failed to fetch shared report diagnostics",
+      err,
+    );
+  }
+});
+
+app.get("/public/reports/:token/links", async (req, res) => {
+  const token = req.params.token;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const classificationRaw = req.query.classification;
+  const statusGroupRaw = req.query.statusGroup;
+  const showIgnoredRaw = req.query.showIgnored;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const classification = parseClassification(classificationRaw);
+  const statusGroup = parseStatusGroup(statusGroupRaw);
+  const showIgnored = parseShowIgnored(showIgnoredRaw);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res, token);
+    if (!access) return;
+    await applyIgnoreRulesForScanRun(access.run.id);
+    const paginatedLinks = await getScanLinksForRun(access.run.id, {
+      limit,
+      offset,
+      classification,
+      statusGroup,
+      includeIgnored: showIgnored,
+    });
+
+    const serializedLinks = paginatedLinks.links.map((link) => ({
+      ...link,
+      first_seen_at:
+        link.first_seen_at instanceof Date
+          ? link.first_seen_at.toISOString()
+          : link.first_seen_at,
+      last_seen_at:
+        link.last_seen_at instanceof Date
+          ? link.last_seen_at.toISOString()
+          : link.last_seen_at,
+      created_at:
+        link.created_at instanceof Date
+          ? link.created_at.toISOString()
+          : link.created_at,
+      updated_at:
+        link.updated_at instanceof Date
+          ? link.updated_at.toISOString()
+          : link.updated_at,
+      ignored_at:
+        link.ignored_at instanceof Date
+          ? link.ignored_at.toISOString()
+          : link.ignored_at,
+    }));
+
+    return res.json({
+      scanRunId: access.run.id,
+      classification,
+      statusGroup,
+      showIgnored,
+      countReturned: paginatedLinks.countReturned,
+      totalMatching: paginatedLinks.totalMatching,
+      links: serializedLinks,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/links", err);
+    return sendInternalError(res, "Failed to fetch shared report links", err);
+  }
+});
+
+app.get("/public/reports/:token/ignored", async (req, res) => {
+  const token = req.params.token;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_limit",
+      "limit must be a positive number",
+    );
+  }
+  if (Number.isNaN(offset) || offset < 0) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_offset",
+      "offset must be 0 or greater",
+    );
+  }
+
+  try {
+    const access = await requireSharedReportAccess(req, res, token);
+    if (!access) return;
+    await applyIgnoreRulesForScanRun(access.run.id);
+    const result = await listIgnoredLinksForRun(access.run.id, limit, offset);
+    const serialized = result.links.map((row) => ({
+      ...row,
+      first_seen_at:
+        row.first_seen_at instanceof Date
+          ? row.first_seen_at.toISOString()
+          : row.first_seen_at,
+      last_seen_at:
+        row.last_seen_at instanceof Date
+          ? row.last_seen_at.toISOString()
+          : row.last_seen_at,
+      created_at:
+        row.created_at instanceof Date
+          ? row.created_at.toISOString()
+          : row.created_at,
+    }));
+    return res.json({
+      scanRunId: access.run.id,
+      countReturned: result.countReturned,
+      totalMatching: result.totalMatching,
+      links: serialized,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /public/reports/:token/ignored", err);
+    return sendInternalError(res, "Failed to fetch shared ignored links", err);
+  }
+});
+
 // Cancel a scan run
 // curl -X POST "http://localhost:3001/scan-runs/<scanRunId>/cancel"
 app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
@@ -1708,18 +2306,122 @@ app.post("/sites", async (req, res) => {
     if (!userId) {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
-    const url = req.body.url as string | undefined;
+    const body = req.body as {
+      url?: string;
+      name?: string;
+      siteDisplayName?: string | null;
+      clientName?: string | null;
+      reportDisplayName?: string | null;
+      internalNotes?: string | null;
+    };
+    const url = body.url;
 
     if (!url) {
       return sendApiError(res, 400, "missing_url", "Missing 'url' in body");
     }
 
-    const site = await createSiteForUser(userId, url);
+    const siteDisplayName = parseOptionalSiteMetadataField(
+      body.siteDisplayName ?? body.name,
+    );
+    const clientName = parseOptionalSiteMetadataField(body.clientName);
+    const reportDisplayName = parseOptionalSiteMetadataField(
+      body.reportDisplayName,
+    );
+    const internalNotes = parseOptionalSiteMetadataField(body.internalNotes);
+
+    if (
+      siteDisplayName === "__invalid__" ||
+      clientName === "__invalid__" ||
+      reportDisplayName === "__invalid__" ||
+      internalNotes === "__invalid__"
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_site_metadata",
+        "Site metadata fields must be strings when provided",
+      );
+    }
+
+    const site = await createSiteForUser(userId, url, {
+      siteDisplayName,
+      clientName,
+      reportDisplayName,
+      internalNotes,
+    });
 
     res.status(201).json({ site });
   } catch (err: unknown) {
     console.error("Error creating site", err);
     return sendInternalError(res, "Failed to create site", err);
+  }
+});
+
+app.patch("/sites/:siteId", async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+
+    const siteId = req.params.siteId;
+    const body = req.body as {
+      siteDisplayName?: string | null;
+      clientName?: string | null;
+      reportDisplayName?: string | null;
+      internalNotes?: string | null;
+    };
+
+    const siteDisplayName = parseOptionalSiteMetadataField(
+      body.siteDisplayName,
+    );
+    const clientName = parseOptionalSiteMetadataField(body.clientName);
+    const reportDisplayName = parseOptionalSiteMetadataField(
+      body.reportDisplayName,
+    );
+    const internalNotes = parseOptionalSiteMetadataField(body.internalNotes);
+
+    if (
+      siteDisplayName === "__invalid__" ||
+      clientName === "__invalid__" ||
+      reportDisplayName === "__invalid__" ||
+      internalNotes === "__invalid__"
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_site_metadata",
+        "Site metadata fields must be strings when provided",
+      );
+    }
+
+    const fields: Partial<SiteMetadataFields> = {};
+    if (body.siteDisplayName !== undefined) {
+      fields.siteDisplayName = siteDisplayName;
+    }
+    if (body.clientName !== undefined) {
+      fields.clientName = clientName;
+    }
+    if (body.reportDisplayName !== undefined) {
+      fields.reportDisplayName = reportDisplayName;
+    }
+    if (body.internalNotes !== undefined) {
+      fields.internalNotes = internalNotes;
+    }
+
+    if (Object.keys(fields).length === 0) {
+      return sendApiError(res, 400, "empty_patch", "No fields to update");
+    }
+
+    const site = await updateSiteMetadataForUser(userId, siteId, fields);
+    if (!site) {
+      return sendNotFound(res);
+    }
+
+    return res.json({ site });
+  } catch (err: unknown) {
+    console.error("Error updating site metadata", err);
+    return sendInternalError(res, "Failed to update site metadata", err);
   }
 });
 

@@ -82,28 +82,48 @@ export async function getScanTechnicalDiagnosticsForUser(
   userId: string,
   scanRunId: string,
 ): Promise<ScanTechnicalDiagnosticsSummary> {
+  return getScanTechnicalDiagnostics(scanRunId, userId);
+}
+
+export async function getScanTechnicalDiagnostics(
+  scanRunId: string,
+  userId?: string,
+): Promise<ScanTechnicalDiagnosticsSummary> {
   const client = await ensureConnected();
+  const scopedParams: Array<string> = userId
+    ? [scanRunId, userId]
+    : [scanRunId];
+  const pageJoin = userId ? "JOIN sites s ON s.id = pc.site_id" : "";
+  const siteJoin = userId ? "JOIN sites s ON s.id = sc.site_id" : "";
+  const issueJoin = userId ? "JOIN sites s ON s.id = si.site_id" : "";
+  const pageWhere = userId
+    ? "WHERE pc.scan_run_id = $1 AND s.user_id = $2"
+    : "WHERE pc.scan_run_id = $1";
+  const siteWhere = userId
+    ? "WHERE sc.scan_run_id = $1 AND s.user_id = $2"
+    : "WHERE sc.scan_run_id = $1";
+  const issueWhere = userId
+    ? "WHERE si.scan_run_id = $1 AND s.user_id = $2 AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')"
+    : "WHERE si.scan_run_id = $1 AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')";
 
   const pageChecksRes = await client.query<{ count: string }>(
     `
       SELECT COUNT(*) AS count
       FROM scan_page_checks pc
-      JOIN sites s ON s.id = pc.site_id
-      WHERE pc.scan_run_id = $1
-        AND s.user_id = $2
+      ${pageJoin}
+      ${pageWhere}
     `,
-    [scanRunId, userId],
+    scopedParams,
   );
 
   const siteChecksRes = await client.query<SiteCheckRow>(
     `
       SELECT sc.check_type, sc.ok, sc.facts_json
       FROM scan_site_checks sc
-      JOIN sites s ON s.id = sc.site_id
-      WHERE sc.scan_run_id = $1
-        AND s.user_id = $2
+      ${siteJoin}
+      ${siteWhere}
     `,
-    [scanRunId, userId],
+    scopedParams,
   );
 
   const issueCountsRes = await client.query<{
@@ -113,13 +133,11 @@ export async function getScanTechnicalDiagnosticsForUser(
     `
       SELECT si.category, COUNT(*) AS count
       FROM scan_issues si
-      JOIN sites s ON s.id = si.site_id
-      WHERE si.scan_run_id = $1
-        AND s.user_id = $2
-        AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')
+      ${issueJoin}
+      ${issueWhere}
       GROUP BY si.category
     `,
-    [scanRunId, userId],
+    scopedParams,
   );
 
   const issueCountByCategory = new Map<string, number>();

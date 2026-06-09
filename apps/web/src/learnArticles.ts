@@ -414,7 +414,7 @@ export const LEARN_ARTICLES: LearnArticle[] = [
     summary:
       "Use this guide to interpret health scores, issue lists, evidence, diagnostics, and category summaries.",
     whatItMeans:
-      "A Scanlark report is a practical record of one completed scan. It combines scores, issue severity, plain-English summaries, raw evidence, and technical diagnostics so both non-technical and technical readers can work from the same source.",
+      "A Scanlark report is a practical record of one completed scan. It combines scores, issue severity, plain-English summaries, raw evidence, and developer diagnostics so both non-technical and technical readers can work from the same source.",
     whyItMatters:
       "Teams move faster when everyone is looking at the same signals and understands where plain-language guidance ends and technical evidence begins.",
     howToFix:
@@ -433,7 +433,7 @@ export const LEARN_ARTICLES: LearnArticle[] = [
       "dashboard",
       "health score",
       "severity",
-      "technical diagnostics",
+      "developer diagnostics",
       "evidence",
     ],
     audience: "non_technical",

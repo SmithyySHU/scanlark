@@ -64,6 +64,10 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction,
 ) {
+  if (req.path.startsWith("/public/")) {
+    return next();
+  }
+
   const internalToken =
     typeof req.headers["x-internal-token"] === "string"
       ? req.headers["x-internal-token"]

@@ -117,7 +117,33 @@ export async function getScanCategoryScoresForUser(
   userId: string,
   scanRunId: string,
 ): Promise<ScanCategoryScore[]> {
+  return getScanCategoryScores(scanRunId, userId);
+}
+
+export async function getScanCategoryScores(
+  scanRunId: string,
+  userId?: string,
+): Promise<ScanCategoryScore[]> {
   const client = await ensureConnected();
+  const scopedParams: Array<string> = userId
+    ? [scanRunId, userId]
+    : [scanRunId];
+  const runJoin = userId ? "JOIN sites s ON s.id = sr.site_id" : "";
+  const pageJoin = userId ? "JOIN sites s ON s.id = pc.site_id" : "";
+  const siteJoin = userId ? "JOIN sites s ON s.id = sc.site_id" : "";
+  const issueJoin = userId ? "JOIN sites s ON s.id = si.site_id" : "";
+  const runWhere = userId
+    ? "WHERE sr.id = $1 AND s.user_id = $2"
+    : "WHERE sr.id = $1";
+  const pageWhere = userId
+    ? "WHERE pc.scan_run_id = $1 AND s.user_id = $2"
+    : "WHERE pc.scan_run_id = $1";
+  const siteWhere = userId
+    ? "WHERE sc.scan_run_id = $1 AND s.user_id = $2"
+    : "WHERE sc.scan_run_id = $1";
+  const issueWhere = userId
+    ? "WHERE si.scan_run_id = $1 AND s.user_id = $2 AND si.status = 'open'"
+    : "WHERE si.scan_run_id = $1 AND si.status = 'open'";
 
   const [runRes, pageChecksRes, siteChecksRes, issueCountsRes] =
     await Promise.all([
@@ -125,33 +151,30 @@ export async function getScanCategoryScoresForUser(
         `
           SELECT sr.checked_links
           FROM scan_runs sr
-          JOIN sites s ON s.id = sr.site_id
-          WHERE sr.id = $1
-            AND s.user_id = $2
+          ${runJoin}
+          ${runWhere}
           LIMIT 1
         `,
-        [scanRunId, userId],
+        scopedParams,
       ),
       client.query<{ count: string }>(
         `
           SELECT COUNT(*) AS count
           FROM scan_page_checks pc
-          JOIN sites s ON s.id = pc.site_id
-          WHERE pc.scan_run_id = $1
-            AND s.user_id = $2
+          ${pageJoin}
+          ${pageWhere}
         `,
-        [scanRunId, userId],
+        scopedParams,
       ),
       client.query<{ check_type: string; count: string }>(
         `
           SELECT sc.check_type, COUNT(*) AS count
           FROM scan_site_checks sc
-          JOIN sites s ON s.id = sc.site_id
-          WHERE sc.scan_run_id = $1
-            AND s.user_id = $2
+          ${siteJoin}
+          ${siteWhere}
           GROUP BY sc.check_type
         `,
-        [scanRunId, userId],
+        scopedParams,
       ),
       client.query<{
         category: ScanIssueCategory;
@@ -161,13 +184,11 @@ export async function getScanCategoryScoresForUser(
         `
           SELECT si.category, si.severity, COUNT(*) AS count
           FROM scan_issues si
-          JOIN sites s ON s.id = si.site_id
-          WHERE si.scan_run_id = $1
-            AND s.user_id = $2
-            AND si.status = 'open'
+          ${issueJoin}
+          ${issueWhere}
           GROUP BY si.category, si.severity
         `,
-        [scanRunId, userId],
+        scopedParams,
       ),
     ]);
 

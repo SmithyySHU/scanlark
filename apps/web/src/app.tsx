@@ -57,15 +57,21 @@ type NotifyOnOption = "new_issues_only" | "issues_exist" | "always" | "never";
 type LinkNoteStatus = "open" | "snoozed" | "resolved";
 type FixQueueStatusFilter = LinkNoteStatus | "all";
 type FixQueueView = "results" | "changes" | "fix_queue";
-type AppRoute = "landing" | "login" | "app" | "report" | "learn";
-type AppSection =
-  | "dashboard"
-  | "reports"
-  | "schedule"
+type AppRoute =
+  | "landing"
+  | "login"
+  | "app"
+  | "report"
+  | "shared_report"
+  | "learn";
+type AppSection = "dashboard" | "reports" | "site_settings";
+type LearnCategoryFilter = LearnArticleCategory | "all";
+type SiteSettingsSection =
+  | "general"
+  | "monitoring"
   | "alerts"
   | "ignore_rules"
-  | "sites";
-type LearnCategoryFilter = LearnArticleCategory | "all";
+  | "danger";
 
 interface Site {
   id: string;
@@ -85,6 +91,42 @@ interface Site {
   notify_include_csv: boolean;
   summary_enabled: boolean;
   last_notified_scan_run_id: string | null;
+  site_display_name: string | null;
+  client_name: string | null;
+  report_display_name: string | null;
+  internal_notes: string | null;
+}
+
+type UptimeMonitorStatus = "up" | "down" | "degraded" | "unknown";
+
+interface UptimeCheckRow {
+  id: string;
+  status: UptimeMonitorStatus;
+  status_code: number | null;
+  response_time_ms: number | null;
+  error_message: string | null;
+  checked_at: string;
+}
+
+interface UptimeStatusResponse {
+  settingsId: string;
+  siteId: string;
+  enabled: boolean;
+  checkUrl: string;
+  intervalMinutes: number;
+  failureThreshold: number;
+  status: UptimeMonitorStatus;
+  consecutiveFailures: number;
+  lastCheckedAt: string | null;
+  lastUpAt: string | null;
+  lastDownAt: string | null;
+  lastRecoveredAt: string | null;
+  lastResponseTimeMs: number | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  uptime30d: number | null;
+  activeIncidentId: string | null;
+  recentChecks: UptimeCheckRow[];
 }
 
 interface AuthUser {
@@ -380,11 +422,12 @@ interface IgnoredOccurrencesResponse {
   occurrences: ScanLinkOccurrence[];
 }
 
-type ReportSectionKey = "broken" | "blocked" | "no_response";
+type ReportSectionKey = "broken" | "blocked" | "no_response" | "ok";
 
 type ReportLinkSectionState = {
   links: ScanLink[];
   offset: number;
+  totalMatching: number | null;
   hasMore: boolean;
   loading: boolean;
   error: string | null;
@@ -580,6 +623,37 @@ interface DashboardSummaryResponse {
   } | null;
 }
 
+interface ReportShareDetails {
+  id: string;
+  enabled: boolean;
+  created_at: string;
+  disabled_at: string | null;
+  last_viewed_at: string | null;
+  view_count: number;
+  shareToken: string;
+  shareUrl: string;
+}
+
+interface ReportShareResponse {
+  share: ReportShareDetails | null;
+}
+
+interface ReportOverviewResponse {
+  scanRun: ScanRunSummary;
+  site: {
+    site_display_name: string | null;
+    client_name: string | null;
+    report_display_name: string | null;
+    url: string;
+  } | null;
+  summary: {
+    byClassification: Record<string, number>;
+    byStatusCode: Record<string, number>;
+    rows?: ScanLinksSummaryRow[];
+  };
+  generatedAt: string;
+}
+
 type ReportIssuesState = {
   issues: ScanIssue[];
   resolvedIssues: ResolvedScanIssue[];
@@ -693,7 +767,9 @@ type SsePayload = ScanEventPayload | ScheduleEventPayload;
 const API_BASE = "http://localhost:3001";
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
+const MAX_HISTORY_RESULTS = 100;
 const REPORT_INITIAL_VISIBLE_ROWS = 10;
+const REPORT_OK_INITIAL_VISIBLE_ROWS = 5;
 const REPORT_VISIBLE_ROWS_INCREMENT = 10;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
@@ -703,9 +779,114 @@ const SAMPLE_SITE_URL = "https://example.com";
 const SAMPLE_SITE_NAME = "Sample site";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
+const COMMON_HOST_SUFFIX_WORDS = [
+  "agency",
+  "bakery",
+  "business",
+  "care",
+  "coffee",
+  "creative",
+  "design",
+  "digital",
+  "events",
+  "finance",
+  "food",
+  "garden",
+  "group",
+  "health",
+  "home",
+  "homes",
+  "house",
+  "kitchen",
+  "labs",
+  "media",
+  "partners",
+  "shop",
+  "solutions",
+  "store",
+  "studio",
+  "systems",
+  "tech",
+  "travel",
+  "works",
+] as const;
+const DISPLAY_NAME_SPLIT_SUFFIXES = [
+  "academy",
+  "analytics",
+  "app",
+  "booking",
+  "brand",
+  "cloud",
+  "commerce",
+  "company",
+  "creative",
+  "design",
+  "engineering",
+  "expert",
+  "finance",
+  "food",
+  "group",
+  "health",
+  "home",
+  "homes",
+  "house",
+  "hub",
+  "io",
+  "jobs",
+  "kitchen",
+  "labs",
+  "legal",
+  "media",
+  "network",
+  "online",
+  "platform",
+  "press",
+  "pro",
+  "services",
+  "shop",
+  "studio",
+  "systems",
+  "tech",
+  "technology",
+  "travel",
+  "works",
+  "yard",
+] as const;
+const SITE_SETTINGS_SECTIONS: Array<{
+  key: SiteSettingsSection;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "general",
+    label: "General",
+    description: "Name, client label, report title, and private notes",
+  },
+  {
+    key: "monitoring",
+    label: "Monitoring",
+    description: "Schedules and availability checks",
+  },
+  {
+    key: "alerts",
+    label: "Alerts",
+    description: "Email delivery preferences and test sends",
+  },
+  {
+    key: "ignore_rules",
+    label: "Ignore rules",
+    description: "Exclude known-safe links and patterns",
+  },
+  {
+    key: "danger",
+    label: "Danger zone",
+    description: "Delete this site from the workspace",
+  },
+];
 const EMPTY_REPORT_SECTION: ReportLinkSectionState = {
   links: [],
   offset: 0,
+  totalMatching: null,
   hasMore: false,
   loading: false,
   error: null,
@@ -715,7 +896,14 @@ const EMPTY_REPORT_SECTIONS: Record<ReportSectionKey, ReportLinkSectionState> =
     broken: { ...EMPTY_REPORT_SECTION },
     blocked: { ...EMPTY_REPORT_SECTION },
     no_response: { ...EMPTY_REPORT_SECTION },
+    ok: { ...EMPTY_REPORT_SECTION },
   };
+const EMPTY_REPORT_SUMMARY_COUNTS: ReportSummaryCounts = {
+  ok: 0,
+  broken: 0,
+  blocked: 0,
+  no_response: 0,
+};
 const EMPTY_REPORT_IGNORED_SECTION: ReportIgnoredSectionState = {
   links: [],
   offset: 0,
@@ -819,6 +1007,32 @@ function summarizeReportClassifications(
     },
     { ok: 0, broken: 0, blocked: 0, no_response: 0 },
   );
+}
+
+function getOverviewClassificationCount(
+  byClassification: Record<string, number> | undefined,
+  classification: LinkClassification,
+) {
+  const value = byClassification?.[classification];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function summarizeReportOverview(
+  rows: ScanLinksSummaryRow[],
+  byClassification: Record<string, number> | undefined,
+): ReportSummaryCounts {
+  if (rows.length > 0) {
+    return summarizeReportClassifications(rows);
+  }
+  return {
+    ok: getOverviewClassificationCount(byClassification, "ok"),
+    broken: getOverviewClassificationCount(byClassification, "broken"),
+    blocked: getOverviewClassificationCount(byClassification, "blocked"),
+    no_response: getOverviewClassificationCount(
+      byClassification,
+      "no_response",
+    ),
+  };
 }
 
 function summarizeReportStatusCodes(
@@ -1512,6 +1726,20 @@ function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
   return "Alerts: Enabled (Always)";
 }
 
+function formatUptimeStatusLabel(status: UptimeMonitorStatus) {
+  if (status === "up") return "Up";
+  if (status === "down") return "Down";
+  if (status === "degraded") return "Degraded";
+  return "Unknown";
+}
+
+function getUptimeStatusTone(status: UptimeMonitorStatus) {
+  if (status === "up") return "success";
+  if (status === "down") return "danger";
+  if (status === "degraded") return "warning";
+  return "default";
+}
+
 function normalizeNotifyOn(value: string): NotifyOnOption {
   if (value === "issues") return "issues_exist";
   if (value === "new_issues_only") return "new_issues_only";
@@ -1566,13 +1794,46 @@ function getReportScanRunIdFromLocation() {
   return null;
 }
 
+function getSharedReportTokenFromLocation() {
+  if (typeof window === "undefined") return null;
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (!path.startsWith("/shared-reports/")) return null;
+  const rawToken = path.slice("/shared-reports/".length);
+  return rawToken ? decodeURIComponent(rawToken) : null;
+}
+
+function getAppSectionFromLocation(): AppSection {
+  if (typeof window === "undefined") return "dashboard";
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (
+    path === "/dashboard/settings" ||
+    path.startsWith("/dashboard/settings/") ||
+    path === "/app/settings" ||
+    path.startsWith("/app/settings/")
+  ) {
+    return "site_settings";
+  }
+  if (
+    path === "/dashboard/reports" ||
+    path.startsWith("/dashboard/reports/") ||
+    path === "/app/reports" ||
+    path.startsWith("/app/reports/")
+  ) {
+    return "reports";
+  }
+  return "dashboard";
+}
+
 function getRouteFromLocation(): AppRoute {
   if (typeof window === "undefined") return "landing";
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
   if (path === "/" || path === "/landing") return "landing";
   if (path === "/login") return "login";
   if (path === "/report") return "report";
+  if (path.startsWith("/shared-reports/")) return "shared_report";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
+  if (path === "/app" || path.startsWith("/app/")) return "app";
+  if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
   return "app";
 }
 
@@ -1594,6 +1855,72 @@ function getErrorMessage(err: unknown, fallback: string) {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string") return err;
   return fallback;
+}
+
+type CreateSiteError = {
+  kind: "duplicate" | "invalid_url" | "unknown";
+  status: number;
+  message: string;
+};
+
+function extractErrorMessageFromBody(body: string) {
+  const normalized = body.trim();
+  if (!normalized) return "";
+  try {
+    const parsed = JSON.parse(normalized) as
+      | string
+      | { message?: unknown; error?: unknown; detail?: unknown };
+    if (typeof parsed === "string") return parsed;
+    if (typeof parsed === "object" && parsed !== null) {
+      return (
+        (typeof parsed.message === "string" && parsed.message) ||
+        (typeof parsed.error === "string" && parsed.error) ||
+        (typeof parsed.detail === "string" && parsed.detail) ||
+        normalized
+      );
+    }
+  } catch {
+    // Ignore parse errors and fall back to raw text.
+  }
+  return normalized;
+}
+
+function normalizeCreateSiteError(
+  status: number,
+  body: string,
+): CreateSiteError {
+  const rawMessage = extractErrorMessageFromBody(body);
+  const lowered = rawMessage.toLowerCase();
+
+  if (
+    status === 409 ||
+    /duplicate|already exists|unique|constraint/i.test(lowered)
+  ) {
+    return {
+      kind: "duplicate",
+      status,
+      message: "A site with this URL already exists in your workspace.",
+    };
+  }
+
+  if (
+    status === 400 &&
+    /(invalid|missing|unsupported|only http|only https|must start|must be)/i.test(
+      lowered,
+    )
+  ) {
+    return {
+      kind: "invalid_url",
+      status,
+      message: "Enter a valid website URL starting with http:// or https://",
+    };
+  }
+
+  return {
+    kind: "unknown",
+    status,
+    message: "Could not add that site right now. Try again in a moment.",
+  };
 }
 
 const STATUS_TOOLTIPS: Record<number, string> = {
@@ -1732,6 +2059,101 @@ function trimDisplayHost(hostname: string) {
   return hostname.replace(/^www\./i, "");
 }
 
+function toTitleCase(value: string) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function splitHostToken(value: string) {
+  for (const suffix of COMMON_HOST_SUFFIX_WORDS) {
+    if (
+      value.length > suffix.length + 3 &&
+      value.toLowerCase().endsWith(suffix)
+    ) {
+      const prefix = value.slice(0, -suffix.length);
+      if (prefix && !prefix.endsWith("-")) {
+        return `${prefix} ${suffix}`;
+      }
+    }
+  }
+  return value;
+}
+
+function splitDisplayToken(value: string) {
+  if (!value) return "";
+  const normalized = value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+
+  const lower = normalized.toLowerCase();
+  for (const suffix of DISPLAY_NAME_SPLIT_SUFFIXES) {
+    if (suffix.length < 4) continue;
+    if (lower.length <= suffix.length + 3) continue;
+    if (lower === suffix) return normalized;
+    if (lower.endsWith(suffix)) {
+      const prefix = normalized
+        .slice(0, normalized.length - suffix.length)
+        .trim();
+      if (!prefix || /[0-9]$/.test(prefix)) {
+        continue;
+      }
+      return `${prefix} ${suffix}`;
+    }
+  }
+  return normalized;
+}
+
+function getSuggestedSiteDisplayName(url: string) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
+    const host = trimDisplayHost(parsed.hostname.toLowerCase());
+    const parts = host.split(".").filter(Boolean);
+    if (parts.length === 0) return "";
+    const suffixAwareIndex =
+      parts.length >= 3 &&
+      ["co", "com", "org", "net", "gov", "ac"].includes(parts[parts.length - 2])
+        ? parts.length - 3
+        : Math.max(0, parts.length - 2);
+    const base = splitHostToken(parts[suffixAwareIndex] ?? parts[0]);
+    const candidate = splitDisplayToken(base);
+    const spaced = candidate
+      .replace(/[_-]+/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .trim();
+    return spaced ? toTitleCase(spaced) : "";
+  } catch {
+    return "";
+  }
+}
+
+function getSiteUrlValidationError(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return "Website URL is required.";
+  try {
+    normalizeComparableUrl(trimmed);
+    return null;
+  } catch {
+    return "Enter a valid website URL starting with http:// or https://";
+  }
+}
+
+function normalizeComparableUrl(url: string) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http and https URLs are supported");
+  }
+  const pathname =
+    parsed.pathname && parsed.pathname !== "/"
+      ? parsed.pathname.replace(/\/+$/, "")
+      : "";
+  return `${parsed.protocol}//${trimDisplayHost(parsed.hostname.toLowerCase())}${pathname}${parsed.search}`;
+}
+
 function buildAppUrl(
   pathname: string,
   params?: Record<string, string | null | undefined>,
@@ -1749,6 +2171,12 @@ function buildAppUrl(
 
 function buildLearnArticlePath(slug: string) {
   return `/learn/${encodeURIComponent(slug)}`;
+}
+
+function buildAppSectionPath(section: AppSection) {
+  if (section === "reports") return "/dashboard/reports";
+  if (section === "site_settings") return "/dashboard/settings";
+  return "/dashboard";
 }
 
 function buildScanLinksUrl(
@@ -1800,11 +2228,20 @@ function createEmptyReportSections(): Record<
     broken: { ...EMPTY_REPORT_SECTION, links: [] },
     blocked: { ...EMPTY_REPORT_SECTION, links: [] },
     no_response: { ...EMPTY_REPORT_SECTION, links: [] },
+    ok: { ...EMPTY_REPORT_SECTION, links: [] },
   };
 }
 
 function createEmptyReportIgnoredSection(): ReportIgnoredSectionState {
   return { ...EMPTY_REPORT_IGNORED_SECTION, links: [] };
+}
+
+function getReportSectionDisplayTotal(
+  section: ReportLinkSectionState,
+  fallbackCount: number,
+) {
+  if (section.totalMatching != null) return section.totalMatching;
+  return Math.max(fallbackCount, section.links.length);
 }
 
 function matchesLearnArticleQuery(article: LearnArticle, query: string) {
@@ -2122,6 +2559,9 @@ const App: React.FC = () => {
   const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const progressDismissRef = useRef<number | null>(null);
+  const dashboardCompletionPollTimerRef = useRef<number | null>(null);
+  const dashboardCompletionPollKeyRef = useRef<string | null>(null);
+  const dashboardCompletionPollAttemptsRef = useRef(0);
   const lastRunStatusRef = useRef<{
     id: string | null;
     status: ScanStatus | null;
@@ -2155,10 +2595,31 @@ const App: React.FC = () => {
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
+  const [siteSettingsSection, setSiteSettingsSection] =
+    useState<SiteSettingsSection>("general");
+  const [siteDisplayNameDraft, setSiteDisplayNameDraft] = useState("");
+  const [siteClientNameDraft, setSiteClientNameDraft] = useState("");
+  const [siteReportDisplayNameDraft, setSiteReportDisplayNameDraft] =
+    useState("");
+  const [siteInternalNotesDraft, setSiteInternalNotesDraft] = useState("");
+  const [siteDetailsSaving, setSiteDetailsSaving] = useState(false);
+  const [siteDetailsError, setSiteDetailsError] = useState<string | null>(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [onboardingSiteUrl, setOnboardingSiteUrl] = useState("");
-  const [onboardingSiteName, setOnboardingSiteName] = useState("");
+  const [onboardingSiteDisplayName, setOnboardingSiteDisplayName] =
+    useState("");
+  const [onboardingClientName, setOnboardingClientName] = useState("");
+  const [onboardingReportDisplayName, setOnboardingReportDisplayName] =
+    useState("");
+  const [
+    onboardingSiteDisplayNameTouched,
+    setOnboardingSiteDisplayNameTouched,
+  ] = useState(false);
+  const [
+    onboardingReportDisplayNameTouched,
+    setOnboardingReportDisplayNameTouched,
+  ] = useState(false);
   const [onboardingWorking, setOnboardingWorking] = useState(false);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const [onboardingScanRequested, setOnboardingScanRequested] = useState(false);
@@ -2183,19 +2644,31 @@ const App: React.FC = () => {
   const [learnSearchQuery, setLearnSearchQuery] = useState("");
   const [learnCategoryFilter, setLearnCategoryFilter] =
     useState<LearnCategoryFilter>("all");
-  const [appSection, setAppSection] = useState<AppSection>("dashboard");
+  const [appSection, setAppSection] = useState<AppSection>(() =>
+    getAppSectionFromLocation(),
+  );
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
-    getReportScanRunIdFromLocation() ? "report" : "dashboard",
+    getReportScanRunIdFromLocation() || getSharedReportTokenFromLocation()
+      ? "report"
+      : "dashboard",
   );
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
   );
+  const [sharedReportToken, setSharedReportToken] = useState<string | null>(
+    () => getSharedReportTokenFromLocation(),
+  );
   const [reportRunData, setReportRunData] = useState<ScanRunSummary | null>(
     null,
   );
+  const [reportSiteSnapshot, setReportSiteSnapshot] = useState<
+    ReportOverviewResponse["site"] | null
+  >(null);
   const [reportSummaryRows, setReportSummaryRows] = useState<
     ScanLinksSummaryRow[]
   >([]);
+  const [reportSummaryTotals, setReportSummaryTotals] =
+    useState<ReportSummaryCounts>(EMPTY_REPORT_SUMMARY_COUNTS);
   const [reportIgnoredTotal, setReportIgnoredTotal] = useState<number | null>(
     null,
   );
@@ -2222,6 +2695,7 @@ const App: React.FC = () => {
     broken: REPORT_INITIAL_VISIBLE_ROWS,
     blocked: REPORT_INITIAL_VISIBLE_ROWS,
     no_response: REPORT_INITIAL_VISIBLE_ROWS,
+    ok: REPORT_OK_INITIAL_VISIBLE_ROWS,
   });
   const [reportVisibleIgnoredCount, setReportVisibleIgnoredCount] = useState(
     REPORT_INITIAL_VISIBLE_ROWS,
@@ -2234,6 +2708,13 @@ const App: React.FC = () => {
     useState<Phase0Diagnostics | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportShare, setReportShare] = useState<ReportShareDetails | null>(
+    null,
+  );
+  const [reportShareLoading, setReportShareLoading] = useState(false);
+  const [reportShareSaving, setReportShareSaving] = useState(false);
+  const [reportShareError, setReportShareError] = useState<string | null>(null);
+  const [reportSharePanelOpen, setReportSharePanelOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -2289,8 +2770,19 @@ const App: React.FC = () => {
   const [triggerError, setTriggerError] = useState<string | null>(null);
 
   const [newSiteUrl, setNewSiteUrl] = useState("");
+  const [newSiteDisplayName, setNewSiteDisplayName] = useState("");
+  const [newSiteClientName, setNewSiteClientName] = useState("");
+  const [newSiteReportDisplayName, setNewSiteReportDisplayName] = useState("");
+  const [newSiteDisplayNameTouched, setNewSiteDisplayNameTouched] =
+    useState(false);
+  const [newSiteReportDisplayNameTouched, setNewSiteReportDisplayNameTouched] =
+    useState(false);
   const [creatingSite, setCreatingSite] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const newSiteUrlValidationError = useMemo(
+    () => getSiteUrlValidationError(newSiteUrl),
+    [newSiteUrl],
+  );
 
   const [deletingSiteId, setDeletingSiteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -2332,7 +2824,6 @@ const App: React.FC = () => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [addSiteOpen, setAddSiteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [ignoreRulesOpen, setIgnoreRulesOpen] = useState(false);
   const [ignoreRules, setIgnoreRules] = useState<IgnoreRule[]>([]);
   const [ignoreRulesLoading, setIgnoreRulesLoading] = useState(false);
   const [ignoreRulesError, setIgnoreRulesError] = useState<string | null>(null);
@@ -2354,11 +2845,23 @@ const App: React.FC = () => {
   const [notifySaving, setNotifySaving] = useState(false);
   const [notifyTestSending, setNotifyTestSending] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
+  const [uptimeStatus, setUptimeStatus] = useState<UptimeStatusResponse | null>(
+    null,
+  );
+  const [uptimeEnabled, setUptimeEnabled] = useState(false);
+  const [uptimeCheckUrl, setUptimeCheckUrl] = useState("");
+  const [uptimeFailureThreshold, setUptimeFailureThreshold] = useState(3);
+  const [uptimeLoading, setUptimeLoading] = useState(false);
+  const [uptimeSaving, setUptimeSaving] = useState(false);
+  const [uptimeError, setUptimeError] = useState<string | null>(null);
   const [newRuleType, setNewRuleType] =
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
   const [newRuleScope, setNewRuleScope] = useState<"site" | "global">("site");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [dashboardHistoryExpanded, setDashboardHistoryExpanded] =
+    useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
   const [resultsView, setResultsView] = useState<FixQueueView>("results");
   const [scanWorkspaceOpen, setScanWorkspaceOpen] = useState(false);
@@ -2429,11 +2932,17 @@ const App: React.FC = () => {
     const handlePopState = () => {
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
+      const nextSharedToken = getSharedReportTokenFromLocation();
       setRoute(nextRoute);
+      setAppSection(getAppSectionFromLocation());
       setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
+      setSharedReportToken(nextSharedToken);
       setViewMode(
-        nextRoute === "report" && nextReportId ? "report" : "dashboard",
+        (nextRoute === "report" && nextReportId) ||
+          (nextRoute === "shared_report" && nextSharedToken)
+          ? "report"
+          : "dashboard",
       );
     };
     window.addEventListener("popstate", handlePopState);
@@ -2442,8 +2951,20 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!authUser || route !== "login") return;
-    navigateTo("/app");
+    navigateTo("/dashboard");
   }, [authUser, route]);
+
+  useEffect(() => {
+    setDashboardHistoryExpanded(false);
+  }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || route !== "app") return;
+    const { pathname, search, hash } = window.location;
+    if (pathname !== "/app" && !pathname.startsWith("/app/")) return;
+    const dashboardPath = pathname.replace(/^\/app(?=\/|$)/, "/dashboard");
+    window.history.replaceState({}, "", `${dashboardPath}${search}${hash}`);
+  }, [route]);
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -2495,6 +3016,7 @@ const App: React.FC = () => {
     setReportIgnoredSection(createEmptyReportIgnoredSection());
     setReportIssues(EMPTY_REPORT_ISSUES_STATE);
     setReportTechnicalDiagnostics(null);
+    setReportSiteSnapshot(null);
     setReportFilteredIssueStates({});
     setReportIssueFilter("all");
     setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
@@ -2503,9 +3025,13 @@ const App: React.FC = () => {
       broken: REPORT_INITIAL_VISIBLE_ROWS,
       blocked: REPORT_INITIAL_VISIBLE_ROWS,
       no_response: REPORT_INITIAL_VISIBLE_ROWS,
+      ok: REPORT_OK_INITIAL_VISIBLE_ROWS,
     });
     setReportVisibleIgnoredCount(REPORT_INITIAL_VISIBLE_ROWS);
     setReportSectionsLoaded(false);
+    setReportShare(null);
+    setReportShareError(null);
+    setReportSharePanelOpen(false);
   }, []);
 
   const fetchReportScanLinksPage = useCallback(
@@ -2529,61 +3055,75 @@ const App: React.FC = () => {
   );
 
   const loadReportOverview = useCallback(
-    async (scanRunId: string) => {
-      const [runRes, summaryRes, ignoredRes, diagnosticsRes] =
-        await Promise.all([
-          apiFetch(`${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`, {
+    async (scanRunId: string, shareToken?: string | null) => {
+      const reportBase = shareToken
+        ? `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}`
+        : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
+      const [overviewRes, ignoredRes, diagnosticsRes] = await Promise.all([
+        apiFetch(shareToken ? `${reportBase}/report` : `${reportBase}/report`, {
+          cache: "no-store",
+        }),
+        apiFetch(
+          shareToken
+            ? `${reportBase}/ignored?limit=1&offset=0`
+            : buildIgnoredLinksUrl(scanRunId, 0, 1),
+          {
             cache: "no-store",
-          }),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/links/summary`,
-            { cache: "no-store" },
-          ),
-          apiFetch(buildIgnoredLinksUrl(scanRunId, 0, 1), {
-            cache: "no-store",
-          }),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/technical-diagnostics`,
-            { cache: "no-store" },
-          ),
-        ]);
+          },
+        ),
+        apiFetch(
+          shareToken
+            ? `${reportBase}/technical-diagnostics`
+            : `${reportBase}/technical-diagnostics`,
+          { cache: "no-store" },
+        ),
+      ]);
 
-      if (!runRes.ok) {
-        if (runRes.status === 404) {
-          throw new Error("Report not found for this scan run");
+      if (!overviewRes.ok) {
+        if (overviewRes.status === 404) {
+          throw new Error(
+            shareToken
+              ? "Shared report link is invalid or no longer available"
+              : "Report not found for this scan run",
+          );
         }
-        if (runRes.status === 401) {
+        if (overviewRes.status === 401) {
           throw new Error("You do not have access to this scan report");
         }
-        const text = await runRes.text().catch(() => "");
+        const text = await overviewRes.text().catch(() => "");
         throw new Error(
-          `Failed to load scan run: ${runRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+          `Failed to load report: ${overviewRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
         );
-      }
-      if (!summaryRes.ok) {
-        throw new Error(`Failed to load link summary: ${summaryRes.status}`);
       }
       if (!ignoredRes.ok) {
         throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
       }
       if (!diagnosticsRes.ok) {
         throw new Error(
-          `Failed to load technical diagnostics: ${diagnosticsRes.status}`,
+          `Failed to load developer diagnostics: ${diagnosticsRes.status}`,
         );
       }
 
-      const run = (await runRes.json()) as ScanRunSummary;
-      const summaryData = (await summaryRes.json()) as ScanLinksSummaryResponse;
+      const overviewData = (await overviewRes.json()) as ReportOverviewResponse;
+      const run = overviewData.scanRun;
+      const summaryRows = overviewData.summary.rows ?? [];
       const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
       const diagnosticsData =
         (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
 
       setReportRunData(run);
-      setReportSummaryRows(summaryData.summary ?? []);
+      setReportSiteSnapshot(overviewData.site ?? null);
+      setReportSummaryRows(summaryRows);
+      setReportSummaryTotals(
+        summarizeReportOverview(
+          summaryRows,
+          overviewData.summary.byClassification,
+        ),
+      );
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
       setReportTechnicalDiagnostics({
-        scanRunId,
+        scanRunId: run.id,
         ok: null,
         broken: null,
         blocked: null,
@@ -2607,13 +3147,47 @@ const App: React.FC = () => {
     [apiFetch],
   );
 
-  const loadInitialReportSections = useCallback(
+  const loadReportShare = useCallback(
     async (scanRunId: string) => {
+      setReportShareLoading(true);
+      setReportShareError(null);
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/share`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          if (res.status === 404) {
+            setReportShare(null);
+            return null;
+          }
+          const text = await res.text().catch(() => "");
+          throw new Error(
+            `Failed to load share link: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+          );
+        }
+        const data = (await res.json()) as ReportShareResponse;
+        setReportShare(data.share ?? null);
+        return data.share ?? null;
+      } catch (err: unknown) {
+        setReportShare(null);
+        setReportShareError(getErrorMessage(err, "Failed to load share link"));
+        return null;
+      } finally {
+        setReportShareLoading(false);
+      }
+    },
+    [apiFetch],
+  );
+
+  const loadInitialReportSections = useCallback(
+    async (scanRunId: string, shareToken?: string | null) => {
       setReportSectionsLoaded(false);
       setReportSections((prev) => ({
         broken: { ...prev.broken, loading: true, error: null },
         blocked: { ...prev.blocked, loading: true, error: null },
         no_response: { ...prev.no_response, loading: true, error: null },
+        ok: { ...prev.ok, loading: true, error: null },
       }));
       setReportIgnoredSection((prev) => ({
         ...prev,
@@ -2625,16 +3199,29 @@ const App: React.FC = () => {
         ["broken", "broken"],
         ["blocked", "blocked"],
         ["no_response", "no_response"],
+        ["ok", "ok"],
       ];
+
+      const publicReportBase = shareToken
+        ? `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}`
+        : null;
 
       const sectionResults = await Promise.all(
         sectionEntries.map(async ([key, classification]) => {
           try {
-            const data = await fetchReportScanLinksPage(
-              scanRunId,
-              classification,
-              0,
-            );
+            const data = publicReportBase
+              ? ((await apiFetch(
+                  `${publicReportBase}/links?classification=${classification}&limit=${LINKS_PAGE_SIZE}&offset=0`,
+                  { cache: "no-store" },
+                ).then(async (res) => {
+                  if (!res.ok) {
+                    throw new Error(
+                      `Failed to load ${key} links: ${res.status}`,
+                    );
+                  }
+                  return (await res.json()) as ScanLinksResponse;
+                })) as ScanLinksResponse)
+              : await fetchReportScanLinksPage(scanRunId, classification, 0);
             return { key, data, error: null as string | null };
           } catch (err: unknown) {
             return {
@@ -2652,6 +3239,7 @@ const App: React.FC = () => {
           next[key] = {
             links: data?.links ?? [],
             offset: data?.countReturned ?? 0,
+            totalMatching: data?.totalMatching ?? null,
             hasMore: data ? data.countReturned < data.totalMatching : false,
             loading: false,
             error,
@@ -2662,7 +3250,9 @@ const App: React.FC = () => {
 
       try {
         const ignoredRes = await apiFetch(
-          buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
+          publicReportBase
+            ? `${publicReportBase}/ignored?limit=${LINKS_PAGE_SIZE}&offset=0`
+            : buildIgnoredLinksUrl(scanRunId, 0, LINKS_PAGE_SIZE),
           {
             cache: "no-store",
           },
@@ -2691,9 +3281,12 @@ const App: React.FC = () => {
   );
 
   const loadInitialReportIssues = useCallback(
-    async (scanRunId: string) => {
+    async (scanRunId: string, shareToken?: string | null) => {
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
+        const reportBase = shareToken
+          ? `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}`
+          : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
         const [
           allRes,
           linkRes,
@@ -2704,36 +3297,31 @@ const App: React.FC = () => {
           securityRes,
           performanceRes,
         ] = await Promise.all([
+          apiFetch(`${reportBase}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`, {
+            cache: "no-store",
+          }),
           apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=0`,
+            `${reportBase}/issues?category=link_integrity&limit=1&offset=0`,
+            { cache: "no-store" },
+          ),
+          apiFetch(`${reportBase}/issues?category=seo_basic&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          apiFetch(`${reportBase}/issues?category=robots&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          apiFetch(`${reportBase}/issues?category=sitemap&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          apiFetch(`${reportBase}/issues?category=ssl_https&limit=1&offset=0`, {
+            cache: "no-store",
+          }),
+          apiFetch(
+            `${reportBase}/issues?category=security_header&limit=1&offset=0`,
             { cache: "no-store" },
           ),
           apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=link_integrity&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=seo_basic&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=robots&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=sitemap&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=ssl_https&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=security_header&limit=1&offset=0`,
-            { cache: "no-store" },
-          ),
-          apiFetch(
-            `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?category=performance_basic&limit=1&offset=0`,
+            `${reportBase}/issues?category=performance_basic&limit=1&offset=0`,
             { cache: "no-store" },
           ),
         ]);
@@ -2816,6 +3404,7 @@ const App: React.FC = () => {
       filter: ReportIssueFilter,
       offset: number,
       limit = LINKS_PAGE_SIZE,
+      shareToken?: string | null,
     ) => {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
@@ -2834,13 +3423,21 @@ const App: React.FC = () => {
       ) {
         params.set("category", filter);
       }
+      if (shareToken) {
+        return `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}/issues?${params.toString()}`;
+      }
       return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?${params.toString()}`;
     },
     [],
   );
 
   const loadFilteredReportIssues = useCallback(
-    async (scanRunId: string, filter: ReportIssueFilter, offset = 0) => {
+    async (
+      scanRunId: string,
+      filter: ReportIssueFilter,
+      offset = 0,
+      shareToken?: string | null,
+    ) => {
       if (filter === "all") return;
       setReportFilteredIssueStates((prev) => ({
         ...prev,
@@ -2852,7 +3449,13 @@ const App: React.FC = () => {
       }));
       try {
         const res = await apiFetch(
-          buildReportIssuesUrl(scanRunId, filter, offset),
+          buildReportIssuesUrl(
+            scanRunId,
+            filter,
+            offset,
+            LINKS_PAGE_SIZE,
+            shareToken,
+          ),
           { cache: "no-store" },
         );
         if (!res.ok) {
@@ -2900,12 +3503,15 @@ const App: React.FC = () => {
   );
 
   const loadMoreReportIssues = useCallback(
-    async (scanRunId: string) => {
+    async (scanRunId: string, shareToken?: string | null) => {
       if (reportIssues.loading || !reportIssues.hasMore) return;
       setReportIssues((prev) => ({ ...prev, loading: true, error: null }));
       try {
+        const reportIssuesBase = shareToken
+          ? `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}`
+          : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
         const res = await apiFetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
+          `${reportIssuesBase}/issues?limit=${LINKS_PAGE_SIZE}&offset=${reportIssues.offset}`,
           { cache: "no-store" },
         );
         if (!res.ok) {
@@ -2938,7 +3544,11 @@ const App: React.FC = () => {
   );
 
   const loadMoreReportSection = useCallback(
-    async (scanRunId: string, section: ReportSectionKey) => {
+    async (
+      scanRunId: string,
+      section: ReportSectionKey,
+      shareToken?: string | null,
+    ) => {
       const current = reportSections[section];
       if (current.loading || !current.hasMore) return;
       setReportSections((prev) => ({
@@ -2946,16 +3556,25 @@ const App: React.FC = () => {
         [section]: { ...prev[section], loading: true, error: null },
       }));
       try {
-        const data = await fetchReportScanLinksPage(
-          scanRunId,
-          section,
-          current.offset,
-        );
+        const data = shareToken
+          ? ((await apiFetch(
+              `${API_BASE}/public/reports/${encodeURIComponent(
+                shareToken,
+              )}/links?classification=${section}&limit=${LINKS_PAGE_SIZE}&offset=${current.offset}`,
+              { cache: "no-store" },
+            ).then(async (res) => {
+              if (!res.ok) {
+                throw new Error(`Failed to load more results: ${res.status}`);
+              }
+              return (await res.json()) as ScanLinksResponse;
+            })) as ScanLinksResponse)
+          : await fetchReportScanLinksPage(scanRunId, section, current.offset);
         setReportSections((prev) => ({
           ...prev,
           [section]: {
             links: [...prev[section].links, ...(data.links ?? [])],
             offset: prev[section].offset + data.countReturned,
+            totalMatching: data.totalMatching,
             hasMore:
               prev[section].offset + data.countReturned < data.totalMatching,
             loading: false,
@@ -2977,7 +3596,7 @@ const App: React.FC = () => {
   );
 
   const loadMoreReportIgnored = useCallback(
-    async (scanRunId: string) => {
+    async (scanRunId: string, shareToken?: string | null) => {
       if (reportIgnoredSection.loading || !reportIgnoredSection.hasMore) return;
       setReportIgnoredSection((prev) => ({
         ...prev,
@@ -2986,11 +3605,15 @@ const App: React.FC = () => {
       }));
       try {
         const res = await apiFetch(
-          buildIgnoredLinksUrl(
-            scanRunId,
-            reportIgnoredSection.offset,
-            LINKS_PAGE_SIZE,
-          ),
+          shareToken
+            ? `${API_BASE}/public/reports/${encodeURIComponent(
+                shareToken,
+              )}/ignored?limit=${LINKS_PAGE_SIZE}&offset=${reportIgnoredSection.offset}`
+            : buildIgnoredLinksUrl(
+                scanRunId,
+                reportIgnoredSection.offset,
+                LINKS_PAGE_SIZE,
+              ),
           { cache: "no-store" },
         );
         if (!res.ok)
@@ -3016,13 +3639,21 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (viewMode !== "report") return;
-    if (!reportScanRunId) {
+    const activeReportId =
+      reportScanRunId ?? (sharedReportToken ? "shared" : null);
+    if (!activeReportId) {
       setReportRunData(null);
+      setReportSiteSnapshot(null);
       setReportSummaryRows([]);
+      setReportSummaryTotals(EMPTY_REPORT_SUMMARY_COUNTS);
       setReportIgnoredTotal(null);
       setReportLastLoadedAt(null);
       resetReportSections();
-      setReportError("Missing scan run id");
+      setReportError(
+        sharedReportToken
+          ? "Missing shared report token"
+          : "Missing scan run id",
+      );
       return;
     }
     let cancelled = false;
@@ -3031,7 +3662,10 @@ const App: React.FC = () => {
       setReportError(null);
       try {
         resetReportSections();
-        await loadReportOverview(reportScanRunId);
+        await loadReportOverview(
+          reportScanRunId ?? activeReportId,
+          sharedReportToken,
+        );
       } catch (err) {
         if (!cancelled) {
           setReportError(getErrorMessage(err, "Failed to load report"));
@@ -3044,7 +3678,13 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadReportOverview, reportScanRunId, resetReportSections, viewMode]);
+  }, [
+    loadReportOverview,
+    reportScanRunId,
+    resetReportSections,
+    sharedReportToken,
+    viewMode,
+  ]);
 
   useEffect(() => {
     if (
@@ -3071,17 +3711,33 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
+    if (viewMode !== "report" || !reportScanRunId) return;
+    if (reportRunData?.status !== "completed") {
+      setReportShare(null);
+      setReportSharePanelOpen(false);
+      return;
+    }
+    void loadReportShare(reportScanRunId);
+  }, [loadReportShare, reportRunData?.status, reportScanRunId, viewMode]);
+
+  useEffect(() => {
     if (
       viewMode !== "report" ||
-      !reportScanRunId ||
+      (!reportScanRunId && !sharedReportToken) ||
       reportRunData?.status !== "completed" ||
       reportSectionsLoaded
     ) {
       return;
     }
     void Promise.all([
-      loadInitialReportSections(reportScanRunId),
-      loadInitialReportIssues(reportScanRunId),
+      loadInitialReportSections(
+        reportScanRunId ?? reportRunData?.id ?? "",
+        sharedReportToken,
+      ),
+      loadInitialReportIssues(
+        reportScanRunId ?? reportRunData?.id ?? "",
+        sharedReportToken,
+      ),
     ]).catch((err) => {
       setReportError(getErrorMessage(err, "Failed to load report sections"));
     });
@@ -3091,13 +3747,15 @@ const App: React.FC = () => {
     reportRunData?.status,
     reportScanRunId,
     reportSectionsLoaded,
+    sharedReportToken,
     viewMode,
   ]);
 
   useEffect(() => {
+    const activeRunId = reportScanRunId ?? reportRunData?.id ?? null;
     if (
       viewMode !== "report" ||
-      !reportScanRunId ||
+      !activeRunId ||
       reportIssueFilter === "all" ||
       !reportIssues.hasMore
     ) {
@@ -3110,13 +3768,20 @@ const App: React.FC = () => {
     ) {
       return;
     }
-    void loadFilteredReportIssues(reportScanRunId, reportIssueFilter, 0);
+    void loadFilteredReportIssues(
+      activeRunId,
+      reportIssueFilter,
+      0,
+      sharedReportToken,
+    );
   }, [
     loadFilteredReportIssues,
     reportFilteredIssueStates,
     reportIssueFilter,
     reportIssues.hasMore,
+    reportRunData?.id,
     reportScanRunId,
+    sharedReportToken,
     viewMode,
   ]);
 
@@ -3802,8 +4467,34 @@ const App: React.FC = () => {
 
   const reportView = viewMode === "report";
   const reportRun = reportRunData;
-  const reportSummary = summarizeReportClassifications(reportSummaryRows);
+  const reportSummaryFromRows =
+    summarizeReportClassifications(reportSummaryRows);
+  const reportSummary: ReportSummaryCounts = {
+    ok: getReportSectionDisplayTotal(
+      reportSections.ok,
+      Math.max(reportSummaryTotals.ok, reportSummaryFromRows.ok),
+    ),
+    broken: getReportSectionDisplayTotal(
+      reportSections.broken,
+      Math.max(reportSummaryTotals.broken, reportSummaryFromRows.broken),
+    ),
+    blocked: getReportSectionDisplayTotal(
+      reportSections.blocked,
+      Math.max(reportSummaryTotals.blocked, reportSummaryFromRows.blocked),
+    ),
+    no_response: getReportSectionDisplayTotal(
+      reportSections.no_response,
+      Math.max(
+        reportSummaryTotals.no_response,
+        reportSummaryFromRows.no_response,
+      ),
+    ),
+  };
   const reportStatusGroups = summarizeReportStatusCodes(reportSummaryRows);
+  const reportIgnoredDisplayTotal = Math.max(
+    reportIgnoredTotal ?? 0,
+    reportIgnoredSection.links.length,
+  );
   const reportHost = reportRun ? safeHost(reportRun.start_url) : null;
   const reportIssueSummary = reportIssues.summary;
   const reportLinkIntegrityIssueSummary =
@@ -3859,6 +4550,41 @@ const App: React.FC = () => {
   const reportHighPriorityCount =
     (reportIssueSummary?.bySeverity.critical ?? 0) +
     (reportIssueSummary?.bySeverity.high ?? 0);
+  const reportCompletedIssueSummaryReady =
+    reportRun?.status === "completed" &&
+    reportIssueSummary != null &&
+    !reportIssues.loading;
+  const reportSummaryStatItems = reportCompletedIssueSummaryReady
+    ? [
+        {
+          label: "Latest score",
+          value:
+            reportScores.overall.score == null
+              ? "—"
+              : `${reportScores.overall.score}%`,
+        },
+        {
+          label: "Open issues",
+          value: reportIssueSummary.total,
+        },
+        {
+          label: "High priority",
+          value: reportHighPriorityCount,
+        },
+        {
+          label: "New",
+          value: reportIssueSummary.byChangeStatus.new ?? 0,
+        },
+        {
+          label: "Resolved",
+          value: reportIssueSummary.byChangeStatus.resolved ?? 0,
+        },
+        {
+          label: "Links checked",
+          value: reportRun.checked_links,
+        },
+      ]
+    : [];
   const reportDateLabel = formatDate(
     reportRun?.finished_at ?? reportRun?.started_at ?? null,
   );
@@ -3903,27 +4629,38 @@ const App: React.FC = () => {
   }, [reportIssues.issues]);
   const reportTechnicalDiagnosticsNeedsAttention =
     !!reportRun?.issue_generation_error ||
-    reportRun?.issue_generation_status === "pending" ||
     reportRun?.issue_generation_status === "failed" ||
-    !reportTechnicalDiagnostics ||
-    [
-      reportTechnicalDiagnostics?.seoBasic?.issueCount,
-      reportTechnicalDiagnostics?.robots?.issueCount,
-      reportTechnicalDiagnostics?.sitemap?.issueCount,
-      reportTechnicalDiagnostics?.sslHttps?.issueCount,
-      reportTechnicalDiagnostics?.securityHeader?.issueCount,
-      reportTechnicalDiagnostics?.performanceBasic?.issueCount,
-    ].some((count) => (count ?? 0) > 0);
+    reportRun?.status === "failed" ||
+    (reportRun?.status === "completed" && !reportTechnicalDiagnostics);
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
+  );
+  const getSiteDisplayName = useCallback(
+    (site: Site | null) => {
+      if (!site) return null;
+      return site.site_display_name ?? siteNameById[site.id] ?? null;
+    },
+    [siteNameById],
   );
   const selectedSite = useMemo(
     () => sites.find((site) => site.id === selectedSiteId) ?? null,
     [sites, selectedSiteId],
   );
-  const selectedSiteName = selectedSite
-    ? (siteNameById[selectedSite.id] ?? null)
+  const selectedSiteName = getSiteDisplayName(selectedSite);
+  const reportDisplayName =
+    reportSiteSnapshot?.report_display_name ??
+    reportSiteSnapshot?.site_display_name ??
+    selectedSiteName;
+  const reportClientName = reportSiteSnapshot?.client_name ?? null;
+  const selectedSiteHost = selectedSite
+    ? (() => {
+        try {
+          return trimDisplayHost(new URL(selectedSite.url).hostname);
+        } catch {
+          return selectedSite.url.replace(/^https?:\/\//i, "");
+        }
+      })()
     : null;
   const currentLearnArticle = useMemo(
     () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
@@ -3972,6 +4709,25 @@ const App: React.FC = () => {
       return await fetchDashboardSummary(selectedSiteId);
     },
   });
+  const upsertRunSummary = useCallback((run: ScanRunSummary) => {
+    setHistory((prev) => {
+      const idx = prev.findIndex((item) => item.id === run.id);
+      if (idx === -1) {
+        return [run, ...prev];
+      }
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], ...run };
+      return copy;
+    });
+    if (selectedRunIdRef.current === run.id) {
+      setSelectedRunId(run.id);
+      selectedRunIdRef.current = run.id;
+    }
+    if (!isInProgress(run.status) && activeRunIdRef.current === run.id) {
+      setActiveRunId(null);
+      activeRunIdRef.current = null;
+    }
+  }, []);
   const refreshDashboardSummary = useCallback(
     async (
       siteId: string,
@@ -3990,6 +4746,11 @@ const App: React.FC = () => {
             queryFn: () => fetchDashboardSummary(siteId),
             staleTime: 0,
           });
+          if (data.latestRun) {
+            upsertRunSummary(data.latestRun);
+            markRunProgress(data.latestRun.id);
+            maybeNotifyRunStatus(data.latestRun);
+          }
           const latestRunId = data.latestRun?.id ?? null;
           const matchesRun =
             !opts?.targetRunId || latestRunId === opts.targetRunId;
@@ -4015,27 +4776,58 @@ const App: React.FC = () => {
       }
       return null;
     },
-    [fetchDashboardSummary, queryClient],
+    [fetchDashboardSummary, queryClient, upsertRunSummary],
+  );
+
+  const fetchRunSnapshot = useCallback(
+    async (runId: string) => {
+      try {
+        const res = await apiFetch(
+          `${API_BASE}/scan-runs/${encodeURIComponent(runId)}`,
+          {
+            cache: "no-store",
+          },
+        );
+        if (!res.ok) {
+          return null;
+        }
+        const run: ScanRunSummary = await res.json();
+        upsertRunSummary(run);
+        markRunProgress(run.id);
+        maybeNotifyRunStatus(run);
+        return run;
+      } catch {
+        return null;
+      }
+    },
+    [apiFetch, upsertRunSummary],
   );
   const dashboardSummary = dashboardSummaryQuery.data ?? null;
   const dashboardObservedRun =
     selectedRun && dashboardObservedScanRunId === selectedRun.id
       ? selectedRun
       : null;
+  const dashboardObservedRunLatestSnapshot =
+    dashboardObservedRun &&
+    dashboardSummary?.latestRun?.id === dashboardObservedRun.id
+      ? { ...dashboardObservedRun, ...dashboardSummary.latestRun }
+      : dashboardObservedRun;
   const dashboardSummaryMatchesObservedRun =
-    !!dashboardObservedRun &&
-    dashboardSummary?.latestRun?.id === dashboardObservedRun.id;
+    !!dashboardObservedRunLatestSnapshot &&
+    dashboardSummary?.latestRun?.id === dashboardObservedRunLatestSnapshot.id;
   const dashboardTerminalSummaryPending =
-    !!dashboardObservedRun &&
-    !isInProgress(dashboardObservedRun.status) &&
+    !!dashboardObservedRunLatestSnapshot &&
+    !isInProgress(dashboardObservedRunLatestSnapshot.status) &&
     (!dashboardSummaryMatchesObservedRun ||
-      (dashboardObservedRun.status === "completed" &&
-        dashboardObservedRun.issue_generation_status != null &&
-        dashboardObservedRun.issue_generation_status !== "completed"));
+      (dashboardObservedRunLatestSnapshot.status === "completed" &&
+        dashboardObservedRunLatestSnapshot.issue_generation_status != null &&
+        dashboardObservedRunLatestSnapshot.issue_generation_status !==
+          "completed"));
   const dashboardLatestRun =
-    selectedRun &&
-    (isInProgress(selectedRun.status) || dashboardTerminalSummaryPending)
-      ? selectedRun
+    dashboardObservedRunLatestSnapshot &&
+    (isInProgress(dashboardObservedRunLatestSnapshot.status) ||
+      dashboardTerminalSummaryPending)
+      ? dashboardObservedRunLatestSnapshot
       : (dashboardSummary?.latestRun ?? selectedRun ?? null);
   const phase0SummaryRows = currentPhase0Diagnostics
     ? ([
@@ -4142,6 +4934,26 @@ const App: React.FC = () => {
     (dashboardLatestRun.status === "completed" ||
       dashboardLatestRun.status === "failed" ||
       dashboardLatestRun.status === "cancelled");
+  const selectedRunMatchesLatestSummary =
+    !!selectedRun &&
+    !!dashboardSummary?.latestRun &&
+    selectedRun.id === dashboardSummary.latestRun.id;
+  const selectedRunSummaryStats =
+    selectedRunMatchesLatestSummary &&
+    dashboardSummaryDataReady &&
+    !isInProgress(selectedRun.status)
+      ? {
+          latestScore:
+            dashboardScores.overall.score == null
+              ? "—"
+              : `${dashboardScores.overall.score}%`,
+          linksChecked: selectedRun.checked_links,
+          openIssues: dashboardIssueSummary?.total ?? 0,
+          highPriority: dashboardHighPriority,
+          newIssues: dashboardIssueMovement?.new ?? 0,
+          resolvedIssues: dashboardIssueMovement?.resolved ?? 0,
+        }
+      : null;
   const dashboardRunningPreviewItems = [
     dashboardActiveLinkSummary.broken > 0
       ? {
@@ -4206,10 +5018,135 @@ const App: React.FC = () => {
     !!dashboardLatestRun &&
     dashboardTerminalLike &&
     dashboardRecentlyFinishedRunId === dashboardLatestRun.id;
+
+  useEffect(() => {
+    const stopDashboardCompletionPoll = () => {
+      if (dashboardCompletionPollTimerRef.current != null) {
+        window.clearTimeout(dashboardCompletionPollTimerRef.current);
+        dashboardCompletionPollTimerRef.current = null;
+      }
+      dashboardCompletionPollKeyRef.current = null;
+      dashboardCompletionPollAttemptsRef.current = 0;
+    };
+
+    if (
+      !selectedSiteId ||
+      !dashboardLatestRun ||
+      dashboardLatestRun.status !== "completed" ||
+      !dashboardSummaryPending
+    ) {
+      stopDashboardCompletionPoll();
+      return;
+    }
+
+    const pollKey = `${selectedSiteId}:${dashboardLatestRun.id}`;
+    if (dashboardCompletionPollKeyRef.current !== pollKey) {
+      if (dashboardCompletionPollTimerRef.current != null) {
+        window.clearTimeout(dashboardCompletionPollTimerRef.current);
+        dashboardCompletionPollTimerRef.current = null;
+      }
+      dashboardCompletionPollKeyRef.current = pollKey;
+      dashboardCompletionPollAttemptsRef.current = 0;
+    }
+
+    const scheduleNext = () => {
+      if (dashboardCompletionPollTimerRef.current != null) return;
+      const attempt = dashboardCompletionPollAttemptsRef.current;
+      if (attempt >= 12) return;
+      const delay =
+        attempt < 2 ? 900 : attempt < 6 ? 1500 : attempt < 9 ? 2200 : 3000;
+      dashboardCompletionPollTimerRef.current = window.setTimeout(() => {
+        dashboardCompletionPollTimerRef.current = null;
+        dashboardCompletionPollAttemptsRef.current += 1;
+
+        void (async () => {
+          const run = await fetchRunSnapshot(dashboardLatestRun.id);
+          const summary = await refreshDashboardSummary(
+            selectedSiteId,
+            "dashboard_completion_poll",
+            {
+              targetRunId: dashboardLatestRun.id,
+              waitForIssueSummary: true,
+              maxAttempts: 1,
+            },
+          );
+          const issueSummaryReady =
+            summary != null ||
+            run?.issue_generation_status === "completed" ||
+            run?.issue_generation_status === "failed";
+
+          if (issueSummaryReady) {
+            await loadHistory(selectedSiteId, { preserveSelection: true });
+            if (selectedRunIdRef.current === dashboardLatestRun.id) {
+              await loadResults(dashboardLatestRun.id);
+            }
+            stopDashboardCompletionPoll();
+            return;
+          }
+
+          if (dashboardCompletionPollAttemptsRef.current < 12) {
+            scheduleNext();
+          }
+        })();
+      }, delay);
+    };
+
+    scheduleNext();
+    return () => {
+      if (dashboardCompletionPollKeyRef.current === pollKey) {
+        if (dashboardCompletionPollTimerRef.current != null) {
+          window.clearTimeout(dashboardCompletionPollTimerRef.current);
+          dashboardCompletionPollTimerRef.current = null;
+        }
+      }
+    };
+  }, [
+    dashboardLatestRun,
+    dashboardSummaryPending,
+    fetchRunSnapshot,
+    refreshDashboardSummary,
+    selectedSiteId,
+  ]);
+
   const dashboardHistoryItems =
-    dashboardSummaryDataReady || !dashboardObservedRun
-      ? (dashboardSummary?.history ?? history)
-      : history;
+    history.length > 0 ? history : (dashboardSummary?.history ?? []);
+  const visibleDashboardHistoryItems = dashboardHistoryExpanded
+    ? dashboardHistoryItems
+    : dashboardHistoryItems.slice(0, 5);
+  const visibleHistoryItems = historyExpanded ? history : history.slice(0, 5);
+  const scheduleSummaryText = selectedSite
+    ? formatScheduleSummary(
+        scheduleEnabled,
+        scheduleFrequency,
+        scheduleTimeUtc,
+        scheduleDayOfWeek,
+        scheduleDayOfMonth,
+        selectedSite.next_scheduled_at,
+      )
+    : "Select a site to configure auto-scans";
+  const alertsSummaryText = selectedSite
+    ? formatAlertsSummary(notifyEnabled, notifyOn)
+    : "Select a site to configure alerts";
+  const uptimeSummaryText = !selectedSite
+    ? "Select a site to configure monitoring"
+    : uptimeLoading
+      ? "Loading availability status…"
+      : uptimeError
+        ? "Availability status unavailable"
+        : !uptimeStatus?.enabled
+          ? "Availability monitoring off"
+          : `${formatUptimeStatusLabel(uptimeStatus.status)} · ${
+              uptimeStatus.uptime30d == null
+                ? "30d uptime pending"
+                : `${uptimeStatus.uptime30d.toFixed(2)}% over 30 days`
+            }`;
+  const ignoreRulesSummaryText = !selectedSite
+    ? "Select a site to manage ignore rules"
+    : ignoreRulesLoading
+      ? "Loading ignore rules…"
+      : ignoreRules.length === 0
+        ? "No ignore rules configured"
+        : `${ignoreRules.filter((rule) => rule.is_enabled).length} enabled of ${ignoreRules.length} total`;
   const primaryAppSections: Array<{ key: AppSection; label: string }> = [
     { key: "dashboard", label: "Dashboard" },
     { key: "reports", label: "Reports" },
@@ -4217,6 +5154,8 @@ const App: React.FC = () => {
   const isPublicLandingRoute = route === "landing";
   const isLoginRoute = route === "login";
   const isReportRoute = route === "report";
+  const isSharedReportRoute = route === "shared_report";
+  const isReadOnlyReport = isSharedReportRoute;
   const protectedRouteRequiresAuth = route === "app" || route === "report";
   const authPageTitle =
     isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
@@ -4484,27 +5423,30 @@ const App: React.FC = () => {
   };
 
   const handleShowMoreReportIssues = () => {
+    const activeRunId = reportScanRunId ?? reportRunData?.id ?? null;
     const nextVisible = reportVisibleIssueCount + REPORT_VISIBLE_ROWS_INCREMENT;
     setReportVisibleIssueCount(nextVisible);
     if (
-      reportScanRunId &&
+      activeRunId &&
       nextVisible > displayedIssueRows.length &&
       activeFilteredIssueState.hasMore &&
       !activeFilteredIssueState.loading
     ) {
       if (canUseClientIssueFilter) {
-        void loadMoreReportIssues(reportScanRunId);
+        void loadMoreReportIssues(activeRunId, sharedReportToken);
       } else {
         void loadFilteredReportIssues(
-          reportScanRunId,
+          activeRunId,
           reportIssueFilter,
           activeFilteredIssueState.offset,
+          sharedReportToken,
         );
       }
     }
   };
 
   const handleShowMoreReportSection = (sectionKey: ReportSectionKey) => {
+    const activeRunId = reportScanRunId ?? reportRunData?.id ?? null;
     const nextVisible =
       reportVisibleSectionCounts[sectionKey] + REPORT_VISIBLE_ROWS_INCREMENT;
     setReportVisibleSectionCounts((prev) => ({
@@ -4513,26 +5455,27 @@ const App: React.FC = () => {
     }));
     const section = reportSections[sectionKey];
     if (
-      reportScanRunId &&
+      activeRunId &&
       nextVisible > section.links.length &&
       section.hasMore &&
       !section.loading
     ) {
-      void loadMoreReportSection(reportScanRunId, sectionKey);
+      void loadMoreReportSection(activeRunId, sectionKey, sharedReportToken);
     }
   };
 
   const handleShowMoreReportIgnored = () => {
+    const activeRunId = reportScanRunId ?? reportRunData?.id ?? null;
     const nextVisible =
       reportVisibleIgnoredCount + REPORT_VISIBLE_ROWS_INCREMENT;
     setReportVisibleIgnoredCount(nextVisible);
     if (
-      reportScanRunId &&
+      activeRunId &&
       nextVisible > reportIgnoredSection.links.length &&
       reportIgnoredSection.hasMore &&
       !reportIgnoredSection.loading
     ) {
-      void loadMoreReportIgnored(reportScanRunId);
+      void loadMoreReportIgnored(activeRunId, sharedReportToken);
     }
   };
 
@@ -4553,30 +5496,32 @@ const App: React.FC = () => {
         <span className="report-url-text" title={url}>
           {formatReportUrlLabel(url)}
         </span>
-        <div className="report-url-actions">
-          <button
-            type="button"
-            className="report-url-action"
-            onClick={() =>
-              void copyToClipboard(
-                url,
-                undefined,
-                options?.copyLabel ?? "Copied full URL",
-              )
-            }
-            title="Copy full URL"
-          >
-            Copy
-          </button>
-          <button
-            type="button"
-            className="report-url-action"
-            onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
-            title="Open URL"
-          >
-            Open
-          </button>
-        </div>
+        {!isReadOnlyReport && (
+          <div className="report-url-actions">
+            <button
+              type="button"
+              className="report-url-action"
+              onClick={() =>
+                void copyToClipboard(
+                  url,
+                  undefined,
+                  options?.copyLabel ?? "Copied full URL",
+                )
+              }
+              title="Copy full URL"
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="report-url-action"
+              onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+              title="Open URL"
+            >
+              Open
+            </button>
+          </div>
+        )}
       </div>
     );
   };
@@ -4585,6 +5530,7 @@ const App: React.FC = () => {
     title: string,
     sectionKey: ReportSectionKey,
     count: number,
+    description?: string,
   ) => {
     const section = reportSections[sectionKey];
     const visibleLinks = section.links.slice(
@@ -4593,10 +5539,22 @@ const App: React.FC = () => {
     );
     const shownCount = Math.min(visibleLinks.length, count);
     return (
-      <div className="report-card">
+      <div
+        className={`report-card report-link-section report-link-section--${sectionKey}`}
+      >
         <div className="report-card__header">
-          <div className="report-table-title">
-            {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+          <div>
+            <div className="report-table-title">
+              {title} <span style={{ color: "var(--muted)" }}>({count})</span>
+            </div>
+            {description && (
+              <div
+                className="report-table-meta report-link-section__description"
+                style={{ marginTop: "4px" }}
+              >
+                {description}
+              </div>
+            )}
           </div>
         </div>
         {section.error && (
@@ -4631,28 +5589,34 @@ const App: React.FC = () => {
               ) : (
                 visibleLinks.map((row) => (
                   <tr key={row.id}>
-                    <td>{renderReportUrlCell(row.link_url)}</td>
-                    <td>{row.status_code ?? "-"}</td>
-                    <td>
+                    <td data-label="Link">
+                      {renderReportUrlCell(row.link_url)}
+                    </td>
+                    <td data-label="Status">{row.status_code ?? "-"}</td>
+                    <td data-label="Result">
                       {row.error_message ??
                         formatClassification(row.classification)}
                     </td>
-                    <td>{row.occurrence_count}</td>
-                    <td>{formatDate(row.last_seen_at)}</td>
+                    <td data-label="Occurrences">{row.occurrence_count}</td>
+                    <td data-label="Last seen">
+                      {formatDate(row.last_seen_at)}
+                    </td>
                   </tr>
                 ))
               )}
             </tbody>
           </table>
         </div>
-        <div className="report-table-meta">
+        <div className="report-table-meta report-link-section__count">
           Showing {shownCount} of {count} links
         </div>
         {(shownCount < count || section.hasMore) && (
           <button
             className="report-button"
             onClick={() => handleShowMoreReportSection(sectionKey)}
-            disabled={section.loading || !reportScanRunId}
+            disabled={
+              section.loading || (!reportScanRunId && !reportRunData?.id)
+            }
           >
             {section.loading ? "Loading..." : "Show more"}
           </button>
@@ -4668,7 +5632,7 @@ const App: React.FC = () => {
     );
     const shownCount = Math.min(
       visibleIgnoredLinks.length,
-      reportIgnoredTotal ?? 0,
+      reportIgnoredDisplayTotal,
     );
     return (
       <div className="report-card">
@@ -4676,7 +5640,7 @@ const App: React.FC = () => {
           <div className="report-table-title">
             Ignored / skipped links{" "}
             <span style={{ color: "var(--muted)" }}>
-              ({reportIgnoredTotal ?? 0})
+              ({reportIgnoredDisplayTotal})
             </span>
           </div>
         </div>
@@ -4713,9 +5677,11 @@ const App: React.FC = () => {
               ) : (
                 visibleIgnoredLinks.map((row) => (
                   <tr key={row.id}>
-                    <td>{renderReportUrlCell(row.link_url)}</td>
-                    <td>{row.status_code ?? "-"}</td>
-                    <td>
+                    <td data-label="Link">
+                      {renderReportUrlCell(row.link_url)}
+                    </td>
+                    <td data-label="Status">{row.status_code ?? "-"}</td>
+                    <td data-label="Reason">
                       <div>{getIgnoredRowSummary(row)}</div>
                       <div style={{ color: "var(--muted)", fontSize: "12px" }}>
                         {row.error_message ??
@@ -4724,8 +5690,10 @@ const App: React.FC = () => {
                           "No reason recorded"}
                       </div>
                     </td>
-                    <td>{row.occurrence_count}</td>
-                    <td>{formatDate(row.last_seen_at)}</td>
+                    <td data-label="Occurrences">{row.occurrence_count}</td>
+                    <td data-label="Last seen">
+                      {formatDate(row.last_seen_at)}
+                    </td>
                   </tr>
                 ))
               )}
@@ -4733,14 +5701,17 @@ const App: React.FC = () => {
           </table>
         </div>
         <div className="report-table-meta">
-          Showing {shownCount} of {reportIgnoredTotal ?? 0} links
+          Showing {shownCount} of {reportIgnoredDisplayTotal} links
         </div>
-        {(shownCount < (reportIgnoredTotal ?? 0) ||
+        {(shownCount < reportIgnoredDisplayTotal ||
           reportIgnoredSection.hasMore) && (
           <button
             className="report-button"
             onClick={handleShowMoreReportIgnored}
-            disabled={reportIgnoredSection.loading || !reportScanRunId}
+            disabled={
+              reportIgnoredSection.loading ||
+              (!reportScanRunId && !reportRunData?.id)
+            }
           >
             {reportIgnoredSection.loading ? "Loading..." : "Show more"}
           </button>
@@ -4804,6 +5775,7 @@ const App: React.FC = () => {
               <th>Source URL</th>
               <th>Status</th>
               <th>Last seen</th>
+              {!isReadOnlyReport && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -4814,13 +5786,13 @@ const App: React.FC = () => {
               activeFilteredIssueState.loading &&
               displayedIssueRows.length === 0) ? (
               <tr>
-                <td colSpan={6} className="report-empty">
+                <td colSpan={isReadOnlyReport ? 6 : 7} className="report-empty">
                   Loading…
                 </td>
               </tr>
             ) : displayedIssueRows.length === 0 ? (
               <tr>
-                <td colSpan={6} className="report-empty">
+                <td colSpan={isReadOnlyReport ? 6 : 7} className="report-empty">
                   {reportRun?.issue_generation_status === "failed"
                     ? "Issue generation failed for this scan. Raw scan evidence is still available below."
                     : reportRun?.issue_generation_status === "pending"
@@ -4887,6 +5859,159 @@ const App: React.FC = () => {
                     </div>
                   </td>
                   <td>{formatDate(issue.last_seen_at)}</td>
+                  {!isReadOnlyReport && (
+                    <td>
+                      <div
+                        style={{
+                          position: "relative",
+                          display: "inline-flex",
+                        }}
+                        data-action-menu
+                      >
+                        <button
+                          type="button"
+                          className="icon-button"
+                          aria-label="Issue actions"
+                          title="Issue actions"
+                          onClick={() =>
+                            setActionMenuOpenId(
+                              actionMenuOpenId === `report-issue:${issue.id}`
+                                ? null
+                                : `report-issue:${issue.id}`,
+                            )
+                          }
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="14"
+                            height="14"
+                            aria-hidden="true"
+                          >
+                            <circle
+                              cx="5"
+                              cy="12"
+                              r="1.6"
+                              fill="currentColor"
+                            />
+                            <circle
+                              cx="12"
+                              cy="12"
+                              r="1.6"
+                              fill="currentColor"
+                            />
+                            <circle
+                              cx="19"
+                              cy="12"
+                              r="1.6"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </button>
+                        {actionMenuOpenId === `report-issue:${issue.id}` && (
+                          <div
+                            className="action-menu"
+                            style={{
+                              position: "absolute",
+                              right: 0,
+                              top: "calc(100% + 6px)",
+                              background: "var(--panel)",
+                              border: "1px solid var(--border)",
+                              borderRadius: "12px",
+                              boxShadow: "var(--shadow)",
+                              padding: "6px",
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "4px",
+                              minWidth: "220px",
+                              zIndex: 40,
+                            }}
+                          >
+                            <button
+                              onClick={() => {
+                                if (issue.affected_url) {
+                                  window.open(
+                                    issue.affected_url,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  );
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.affected_url}
+                            >
+                              Open affected URL
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (issue.affected_url) {
+                                  void copyToClipboard(
+                                    issue.affected_url,
+                                    undefined,
+                                    "Copied affected URL",
+                                  );
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.affected_url}
+                            >
+                              Copy affected URL
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (issue.source_url) {
+                                  openSourcePage(issue.source_url);
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.source_url}
+                            >
+                              Open source page
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (issue.source_url) {
+                                  void copyToClipboard(
+                                    issue.source_url,
+                                    undefined,
+                                    "Copied source page URL",
+                                  );
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.source_url}
+                            >
+                              Copy source page URL
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (issue.affected_url) {
+                                  void handleIgnoreLinkByUrl(
+                                    issue.affected_url,
+                                    reportScanRunId,
+                                  );
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.affected_url}
+                            >
+                              Ignore exact URL
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (issue.affected_url) {
+                                  openNoteModal(issue.affected_url);
+                                }
+                                setActionMenuOpenId(null);
+                              }}
+                              disabled={!issue.affected_url}
+                            >
+                              Edit note
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))
             )}
@@ -4903,7 +6028,10 @@ const App: React.FC = () => {
         <button
           className="report-button"
           onClick={handleShowMoreReportIssues}
-          disabled={activeFilteredIssueState.loading || !reportScanRunId}
+          disabled={
+            activeFilteredIssueState.loading ||
+            (!reportScanRunId && !reportRunData?.id)
+          }
         >
           {activeFilteredIssueState.loading ? "Loading..." : "Show more"}
         </button>
@@ -4931,12 +6059,16 @@ const App: React.FC = () => {
                   <th>Source URL</th>
                   <th>Status</th>
                   <th>Resolved</th>
+                  {!isReadOnlyReport && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {reportIssues.resolvedIssues.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="report-empty">
+                    <td
+                      colSpan={isReadOnlyReport ? 6 : 7}
+                      className="report-empty"
+                    >
                       No resolved issue rows were returned for this scan.
                     </td>
                   </tr>
@@ -4991,6 +6123,147 @@ const App: React.FC = () => {
                         </span>
                       </td>
                       <td>{formatDate(issue.resolved_at)}</td>
+                      {!isReadOnlyReport && (
+                        <td>
+                          <div
+                            style={{
+                              position: "relative",
+                              display: "inline-flex",
+                            }}
+                            data-action-menu
+                          >
+                            <button
+                              type="button"
+                              className="icon-button"
+                              aria-label="Resolved issue actions"
+                              title="Resolved issue actions"
+                              onClick={() =>
+                                setActionMenuOpenId(
+                                  actionMenuOpenId ===
+                                    `report-resolved-issue:${issue.id}`
+                                    ? null
+                                    : `report-resolved-issue:${issue.id}`,
+                                )
+                              }
+                            >
+                              <svg
+                                viewBox="0 0 24 24"
+                                width="14"
+                                height="14"
+                                aria-hidden="true"
+                              >
+                                <circle
+                                  cx="5"
+                                  cy="12"
+                                  r="1.6"
+                                  fill="currentColor"
+                                />
+                                <circle
+                                  cx="12"
+                                  cy="12"
+                                  r="1.6"
+                                  fill="currentColor"
+                                />
+                                <circle
+                                  cx="19"
+                                  cy="12"
+                                  r="1.6"
+                                  fill="currentColor"
+                                />
+                              </svg>
+                            </button>
+                            {actionMenuOpenId ===
+                              `report-resolved-issue:${issue.id}` && (
+                              <div
+                                className="action-menu"
+                                style={{
+                                  position: "absolute",
+                                  right: 0,
+                                  top: "calc(100% + 6px)",
+                                  background: "var(--panel)",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: "12px",
+                                  boxShadow: "var(--shadow)",
+                                  padding: "6px",
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: "4px",
+                                  minWidth: "220px",
+                                  zIndex: 40,
+                                }}
+                              >
+                                <button
+                                  onClick={() => {
+                                    if (issue.affected_url) {
+                                      window.open(
+                                        issue.affected_url,
+                                        "_blank",
+                                        "noopener,noreferrer",
+                                      );
+                                    }
+                                    setActionMenuOpenId(null);
+                                  }}
+                                  disabled={!issue.affected_url}
+                                >
+                                  Open affected URL
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (issue.affected_url) {
+                                      void copyToClipboard(
+                                        issue.affected_url,
+                                        undefined,
+                                        "Copied affected URL",
+                                      );
+                                    }
+                                    setActionMenuOpenId(null);
+                                  }}
+                                  disabled={!issue.affected_url}
+                                >
+                                  Copy affected URL
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (issue.source_url) {
+                                      openSourcePage(issue.source_url);
+                                    }
+                                    setActionMenuOpenId(null);
+                                  }}
+                                  disabled={!issue.source_url}
+                                >
+                                  Open source page
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (issue.source_url) {
+                                      void copyToClipboard(
+                                        issue.source_url,
+                                        undefined,
+                                        "Copied source page URL",
+                                      );
+                                    }
+                                    setActionMenuOpenId(null);
+                                  }}
+                                  disabled={!issue.source_url}
+                                >
+                                  Copy source page URL
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    if (issue.affected_url) {
+                                      openNoteModal(issue.affected_url);
+                                    }
+                                    setActionMenuOpenId(null);
+                                  }}
+                                  disabled={!issue.affected_url}
+                                >
+                                  Edit note
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))
                 )}
@@ -5477,7 +6750,7 @@ const App: React.FC = () => {
       }
       if (event.key === "a" && !isTyping) {
         event.preventDefault();
-        setAddSiteOpen(true);
+        openAddSiteModal();
       }
       if (event.key === "?" && !isTyping) {
         event.preventDefault();
@@ -5487,10 +6760,9 @@ const App: React.FC = () => {
         setIsDrawerOpen(false);
         setDetailsOpen(false);
         setDetailsLinkId(null);
-        setIgnoreRulesOpen(false);
         setHistoryOpen(false);
         setFiltersOpen(false);
-        setAddSiteOpen(false);
+        closeAddSiteModal();
         setShortcutsOpen(false);
       }
     };
@@ -5594,6 +6866,7 @@ const App: React.FC = () => {
     setIgnoredResults([]);
     setReportRunData(null);
     setReportSummaryRows([]);
+    setReportSummaryTotals(EMPTY_REPORT_SUMMARY_COUNTS);
     setReportIgnoredTotal(null);
     setReportLastLoadedAt(null);
     resetReportSections();
@@ -5607,7 +6880,11 @@ const App: React.FC = () => {
     setOnboardingOpen(false);
     setOnboardingStep(0);
     setOnboardingSiteUrl("");
-    setOnboardingSiteName("");
+    setOnboardingSiteDisplayName("");
+    setOnboardingClientName("");
+    setOnboardingReportDisplayName("");
+    setOnboardingSiteDisplayNameTouched(false);
+    setOnboardingReportDisplayNameTouched(false);
     setOnboardingWorking(false);
     setOnboardingError(null);
     setOnboardingScanRequested(false);
@@ -5667,7 +6944,7 @@ const App: React.FC = () => {
       setAuthPassword("");
       setAuthError(null);
       if (route === "login" || route === "landing") {
-        navigateTo("/app");
+        navigateTo("/dashboard");
       }
     } catch (err: unknown) {
       setAuthError(getErrorMessage(err, "Failed to authenticate"));
@@ -5697,9 +6974,47 @@ const App: React.FC = () => {
     });
   }
 
+  function clearPersistedSiteName(siteId: string) {
+    if (!siteNamesStorageKey) return;
+    setSiteNameById((prev) => {
+      if (!(siteId in prev)) return prev;
+      const next = { ...prev };
+      delete next[siteId];
+      saveStorageMap(siteNamesStorageKey, next);
+      return next;
+    });
+  }
+
+  function applyUpdatedSite(site: Site) {
+    const normalized = normalizeSiteNotifyOn(site);
+    setSites((prev) =>
+      prev.map((item) => (item.id === normalized.id ? normalized : item)),
+    );
+  }
+
   function clearOnboardingState() {
     if (!onboardingStorageKey || typeof window === "undefined") return;
     window.localStorage.removeItem(onboardingStorageKey);
+  }
+
+  function resetAddSiteForm() {
+    setNewSiteUrl("");
+    setNewSiteDisplayName("");
+    setNewSiteClientName("");
+    setNewSiteReportDisplayName("");
+    setNewSiteDisplayNameTouched(false);
+    setNewSiteReportDisplayNameTouched(false);
+    setCreateError(null);
+  }
+
+  function openAddSiteModal() {
+    resetAddSiteForm();
+    setAddSiteOpen(true);
+  }
+
+  function closeAddSiteModal() {
+    setAddSiteOpen(false);
+    resetAddSiteForm();
   }
 
   function completeOnboarding() {
@@ -5713,7 +7028,11 @@ const App: React.FC = () => {
     setOnboardingStep(0);
     setOnboardingScanRequested(false);
     setOnboardingSiteUrl("");
-    setOnboardingSiteName("");
+    setOnboardingSiteDisplayName("");
+    setOnboardingClientName("");
+    setOnboardingReportDisplayName("");
+    setOnboardingSiteDisplayNameTouched(false);
+    setOnboardingReportDisplayNameTouched(false);
     setOnboardingError(null);
     setOnboardingWorking(false);
   }
@@ -5820,12 +7139,13 @@ const App: React.FC = () => {
   async function loadHistory(siteId: string, opts?: LoadHistoryOpts) {
     const preserveSelection = !!opts?.preserveSelection;
     const skipResultsWhileInProgress = !!opts?.skipResultsWhileInProgress;
+    setHistoryExpanded(false);
 
     setHistoryLoading(true);
     setHistoryError(null);
     try {
       const res = await apiFetch(
-        `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=10`,
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=${MAX_HISTORY_RESULTS}`,
         { cache: "no-store" },
       );
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
@@ -6207,21 +7527,29 @@ const App: React.FC = () => {
   }, [selectedRunId]);
 
   useEffect(() => {
-    if (!ignoreRulesOpen || !selectedSiteId) return;
-    void loadIgnoreRules(selectedSiteId);
-  }, [ignoreRulesOpen, selectedSiteId]);
-
-  useEffect(() => {
-    if (!selectedSiteId) {
-      setIgnoreRulesOpen(false);
-    }
-  }, [selectedSiteId]);
-
-  useEffect(() => {
     if (!selectedSiteId) {
       setHistoryOpen(false);
     }
   }, [selectedSiteId]);
+
+  useEffect(() => {
+    if (!selectedSite) {
+      setSiteDisplayNameDraft("");
+      setSiteClientNameDraft("");
+      setSiteReportDisplayNameDraft("");
+      setSiteInternalNotesDraft("");
+      setSiteDetailsError(null);
+      return;
+    }
+    setSiteSettingsSection("general");
+    setSiteDisplayNameDraft(
+      selectedSite.site_display_name ?? selectedSiteName ?? "",
+    );
+    setSiteClientNameDraft(selectedSite.client_name ?? "");
+    setSiteReportDisplayNameDraft(selectedSite.report_display_name ?? "");
+    setSiteInternalNotesDraft(selectedSite.internal_notes ?? "");
+    setSiteDetailsError(null);
+  }, [selectedSite, selectedSiteName]);
 
   useEffect(() => {
     if (!selectedSite) return;
@@ -6234,6 +7562,47 @@ const App: React.FC = () => {
   }, [selectedSite]);
 
   useEffect(() => {
+    const suggestion = getSuggestedSiteDisplayName(newSiteUrl.trim());
+    const shouldAutoFillDisplayName =
+      !newSiteDisplayNameTouched || !newSiteDisplayName.trim();
+    if (shouldAutoFillDisplayName) {
+      setNewSiteDisplayName(suggestion);
+    }
+    const shouldAutoFillReportName =
+      !newSiteReportDisplayNameTouched || !newSiteReportDisplayName.trim();
+    if (shouldAutoFillReportName) {
+      setNewSiteReportDisplayName(suggestion);
+    }
+  }, [
+    newSiteDisplayNameTouched,
+    newSiteDisplayName,
+    newSiteReportDisplayNameTouched,
+    newSiteReportDisplayName,
+    newSiteUrl,
+  ]);
+
+  useEffect(() => {
+    const suggestion = getSuggestedSiteDisplayName(onboardingSiteUrl.trim());
+    const shouldAutoFillDisplayName =
+      !onboardingSiteDisplayNameTouched || !onboardingSiteDisplayName.trim();
+    if (shouldAutoFillDisplayName) {
+      setOnboardingSiteDisplayName(suggestion);
+    }
+    const shouldAutoFillReportName =
+      !onboardingReportDisplayNameTouched ||
+      !onboardingReportDisplayName.trim();
+    if (shouldAutoFillReportName) {
+      setOnboardingReportDisplayName(suggestion);
+    }
+  }, [
+    onboardingSiteDisplayNameTouched,
+    onboardingSiteDisplayName,
+    onboardingSiteUrl,
+    onboardingReportDisplayNameTouched,
+    onboardingReportDisplayName,
+  ]);
+
+  useEffect(() => {
     if (!selectedSiteId) {
       setNotifyEnabled(false);
       setNotifyEmail("");
@@ -6241,9 +7610,17 @@ const App: React.FC = () => {
       setNotifyIncludeCsv(false);
       setSummaryEnabled(false);
       setNotifyError(null);
+      setUptimeStatus(null);
+      setUptimeEnabled(false);
+      setUptimeCheckUrl("");
+      setUptimeFailureThreshold(3);
+      setUptimeError(null);
+      setIgnoreRules([]);
       return;
     }
     void loadNotificationSettings(selectedSiteId);
+    void loadUptimeStatus(selectedSiteId);
+    void loadIgnoreRules(selectedSiteId);
   }, [selectedSiteId]);
 
   useEffect(() => {
@@ -6342,10 +7719,10 @@ const App: React.FC = () => {
             (await res.json()) as ScanTechnicalDiagnosticsResponse;
           technicalLoaded = true;
         } else {
-          errors.push(`technical diagnostics ${res.status}`);
+          errors.push(`developer diagnostics ${res.status}`);
         }
       } catch (err: unknown) {
-        errors.push(getErrorMessage(err, "technical diagnostics failed"));
+        errors.push(getErrorMessage(err, "developer diagnostics failed"));
       }
 
       if (cancelled) return;
@@ -6402,49 +7779,26 @@ const App: React.FC = () => {
   ]);
 
   async function refreshSelectedRun(runId: string) {
-    try {
-      const res = await apiFetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}`,
-        {
-          cache: "no-store",
-        },
-      );
-      if (!res.ok) {
-        return;
-      }
+    const run = await fetchRunSnapshot(runId);
+    if (!run) return;
 
-      const run: ScanRunSummary = await res.json();
+    if (selectedRunIdRef.current !== run.id) {
+      setSelectedRunId(run.id);
+      selectedRunIdRef.current = run.id;
+    }
 
-      setHistory((prev) => {
-        const idx = prev.findIndex((r) => r.id === run.id);
-        if (idx === -1) {
-          return [run, ...prev];
-        }
-        const copy = [...prev];
-        copy[idx] = run;
-        return copy;
+    if (!isInProgress(run.status)) {
+      setActiveRunId(null);
+      activeRunIdRef.current = null;
+
+      await refreshDashboardSummary(run.site_id, "refresh_selected_run", {
+        targetRunId: run.id,
+        waitForIssueSummary: run.status === "completed",
+        maxAttempts: run.status === "completed" ? 6 : 2,
       });
-      markRunProgress(run.id);
-      maybeNotifyRunStatus(run);
-
-      if (selectedRunIdRef.current !== run.id) {
-        setSelectedRunId(run.id);
-        selectedRunIdRef.current = run.id;
-      }
-
-      if (!isInProgress(run.status)) {
-        setActiveRunId(null);
-        activeRunIdRef.current = null;
-
-        await refreshDashboardSummary(run.site_id, "refresh_selected_run", {
-          targetRunId: run.id,
-          waitForIssueSummary: run.status === "completed",
-          maxAttempts: run.status === "completed" ? 6 : 2,
-        });
-        await loadHistory(run.site_id, { preserveSelection: true });
-        await loadResults(run.id);
-      }
-    } catch {}
+      await loadHistory(run.site_id, { preserveSelection: true });
+      await loadResults(run.id);
+    }
   }
 
   async function handleSelectSite(site: Site) {
@@ -6494,25 +7848,35 @@ const App: React.FC = () => {
     await handleRunScanWithUrl(startUrl);
   }
 
-  async function createSiteRecord(url: string, name?: string) {
+  async function createSiteRecord(
+    url: string,
+    metadata?: {
+      siteDisplayName?: string;
+      clientName?: string;
+      reportDisplayName?: string;
+    },
+  ) {
     const res = await apiFetch(`${API_BASE}/sites`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url, name: name?.trim() || undefined }),
+      body: JSON.stringify({
+        url,
+        siteDisplayName: metadata?.siteDisplayName?.trim() || undefined,
+        clientName: metadata?.clientName?.trim() || undefined,
+        reportDisplayName: metadata?.reportDisplayName?.trim() || undefined,
+      }),
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(
-        `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-      );
+      throw normalizeCreateSiteError(res.status, text);
     }
 
     const data = (await res.json()) as { site: Site };
     return data.site;
   }
 
-  function applyCreatedSite(site: Site, name?: string) {
+  function applyCreatedSite(site: Site, fallbackName?: string) {
     const normalized = normalizeSiteNotifyOn(site);
     setSites((prev) => {
       const filtered = prev.filter((item) => item.id !== site.id);
@@ -6529,15 +7893,14 @@ const App: React.FC = () => {
     resetOccurrencesState();
     setHistory([]);
     void loadHistory(site.id, { preserveSelection: false });
-    if (name) {
-      persistSiteName(site.id, name);
+    if (!site.site_display_name && fallbackName) {
+      persistSiteName(site.id, fallbackName);
     }
   }
 
   function handleNewScanAction() {
     if (!hasSites) {
-      setCreateError(null);
-      setAddSiteOpen(true);
+      openAddSiteModal();
       return;
     }
     if (!selectedSiteId) {
@@ -6591,13 +7954,51 @@ const App: React.FC = () => {
     setCreatingSite(true);
     setCreateError(null);
     try {
-      const site = await createSiteRecord(url);
-      applyCreatedSite(site);
-      setNewSiteUrl("");
-      setAddSiteOpen(false);
+      const urlValidationError = getSiteUrlValidationError(url);
+      if (urlValidationError) {
+        setCreateError(urlValidationError);
+        return;
+      }
+      const normalizedUrl = normalizeComparableUrl(url);
+
+      const existing = sites.find((site) => {
+        try {
+          return normalizeComparableUrl(site.url) === normalizedUrl;
+        } catch {
+          return false;
+        }
+      });
+
+      if (existing) {
+        applyCreatedSite(existing, getSiteDisplayName(existing) ?? undefined);
+        openAppSection("dashboard");
+        closeAddSiteModal();
+        pushToast("That site is already in your workspace", "info");
+        return;
+      }
+
+      const siteDisplayName = newSiteDisplayName.trim();
+      const clientName = newSiteClientName.trim();
+      const reportDisplayName = newSiteReportDisplayName.trim();
+      const site = await createSiteRecord(url, {
+        siteDisplayName,
+        clientName,
+        reportDisplayName,
+      });
+      applyCreatedSite(site, siteDisplayName || undefined);
+      openAppSection("dashboard");
+      closeAddSiteModal();
       pushToast("Site added", "success");
     } catch (err: unknown) {
-      setCreateError(getErrorMessage(err, "Failed to create site"));
+      const createErr = err as CreateSiteError | null;
+      if (createErr) {
+        setCreateError(createErr.message);
+        if (createErr.kind === "duplicate") {
+          pushToast("That website is already in your workspace", "info");
+        }
+        return;
+      }
+      setCreateError("Could not add that site right now. Try again.");
     } finally {
       setCreatingSite(false);
     }
@@ -6611,8 +8012,12 @@ const App: React.FC = () => {
     }
     try {
       setCreatingSite(true);
-      const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+      const site = await createSiteRecord(SAMPLE_SITE_URL, {
+        siteDisplayName: SAMPLE_SITE_NAME,
+        reportDisplayName: SAMPLE_SITE_NAME,
+      });
       applyCreatedSite(site, SAMPLE_SITE_NAME);
+      openAppSection("dashboard");
       pushToast("Sample site added", "success");
     } catch (err: unknown) {
       setCreateError(getErrorMessage(err, "Failed to add sample site"));
@@ -6627,13 +8032,58 @@ const App: React.FC = () => {
     setOnboardingWorking(true);
     setOnboardingError(null);
     try {
-      const site = await createSiteRecord(url, onboardingSiteName);
-      applyCreatedSite(site, onboardingSiteName);
+      try {
+        normalizeComparableUrl(url);
+      } catch {
+        setOnboardingError(
+          "Enter a valid website URL starting with http:// or https://",
+        );
+        return;
+      }
+
+      const existing = sites.find((site) => {
+        try {
+          return (
+            normalizeComparableUrl(site.url) === normalizeComparableUrl(url)
+          );
+        } catch {
+          return false;
+        }
+      });
+
+      if (existing) {
+        applyCreatedSite(existing, getSiteDisplayName(existing) ?? undefined);
+        setOnboardingStep(1);
+        pushToast("That site is already in your workspace", "info");
+        return;
+      }
+
+      const site = await createSiteRecord(url, {
+        siteDisplayName: onboardingSiteDisplayName,
+        clientName: onboardingClientName,
+        reportDisplayName: onboardingReportDisplayName,
+      });
+      applyCreatedSite(site, onboardingSiteDisplayName);
       setOnboardingSiteUrl("");
-      setOnboardingSiteName("");
+      setOnboardingSiteDisplayName("");
+      setOnboardingClientName("");
+      setOnboardingReportDisplayName("");
+      setOnboardingSiteDisplayNameTouched(false);
+      setOnboardingReportDisplayNameTouched(false);
       setOnboardingStep(1);
     } catch (err: unknown) {
-      setOnboardingError(getErrorMessage(err, "Failed to create site"));
+      const createErr = err as CreateSiteError | null;
+      if (createErr?.kind === "duplicate") {
+        setOnboardingError("That website is already in your workspace.");
+      } else if (createErr?.kind === "invalid_url") {
+        setOnboardingError(
+          "Enter a valid website URL starting with http:// or https://",
+        );
+      } else if (createErr?.status === 400) {
+        setOnboardingError("Check the website URL and try again.");
+      } else {
+        setOnboardingError("Could not add that site right now. Try again.");
+      }
     } finally {
       setOnboardingWorking(false);
     }
@@ -6647,7 +8097,10 @@ const App: React.FC = () => {
       if (existing) {
         await handleSelectSite(existing);
       } else {
-        const site = await createSiteRecord(SAMPLE_SITE_URL, SAMPLE_SITE_NAME);
+        const site = await createSiteRecord(SAMPLE_SITE_URL, {
+          siteDisplayName: SAMPLE_SITE_NAME,
+          reportDisplayName: SAMPLE_SITE_NAME,
+        });
         applyCreatedSite(site, SAMPLE_SITE_NAME);
       }
       setOnboardingStep(1);
@@ -6718,6 +8171,49 @@ const App: React.FC = () => {
       setDeleteError(getErrorMessage(err, "Failed to delete site"));
     } finally {
       setDeletingSiteId(null);
+    }
+  }
+
+  async function handleSaveSiteDetails() {
+    if (!selectedSiteId) return;
+    setSiteDetailsSaving(true);
+    setSiteDetailsError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            siteDisplayName: siteDisplayNameDraft.trim() || null,
+            clientName: siteClientNameDraft.trim() || null,
+            reportDisplayName: siteReportDisplayNameDraft.trim() || null,
+            internalNotes: siteInternalNotesDraft.trim() || null,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Site details update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as { site: Site };
+      applyUpdatedSite(data.site);
+      if (data.site.site_display_name) {
+        clearPersistedSiteName(data.site.id);
+      } else if (!siteDisplayNameDraft.trim()) {
+        clearPersistedSiteName(data.site.id);
+      }
+      pushToast("Site details updated", "success");
+    } catch (err: unknown) {
+      setSiteDetailsError(
+        getErrorMessage(err, "Failed to update site details"),
+      );
+    } finally {
+      setSiteDetailsSaving(false);
     }
   }
 
@@ -6821,6 +8317,71 @@ const App: React.FC = () => {
       );
     } finally {
       setNotifyLoading(false);
+    }
+  }
+
+  async function loadUptimeStatus(siteId: string) {
+    setUptimeLoading(true);
+    setUptimeError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/uptime`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to load uptime settings: ${res.status}${
+            text ? ` - ${text.slice(0, 200)}` : ""
+          }`,
+        );
+      }
+      const data = (await res.json()) as UptimeStatusResponse;
+      setUptimeStatus(data);
+      setUptimeEnabled(data.enabled);
+      setUptimeCheckUrl(data.checkUrl);
+      setUptimeFailureThreshold(data.failureThreshold);
+    } catch (err: unknown) {
+      setUptimeStatus(null);
+      setUptimeError(getErrorMessage(err, "Failed to load uptime settings"));
+    } finally {
+      setUptimeLoading(false);
+    }
+  }
+
+  async function handleSaveUptimeSettings() {
+    if (!selectedSiteId) return;
+    setUptimeSaving(true);
+    setUptimeError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/uptime`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: uptimeEnabled,
+            checkUrl: uptimeCheckUrl.trim(),
+            failureThreshold: uptimeFailureThreshold,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Uptime update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      await loadUptimeStatus(selectedSiteId);
+      pushToast("Availability monitoring updated", "success");
+    } catch (err: unknown) {
+      setUptimeError(
+        getErrorMessage(err, "Failed to update availability monitoring"),
+      );
+    } finally {
+      setUptimeSaving(false);
     }
   }
 
@@ -7161,6 +8722,7 @@ const App: React.FC = () => {
     window.history.pushState({}, "", url);
     const nextRoute = getRouteFromLocation();
     setRoute(nextRoute);
+    setAppSection(getAppSectionFromLocation());
     setLearnSlug(getLearnSlugFromLocation());
     setViewMode(nextRoute === "report" ? "report" : "dashboard");
   }
@@ -7169,14 +8731,36 @@ const App: React.FC = () => {
     navigateTo(buildLearnArticlePath(slug));
   }
 
+  function openAppSection(section: AppSection) {
+    const url = buildAppUrl(buildAppSectionPath(section));
+    window.history.pushState({}, "", url);
+    setRoute("app");
+    setAppSection(section);
+    setLearnSlug(null);
+    if (section !== "reports") {
+      setScanWorkspaceOpen(false);
+    }
+    setViewMode("dashboard");
+    setReportScanRunId(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportSummaryTotals(EMPTY_REPORT_SUMMARY_COUNTS);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
+    setReportError(null);
+  }
+
   function openReport(scanRunId: string) {
     const url = buildReportLink(scanRunId);
     window.history.pushState({}, "", url);
     setRoute("report");
+    setAppSection("reports");
     setLearnSlug(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
+    setReportSummaryTotals(EMPTY_REPORT_SUMMARY_COUNTS);
     setReportIgnoredTotal(null);
     setReportLastLoadedAt(null);
     resetReportSections();
@@ -7185,18 +8769,83 @@ const App: React.FC = () => {
   }
 
   function backToDashboard() {
-    const url = buildAppUrl("/app");
-    window.history.pushState({}, "", url);
-    setRoute("app");
-    setLearnSlug(null);
-    setReportScanRunId(null);
-    setReportRunData(null);
-    setReportSummaryRows([]);
-    setReportIgnoredTotal(null);
-    setReportLastLoadedAt(null);
-    resetReportSections();
-    setReportError(null);
-    setViewMode("dashboard");
+    openAppSection("dashboard");
+  }
+
+  function handlePrintReport() {
+    setActionMenuOpenId(null);
+    if (typeof window !== "undefined") {
+      window.print();
+    }
+  }
+
+  async function handleCreateOrManageReportShare() {
+    if (!reportScanRunId || reportRunData?.status !== "completed") return;
+    if (reportShare) {
+      setReportSharePanelOpen((prev) => !prev);
+      return;
+    }
+    setReportShareSaving(true);
+    setReportShareError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        {
+          method: "POST",
+        },
+      );
+      if (!res.ok) {
+        const payload = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(
+          payload?.message ??
+            (res.status === 400
+              ? "Only completed scan runs can create share links"
+              : `Failed to create share link (${res.status})`),
+        );
+      }
+      const data = (await res.json()) as {
+        created: boolean;
+        share: ReportShareDetails;
+      };
+      setReportShare(data.share);
+      setReportSharePanelOpen(true);
+      pushToast(
+        data.created ? "Share link created" : "Share link already active",
+        "success",
+      );
+    } catch (err: unknown) {
+      setReportShareError(getErrorMessage(err, "Failed to create share link"));
+      pushToast(getErrorMessage(err, "Failed to create share link"), "warning");
+    } finally {
+      setReportShareSaving(false);
+    }
+  }
+
+  async function handleRevokeReportShare() {
+    if (!reportScanRunId || !reportShare) return;
+    setReportShareSaving(true);
+    setReportShareError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/share`,
+        {
+          method: "DELETE",
+        },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to revoke share link (${res.status})`);
+      }
+      setReportShare(null);
+      setReportSharePanelOpen(false);
+      pushToast("Share link revoked", "info");
+    } catch (err: unknown) {
+      setReportShareError(getErrorMessage(err, "Failed to revoke share link"));
+      pushToast(getErrorMessage(err, "Failed to revoke share link"), "warning");
+    } finally {
+      setReportShareSaving(false);
+    }
   }
 
   function triggerExport(
@@ -9415,31 +11064,23 @@ const App: React.FC = () => {
         }
         .dashboard-category-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 14px;
         }
         .report-category-score-grid {
           margin-top: 14px;
         }
-        .dashboard-history-grid {
-          display: grid;
-          grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.8fr);
-          gap: 18px;
-        }
-        .dashboard-history-card__header,
-        .dashboard-summary-card__header {
+        .dashboard-history-card__header {
           padding: 18px 20px 14px;
           border-bottom: 1px solid var(--border);
           display: grid;
           gap: 4px;
         }
-        .dashboard-history-card__title,
-        .dashboard-summary-card__title {
+        .dashboard-history-card__title {
           font-size: 16px;
           font-weight: 700;
         }
-        .dashboard-history-card__meta,
-        .dashboard-summary-card__meta {
+        .dashboard-history-card__meta {
           font-size: 13px;
           color: var(--text-muted);
           line-height: 1.5;
@@ -9484,37 +11125,6 @@ const App: React.FC = () => {
           color: var(--text);
           font-weight: 600;
         }
-        .dashboard-summary-list {
-          display: grid;
-          gap: 14px;
-          padding: 18px 20px 20px;
-        }
-        .dashboard-summary-item {
-          padding: 16px 18px;
-          border-radius: 18px;
-          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
-          background: color-mix(
-            in srgb,
-            var(--panel-elev) 76%,
-            rgba(255, 255, 255, 0.03)
-          );
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-        }
-        .dashboard-summary-item span:first-child {
-          font-size: 12px;
-          color: var(--text-muted);
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          font-weight: 700;
-        }
-        .dashboard-summary-item strong {
-          font-family: var(--font-display);
-          font-size: 24px;
-          line-height: 1;
-        }
         .category-status-card__header {
           display: flex;
           justify-content: space-between;
@@ -9551,7 +11161,7 @@ const App: React.FC = () => {
         .scan-hero-card {
           border: 1px solid var(--border);
           border-radius: 24px;
-          padding: 22px;
+          padding: 20px;
           background: linear-gradient(
             180deg,
             color-mix(in srgb, var(--panel-elev) 82%, rgba(56, 189, 248, 0.08)) 0%,
@@ -9559,9 +11169,24 @@ const App: React.FC = () => {
           );
           box-shadow: var(--shadow);
           display: grid;
-          grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1.15fr);
+          grid-template-columns: minmax(320px, 1.08fr) minmax(0, 0.92fr);
           gap: 22px;
           align-items: center;
+        }
+        .scan-hero-card__visual,
+        .scan-hero-card__content {
+          min-width: 0;
+        }
+        .scan-hero-card__visual-surface {
+          min-height: 100%;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          display: grid;
+          justify-items: center;
+          align-content: center;
+          gap: 16px;
+          box-shadow: none;
         }
         .scan-hero-card[data-tone="success"] {
           border-color: color-mix(in srgb, var(--success) 20%, var(--border));
@@ -9575,13 +11200,13 @@ const App: React.FC = () => {
         .scan-hero-card__ring {
           display: grid;
           place-items: center;
-          gap: 10px;
+          gap: 12px;
         }
         .scan-hero-card__ring-outer {
           --scan-progress: 0%;
           --scan-ring-color: var(--accent);
-          width: 196px;
-          height: 196px;
+          width: clamp(244px, 26vw, 288px);
+          height: clamp(244px, 26vw, 288px);
           border-radius: 50%;
           display: grid;
           place-items: center;
@@ -9645,8 +11270,8 @@ const App: React.FC = () => {
           opacity: 0.5;
         }
         .scan-hero-card__ring-inner {
-          width: 142px;
-          height: 142px;
+          width: clamp(176px, 18vw, 212px);
+          height: clamp(176px, 18vw, 212px);
           border-radius: 50%;
           display: grid;
           place-items: center;
@@ -9660,12 +11285,12 @@ const App: React.FC = () => {
           padding: 14px;
         }
         .scan-hero-card__ring-inner strong {
-          font-size: 36px;
+          font-size: clamp(42px, 3.8vw, 54px);
           line-height: 1;
           font-family: var(--font-display);
         }
         .scan-hero-card__ring-inner span {
-          font-size: 11px;
+          font-size: 12px;
           color: var(--text-muted);
         }
         .scan-hero-card__ring-fallback {
@@ -9673,16 +11298,53 @@ const App: React.FC = () => {
           color: var(--text-muted);
           text-align: center;
         }
+        .scan-hero-card__visual-copy {
+          display: grid;
+          gap: 8px;
+          width: 100%;
+          justify-items: center;
+          text-align: center;
+        }
+        .scan-hero-card__eyebrow {
+          font-size: 11px;
+          color: var(--text-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          font-weight: 700;
+        }
         .scan-hero-card__title {
-          font-size: 22px;
+          font-size: clamp(24px, 2.4vw, 30px);
           font-weight: 700;
           font-family: var(--font-display);
+          line-height: 1.12;
+          text-align: center;
+        }
+        .scan-hero-card__stage-chip {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 34px;
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 82%,
+            rgba(56, 189, 248, 0.05)
+          );
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--text);
         }
         .scan-hero-card__summary,
         .scan-hero-card__note {
           font-size: 13px;
           color: var(--text-muted);
           line-height: 1.6;
+        }
+        .scan-hero-card__content {
+          display: grid;
+          gap: 14px;
         }
         .scan-hero-card__counter-grid {
           display: grid;
@@ -10226,7 +11888,7 @@ const App: React.FC = () => {
         }
         .app-section-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 16px;
         }
         .app-settings-card {
@@ -10237,6 +11899,143 @@ const App: React.FC = () => {
           box-shadow: var(--soft-shadow);
           display: grid;
           gap: 14px;
+        }
+        .app-settings-workspace {
+          display: grid;
+          gap: 16px;
+        }
+        .app-settings-nav {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .app-settings-nav__button {
+          min-height: 40px;
+          padding: 10px 14px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          color: var(--text);
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          font: inherit;
+          transition:
+            border-color 150ms ease,
+            background 150ms ease,
+            transform 150ms ease;
+        }
+        .app-settings-nav__button.active {
+          background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+          border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+        }
+        .app-settings-nav__button:hover {
+          transform: translateY(-1px);
+          border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+        }
+        .app-settings-nav__meta {
+          display: grid;
+          gap: 2px;
+          text-align: left;
+        }
+        .app-settings-nav__label {
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .app-settings-nav__description {
+          font-size: 11px;
+          color: var(--muted);
+          line-height: 1.45;
+        }
+        .app-settings-panel {
+          display: grid;
+          gap: 16px;
+          padding: 20px;
+          border-radius: 20px;
+          border: 1px solid var(--border);
+          background: linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--panel) 95%, rgba(56, 189, 248, 0.03)) 0%,
+            var(--panel) 100%
+          );
+          box-shadow: var(--soft-shadow);
+        }
+        .app-settings-panel__header {
+          display: grid;
+          gap: 6px;
+        }
+        .app-settings-panel__eyebrow {
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--accent);
+        }
+        .app-settings-panel__title {
+          font-family: var(--font-display);
+          font-size: 26px;
+          line-height: 1.1;
+          font-weight: 700;
+        }
+        .app-settings-panel__subtitle {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.65;
+          max-width: 70ch;
+        }
+        .app-settings-stack {
+          display: grid;
+          gap: 16px;
+        }
+        .app-settings-subsection {
+          display: grid;
+          gap: 14px;
+          padding-top: 6px;
+        }
+        .app-settings-subsection + .app-settings-subsection {
+          padding-top: 18px;
+          border-top: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+        }
+        .app-settings-subsection__header {
+          display: grid;
+          gap: 4px;
+        }
+        .app-settings-subsection__title {
+          font-size: 17px;
+          font-weight: 700;
+        }
+        .app-settings-subsection__subtitle {
+          font-size: 13px;
+          color: var(--muted);
+          line-height: 1.6;
+        }
+        .app-settings-status-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .app-settings-summary-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 12px;
+        }
+        .app-settings-summary-item {
+          display: grid;
+          gap: 4px;
+          padding: 14px;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 88%, rgba(255, 255, 255, 0.02));
+        }
+        .app-settings-summary-item strong {
+          font-size: 13px;
+        }
+        .app-settings-summary-item span {
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.55;
+        }
+        .app-settings-danger {
+          background: color-mix(in srgb, var(--panel) 96%, rgba(127, 29, 29, 0.05));
         }
         .app-settings-card__title {
           font-family: var(--font-display);
@@ -11068,12 +12867,17 @@ const App: React.FC = () => {
             flex-direction: column;
           }
           .dashboard-health-layout,
-          .dashboard-history-grid,
           .site-header-card {
             grid-template-columns: 1fr;
           }
           .dashboard-score-grid {
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+          }
+          .dashboard-category-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .app-section-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
           }
           .dashboard-history-row {
             grid-template-columns: 1fr;
@@ -11084,6 +12888,9 @@ const App: React.FC = () => {
           }
           .scan-hero-card {
             grid-template-columns: 1fr;
+          }
+          .scan-hero-card__visual-surface {
+            padding: 0;
           }
           .score-ring-card__body {
             grid-template-columns: 1fr;
@@ -11128,10 +12935,38 @@ const App: React.FC = () => {
           .drawer-close {
             display: inline-flex;
           }
+          .dashboard-category-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .app-section-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+          .scan-hero-card__ring-outer {
+            width: clamp(220px, 30vw, 246px);
+            height: clamp(220px, 30vw, 246px);
+          }
+          .scan-hero-card__ring-inner {
+            width: clamp(156px, 22vw, 184px);
+            height: clamp(156px, 22vw, 184px);
+          }
         }
         @media (max-width: 860px) {
           .results-layout.drawer-open {
             grid-template-columns: 1fr;
+          }
+          .dashboard-category-grid {
+            grid-template-columns: 1fr;
+          }
+          .app-section-grid {
+            grid-template-columns: 1fr;
+          }
+          .scan-hero-card__ring-outer {
+            width: 192px;
+            height: 192px;
+          }
+          .scan-hero-card__ring-inner {
+            width: 144px;
+            height: 144px;
           }
         }
         .top-grid {
@@ -11505,6 +13340,7 @@ const App: React.FC = () => {
           letter-spacing: 0.06em;
           font-weight: 700;
           background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
+          white-space: nowrap;
         }
         .report-table td {
           overflow-wrap: normal;
@@ -11525,6 +13361,9 @@ const App: React.FC = () => {
         .report-links-table th:nth-child(5),
         .report-links-table td:nth-child(5) {
           width: 18%;
+        }
+        .report-links-table {
+          min-width: 720px;
         }
         .report-issues-table th:nth-child(1),
         .report-issues-table td:nth-child(1) {
@@ -11786,11 +13625,222 @@ const App: React.FC = () => {
           text-align: right;
         }
         @media print {
-          .report-actions {
+          .top-nav,
+          .report-actions,
+          .report-filter-row,
+          .report-url-actions,
+          [data-action-menu],
+          .report-share-panel,
+          .report-developer-diagnostics,
+          .toast-stack,
+          .icon-button {
+            display: none !important;
+          }
+          .report-link-section--ok .report-table-wrap,
+          .report-link-section--ok .report-link-section__count,
+          .report-link-section--ok .report-button {
+            display: none !important;
+          }
+          .report-issues-table th:last-child,
+          .report-issues-table td:last-child {
             display: none;
           }
           .app-shell {
             padding: 0;
+          }
+          .report-page {
+            gap: 10px;
+          }
+          .report-header {
+            padding: 14px 16px;
+            border-radius: 14px;
+            box-shadow: none;
+            break-after: avoid;
+          }
+          .report-title {
+            font-size: 26px;
+          }
+          .report-subtitle {
+            margin-top: 4px;
+            line-height: 1.45;
+          }
+          .report-overview-grid {
+            grid-template-columns: 1fr;
+            gap: 10px;
+            break-inside: avoid;
+          }
+          .report-overview-stack {
+            grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.55fr);
+            gap: 10px;
+            align-items: stretch;
+          }
+          .report-overview-score.surface-card--metric.prominent {
+            padding: 16px;
+            min-height: 0;
+            box-shadow: none;
+          }
+          .report-overview-score .score-ring-card__body {
+            grid-template-columns: 1fr;
+            justify-items: center;
+            text-align: center;
+            gap: 10px;
+          }
+          .report-overview-score .score-ring {
+            width: 142px;
+            height: 142px;
+          }
+          .report-overview-score .score-ring-card__content {
+            justify-items: center;
+            max-width: 520px;
+          }
+          .report-overview-score .score-ring-card__helper {
+            width: auto;
+          }
+          .report-overview-score .score-ring-card__stats,
+          .report-kpi-grid--expanded {
+            display: none;
+          }
+          .report-score-card,
+          .report-summary-card {
+            min-height: 0;
+            padding: 10px 12px;
+            gap: 5px;
+          }
+          .report-change-grid--dense {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+          }
+          .report-metric {
+            font-size: 22px;
+          }
+          .report-score-subtitle {
+            font-size: 11px;
+            line-height: 1.35;
+          }
+          .report-card {
+            padding: 12px;
+            border-radius: 12px;
+            box-shadow: none;
+            break-inside: auto;
+          }
+          .report-table-grid {
+            grid-template-columns: 1fr;
+            gap: 10px;
+          }
+          .report-card__header {
+            margin-bottom: 8px;
+            break-after: avoid;
+          }
+          .report-table-title {
+            break-after: avoid;
+          }
+          .report-category-scores {
+            break-inside: avoid;
+          }
+          .report-category-score-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+          }
+          .report-category-score-grid .surface-card--category {
+            min-height: 0;
+            padding: 10px;
+            gap: 6px;
+            box-shadow: none;
+            break-inside: avoid;
+          }
+          .report-category-score-grid .category-status-card__title {
+            font-size: 12px;
+          }
+          .report-category-score-grid .category-status-card__score {
+            font-size: 22px;
+          }
+          .report-category-score-grid .category-status-card__description,
+          .report-category-score-grid .category-status-card__summary {
+            font-size: 10.5px;
+            line-height: 1.35;
+          }
+          .report-priority-item,
+          .report-mini-stat {
+            break-inside: avoid;
+          }
+        }
+        @media (max-width: 760px), print {
+          .report-links-table {
+            min-width: 0;
+            table-layout: auto;
+          }
+          .report-links-table thead {
+            display: none;
+          }
+          .report-links-table,
+          .report-links-table tbody,
+          .report-links-table tr,
+          .report-links-table td {
+            display: block;
+            width: 100%;
+          }
+          .report-links-table tr {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+          }
+          .report-links-table td {
+            display: grid;
+            grid-template-columns: minmax(92px, 0.34fr) minmax(0, 1fr);
+            gap: 10px;
+            padding: 6px 0;
+            border-bottom: 0;
+            overflow-wrap: anywhere;
+          }
+          .report-links-table td::before {
+            content: attr(data-label);
+            color: var(--text-muted);
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+          }
+          .report-links-table .report-url-cell {
+            align-items: flex-start;
+          }
+          .report-links-table .report-url-text {
+            white-space: normal;
+            overflow-wrap: anywhere;
+          }
+        }
+        @media print {
+          .report-table-wrap {
+            overflow: visible;
+          }
+          .report-links-table {
+            width: 100%;
+            min-width: 0 !important;
+            table-layout: fixed;
+          }
+          .report-links-table tr {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          .report-links-table td {
+            grid-template-columns: 124px minmax(96px, 1fr);
+            overflow-wrap: normal;
+            word-break: normal;
+          }
+          .report-links-table td[data-label="Status"],
+          .report-links-table td[data-label="Occurrences"],
+          .report-links-table td[data-label="Last seen"] {
+            white-space: nowrap;
+          }
+          .report-links-table td[data-label="Link"] {
+            overflow-wrap: anywhere;
+            word-break: break-word;
+          }
+          .report-links-table .report-url-cell {
+            max-width: 100%;
+          }
+          .report-links-table .report-url-text {
+            overflow-wrap: anywhere;
+            word-break: break-word;
           }
         }
         @media (max-width: 1100px) {
@@ -11816,6 +13866,20 @@ const App: React.FC = () => {
             grid-template-columns: 1fr;
           }
         }
+        @media print {
+          .report-overview-grid {
+            grid-template-columns: 1fr;
+          }
+          .report-overview-stack {
+            grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.55fr);
+          }
+          .report-change-grid--dense {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+          }
+          .report-category-score-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+        }
       `}</style>
       <div className="app-container">
         {route === "learn" ? (
@@ -11832,7 +13896,7 @@ const App: React.FC = () => {
             onOpenArticle={openLearnArticle}
             onBackToIndex={() => navigateTo("/learn")}
             onBackToLanding={() => navigateTo("/landing")}
-            onOpenApp={() => navigateTo("/app")}
+            onOpenApp={() => navigateTo("/dashboard")}
             onOpenLogin={() => navigateTo("/login")}
             onClearFilters={() => {
               setLearnSearchQuery("");
@@ -11852,7 +13916,7 @@ const App: React.FC = () => {
           >
             Loading session...
           </div>
-        ) : !authUser ? (
+        ) : !authUser && !isSharedReportRoute ? (
           isPublicLandingRoute ? (
             <MarketingPage
               isAuthenticated={false}
@@ -11882,615 +13946,738 @@ const App: React.FC = () => {
         ) : isPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
-            onOpenApp={() => navigateTo("/app")}
-            onOpenLogin={() => navigateTo("/app")}
+            onOpenApp={() => navigateTo("/dashboard")}
+            onOpenLogin={() => navigateTo("/dashboard")}
             onOpenLearn={() => navigateTo("/learn")}
           />
         ) : reportView ? (
-          <div className="report-page">
-            <div className="report-header">
-              <div>
-                <div className="report-title">
-                  {selectedSiteName ?? reportHost ?? "Scan report"}
+          <>
+            {!isReadOnlyReport && (
+              <nav className="top-nav">
+                <div className="app-brand-block">
+                  <div>
+                    <div
+                      style={{
+                        fontWeight: 700,
+                        fontSize: "18px",
+                        fontFamily: "var(--font-display)",
+                      }}
+                    >
+                      Scanlark
+                    </div>
+                    <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+                      Customer monitoring control centre
+                    </div>
+                  </div>
+                  <div className="app-nav-tabs">
+                    {primaryAppSections.map((item) => {
+                      const isActive =
+                        appSection === item.key ||
+                        (item.key === "dashboard" &&
+                          appSection === "site_settings");
+                      return (
+                        <button
+                          key={item.key}
+                          className={`app-nav-tab ${isActive ? "active" : ""}`}
+                          onClick={() => openAppSection(item.key)}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="report-subtitle">
-                  Detailed scan document with summary, issue analysis, raw
-                  evidence, and diagnostics for a single run.
+
+                <div className="app-site-switcher">
+                  <div style={{ minWidth: 0 }}>
+                    <div className="app-site-switcher__label">
+                      Selected Site
+                    </div>
+                    <select
+                      value={selectedSiteId ?? ""}
+                      onChange={(event) => {
+                        const nextSite = sites.find(
+                          (site) => site.id === event.target.value,
+                        );
+                        if (nextSite) void handleSelectSite(nextSite);
+                      }}
+                      className="app-input"
+                      style={{ minHeight: "44px" }}
+                    >
+                      {!selectedSiteId && (
+                        <option value="">Select a site</option>
+                      )}
+                      {sites.map((site) => (
+                        <option key={site.id} value={site.id}>
+                          {(getSiteDisplayName(site) ?? site.url).slice(0, 90)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    onClick={openAddSiteModal}
+                    className="secondary-button"
+                  >
+                    Add site
+                  </button>
                 </div>
-                <div className="report-status-row">
-                  <StatusBadge
-                    label={reportRun?.status.replace("_", " ") ?? "Loading"}
-                    tone={
-                      reportRun?.status === "completed"
-                        ? "success"
-                        : reportRun?.status === "failed"
-                          ? "danger"
-                          : reportRun?.status === "cancelled"
-                            ? "warning"
-                            : "accent"
+
+                <div className="app-toolbar">
+                  <button
+                    onClick={handleNewScanAction}
+                    disabled={
+                      !!selectedSiteId && (triggeringScan || canCancelRun)
                     }
-                  />
-                  {reportIssueSummaryPending && (
-                    <StatusBadge label="Building issue summary" tone="accent" />
-                  )}
-                  {reportHost && (
-                    <StatusBadge label={reportHost} tone="default" />
-                  )}
-                  {reportDateLabel !== "-" && (
-                    <StatusBadge label={reportDateLabel} tone="default" />
+                    className="primary-button"
+                  >
+                    {triggeringScan ? "Starting..." : "Run scan"}
+                  </button>
+                  {authUser && (
+                    <div
+                      ref={userMenuRef}
+                      style={{
+                        position: "relative",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                      }}
+                    >
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {authUser.name ?? authUser.email}
+                      </div>
+                      <button
+                        onClick={() => setUserMenuOpen((prev) => !prev)}
+                        className="secondary-button"
+                      >
+                        Account
+                      </button>
+                      {userMenuOpen && (
+                        <div className="theme-menu">
+                          <div
+                            style={{
+                              fontSize: "11px",
+                              color: "var(--muted)",
+                              padding: "4px 8px",
+                            }}
+                          >
+                            Theme
+                          </div>
+                          <button onClick={handleThemeToggle}>
+                            Toggle {themeMode === "dark" ? "Light" : "Dark"}
+                          </button>
+                          {(["system", "dark", "light"] as const).map(
+                            (mode) => (
+                              <button
+                                key={mode}
+                                className={
+                                  themePreference === mode
+                                    ? "active"
+                                    : undefined
+                                }
+                                onClick={() => {
+                                  handleThemeChange(mode);
+                                  setUserMenuOpen(false);
+                                }}
+                              >
+                                {mode === "system"
+                                  ? "System"
+                                  : mode === "dark"
+                                    ? "Dark"
+                                    : "Light"}
+                              </button>
+                            ),
+                          )}
+                          <div
+                            style={{
+                              height: "1px",
+                              margin: "6px 0",
+                              background: "var(--border)",
+                            }}
+                          />
+                          <div
+                            style={{
+                              fontSize: "11px",
+                              color: "var(--muted)",
+                              padding: "4px 8px",
+                            }}
+                          >
+                            Help
+                          </div>
+                          <button
+                            onClick={() => {
+                              openOnboarding(0);
+                              setUserMenuOpen(false);
+                            }}
+                          >
+                            Run onboarding
+                          </button>
+                          <button
+                            onClick={() => {
+                              clearOnboardingState();
+                              openOnboarding(0);
+                              setUserMenuOpen(false);
+                            }}
+                          >
+                            Reset onboarding
+                          </button>
+                          <button
+                            onClick={() => {
+                              setShortcutsOpen(true);
+                              setUserMenuOpen(false);
+                            }}
+                          >
+                            Keyboard shortcuts
+                          </button>
+                          <div
+                            style={{
+                              height: "1px",
+                              margin: "6px 0",
+                              background: "var(--border)",
+                            }}
+                          />
+                          <button onClick={() => void handleLogout()}>
+                            Logout
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-              </div>
-              <div className="report-actions">
-                <button className="report-button" onClick={backToDashboard}>
-                  Back to dashboard
-                </button>
-                <button
-                  className="report-button"
-                  onClick={() =>
-                    reportScanRunId &&
-                    copyToClipboard(
-                      buildReportLink(reportScanRunId),
-                      undefined,
-                      "Copied link",
-                    )
-                  }
-                  disabled={!reportScanRunId}
-                >
-                  Copy report link
-                </button>
-              </div>
-            </div>
-
-            {reportLoading && !reportRun && (
-              <div
-                className="report-card"
-                style={{ fontSize: "13px", color: "var(--muted)" }}
-              >
-                Loading report…
-              </div>
+              </nav>
             )}
-            {reportError && (
-              <div
-                className="report-card"
-                style={{ fontSize: "13px", color: "var(--warning)" }}
-              >
-                {reportError}
-              </div>
-            )}
-
-            {reportRun?.error_message && (
-              <div
-                className="report-card"
-                style={{ fontSize: "13px", color: "var(--warning)" }}
-              >
-                Failure reason: {reportRun.error_message}
-              </div>
-            )}
-
-            {reportRun && (
-              <>
-                <div className="report-overview-grid">
-                  <ScoreRingCard
-                    label="Overall health"
-                    className="report-overview-score"
-                    caption="Health score"
-                    emptyValueText={
-                      reportIssueSummaryPending ? "Pending" : "N/A"
-                    }
-                    score={
-                      reportIssueSummaryPending
-                        ? null
-                        : reportScores.overall.score
-                    }
-                    status={
-                      reportIssueSummaryPending
-                        ? "Score pending"
-                        : reportScores.overall.score == null
-                          ? "Score unavailable"
-                          : (reportScores.overall.band ??
-                            reportScores.overall.detail)
-                    }
-                    detail={
-                      reportIssueSummaryPending
-                        ? "The crawl is complete. Final issue scoring appears when the report summary finishes."
-                        : reportScores.overall.score == null
-                          ? "Score unavailable for this run. Review the detailed findings and diagnostics below."
-                          : reportScores.overall.detail
-                    }
-                    helper={
-                      reportIssueSummaryPending
-                        ? "Final issue scoring is still being prepared"
-                        : `Links checked ${reportRun.checked_links} · Total issues ${
-                            reportIssueSummary?.total ?? 0
-                          }`
-                    }
-                    stats={[
-                      {
-                        label: "High priority",
-                        value: reportHighPriorityCount,
-                      },
-                      {
-                        label: "New issues",
-                        value: reportIssueSummary?.byChangeStatus.new ?? 0,
-                      },
-                      {
-                        label: "Resolved",
-                        value:
-                          reportIssueSummary?.byChangeStatus.resolved ??
-                          reportIssues.resolvedCount,
-                      },
-                      {
-                        label: "Links checked",
-                        value: reportRun.checked_links,
-                      },
-                    ]}
-                    tone={
-                      reportScores.overall.score == null
-                        ? "default"
-                        : reportScores.overall.score >= 90
+            <div className="report-page">
+              <div className="report-header">
+                <div>
+                  <div className="report-title">
+                    {reportDisplayName ?? reportHost ?? "Scan report"}
+                  </div>
+                  <div className="report-subtitle">
+                    Detailed scan document with summary, issue analysis, raw
+                    evidence, and diagnostics for a single run.
+                  </div>
+                  <div className="report-status-row">
+                    <StatusBadge
+                      label={reportRun?.status.replace("_", " ") ?? "Loading"}
+                      tone={
+                        reportRun?.status === "completed"
                           ? "success"
-                          : reportScores.overall.score >= 75
-                            ? "accent"
-                            : reportScores.overall.score >= 60
+                          : reportRun?.status === "failed"
+                            ? "danger"
+                            : reportRun?.status === "cancelled"
                               ? "warning"
-                              : "danger"
-                    }
-                  />
-                  <div className="report-overview-stack">
-                    <div className="report-card report-score-card report-kpi-card">
-                      <div className="report-label">Link Integrity Score</div>
+                              : "accent"
+                      }
+                    />
+                    {reportIssueSummaryPending && (
+                      <StatusBadge
+                        label="Building issue summary"
+                        tone="accent"
+                      />
+                    )}
+                    {reportHost && (
+                      <StatusBadge label={reportHost} tone="default" />
+                    )}
+                    {reportDateLabel !== "-" && (
+                      <StatusBadge label={reportDateLabel} tone="default" />
+                    )}
+                    {reportClientName && (
+                      <StatusBadge label={reportClientName} tone="default" />
+                    )}
+                  </div>
+                </div>
+                {!isReadOnlyReport && (
+                  <div className="report-actions">
+                    <button className="report-button" onClick={backToDashboard}>
+                      Back to dashboard
+                    </button>
+                    {reportRun && (
+                      <button
+                        className="report-button"
+                        onClick={handlePrintReport}
+                      >
+                        Print / save PDF
+                      </button>
+                    )}
+                    {reportRun?.status === "completed" && (
+                      <button
+                        className="report-button"
+                        onClick={() => {
+                          void handleCreateOrManageReportShare();
+                        }}
+                        disabled={reportShareLoading || reportShareSaving}
+                      >
+                        {reportShare
+                          ? "Manage share link"
+                          : reportShareSaving
+                            ? "Creating share link..."
+                            : "Create share link"}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {!isReadOnlyReport &&
+                reportRun?.status === "completed" &&
+                reportSharePanelOpen && (
+                  <div className="report-card report-share-panel">
+                    <div
+                      style={{
+                        display: "grid",
+                        gap: "14px",
+                      }}
+                    >
+                      <div>
+                        <div className="report-table-title">Share report</div>
+                        <div className="report-score-subtitle">
+                          Generate a read-only link for client review. Revoke it
+                          here when access should end.
+                        </div>
+                      </div>
+                      <label className="field-label">
+                        Shared report URL
+                        <input
+                          className="app-input"
+                          value={reportShare?.shareUrl ?? ""}
+                          readOnly
+                        />
+                      </label>
                       <div
-                        className="report-metric"
                         style={{
-                          color: getScoreBandTone(
-                            reportScores.linkIntegrity.score,
-                          ),
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: "10px",
+                          alignItems: "center",
                         }}
                       >
-                        {reportScores.linkIntegrity.score == null
-                          ? reportScores.linkIntegrity.detail
-                          : `${reportScores.linkIntegrity.score}%`}
+                        <button
+                          className="primary-button"
+                          onClick={() => {
+                            if (reportShare?.shareUrl) {
+                              void copyToClipboard(
+                                reportShare.shareUrl,
+                                "report-share-url",
+                                "Copied share link",
+                              );
+                            }
+                          }}
+                          disabled={!reportShare?.shareUrl}
+                        >
+                          Copy share link
+                        </button>
+                        <button
+                          className="secondary-button"
+                          onClick={() => {
+                            void handleRevokeReportShare();
+                          }}
+                          disabled={!reportShare || reportShareSaving}
+                        >
+                          {reportShareSaving ? "Revoking..." : "Revoke link"}
+                        </button>
+                        {reportShare?.created_at && (
+                          <span className="report-table-meta">
+                            Created {formatDate(reportShare.created_at)}
+                            {reportShare.view_count > 0
+                              ? ` · ${reportShare.view_count} views`
+                              : " · Not viewed yet"}
+                          </span>
+                        )}
                       </div>
-                      {reportScores.linkIntegrity.band && (
+                      {reportShare?.last_viewed_at && (
+                        <div className="report-table-meta">
+                          Last viewed {formatDate(reportShare.last_viewed_at)}
+                        </div>
+                      )}
+                      {reportShareError && (
                         <div
-                          className="report-score-band"
+                          style={{
+                            fontSize: "13px",
+                            color: "var(--warning)",
+                          }}
+                        >
+                          {reportShareError}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              {reportLoading && !reportRun && (
+                <div
+                  className="report-card"
+                  style={{ fontSize: "13px", color: "var(--muted)" }}
+                >
+                  Loading report…
+                </div>
+              )}
+              {reportError && (
+                <div
+                  className="report-card"
+                  style={{ fontSize: "13px", color: "var(--warning)" }}
+                >
+                  {reportError}
+                </div>
+              )}
+
+              {reportRun?.error_message && (
+                <div
+                  className="report-card"
+                  style={{ fontSize: "13px", color: "var(--warning)" }}
+                >
+                  Failure reason: {reportRun.error_message}
+                </div>
+              )}
+
+              {reportRun && (
+                <>
+                  <div className="report-overview-grid">
+                    <ScoreRingCard
+                      label="Overall health"
+                      className="report-overview-score"
+                      caption="Health score"
+                      emptyValueText={
+                        reportIssueSummaryPending ? "Pending" : "N/A"
+                      }
+                      score={
+                        reportIssueSummaryPending
+                          ? null
+                          : reportScores.overall.score
+                      }
+                      status={
+                        reportIssueSummaryPending
+                          ? "Score pending"
+                          : reportScores.overall.score == null
+                            ? "Score unavailable"
+                            : (reportScores.overall.band ??
+                              reportScores.overall.detail)
+                      }
+                      detail={
+                        reportIssueSummaryPending
+                          ? "The crawl is complete. Final issue scoring appears when the report summary finishes."
+                          : reportScores.overall.score == null
+                            ? "Score unavailable for this run. Review the detailed findings and diagnostics below."
+                            : reportScores.overall.detail
+                      }
+                      helper={
+                        reportIssueSummaryPending
+                          ? "Final issue scoring is still being prepared"
+                          : `Links checked ${reportRun.checked_links} · Total issues ${
+                              reportIssueSummary?.total ?? 0
+                            }`
+                      }
+                      stats={[
+                        {
+                          label: "High priority",
+                          value: reportHighPriorityCount,
+                        },
+                        {
+                          label: "New issues",
+                          value: reportIssueSummary?.byChangeStatus.new ?? 0,
+                        },
+                        {
+                          label: "Resolved",
+                          value:
+                            reportIssueSummary?.byChangeStatus.resolved ??
+                            reportIssues.resolvedCount,
+                        },
+                        {
+                          label: "Links checked",
+                          value: reportRun.checked_links,
+                        },
+                      ]}
+                      tone={
+                        reportScores.overall.score == null
+                          ? "default"
+                          : reportScores.overall.score >= 90
+                            ? "success"
+                            : reportScores.overall.score >= 75
+                              ? "accent"
+                              : reportScores.overall.score >= 60
+                                ? "warning"
+                                : "danger"
+                      }
+                    />
+                    <div className="report-overview-stack">
+                      <div className="report-card report-score-card report-kpi-card">
+                        <div className="report-label">Link Integrity Score</div>
+                        <div
+                          className="report-metric"
                           style={{
                             color: getScoreBandTone(
                               reportScores.linkIntegrity.score,
                             ),
                           }}
                         >
-                          {reportScores.linkIntegrity.band}
+                          {reportScores.linkIntegrity.score == null
+                            ? reportScores.linkIntegrity.detail
+                            : `${reportScores.linkIntegrity.score}%`}
                         </div>
-                      )}
-                      <div className="report-score-subtitle">
-                        {reportScores.linkIntegrity.detail}
-                      </div>
-                    </div>
-                    <div className="report-change-grid report-change-grid--dense">
-                      <div className="report-card report-summary-card">
-                        <div className="report-label">What changed</div>
-                        <div className="report-metric">
-                          {reportIssueSummary?.byChangeStatus.new ?? 0}
-                        </div>
-                        <div className="report-score-subtitle">
-                          New issues in this run
-                        </div>
-                      </div>
-                      <div className="report-card report-summary-card">
-                        <div className="report-label">Open issues</div>
-                        <div className="report-metric">
-                          {reportIssueSummary?.total ?? 0}
-                        </div>
-                        <div className="report-score-subtitle">
-                          Existing and newly detected findings
-                        </div>
-                      </div>
-                      <div className="report-card report-summary-card">
-                        <div className="report-label">Resolved issues</div>
-                        <div className="report-metric">
-                          {reportIssueSummary?.byChangeStatus.resolved ??
-                            reportIssues.resolvedCount}
-                        </div>
-                        <div className="report-score-subtitle">
-                          Fixed since the previous baseline
-                        </div>
-                      </div>
-                      <div className="report-card report-summary-card">
-                        <div className="report-label">Links checked</div>
-                        <div className="report-metric">
-                          {reportRun.checked_links}
-                        </div>
-                        <div className="report-score-subtitle">
-                          Broken {reportSummary.broken} · Blocked{" "}
-                          {reportSummary.blocked}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="report-card report-category-scores">
-                  <div className="report-card__header">
-                    <div>
-                      <div className="report-table-title">Category scores</div>
-                      <div className="report-score-subtitle">
-                        Deterministic scores from open findings in this scan.
-                      </div>
-                    </div>
-                  </div>
-                  <div className="dashboard-category-grid report-category-score-grid">
-                    {DASHBOARD_CATEGORIES.map((category) => {
-                      const score =
-                        reportCategoryScoresByKey[category.key] ?? null;
-                      const scoreValue = reportIssueSummaryPending
-                        ? "Pending"
-                        : getCategoryScoreValue(score);
-                      const statusLabel = reportIssueSummaryPending
-                        ? "Pending"
-                        : score
-                          ? getCategoryScoreStatusLabel(score.status)
-                          : "Score unavailable";
-                      return (
-                        <CategoryStatusCard
-                          key={category.key}
-                          title={category.label}
-                          statusLabel={statusLabel}
-                          tone={
-                            reportIssueSummaryPending
-                              ? "default"
-                              : getCategoryScoreTone(score)
-                          }
-                          score={scoreValue}
-                          description={category.description}
-                          detail={
-                            reportIssueSummaryPending
-                              ? "Building issue summary"
-                              : getSearchAccessCategoryDetail(
-                                  score,
-                                  reportIssues.summariesByCategory,
-                                )
-                          }
-                          stats={
-                            reportIssueSummaryPending
-                              ? null
-                              : score
-                                ? `${score.findingCount} findings · ${score.checkCount} checks`
-                                : "No score payload available"
-                          }
-                        />
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="report-kpi-grid report-kpi-grid--expanded">
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Total issues</div>
-                    <div className="report-metric">
-                      {reportIssueSummary?.total ?? 0}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">High priority</div>
-                    <div className="report-metric">
-                      {reportHighPriorityCount}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">New issues</div>
-                    <div className="report-metric">
-                      {reportIssueSummary?.byChangeStatus.new ?? 0}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Existing issues</div>
-                    <div className="report-metric">
-                      {reportIssueSummary?.byChangeStatus.existing ?? 0}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Resolved issues</div>
-                    <div className="report-metric">
-                      {reportIssueSummary?.byChangeStatus.resolved ??
-                        reportIssues.resolvedCount}
-                    </div>
-                  </div>
-                  <div className="report-card report-summary-card">
-                    <div className="report-label">Links checked</div>
-                    <div className="report-metric">
-                      {reportRun.checked_links}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="report-card report-score-subtitle">
-                  {reportScores.summary}
-                </div>
-
-                <details className="report-card report-meta-details">
-                  <summary className="report-meta-summary">
-                    <div>
-                      <div className="report-table-title">Scan details</div>
-                      <div className="report-score-subtitle">
-                        Run metadata, timestamps, URLs, and scan identifier.
-                      </div>
-                    </div>
-                    <div className="report-meta-summary__chips">
-                      <span className="report-meta-chip">
-                        Duration{" "}
-                        {formatDuration(
-                          reportRun?.started_at,
-                          reportRun?.finished_at,
-                        )}
-                      </span>
-                      <span className="report-meta-chip">
-                        Scan ID {reportScanIdShort}
-                      </span>
-                    </div>
-                  </summary>
-                  <div className="report-meta">
-                    <div className="report-meta-item">
-                      <div className="report-label">Status</div>
-                      <div className="report-value">
-                        {reportRun?.status.replace("_", " ") ?? "-"}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Issue generation</div>
-                      <div className="report-value">
-                        {reportRun.issue_generation_status ?? "pending"}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Site</div>
-                      <div className="report-value">
-                        {selectedSiteName ?? reportHost ?? "-"}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Checked links</div>
-                      <div className="report-value">
-                        {reportRun.checked_links} / {reportRun.total_links}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Scanned</div>
-                      <div className="report-value">{reportDateLabel}</div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Scan ID</div>
-                      <div className="report-value">
-                        <span
-                          style={{
-                            fontSize: "12px",
-                            color: "var(--text-muted)",
-                            overflowWrap: "anywhere",
-                          }}
-                        >
-                          {reportScanIdDisplay}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Start URL</div>
-                      <div className="report-value">
-                        {reportRun?.start_url ?? "-"}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Started</div>
-                      <div className="report-value">
-                        {formatDate(reportRun?.started_at ?? null)}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Finished</div>
-                      <div className="report-value">
-                        {formatDate(reportRun?.finished_at ?? null)}
-                      </div>
-                    </div>
-                    <div className="report-meta-item">
-                      <div className="report-label">Duration</div>
-                      <div className="report-value">
-                        {formatDuration(
-                          reportRun?.started_at,
-                          reportRun?.finished_at,
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </details>
-
-                {isInProgress(reportRun.status) && (
-                  <ScanProgressHero
-                    progress={
-                      reportRun.total_links > 0
-                        ? (reportRun.checked_links / reportRun.total_links) *
-                          100
-                        : 0
-                    }
-                    indeterminate={reportRun.total_links <= 0}
-                    title="Scan still running"
-                    stage={getScanStageText(reportRun)}
-                    summary={`${
-                      reportRun.checked_links
-                    } / ${reportRun.total_links || "?"} links checked · Last update ${
-                      reportLastLoadedAt
-                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
-                        : "-"
-                    }`}
-                    counters={[
-                      {
-                        label: "Links checked",
-                        value: reportRun.checked_links,
-                      },
-                      { label: "Broken", value: reportSummary.broken },
-                      { label: "Blocked", value: reportSummary.blocked },
-                      {
-                        label: "No response",
-                        value: reportSummary.no_response,
-                      },
-                      { label: "Ignored", value: reportIgnoredTotal ?? 0 },
-                    ]}
-                    note="This report stays locked to this exact run and refreshes as scan progress arrives."
-                    statusTone="accent"
-                  />
-                )}
-
-                {reportRun.status === "completed" && (
-                  <>
-                    {reportRun.issue_generation_status !== "completed" && (
-                      <div
-                        className="report-card"
-                        style={{
-                          display: "grid",
-                          gap: "8px",
-                          borderColor:
-                            reportRun.issue_generation_status === "failed"
-                              ? "var(--warning)"
-                              : "var(--border)",
-                        }}
-                      >
-                        <div style={{ fontWeight: 600 }}>
-                          {reportRun.issue_generation_status === "failed"
-                            ? "Issue generation failed"
-                            : "Issue generation pending"}
-                        </div>
-                        <div
-                          style={{ fontSize: "13px", color: "var(--muted)" }}
-                        >
-                          Scan completed, but issue generation{" "}
-                          {reportRun.issue_generation_status === "failed"
-                            ? "failed"
-                            : "has not finished yet"}
-                          . Raw scan evidence is still available.
-                        </div>
-                        {reportRun.issue_generation_error && (
+                        {reportScores.linkIntegrity.band && (
                           <div
+                            className="report-score-band"
                             style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
+                              color: getScoreBandTone(
+                                reportScores.linkIntegrity.score,
+                              ),
                             }}
                           >
-                            {reportRun.issue_generation_error}
+                            {reportScores.linkIntegrity.band}
                           </div>
                         )}
+                        <div className="report-score-subtitle">
+                          {reportScores.linkIntegrity.detail}
+                        </div>
                       </div>
-                    )}
-                    {renderTopPriorityIssues()}
-                    {renderReportIssuesSection()}
-
-                    <div className="report-card">
-                      <div className="report-card__header">
-                        <div>
-                          <div className="report-table-title">
-                            Evidence summary
+                      <div className="report-change-grid report-change-grid--dense">
+                        <div className="report-card report-summary-card">
+                          <div className="report-label">What changed</div>
+                          <div className="report-metric">
+                            {reportIssueSummary?.byChangeStatus.new ?? 0}
                           </div>
-                          <div
-                            className="report-table-meta"
-                            style={{ marginTop: "4px" }}
+                          <div className="report-score-subtitle">
+                            New issues in this run
+                          </div>
+                        </div>
+                        <div className="report-card report-summary-card">
+                          <div className="report-label">Open issues</div>
+                          <div className="report-metric">
+                            {reportIssueSummary?.total ?? 0}
+                          </div>
+                          <div className="report-score-subtitle">
+                            Existing and newly detected findings
+                          </div>
+                        </div>
+                        <div className="report-card report-summary-card">
+                          <div className="report-label">Resolved issues</div>
+                          <div className="report-metric">
+                            {reportIssueSummary?.byChangeStatus.resolved ??
+                              reportIssues.resolvedCount}
+                          </div>
+                          <div className="report-score-subtitle">
+                            Fixed since the previous baseline
+                          </div>
+                        </div>
+                        <div className="report-card report-summary-card">
+                          <div className="report-label">Links checked</div>
+                          <div className="report-metric">
+                            {reportRun.checked_links}
+                          </div>
+                          <div className="report-score-subtitle">
+                            Broken {reportSummary.broken} · Blocked{" "}
+                            {reportSummary.blocked}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="report-card report-category-scores">
+                    <div className="report-card__header">
+                      <div>
+                        <div className="report-table-title">
+                          Category scores
+                        </div>
+                        <div className="report-score-subtitle">
+                          Deterministic scores from open findings in this scan.
+                        </div>
+                      </div>
+                    </div>
+                    <div className="dashboard-category-grid report-category-score-grid">
+                      {DASHBOARD_CATEGORIES.map((category) => {
+                        const score =
+                          reportCategoryScoresByKey[category.key] ?? null;
+                        const scoreValue = reportIssueSummaryPending
+                          ? "Pending"
+                          : getCategoryScoreValue(score);
+                        const statusLabel = reportIssueSummaryPending
+                          ? "Pending"
+                          : score
+                            ? getCategoryScoreStatusLabel(score.status)
+                            : "Score unavailable";
+                        return (
+                          <CategoryStatusCard
+                            key={category.key}
+                            title={category.label}
+                            statusLabel={statusLabel}
+                            tone={
+                              reportIssueSummaryPending
+                                ? "default"
+                                : getCategoryScoreTone(score)
+                            }
+                            score={scoreValue}
+                            description={category.description}
+                            detail={
+                              reportIssueSummaryPending
+                                ? "Building issue summary"
+                                : getSearchAccessCategoryDetail(
+                                    score,
+                                    reportIssues.summariesByCategory,
+                                  )
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="report-kpi-grid report-kpi-grid--expanded">
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">Total issues</div>
+                      <div className="report-metric">
+                        {reportIssueSummary?.total ?? 0}
+                      </div>
+                    </div>
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">High priority</div>
+                      <div className="report-metric">
+                        {reportHighPriorityCount}
+                      </div>
+                    </div>
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">New issues</div>
+                      <div className="report-metric">
+                        {reportIssueSummary?.byChangeStatus.new ?? 0}
+                      </div>
+                    </div>
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">Existing issues</div>
+                      <div className="report-metric">
+                        {reportIssueSummary?.byChangeStatus.existing ?? 0}
+                      </div>
+                    </div>
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">Resolved issues</div>
+                      <div className="report-metric">
+                        {reportIssueSummary?.byChangeStatus.resolved ??
+                          reportIssues.resolvedCount}
+                      </div>
+                    </div>
+                    <div className="report-card report-summary-card">
+                      <div className="report-label">Links checked</div>
+                      <div className="report-metric">
+                        {reportRun.checked_links}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="report-card report-score-subtitle">
+                    {reportScores.summary}
+                  </div>
+
+                  <details className="report-card report-meta-details">
+                    <summary className="report-meta-summary">
+                      <div>
+                        <div className="report-table-title">Scan details</div>
+                        <div className="report-score-subtitle">
+                          Run metadata, timestamps, URLs, and scan identifier.
+                        </div>
+                      </div>
+                      <div className="report-meta-summary__chips">
+                        <span className="report-meta-chip">
+                          Duration{" "}
+                          {formatDuration(
+                            reportRun?.started_at,
+                            reportRun?.finished_at,
+                          )}
+                        </span>
+                        <span className="report-meta-chip">
+                          Scan ID {reportScanIdShort}
+                        </span>
+                      </div>
+                    </summary>
+                    <div className="report-meta">
+                      <div className="report-meta-item">
+                        <div className="report-label">Status</div>
+                        <div className="report-value">
+                          {reportRun?.status.replace("_", " ") ?? "-"}
+                        </div>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Issue generation</div>
+                        <div className="report-value">
+                          {reportRun.issue_generation_status ?? "pending"}
+                        </div>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Site</div>
+                        <div className="report-value">
+                          {reportDisplayName ?? reportHost ?? "-"}
+                        </div>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Checked links</div>
+                        <div className="report-value">
+                          {reportRun.checked_links} / {reportRun.total_links}
+                        </div>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Scanned</div>
+                        <div className="report-value">{reportDateLabel}</div>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Scan ID</div>
+                        <div className="report-value">
+                          <span
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--text-muted)",
+                              overflowWrap: "anywhere",
+                            }}
                           >
-                            Link outcomes and severity counts for this exact
-                            run.
-                          </div>
+                            {reportScanIdDisplay}
+                          </span>
                         </div>
                       </div>
-                      <div className="report-mini-stats">
-                        <div className="report-mini-stat">
-                          <span>Broken</span>
-                          <strong>{reportSummary.broken}</strong>
+                      <div className="report-meta-item">
+                        <div className="report-label">Start URL</div>
+                        <div className="report-value">
+                          {reportRun?.start_url ?? "-"}
                         </div>
-                        <div className="report-mini-stat">
-                          <span>Blocked</span>
-                          <strong>{reportSummary.blocked}</strong>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Started</div>
+                        <div className="report-value">
+                          {formatDate(reportRun?.started_at ?? null)}
                         </div>
-                        <div className="report-mini-stat">
-                          <span>No response</span>
-                          <strong>{reportSummary.no_response}</strong>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Finished</div>
+                        <div className="report-value">
+                          {formatDate(reportRun?.finished_at ?? null)}
                         </div>
-                        <div className="report-mini-stat">
-                          <span>Ignored / skipped</span>
-                          <strong>{reportIgnoredTotal ?? 0}</strong>
-                        </div>
-                        <div className="report-mini-stat">
-                          <span>OK links</span>
-                          <strong>{reportSummary.ok}</strong>
-                        </div>
-                        <div className="report-mini-stat">
-                          <span>High</span>
-                          <strong>
-                            {reportIssueSummary?.bySeverity.high ?? 0}
-                          </strong>
-                        </div>
-                        <div className="report-mini-stat">
-                          <span>Medium</span>
-                          <strong>
-                            {reportIssueSummary?.bySeverity.medium ?? 0}
-                          </strong>
-                        </div>
-                        <div className="report-mini-stat">
-                          <span>Low</span>
-                          <strong>
-                            {reportIssueSummary?.bySeverity.low ?? 0}
-                          </strong>
-                        </div>
-                        <div className="report-mini-stat">
-                          <span>Info</span>
-                          <strong>
-                            {reportIssueSummary?.bySeverity.info ?? 0}
-                          </strong>
+                      </div>
+                      <div className="report-meta-item">
+                        <div className="report-label">Duration</div>
+                        <div className="report-value">
+                          {formatDuration(
+                            reportRun?.started_at,
+                            reportRun?.finished_at,
+                          )}
                         </div>
                       </div>
                     </div>
+                  </details>
 
-                    <div className="report-table-grid">
-                      {renderReportLinkSection(
-                        "Broken links",
-                        "broken",
-                        reportSummary.broken,
-                      )}
-                      {renderReportLinkSection(
-                        "Blocked links",
-                        "blocked",
-                        reportSummary.blocked,
-                      )}
-                    </div>
-
-                    <div className="report-table-grid">
-                      {renderReportLinkSection(
-                        "No response links",
-                        "no_response",
-                        reportSummary.no_response,
-                      )}
-                      {renderReportIgnoredSection()}
-                    </div>
-
-                    <div className="report-card">
-                      <div className="report-table-title">OK links</div>
-                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
-                        {reportSummary.ok} OK links were recorded in this scan.
-                        Phase 1A keeps OK links as a summary-only count.
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {reportRun.status !== "completed" &&
-                  !isInProgress(reportRun.status) && (
+                  {isInProgress(reportRun.status) && (
                     <ScanProgressHero
-                      progress={0}
-                      title={
-                        reportRun.status === "failed"
-                          ? "Scan failed"
-                          : "Scan cancelled"
+                      progress={
+                        reportRun.total_links > 0
+                          ? (reportRun.checked_links / reportRun.total_links) *
+                            100
+                          : 0
                       }
+                      indeterminate={reportRun.total_links <= 0}
+                      title="Scan activity"
                       stage={getScanStageText(reportRun)}
-                      summary={
-                        reportRun.error_message ??
-                        "This report only shows the exact run state and any evidence captured before the scan stopped."
-                      }
+                      summary={`${
+                        reportRun.checked_links
+                      } / ${reportRun.total_links || "?"} links checked · Last update ${
+                        reportLastLoadedAt
+                          ? formatDate(
+                              new Date(reportLastLoadedAt).toISOString(),
+                            )
+                          : "-"
+                      }`}
                       counters={[
                         {
                           label: "Links checked",
@@ -12502,104 +14689,283 @@ const App: React.FC = () => {
                           label: "No response",
                           value: reportSummary.no_response,
                         },
-                        { label: "Ignored", value: reportIgnoredTotal ?? 0 },
+                        { label: "Ignored", value: reportIgnoredDisplayTotal },
                       ]}
-                      note="Detailed evidence remains available below for anything the scan captured before it stopped."
-                      statusTone={
-                        reportRun.status === "failed" ? "danger" : "warning"
-                      }
+                      note="Early findings are still updating while this scan runs. Open the full report for evidence, affected pages, and recommended next steps when the scan completes."
+                      statusTone="accent"
                     />
                   )}
 
-                <details
-                  className="report-card"
-                  open={reportTechnicalDiagnosticsNeedsAttention}
-                  style={{ display: "grid", gap: "10px" }}
-                >
-                  <summary
-                    className="report-table-title"
-                    style={{ cursor: "pointer" }}
-                  >
-                    Technical diagnostics
-                  </summary>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: "12px",
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                    }}
-                  >
-                    <span>Raw status {reportRun.status}</span>
-                    <span>Site id {reportRun.site_id}</span>
-                    <span>
-                      Checked {reportRun.checked_links} /{" "}
-                      {reportRun.total_links}
-                    </span>
-                    <span>404/410 {reportStatusGroups.notFound}</span>
-                    <span>401/403/429 {reportStatusGroups.blocked}</span>
-                    <span>5xx {reportStatusGroups.serverError}</span>
-                    <span>No response {reportStatusGroups.noResponse}</span>
-                    <span>Other HTTP {reportStatusGroups.otherHttp}</span>
-                    <span>
-                      Issue generation{" "}
-                      {reportRun.issue_generation_status ?? "pending"}
-                    </span>
-                    {reportRun.issue_generation_error && (
-                      <span title={reportRun.issue_generation_error}>
-                        Issue generation error{" "}
-                        {reportRun.issue_generation_error}
-                      </span>
-                    )}
-                    <span>
-                      {formatSeoDiagnostics(
-                        reportTechnicalDiagnostics?.seoBasic,
+                  {reportRun.status === "completed" && (
+                    <>
+                      {reportRun.issue_generation_status !== "completed" && (
+                        <div
+                          className="report-card"
+                          style={{
+                            display: "grid",
+                            gap: "8px",
+                            borderColor:
+                              reportRun.issue_generation_status === "failed"
+                                ? "var(--warning)"
+                                : "var(--border)",
+                          }}
+                        >
+                          <div style={{ fontWeight: 600 }}>
+                            {reportRun.issue_generation_status === "failed"
+                              ? "Issue generation failed"
+                              : "Issue generation pending"}
+                          </div>
+                          <div
+                            style={{ fontSize: "13px", color: "var(--muted)" }}
+                          >
+                            Scan completed, but issue generation{" "}
+                            {reportRun.issue_generation_status === "failed"
+                              ? "failed"
+                              : "has not finished yet"}
+                            . Raw scan evidence is still available.
+                          </div>
+                          {reportRun.issue_generation_error && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {reportRun.issue_generation_error}
+                            </div>
+                          )}
+                        </div>
                       )}
-                    </span>
-                    <span>
-                      {formatRobotsDiagnostics(
-                        reportTechnicalDiagnostics?.robots,
-                      )}
-                    </span>
-                    <span>
-                      {formatSitemapDiagnostics(
-                        reportTechnicalDiagnostics?.sitemap,
-                      )}
-                    </span>
-                    <span>
-                      {formatSslDiagnostics(
-                        reportTechnicalDiagnostics?.sslHttps,
-                      )}
-                    </span>
-                    <span>
-                      {formatSecurityHeaderDiagnostics(
-                        reportTechnicalDiagnostics?.securityHeader,
-                      )}
-                    </span>
-                    <span>
-                      {formatPerformanceDiagnostics(
-                        reportTechnicalDiagnostics?.performanceBasic,
-                      )}
-                    </span>
-                    <span>
-                      Refreshed{" "}
-                      {reportLastLoadedAt
-                        ? formatDate(new Date(reportLastLoadedAt).toISOString())
-                        : "-"}
-                    </span>
-                  </div>
-                </details>
+                      {renderTopPriorityIssues()}
+                      {renderReportIssuesSection()}
 
-                <div className="report-footer">
-                  Last refreshed{" "}
-                  {reportLastLoadedAt
-                    ? formatDate(new Date(reportLastLoadedAt).toISOString())
-                    : "-"}
-                </div>
-              </>
-            )}
-          </div>
+                      <div className="report-card">
+                        <div className="report-card__header">
+                          <div>
+                            <div className="report-table-title">
+                              Evidence summary
+                            </div>
+                            <div
+                              className="report-table-meta"
+                              style={{ marginTop: "4px" }}
+                            >
+                              Link outcomes and severity counts for this exact
+                              run.
+                            </div>
+                          </div>
+                        </div>
+                        <div className="report-mini-stats">
+                          <div className="report-mini-stat">
+                            <span>Broken</span>
+                            <strong>{reportSummary.broken}</strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>Blocked</span>
+                            <strong>{reportSummary.blocked}</strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>No response</span>
+                            <strong>{reportSummary.no_response}</strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>Ignored / skipped</span>
+                            <strong>{reportIgnoredDisplayTotal}</strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>OK links</span>
+                            <strong>{reportSummary.ok}</strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>High</span>
+                            <strong>
+                              {reportIssueSummary?.bySeverity.high ?? 0}
+                            </strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>Medium</span>
+                            <strong>
+                              {reportIssueSummary?.bySeverity.medium ?? 0}
+                            </strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>Low</span>
+                            <strong>
+                              {reportIssueSummary?.bySeverity.low ?? 0}
+                            </strong>
+                          </div>
+                          <div className="report-mini-stat">
+                            <span>Info</span>
+                            <strong>
+                              {reportIssueSummary?.bySeverity.info ?? 0}
+                            </strong>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="report-table-grid">
+                        {renderReportLinkSection(
+                          "Broken links",
+                          "broken",
+                          reportSummary.broken,
+                        )}
+                        {renderReportLinkSection(
+                          "Blocked links",
+                          "blocked",
+                          reportSummary.blocked,
+                        )}
+                      </div>
+
+                      <div className="report-table-grid">
+                        {renderReportLinkSection(
+                          "No response links",
+                          "no_response",
+                          reportSummary.no_response,
+                        )}
+                        {renderReportIgnoredSection()}
+                      </div>
+
+                      {renderReportLinkSection(
+                        "OK links",
+                        "ok",
+                        reportSummary.ok,
+                        `${reportSummary.ok} OK links were recorded in this scan and passed without broken, blocked, or no-response findings.`,
+                      )}
+                    </>
+                  )}
+
+                  {reportRun.status !== "completed" &&
+                    !isInProgress(reportRun.status) && (
+                      <ScanProgressHero
+                        progress={0}
+                        title={
+                          reportRun.status === "failed"
+                            ? "Scan failed"
+                            : "Scan cancelled"
+                        }
+                        stage={getScanStageText(reportRun)}
+                        summary={
+                          reportRun.error_message ??
+                          "This scan ended before a full report was completed. Your best available evidence is shown below."
+                        }
+                        counters={[
+                          {
+                            label: "Links checked",
+                            value: reportRun.checked_links,
+                          },
+                          { label: "Broken", value: reportSummary.broken },
+                          { label: "Blocked", value: reportSummary.blocked },
+                          {
+                            label: "No response",
+                            value: reportSummary.no_response,
+                          },
+                          {
+                            label: "Ignored",
+                            value: reportIgnoredDisplayTotal,
+                          },
+                        ]}
+                        note="The scan finished with partial evidence available. Open the scan report for full findings, affected pages, and recommended next steps."
+                        statusTone={
+                          reportRun.status === "failed" ? "danger" : "warning"
+                        }
+                      />
+                    )}
+
+                  <details
+                    className="report-card report-developer-diagnostics"
+                    open={reportTechnicalDiagnosticsNeedsAttention}
+                    style={{ display: "grid", gap: "10px" }}
+                  >
+                    <summary
+                      className="report-table-title"
+                      style={{ cursor: "pointer" }}
+                    >
+                      Developer diagnostics
+                    </summary>
+                    <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+                      Advanced scan details for debugging crawler behavior
+                      during beta.
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "12px",
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                      }}
+                    >
+                      <span>Raw status {reportRun.status}</span>
+                      <span>Site id {reportRun.site_id}</span>
+                      <span>
+                        Checked {reportRun.checked_links} /{" "}
+                        {reportRun.total_links}
+                      </span>
+                      <span>404/410 {reportStatusGroups.notFound}</span>
+                      <span>401/403/429 {reportStatusGroups.blocked}</span>
+                      <span>5xx {reportStatusGroups.serverError}</span>
+                      <span>No response {reportStatusGroups.noResponse}</span>
+                      <span>Other HTTP {reportStatusGroups.otherHttp}</span>
+                      <span>
+                        Issue generation{" "}
+                        {reportRun.issue_generation_status ?? "pending"}
+                      </span>
+                      {reportRun.issue_generation_error && (
+                        <span title={reportRun.issue_generation_error}>
+                          Issue generation error{" "}
+                          {reportRun.issue_generation_error}
+                        </span>
+                      )}
+                      <span>
+                        {formatSeoDiagnostics(
+                          reportTechnicalDiagnostics?.seoBasic,
+                        )}
+                      </span>
+                      <span>
+                        {formatRobotsDiagnostics(
+                          reportTechnicalDiagnostics?.robots,
+                        )}
+                      </span>
+                      <span>
+                        {formatSitemapDiagnostics(
+                          reportTechnicalDiagnostics?.sitemap,
+                        )}
+                      </span>
+                      <span>
+                        {formatSslDiagnostics(
+                          reportTechnicalDiagnostics?.sslHttps,
+                        )}
+                      </span>
+                      <span>
+                        {formatSecurityHeaderDiagnostics(
+                          reportTechnicalDiagnostics?.securityHeader,
+                        )}
+                      </span>
+                      <span>
+                        {formatPerformanceDiagnostics(
+                          reportTechnicalDiagnostics?.performanceBasic,
+                        )}
+                      </span>
+                      <span>
+                        Refreshed{" "}
+                        {reportLastLoadedAt
+                          ? formatDate(
+                              new Date(reportLastLoadedAt).toISOString(),
+                            )
+                          : "-"}
+                      </span>
+                    </div>
+                  </details>
+
+                  <div className="report-footer">
+                    Last refreshed{" "}
+                    {reportLastLoadedAt
+                      ? formatDate(new Date(reportLastLoadedAt).toISOString())
+                      : "-"}
+                  </div>
+                </>
+              )}
+            </div>
+          </>
         ) : (
           <>
             <nav className="top-nav">
@@ -12619,15 +14985,21 @@ const App: React.FC = () => {
                   </div>
                 </div>
                 <div className="app-nav-tabs">
-                  {primaryAppSections.map((item) => (
-                    <button
-                      key={item.key}
-                      className={`app-nav-tab ${appSection === item.key ? "active" : ""}`}
-                      onClick={() => setAppSection(item.key)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
+                  {primaryAppSections.map((item) => {
+                    const isActive =
+                      appSection === item.key ||
+                      (item.key === "dashboard" &&
+                        appSection === "site_settings");
+                    return (
+                      <button
+                        key={item.key}
+                        className={`app-nav-tab ${isActive ? "active" : ""}`}
+                        onClick={() => openAppSection(item.key)}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -12648,25 +15020,13 @@ const App: React.FC = () => {
                     {!selectedSiteId && <option value="">Select a site</option>}
                     {sites.map((site) => (
                       <option key={site.id} value={site.id}>
-                        {(siteNameById[site.id] ?? site.url).slice(0, 90)}
+                        {(getSiteDisplayName(site) ?? site.url).slice(0, 90)}
                       </option>
                     ))}
                   </select>
                 </div>
-                <button
-                  onClick={() => {
-                    setCreateError(null);
-                    setAddSiteOpen(true);
-                  }}
-                  className="secondary-button"
-                >
+                <button onClick={openAddSiteModal} className="secondary-button">
                   Add site
-                </button>
-                <button
-                  onClick={() => setAppSection("sites")}
-                  className="ghost-button"
-                >
-                  Manage
                 </button>
               </div>
 
@@ -12921,7 +15281,7 @@ const App: React.FC = () => {
                             }}
                           >
                             <button
-                              onClick={() => handleSelectSite(site)}
+                              onClick={() => void handleSelectSite(site)}
                               style={{
                                 textAlign: "left",
                                 border: "none",
@@ -12940,9 +15300,9 @@ const App: React.FC = () => {
                                   whiteSpace: "nowrap",
                                 }}
                               >
-                                {siteNameById[site.id] ?? site.url}
+                                {getSiteDisplayName(site) ?? site.url}
                               </div>
-                              {siteNameById[site.id] && (
+                              {getSiteDisplayName(site) && (
                                 <div
                                   style={{
                                     fontSize: "11px",
@@ -13020,10 +15380,7 @@ const App: React.FC = () => {
                           {sites.length === 0 && !siteSearch.trim() && (
                             <div style={{ display: "flex", gap: "8px" }}>
                               <button
-                                onClick={() => {
-                                  setCreateError(null);
-                                  setAddSiteOpen(true);
-                                }}
+                                onClick={openAddSiteModal}
                                 style={{
                                   padding: "4px 8px",
                                   borderRadius: "999px",
@@ -13074,7 +15431,7 @@ const App: React.FC = () => {
                         marginBottom: "8px",
                       }}
                     >
-                      Schedule
+                      Site settings
                     </div>
                     <div
                       style={{
@@ -13086,496 +15443,32 @@ const App: React.FC = () => {
                         gap: "10px",
                       }}
                     >
-                      {!selectedSite && (
-                        <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Select a site to configure auto-scans.
-                        </div>
-                      )}
-                      {selectedSite && (
-                        <>
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: "10px",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <span>Auto-scan</span>
-                            <input
-                              type="checkbox"
-                              checked={
-                                scheduleFrequency === "manual"
-                                  ? false
-                                  : scheduleEnabled
-                              }
-                              onChange={(e) =>
-                                setScheduleEnabled(e.target.checked)
-                              }
-                              disabled={scheduleFrequency === "manual"}
-                            />
-                          </label>
-                          <div
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "1fr",
-                              gap: "8px",
-                            }}
-                          >
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Frequency
-                              <select
-                                value={scheduleFrequency}
-                                onChange={(e) => {
-                                  const nextFrequency = e.target.value as
-                                    | "manual"
-                                    | "daily"
-                                    | "weekly"
-                                    | "monthly";
-                                  setScheduleFrequency(nextFrequency);
-                                  if (nextFrequency === "manual") {
-                                    setScheduleEnabled(false);
-                                  }
-                                }}
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "6px 8px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                }}
-                              >
-                                <option value="manual">Manual</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                                <option value="monthly">Monthly</option>
-                              </select>
-                            </label>
-                            {scheduleFrequency === "weekly" && (
-                              <label
-                                style={{
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                Day of week (UTC)
-                                <select
-                                  value={scheduleDayOfWeek}
-                                  onChange={(e) =>
-                                    setScheduleDayOfWeek(Number(e.target.value))
-                                  }
-                                  style={{
-                                    marginTop: "6px",
-                                    width: "100%",
-                                    padding: "6px 8px",
-                                    borderRadius: "10px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  <option value={0}>Sunday</option>
-                                  <option value={1}>Monday</option>
-                                  <option value={2}>Tuesday</option>
-                                  <option value={3}>Wednesday</option>
-                                  <option value={4}>Thursday</option>
-                                  <option value={5}>Friday</option>
-                                  <option value={6}>Saturday</option>
-                                </select>
-                              </label>
-                            )}
-                            {scheduleFrequency === "monthly" && (
-                              <label
-                                style={{
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                Day of month (UTC)
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={31}
-                                  value={scheduleDayOfMonth}
-                                  onChange={(e) =>
-                                    setScheduleDayOfMonth(
-                                      Math.min(
-                                        31,
-                                        Math.max(
-                                          1,
-                                          Number(e.target.value) || 1,
-                                        ),
-                                      ),
-                                    )
-                                  }
-                                  style={{
-                                    marginTop: "6px",
-                                    width: "100%",
-                                    padding: "6px 8px",
-                                    borderRadius: "10px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                  }}
-                                />
-                              </label>
-                            )}
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Time (UTC)
-                              <input
-                                type="time"
-                                value={scheduleTimeUtc}
-                                onChange={(e) =>
-                                  setScheduleTimeUtc(e.target.value)
-                                }
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "6px 8px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                }}
-                              />
-                            </label>
-                          </div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Time (UTC):{" "}
-                            {formatScheduleUtcLabel(
-                              scheduleFrequency,
-                              scheduleTimeUtc,
-                              scheduleDayOfWeek,
-                              scheduleDayOfMonth,
-                            )}
-                          </div>
-                          {showLocalTimeZone && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Your time:{" "}
-                              {formatScheduleLocalLabel(
-                                scheduleFrequency,
-                                scheduleTimeUtc,
-                                scheduleDayOfWeek,
-                                scheduleDayOfMonth,
-                              )}{" "}
-                              ({localTimeZone})
-                            </div>
-                          )}
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Next run (UTC):{" "}
-                            {formatUtcDateTime(selectedSite.next_scheduled_at)}
-                          </div>
-                          {showLocalTimeZone && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Next run (local):{" "}
-                              {formatLocalDateTime(
-                                selectedSite.next_scheduled_at,
-                              )}{" "}
-                              ({localTimeZone})
-                            </div>
-                          )}
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Last scheduled run:{" "}
-                            {formatDate(selectedSite.last_scheduled_at)}
-                          </div>
-                          {scheduleError && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--warning)",
-                              }}
-                            >
-                              {scheduleError}
-                            </div>
-                          )}
-                          <button
-                            onClick={() => void handleSaveSchedule()}
-                            disabled={scheduleSaving}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: scheduleSaving
-                                ? "var(--panel-elev)"
-                                : "var(--panel)",
-                              cursor: scheduleSaving
-                                ? "not-allowed"
-                                : "pointer",
-                              fontSize: "12px",
-                              fontWeight: 600,
-                            }}
-                          >
-                            {scheduleSaving ? "Saving..." : "Save schedule"}
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        marginBottom: "8px",
-                      }}
-                    >
-                      Notifications
-                    </div>
-                    <div
-                      style={{
-                        borderRadius: "12px",
-                        border: "1px solid var(--border)",
-                        padding: "10px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "10px",
-                      }}
-                    >
-                      {!selectedSite && (
-                        <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Select a site to configure notifications.
-                        </div>
-                      )}
-                      {selectedSite && (
-                        <>
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: "10px",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <span>Email alerts</span>
-                            <input
-                              type="checkbox"
-                              checked={notifyEnabled}
-                              disabled={notifyLoading}
-                              onChange={(e) =>
-                                setNotifyEnabled(e.target.checked)
-                              }
-                            />
-                          </label>
-                          <label
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Email address
-                            <input
-                              type="email"
-                              value={notifyEmail}
-                              onChange={(e) => setNotifyEmail(e.target.value)}
-                              placeholder="you@example.com"
-                              disabled={notifyLoading}
-                              style={{
-                                marginTop: "6px",
-                                width: "100%",
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                              }}
-                            />
-                          </label>
-                          <label
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Notify on
-                            <select
-                              value={notifyOn}
-                              onChange={(e) =>
-                                setNotifyOn(e.target.value as NotifyOnOption)
-                              }
-                              disabled={notifyLoading}
-                              style={{
-                                marginTop: "6px",
-                                width: "100%",
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                              }}
-                            >
-                              <option value="new_issues_only">
-                                Only when NEW issues appear
-                              </option>
-                              <option value="issues_exist">
-                                Only when issues exist
-                              </option>
-                              <option value="always">Always</option>
-                              <option value="never">Never</option>
-                            </select>
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={notifyIncludeCsv}
-                              onChange={(e) =>
-                                setNotifyIncludeCsv(e.target.checked)
-                              }
-                              disabled={notifyLoading}
-                            />
-                            Include CSV attachment (coming soon)
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={summaryEnabled}
-                              onChange={(e) =>
-                                setSummaryEnabled(e.target.checked)
-                              }
-                              disabled={notifyLoading}
-                            />
-                            Weekly summary
-                          </label>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            We email you based on the selected trigger.
-                          </div>
-                          {notifyLoading && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Loading notification settings...
-                            </div>
-                          )}
-                          {notifyError && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--warning)",
-                              }}
-                            >
-                              {notifyError}
-                            </div>
-                          )}
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              flexWrap: "wrap",
-                            }}
-                          >
-                            <button
-                              onClick={() => void handleSaveNotifications()}
-                              disabled={
-                                notifySaving ||
-                                notifyLoading ||
-                                (notifyEnabled &&
-                                  notifyOn !== "never" &&
-                                  !notifyEmail.trim())
-                              }
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: notifySaving
-                                  ? "var(--panel-elev)"
-                                  : "var(--panel)",
-                                cursor:
-                                  notifySaving ||
-                                  notifyLoading ||
-                                  (notifyEnabled &&
-                                    notifyOn !== "never" &&
-                                    !notifyEmail.trim())
-                                    ? "not-allowed"
-                                    : "pointer",
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {notifySaving ? "Saving..." : "Save"}
-                            </button>
-                            <button
-                              onClick={() => void handleSendTestEmail()}
-                              disabled={
-                                notifyTestSending ||
-                                !notifyEmail.trim() ||
-                                notifyLoading
-                              }
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: notifyTestSending
-                                  ? "var(--panel-elev)"
-                                  : "var(--panel)",
-                                cursor:
-                                  notifyTestSending ||
-                                  !notifyEmail.trim() ||
-                                  !notifyEnabled ||
-                                  notifyOn === "never" ||
-                                  notifyLoading
-                                    ? "not-allowed"
-                                    : "pointer",
-                                fontSize: "12px",
-                              }}
-                            >
-                              {notifyTestSending
-                                ? "Sending..."
-                                : "Send test alert"}
-                            </button>
-                          </div>
-                        </>
-                      )}
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {scheduleSummaryText}
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {alertsSummaryText}
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {uptimeSummaryText}
+                      </div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        {ignoreRulesSummaryText}
+                      </div>
+                      <button
+                        onClick={() => openAppSection("site_settings")}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: "10px",
+                          border: "1px solid var(--border)",
+                          background: "var(--panel)",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                        }}
+                      >
+                        Manage settings
+                      </button>
                     </div>
                   </div>
 
@@ -13756,10 +15649,7 @@ const App: React.FC = () => {
                         }}
                       >
                         <button
-                          onClick={() => {
-                            setCreateError(null);
-                            setAddSiteOpen(true);
-                          }}
+                          onClick={openAddSiteModal}
                           className="primary-button"
                         >
                           Add site
@@ -13897,23 +15787,10 @@ const App: React.FC = () => {
                           </div>
                           <div className="dashboard-hero-panel__footer-actions">
                             <button
-                              onClick={() => setAppSection("schedule")}
+                              onClick={() => openAppSection("site_settings")}
                               className="secondary-button"
                             >
-                              Configure schedule
-                            </button>
-                            <button
-                              onClick={() => setAppSection("alerts")}
-                              className="secondary-button"
-                            >
-                              Configure alerts
-                            </button>
-                            <button
-                              onClick={() => setAppSection("ignore_rules")}
-                              disabled={!selectedSiteId}
-                              className="secondary-button"
-                            >
-                              Ignore rules
+                              Manage settings
                             </button>
                             <button
                               onClick={() => {
@@ -13932,7 +15809,7 @@ const App: React.FC = () => {
                             </button>
                             <button
                               onClick={() => {
-                                setAppSection("reports");
+                                openAppSection("reports");
                                 setScanWorkspaceOpen(true);
                               }}
                               className="ghost-button"
@@ -14033,8 +15910,8 @@ const App: React.FC = () => {
                           }
                           title={
                             dashboardSummaryPending
-                              ? "Finalising scan"
-                              : "Scan running"
+                              ? "Finalizing report"
+                              : "Scan activity"
                           }
                           stage={dashboardStage}
                           summary={`${dashboardLatestRun.checked_links} / ${dashboardLatestRun.total_links || "?"} links checked · Last update ${formatRelative(dashboardLatestRun.updated_at ?? dashboardLatestRun.started_at)}`}
@@ -14071,22 +15948,22 @@ const App: React.FC = () => {
                                   ]
                                 : []),
                           ]}
-                          previewTitle="Live preview · read-only"
+                          previewTitle="Scan activity"
                           previewItems={
                             dashboardRunningPreviewItems.length > 0
                               ? dashboardRunningPreviewItems.slice(0, 4)
                               : [
                                   {
-                                    label: "Scan is in progress",
+                                    label: "Scan activity",
                                     detail:
-                                      "Counts update live as links are discovered and checked.",
+                                      "Counts update as Scanlark discovers and checks links.",
                                   },
                                 ]
                           }
                           note={
                             dashboardSummaryPending
-                              ? "The crawl is complete. Scanlark is building the issue summary before the report is ready."
-                              : "Live preview stays read-only while the scan is running. Open the report after completion for raw evidence and source pages."
+                              ? "Scanlark is preparing your final issue summary."
+                              : "Early findings are still updating while the scan runs. Open the full report when it completes."
                           }
                           statusTone={
                             dashboardSummaryPending ? "success" : "accent"
@@ -14126,10 +16003,10 @@ const App: React.FC = () => {
                             stage={dashboardStage}
                             summary={
                               dashboardLatestRun.status === "completed"
-                                ? `${formatDate(dashboardLatestRun.finished_at ?? dashboardLatestRun.started_at)} · Report-ready summary is available below.`
+                                ? `${formatDate(dashboardLatestRun.finished_at ?? dashboardLatestRun.started_at)} · Your latest scan is complete.`
                                 : `${
                                     dashboardLatestRun.error_message ??
-                                    "The scan stopped before completion."
+                                    "The scan stopped before completion. You can start a fresh run now."
                                   }`
                             }
                             counters={[
@@ -14182,21 +16059,20 @@ const App: React.FC = () => {
                                       value: dashboardIssueMovement?.new ?? 0,
                                     },
                                     {
-                                      label: "Existing",
-                                      value:
-                                        dashboardIssueMovement?.existing ?? 0,
-                                    },
-                                    {
                                       label: "Resolved",
                                       value:
                                         dashboardIssueMovement?.resolved ?? 0,
+                                    },
+                                    {
+                                      label: "Links checked",
+                                      value: dashboardLatestRun.checked_links,
                                     },
                                   ]
                                 : undefined
                             }
                             previewTitle={
                               dashboardLatestRun.status === "completed"
-                                ? "Scan completion snapshot"
+                                ? "Completion highlights"
                                 : "Latest captured snapshot"
                             }
                             previewItems={
@@ -14219,7 +16095,7 @@ const App: React.FC = () => {
                             }
                             note={
                               dashboardLatestRun.status === "completed"
-                                ? "Detailed evidence, source pages, and technical diagnostics remain in the report."
+                                ? "Open the full report for evidence, affected pages, and recommended next steps."
                                 : "You can start a fresh scan immediately. Existing dashboard cards and history remain available below."
                             }
                             statusTone={
@@ -14253,16 +16129,6 @@ const App: React.FC = () => {
                                     : "Run scan again"}
                                 </button>
                               )
-                            }
-                            secondaryAction={
-                              <button
-                                onClick={() => {
-                                  setDashboardRecentlyFinishedRunId(null);
-                                }}
-                                className="secondary-button"
-                              >
-                                Back to dashboard
-                              </button>
                             }
                           />
                         )}
@@ -14360,131 +16226,190 @@ const App: React.FC = () => {
                                       dashboardCategorySummaries,
                                     )
                               }
-                              stats={
-                                dashboardSummaryPending
-                                  ? null
-                                  : score
-                                    ? `${score.findingCount} findings · ${score.checkCount} checks`
-                                    : "No score payload available"
-                              }
                             />
                           );
                         })}
                       </div>
 
-                      <div className="dashboard-history-grid">
-                        <div className="surface-card surface-card--history">
-                          <div className="dashboard-history-card__header">
-                            <div className="dashboard-history-card__title">
-                              Report history
-                            </div>
-                            <div className="dashboard-history-card__meta">
-                              Recent runs stay readable here. Open the report
-                              for detailed evidence and issue breakdown.
-                            </div>
+                      <div className="surface-card surface-card--history">
+                        <div className="dashboard-history-card__header">
+                          <div className="dashboard-history-card__title">
+                            Report history
                           </div>
-                          {dashboardHistoryItems.slice(0, 5).map((run) => (
-                            <div key={run.id} className="dashboard-history-row">
-                              <div>
-                                <div className="dashboard-history-row__title">
-                                  {formatDate(run.started_at)}
-                                </div>
-                                <div className="dashboard-history-row__meta">
-                                  <span className="dashboard-history-row__meta-status">
-                                    <span>
-                                      {formatRelative(run.started_at)}
-                                    </span>
-                                    <StatusBadge
-                                      label={run.status.replace("_", " ")}
-                                      tone={
-                                        run.status === "completed"
-                                          ? "success"
-                                          : run.status === "failed"
-                                            ? "danger"
-                                            : run.status === "cancelled"
-                                              ? "warning"
-                                              : "accent"
-                                      }
-                                    />
-                                  </span>
-                                </div>
+                          <div className="dashboard-history-card__meta">
+                            Recent runs stay readable here. Open the report for
+                            detailed evidence and issue breakdown.
+                          </div>
+                        </div>
+                        {visibleDashboardHistoryItems.map((run) => (
+                          <div key={run.id} className="dashboard-history-row">
+                            <div>
+                              <div className="dashboard-history-row__title">
+                                {formatDate(run.started_at)}
                               </div>
-                              <div className="dashboard-history-row__stats">
-                                <strong>
-                                  Checked {run.checked_links}/{run.total_links}
-                                </strong>
-                                <span>
-                                  Broken {run.broken_links} (
-                                  {percentBroken(
-                                    run.checked_links || run.total_links,
-                                    run.broken_links,
-                                  )}
-                                  )
+                              <div className="dashboard-history-row__meta">
+                                <span className="dashboard-history-row__meta-status">
+                                  <span>{formatRelative(run.started_at)}</span>
+                                  <StatusBadge
+                                    label={run.status.replace("_", " ")}
+                                    tone={
+                                      run.status === "completed"
+                                        ? "success"
+                                        : run.status === "failed"
+                                          ? "danger"
+                                          : run.status === "cancelled"
+                                            ? "warning"
+                                            : "accent"
+                                    }
+                                  />
                                 </span>
                               </div>
-                              <button
-                                onClick={() => openReport(run.id)}
-                                disabled={run.status !== "completed"}
-                                className="secondary-button"
-                              >
-                                View report
-                              </button>
                             </div>
-                          ))}
-                          {dashboardHistoryItems.length === 0 && (
-                            <div
-                              style={{
-                                padding: "16px",
-                                color: "var(--muted)",
-                                fontSize: "13px",
-                              }}
+                            <div className="dashboard-history-row__stats">
+                              <strong>
+                                Checked {run.checked_links}/{run.total_links}
+                              </strong>
+                              <span>
+                                Broken {run.broken_links} (
+                                {percentBroken(
+                                  run.checked_links || run.total_links,
+                                  run.broken_links,
+                                )}
+                                )
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => openReport(run.id)}
+                              disabled={run.status !== "completed"}
+                              className="secondary-button"
                             >
-                              No scans yet.
-                            </div>
-                          )}
-                        </div>
-                        <div className="surface-card surface-card--summary">
-                          <div className="dashboard-summary-card__header">
-                            <div className="dashboard-summary-card__title">
-                              Latest scan summary
-                            </div>
-                            <div className="dashboard-summary-card__meta">
-                              A compact snapshot of the most important numbers
-                              from the latest dashboard run.
-                            </div>
+                              View report
+                            </button>
                           </div>
-                          <div className="dashboard-summary-list">
-                            <div className="dashboard-summary-item">
-                              <span>High priority issues</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : dashboardHighPriority}
-                              </strong>
-                            </div>
-                            <div className="dashboard-summary-item">
-                              <span>Open issues</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : (dashboardIssueSummary?.total ?? 0)}
-                              </strong>
-                            </div>
-                            <div className="dashboard-summary-item">
-                              <span>Fixed this scan</span>
-                              <strong>
-                                {dashboardSummaryPending
-                                  ? "Pending"
-                                  : (dashboardLatestDiffSummary?.fixedIssues ??
-                                    0)}
-                              </strong>
-                            </div>
-                            <div className="dashboard-summary-item">
-                              <span>Links checked</span>
-                              <strong>
-                                {dashboardLatestRun?.checked_links ?? 0}
-                              </strong>
-                            </div>
+                        ))}
+                        {dashboardHistoryItems.length === 0 && (
+                          <div
+                            style={{
+                              padding: "16px",
+                              color: "var(--muted)",
+                              fontSize: "13px",
+                            }}
+                          >
+                            No scans yet.
+                          </div>
+                        )}
+                        {dashboardHistoryItems.length > 5 && (
+                          <div
+                            style={{
+                              padding: "0 20px 20px",
+                              display: "flex",
+                              justifyContent: "flex-start",
+                            }}
+                          >
+                            <button
+                              onClick={() =>
+                                setDashboardHistoryExpanded((prev) => !prev)
+                              }
+                              className="secondary-button"
+                            >
+                              {dashboardHistoryExpanded
+                                ? "Show less"
+                                : `Show more (${dashboardHistoryItems.length - 5} more)`}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="app-section-grid">
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Schedule and alerts
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Keep the dashboard focused on scan health. Manage
+                            recurring scans and email delivery from Site
+                            Settings.
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "8px",
+                              fontSize: "13px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <div>{scheduleSummaryText}</div>
+                            <div>{alertsSummaryText}</div>
+                          </div>
+                          <div>
+                            <button
+                              onClick={() => openAppSection("site_settings")}
+                              className="secondary-button"
+                            >
+                              Manage settings
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Availability monitoring
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Monitor the selected site without leaving the
+                            authenticated workspace.
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "8px",
+                              fontSize: "13px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <div>{uptimeSummaryText}</div>
+                            {uptimeStatus?.lastCheckedAt && (
+                              <div>
+                                Last checked{" "}
+                                {formatDate(uptimeStatus.lastCheckedAt)}
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <button
+                              onClick={() => openAppSection("site_settings")}
+                              className="secondary-button"
+                            >
+                              Manage settings
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Ignore rules
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Review link exclusions in one place instead of
+                            mixing rule editing into the dashboard.
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gap: "8px",
+                              fontSize: "13px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <div>{ignoreRulesSummaryText}</div>
+                          </div>
+                          <div>
+                            <button
+                              onClick={() => openAppSection("site_settings")}
+                              className="secondary-button"
+                            >
+                              Manage settings
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -14542,7 +16467,7 @@ const App: React.FC = () => {
                             report artifact directly.
                           </div>
                           <div className="app-site-list">
-                            {history.map((run) => (
+                            {visibleHistoryItems.map((run) => (
                               <div key={run.id} className="app-site-row">
                                 <div>
                                   <div
@@ -14600,6 +16525,24 @@ const App: React.FC = () => {
                                 No scans yet.
                               </div>
                             )}
+                            {!historyLoading && history.length > 5 && (
+                              <button
+                                onClick={() =>
+                                  setHistoryExpanded((prev) => !prev)
+                                }
+                                className="ghost-button"
+                                style={{
+                                  justifySelf: "flex-start",
+                                  paddingLeft: "0",
+                                  border: "none",
+                                  textDecoration: "underline",
+                                }}
+                              >
+                                {historyExpanded
+                                  ? "Show less"
+                                  : `Show more (${history.length - 5} more)`}
+                              </button>
+                            )}
                           </div>
                         </div>
                         <div className="app-settings-card">
@@ -14637,583 +16580,1098 @@ const App: React.FC = () => {
                     </div>
                   )}
 
-                  {hasSites && appSection === "schedule" && (
-                    <div className="app-settings-card">
-                      <div className="app-settings-card__title">
-                        Schedule Settings
-                      </div>
-                      <div className="app-settings-card__subtitle">
-                        Configure recurring scans without keeping schedules
-                        pinned in a permanent sidebar.
-                      </div>
-                      {!selectedSite ? (
-                        <div
-                          style={{ fontSize: "13px", color: "var(--muted)" }}
-                        >
-                          Select a site to configure auto-scans.
+                  {hasSites && appSection === "site_settings" && (
+                    <div style={{ display: "grid", gap: "18px" }}>
+                      <div className="app-section-heading">
+                        <div className="app-section-heading__title">
+                          Site settings
                         </div>
-                      ) : (
-                        <div className="app-form-grid">
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: "10px",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <span>Auto-scan enabled</span>
-                            <input
-                              type="checkbox"
-                              checked={
-                                scheduleFrequency === "manual"
-                                  ? false
-                                  : scheduleEnabled
-                              }
-                              onChange={(e) =>
-                                setScheduleEnabled(e.target.checked)
-                              }
-                              disabled={scheduleFrequency === "manual"}
-                            />
-                          </label>
-                          <div className="app-form-grid app-form-grid--two">
-                            <label className="field-label">
-                              Frequency
-                              <select
-                                value={scheduleFrequency}
-                                onChange={(e) => {
-                                  const nextFrequency = e.target.value as
-                                    | "manual"
-                                    | "daily"
-                                    | "weekly"
-                                    | "monthly";
-                                  setScheduleFrequency(nextFrequency);
-                                  if (nextFrequency === "manual") {
-                                    setScheduleEnabled(false);
-                                  }
+                        <div className="app-section-heading__meta">
+                          Keep dashboard health summaries lightweight and manage
+                          the selected site's working settings here.
+                        </div>
+                        {selectedSite && (
+                          <>
+                            <div
+                              style={{
+                                display: "grid",
+                                gap: "4px",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  fontSize: "18px",
+                                  fontWeight: 700,
                                 }}
-                                className="app-input"
                               >
-                                <option value="manual">Manual</option>
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                                <option value="monthly">Monthly</option>
-                              </select>
-                            </label>
-                            <label className="field-label">
-                              Time (UTC)
-                              <input
-                                type="time"
-                                value={scheduleTimeUtc}
-                                onChange={(e) =>
-                                  setScheduleTimeUtc(e.target.value)
-                                }
-                                className="app-input"
-                              />
-                            </label>
-                            {scheduleFrequency === "weekly" && (
-                              <label className="field-label">
-                                Day of week (UTC)
-                                <select
-                                  value={scheduleDayOfWeek}
-                                  onChange={(e) =>
-                                    setScheduleDayOfWeek(Number(e.target.value))
-                                  }
-                                  className="app-input"
-                                >
-                                  <option value={0}>Sunday</option>
-                                  <option value={1}>Monday</option>
-                                  <option value={2}>Tuesday</option>
-                                  <option value={3}>Wednesday</option>
-                                  <option value={4}>Thursday</option>
-                                  <option value={5}>Friday</option>
-                                  <option value={6}>Saturday</option>
-                                </select>
-                              </label>
-                            )}
-                            {scheduleFrequency === "monthly" && (
-                              <label className="field-label">
-                                Day of month (UTC)
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={31}
-                                  value={scheduleDayOfMonth}
-                                  onChange={(e) =>
-                                    setScheduleDayOfMonth(
-                                      Math.min(
-                                        31,
-                                        Math.max(
-                                          1,
-                                          Number(e.target.value) || 1,
-                                        ),
-                                      ),
-                                    )
-                                  }
-                                  className="app-input"
-                                />
-                              </label>
-                            )}
-                          </div>
-                          <div
-                            style={{
-                              display: "grid",
-                              gap: "6px",
-                              fontSize: "12px",
-                              color: "var(--muted)",
-                            }}
-                          >
-                            <div>
-                              Time (UTC):{" "}
-                              {formatScheduleUtcLabel(
-                                scheduleFrequency,
-                                scheduleTimeUtc,
-                                scheduleDayOfWeek,
-                                scheduleDayOfMonth,
-                              )}
-                            </div>
-                            {showLocalTimeZone && (
-                              <div>
-                                Your time:{" "}
-                                {formatScheduleLocalLabel(
-                                  scheduleFrequency,
-                                  scheduleTimeUtc,
-                                  scheduleDayOfWeek,
-                                  scheduleDayOfMonth,
-                                )}{" "}
-                                ({localTimeZone})
-                              </div>
-                            )}
-                            <div>
-                              Next run (UTC):{" "}
-                              {formatUtcDateTime(
-                                selectedSite.next_scheduled_at,
-                              )}
-                            </div>
-                            {showLocalTimeZone && (
-                              <div>
-                                Next run (local):{" "}
-                                {formatLocalDateTime(
-                                  selectedSite.next_scheduled_at,
-                                )}{" "}
-                                ({localTimeZone})
-                              </div>
-                            )}
-                            <div>
-                              Last scheduled run:{" "}
-                              {formatDate(selectedSite.last_scheduled_at)}
-                            </div>
-                          </div>
-                          {scheduleError && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--warning)",
-                              }}
-                            >
-                              {scheduleError}
-                            </div>
-                          )}
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "10px",
-                              flexWrap: "wrap",
-                            }}
-                          >
-                            <button
-                              onClick={() => void handleSaveSchedule()}
-                              disabled={scheduleSaving}
-                              className="primary-button"
-                            >
-                              {scheduleSaving ? "Saving..." : "Save schedule"}
-                            </button>
-                            <button
-                              onClick={() => setAppSection("dashboard")}
-                              className="ghost-button"
-                            >
-                              Back to dashboard
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {hasSites && appSection === "alerts" && (
-                    <div className="app-settings-card">
-                      <div className="app-settings-card__title">
-                        Alert Settings
-                      </div>
-                      <div className="app-settings-card__subtitle">
-                        Manage email alerts, delivery triggers, summaries, and
-                        test sends as a dedicated panel.
-                      </div>
-                      {!selectedSite ? (
-                        <div
-                          style={{ fontSize: "13px", color: "var(--muted)" }}
-                        >
-                          Select a site to configure notifications.
-                        </div>
-                      ) : (
-                        <div className="app-form-grid">
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: "10px",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <span>Email alerts</span>
-                            <input
-                              type="checkbox"
-                              checked={notifyEnabled}
-                              disabled={notifyLoading}
-                              onChange={(e) =>
-                                setNotifyEnabled(e.target.checked)
-                              }
-                            />
-                          </label>
-                          <div className="app-form-grid app-form-grid--two">
-                            <label className="field-label">
-                              Email address
-                              <input
-                                type="email"
-                                value={notifyEmail}
-                                onChange={(e) => setNotifyEmail(e.target.value)}
-                                placeholder="you@example.com"
-                                disabled={notifyLoading}
-                                className="app-input"
-                              />
-                            </label>
-                            <label className="field-label">
-                              Notify on
-                              <select
-                                value={notifyOn}
-                                onChange={(e) =>
-                                  setNotifyOn(e.target.value as NotifyOnOption)
-                                }
-                                disabled={notifyLoading}
-                                className="app-input"
-                              >
-                                <option value="new_issues_only">
-                                  Only when NEW issues appear
-                                </option>
-                                <option value="issues_exist">
-                                  Only when issues exist
-                                </option>
-                                <option value="always">Always</option>
-                                <option value="never">Never</option>
-                              </select>
-                            </label>
-                          </div>
-                          <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={notifyIncludeCsv}
-                              onChange={(e) =>
-                                setNotifyIncludeCsv(e.target.checked)
-                              }
-                              disabled={notifyLoading}
-                            />
-                            Include CSV attachment (coming soon)
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={summaryEnabled}
-                              onChange={(e) =>
-                                setSummaryEnabled(e.target.checked)
-                              }
-                              disabled={notifyLoading}
-                            />
-                            Weekly summary
-                          </label>
-                          {notifyLoading && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Loading notification settings...
-                            </div>
-                          )}
-                          {notifyError && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--warning)",
-                              }}
-                            >
-                              {notifyError}
-                            </div>
-                          )}
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "10px",
-                              flexWrap: "wrap",
-                            }}
-                          >
-                            <button
-                              onClick={() => void handleSaveNotifications()}
-                              disabled={
-                                notifySaving ||
-                                notifyLoading ||
-                                (notifyEnabled &&
-                                  notifyOn !== "never" &&
-                                  !notifyEmail.trim())
-                              }
-                              className="primary-button"
-                            >
-                              {notifySaving ? "Saving..." : "Save alerts"}
-                            </button>
-                            <button
-                              onClick={() => void handleSendTestEmail()}
-                              disabled={
-                                notifyTestSending ||
-                                !notifyEmail.trim() ||
-                                !notifyEnabled ||
-                                notifyOn === "never" ||
-                                notifyLoading
-                              }
-                              className="secondary-button"
-                            >
-                              {notifyTestSending
-                                ? "Sending..."
-                                : "Send test alert"}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {hasSites && appSection === "ignore_rules" && (
-                    <div className="app-settings-card">
-                      <div className="app-settings-card__title">
-                        Ignore Rules
-                      </div>
-                      <div className="app-settings-card__subtitle">
-                        Manage site and global ignore rules as a dashboard tool
-                        instead of permanent sidebar clutter.
-                      </div>
-                      <div
-                        className="app-form-grid app-form-grid--two"
-                        style={{ alignItems: "end" }}
-                      >
-                        <label className="field-label">
-                          Scope
-                          <select
-                            value={newRuleScope}
-                            onChange={(e) =>
-                              setNewRuleScope(
-                                e.target.value as "site" | "global",
-                              )
-                            }
-                            className="app-input"
-                          >
-                            <option value="site">This site</option>
-                            <option value="global">Global</option>
-                          </select>
-                        </label>
-                        <label className="field-label">
-                          Rule type
-                          <select
-                            value={newRuleType}
-                            onChange={(e) =>
-                              setNewRuleType(
-                                e.target.value as IgnoreRule["rule_type"],
-                              )
-                            }
-                            className="app-input"
-                          >
-                            <option value="domain">domain</option>
-                            <option value="path_prefix">path_prefix</option>
-                            <option value="regex">regex</option>
-                            <option value="status_code">status_code</option>
-                          </select>
-                        </label>
-                      </div>
-                      <label className="field-label">
-                        Pattern
-                        <input
-                          value={newRulePattern}
-                          onChange={(e) => setNewRulePattern(e.target.value)}
-                          placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
-                          className="app-input"
-                        />
-                      </label>
-                      <button
-                        onClick={handleCreateIgnoreRule}
-                        disabled={!selectedSiteId || !newRulePattern.trim()}
-                        className="primary-button"
-                      >
-                        Add rule
-                      </button>
-                      {ignoreRulesError && (
-                        <div
-                          style={{ fontSize: "12px", color: "var(--warning)" }}
-                        >
-                          {ignoreRulesError}
-                        </div>
-                      )}
-                      {!ignoreRulesLoading && ignoreRules.length > 0 && (
-                        <div className="app-site-list">
-                          {ignoreRules.map((rule) => (
-                            <div key={rule.id} className="app-site-row">
-                              <div>
-                                <div
-                                  style={{ fontSize: "13px", fontWeight: 700 }}
-                                >
-                                  {rule.rule_type}{" "}
-                                  {rule.site_id ? "" : "· global"}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                    overflowWrap: "anywhere",
-                                  }}
-                                >
-                                  {rule.pattern}
-                                </div>
+                                {selectedSiteName ??
+                                  selectedSiteHost ??
+                                  selectedSite.url}
                               </div>
                               <div
                                 style={{
-                                  display: "flex",
-                                  gap: "8px",
-                                  flexWrap: "wrap",
+                                  fontSize: "13px",
+                                  color: "var(--muted)",
+                                  overflowWrap: "anywhere",
                                 }}
                               >
-                                <button
-                                  onClick={() => handleToggleIgnoreRule(rule)}
-                                  className="secondary-button"
-                                >
-                                  {rule.is_enabled ? "Enabled" : "Disabled"}
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteIgnoreRule(rule)}
-                                  className="ghost-button"
-                                >
-                                  Delete
-                                </button>
+                                {selectedSite.client_name?.trim()
+                                  ? `${selectedSite.client_name} · `
+                                  : ""}
+                                {selectedSiteHost ?? selectedSite.url}
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                      {ignoreRulesLoading && (
+                            <div className="app-settings-status-row">
+                              <StatusBadge
+                                label={
+                                  selectedSite.schedule_frequency === "manual"
+                                    ? "Manual scans"
+                                    : `Schedule ${selectedSite.schedule_frequency}`
+                                }
+                                tone="accent"
+                              />
+                              <StatusBadge
+                                label={
+                                  uptimeStatus?.enabled
+                                    ? "Monitoring enabled"
+                                    : "Monitoring off"
+                                }
+                                tone={
+                                  uptimeStatus?.enabled ? "success" : "default"
+                                }
+                              />
+                              <StatusBadge
+                                label={
+                                  selectedSite.notify_enabled
+                                    ? "Alerts on"
+                                    : "Alerts off"
+                                }
+                                tone={
+                                  selectedSite.notify_enabled
+                                    ? "success"
+                                    : "default"
+                                }
+                              />
+                            </div>
+                          </>
+                        )}
                         <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                          style={{
+                            display: "flex",
+                            gap: "10px",
+                            flexWrap: "wrap",
+                          }}
                         >
-                          Loading rules…
+                          <button
+                            className="secondary-button"
+                            onClick={() => openAppSection("dashboard")}
+                          >
+                            Back to dashboard
+                          </button>
                         </div>
-                      )}
-                      {!ignoreRulesLoading && ignoreRules.length === 0 && (
-                        <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          No ignore rules yet.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {hasSites && appSection === "sites" && (
-                    <div className="app-settings-card">
-                      <div className="app-settings-card__title">Sites</div>
-                      <div className="app-settings-card__subtitle">
-                        Select the active site, add new monitored sites, or
-                        remove old ones from the workspace.
                       </div>
-                      <div className="app-site-list">
-                        {sites.map((site) => {
-                          const isSelected = site.id === selectedSiteId;
-                          const isDeleting = deletingSiteId === site.id;
-                          return (
-                            <div key={site.id} className="app-site-row">
+
+                      {!selectedSite ? (
+                        <div className="app-settings-card">
+                          <div className="app-settings-card__title">
+                            Select a site
+                          </div>
+                          <div className="app-settings-card__subtitle">
+                            Choose a site from the sidebar to edit its
+                            monitoring settings.
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="app-settings-workspace">
+                          <div className="app-settings-nav">
+                            {SITE_SETTINGS_SECTIONS.map((section) => (
                               <button
-                                onClick={() => void handleSelectSite(site)}
-                                style={{
-                                  textAlign: "left",
-                                  border: "none",
-                                  background: "transparent",
-                                  color: "var(--text)",
-                                  cursor: "pointer",
-                                  padding: 0,
-                                }}
+                                key={section.key}
+                                className={`app-settings-nav__button ${
+                                  siteSettingsSection === section.key
+                                    ? "active"
+                                    : ""
+                                }`}
+                                onClick={() =>
+                                  setSiteSettingsSection(section.key)
+                                }
                               >
-                                <div
-                                  style={{ fontWeight: 700, fontSize: "14px" }}
-                                >
-                                  {siteNameById[site.id] ?? site.url}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  {site.url}
-                                </div>
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  Created {formatDate(site.created_at)}
+                                <div className="app-settings-nav__meta">
+                                  <span className="app-settings-nav__label">
+                                    {section.label}
+                                  </span>
+                                  <span className="app-settings-nav__description">
+                                    {section.description}
+                                  </span>
                                 </div>
                               </button>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: "8px",
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <button
-                                  className={
-                                    isSelected
-                                      ? "primary-button"
-                                      : "secondary-button"
-                                  }
-                                  onClick={() => void handleSelectSite(site)}
+                            ))}
+                          </div>
+
+                          <div className="app-settings-panel">
+                            {siteSettingsSection === "general" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    General
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Site identity and report labels
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Choose the names Scanlark should use across
+                                    the authenticated workspace. These fields do
+                                    not change crawling or alert behavior.
+                                  </div>
+                                </div>
+
+                                <div className="app-settings-stack">
+                                  <div className="app-settings-card">
+                                    <div className="app-settings-summary-grid">
+                                      <div className="app-settings-summary-item">
+                                        <strong>Domain</strong>
+                                        <span>{selectedSiteHost ?? "-"}</span>
+                                      </div>
+                                      <div className="app-settings-summary-item">
+                                        <strong>Primary URL</strong>
+                                        <span>{selectedSite.url}</span>
+                                      </div>
+                                      <div className="app-settings-summary-item">
+                                        <strong>Created</strong>
+                                        <span>
+                                          {formatDate(selectedSite.created_at)}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="app-form-grid app-form-grid--two">
+                                      <label className="field-label">
+                                        Site display name
+                                        <input
+                                          value={siteDisplayNameDraft}
+                                          onChange={(e) =>
+                                            setSiteDisplayNameDraft(
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder={
+                                            selectedSiteHost ??
+                                            "My monitored site"
+                                          }
+                                          className="app-input"
+                                        />
+                                      </label>
+                                      <label className="field-label">
+                                        Client name
+                                        <input
+                                          value={siteClientNameDraft}
+                                          onChange={(e) =>
+                                            setSiteClientNameDraft(
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder="Optional client label"
+                                          className="app-input"
+                                        />
+                                      </label>
+                                      <label className="field-label">
+                                        Report display name
+                                        <input
+                                          value={siteReportDisplayNameDraft}
+                                          onChange={(e) =>
+                                            setSiteReportDisplayNameDraft(
+                                              e.target.value,
+                                            )
+                                          }
+                                          placeholder="Optional report title"
+                                          className="app-input"
+                                        />
+                                      </label>
+                                    </div>
+                                    <label className="field-label">
+                                      Internal notes
+                                      <textarea
+                                        value={siteInternalNotesDraft}
+                                        onChange={(e) =>
+                                          setSiteInternalNotesDraft(
+                                            e.target.value,
+                                          )
+                                        }
+                                        placeholder="Private notes for your workspace"
+                                        className="app-input"
+                                        rows={5}
+                                        style={{ resize: "vertical" }}
+                                      />
+                                    </label>
+                                    {siteDetailsError && (
+                                      <div
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {siteDetailsError}
+                                      </div>
+                                    )}
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: "10px",
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      <button
+                                        onClick={() =>
+                                          void handleSaveSiteDetails()
+                                        }
+                                        disabled={siteDetailsSaving}
+                                        className="primary-button"
+                                      >
+                                        {siteDetailsSaving
+                                          ? "Saving..."
+                                          : "Save details"}
+                                      </button>
+                                      <button
+                                        className="ghost-button"
+                                        onClick={() => {
+                                          if (selectedSite.url) {
+                                            window.open(
+                                              selectedSite.url,
+                                              "_blank",
+                                              "noopener,noreferrer",
+                                            );
+                                          }
+                                        }}
+                                      >
+                                        Open site
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+
+                            {siteSettingsSection === "monitoring" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    Monitoring
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Scan cadence and availability checks
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Keep recurring scans and passive uptime
+                                    checks together so this page feels
+                                    operational without crowding the dashboard.
+                                  </div>
+                                </div>
+
+                                <div className="app-settings-card">
+                                  <div className="app-settings-subsection">
+                                    <div className="app-settings-subsection__header">
+                                      <div className="app-settings-subsection__title">
+                                        Scan schedule
+                                      </div>
+                                      <div className="app-settings-subsection__subtitle">
+                                        Choose whether Scanlark runs manually or
+                                        on a recurring schedule for this site.
+                                      </div>
+                                    </div>
+                                    <div className="app-form-grid">
+                                      <label
+                                        style={{
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "space-between",
+                                          gap: "10px",
+                                          fontSize: "13px",
+                                        }}
+                                      >
+                                        <span>Auto-scan enabled</span>
+                                        <input
+                                          type="checkbox"
+                                          checked={
+                                            scheduleFrequency === "manual"
+                                              ? false
+                                              : scheduleEnabled
+                                          }
+                                          onChange={(e) =>
+                                            setScheduleEnabled(e.target.checked)
+                                          }
+                                          disabled={
+                                            scheduleFrequency === "manual"
+                                          }
+                                        />
+                                      </label>
+                                      <div className="app-form-grid app-form-grid--two">
+                                        <label className="field-label">
+                                          Frequency
+                                          <select
+                                            value={scheduleFrequency}
+                                            onChange={(e) => {
+                                              const nextFrequency = e.target
+                                                .value as
+                                                | "manual"
+                                                | "daily"
+                                                | "weekly"
+                                                | "monthly";
+                                              setScheduleFrequency(
+                                                nextFrequency,
+                                              );
+                                              if (nextFrequency === "manual") {
+                                                setScheduleEnabled(false);
+                                              }
+                                            }}
+                                            className="app-input"
+                                          >
+                                            <option value="manual">
+                                              Manual
+                                            </option>
+                                            <option value="daily">Daily</option>
+                                            <option value="weekly">
+                                              Weekly
+                                            </option>
+                                            <option value="monthly">
+                                              Monthly
+                                            </option>
+                                          </select>
+                                        </label>
+                                        <label className="field-label">
+                                          Time (UTC)
+                                          <input
+                                            type="time"
+                                            value={scheduleTimeUtc}
+                                            onChange={(e) =>
+                                              setScheduleTimeUtc(e.target.value)
+                                            }
+                                            className="app-input"
+                                          />
+                                        </label>
+                                        {scheduleFrequency === "weekly" && (
+                                          <label className="field-label">
+                                            Day of week (UTC)
+                                            <select
+                                              value={scheduleDayOfWeek}
+                                              onChange={(e) =>
+                                                setScheduleDayOfWeek(
+                                                  Number(e.target.value),
+                                                )
+                                              }
+                                              className="app-input"
+                                            >
+                                              <option value={0}>Sunday</option>
+                                              <option value={1}>Monday</option>
+                                              <option value={2}>Tuesday</option>
+                                              <option value={3}>
+                                                Wednesday
+                                              </option>
+                                              <option value={4}>
+                                                Thursday
+                                              </option>
+                                              <option value={5}>Friday</option>
+                                              <option value={6}>
+                                                Saturday
+                                              </option>
+                                            </select>
+                                          </label>
+                                        )}
+                                        {scheduleFrequency === "monthly" && (
+                                          <label className="field-label">
+                                            Day of month (UTC)
+                                            <input
+                                              type="number"
+                                              min={1}
+                                              max={31}
+                                              value={scheduleDayOfMonth}
+                                              onChange={(e) =>
+                                                setScheduleDayOfMonth(
+                                                  Math.min(
+                                                    31,
+                                                    Math.max(
+                                                      1,
+                                                      Number(e.target.value) ||
+                                                        1,
+                                                    ),
+                                                  ),
+                                                )
+                                              }
+                                              className="app-input"
+                                            />
+                                          </label>
+                                        )}
+                                      </div>
+                                      <div
+                                        style={{
+                                          display: "grid",
+                                          gap: "6px",
+                                          fontSize: "12px",
+                                          color: "var(--muted)",
+                                        }}
+                                      >
+                                        <div>
+                                          Time (UTC):{" "}
+                                          {formatScheduleUtcLabel(
+                                            scheduleFrequency,
+                                            scheduleTimeUtc,
+                                            scheduleDayOfWeek,
+                                            scheduleDayOfMonth,
+                                          )}
+                                        </div>
+                                        {showLocalTimeZone && (
+                                          <div>
+                                            Your time:{" "}
+                                            {formatScheduleLocalLabel(
+                                              scheduleFrequency,
+                                              scheduleTimeUtc,
+                                              scheduleDayOfWeek,
+                                              scheduleDayOfMonth,
+                                            )}{" "}
+                                            ({localTimeZone})
+                                          </div>
+                                        )}
+                                        <div>
+                                          Next run (UTC):{" "}
+                                          {formatUtcDateTime(
+                                            selectedSite.next_scheduled_at,
+                                          )}
+                                        </div>
+                                        {showLocalTimeZone && (
+                                          <div>
+                                            Next run (local):{" "}
+                                            {formatLocalDateTime(
+                                              selectedSite.next_scheduled_at,
+                                            )}{" "}
+                                            ({localTimeZone})
+                                          </div>
+                                        )}
+                                        <div>
+                                          Last scheduled run:{" "}
+                                          {formatDate(
+                                            selectedSite.last_scheduled_at,
+                                          )}
+                                        </div>
+                                      </div>
+                                      {scheduleError && (
+                                        <div
+                                          style={{
+                                            fontSize: "12px",
+                                            color: "var(--warning)",
+                                          }}
+                                        >
+                                          {scheduleError}
+                                        </div>
+                                      )}
+                                      <div>
+                                        <button
+                                          onClick={() =>
+                                            void handleSaveSchedule()
+                                          }
+                                          disabled={scheduleSaving}
+                                          className="primary-button"
+                                        >
+                                          {scheduleSaving
+                                            ? "Saving..."
+                                            : "Save schedule"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="app-settings-subsection">
+                                    <div className="app-settings-subsection__header">
+                                      <div className="app-settings-subsection__title">
+                                        Availability monitoring
+                                      </div>
+                                      <div className="app-settings-subsection__subtitle">
+                                        Keep passive uptime checks active for
+                                        the selected site without surfacing the
+                                        full control panel on the dashboard.
+                                      </div>
+                                    </div>
+                                    <div className="app-form-grid">
+                                      <label
+                                        style={{
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "space-between",
+                                          gap: "10px",
+                                          fontSize: "13px",
+                                        }}
+                                      >
+                                        <span>Availability monitoring</span>
+                                        <input
+                                          type="checkbox"
+                                          checked={uptimeEnabled}
+                                          disabled={
+                                            uptimeLoading || uptimeSaving
+                                          }
+                                          onChange={(e) =>
+                                            setUptimeEnabled(e.target.checked)
+                                          }
+                                        />
+                                      </label>
+                                      <div className="app-form-grid app-form-grid--two">
+                                        <label className="field-label">
+                                          Check URL
+                                          <input
+                                            type="url"
+                                            value={uptimeCheckUrl}
+                                            onChange={(e) =>
+                                              setUptimeCheckUrl(e.target.value)
+                                            }
+                                            placeholder={selectedSite.url}
+                                            className="app-input"
+                                            disabled={
+                                              uptimeLoading || uptimeSaving
+                                            }
+                                          />
+                                        </label>
+                                        <label className="field-label">
+                                          Failure threshold
+                                          <input
+                                            type="number"
+                                            min={1}
+                                            max={10}
+                                            value={uptimeFailureThreshold}
+                                            onChange={(e) =>
+                                              setUptimeFailureThreshold(
+                                                Math.min(
+                                                  10,
+                                                  Math.max(
+                                                    1,
+                                                    Number(e.target.value) || 1,
+                                                  ),
+                                                ),
+                                              )
+                                            }
+                                            className="app-input"
+                                            disabled={
+                                              uptimeLoading || uptimeSaving
+                                            }
+                                          />
+                                        </label>
+                                      </div>
+                                      <div className="app-settings-status-row">
+                                        <StatusBadge
+                                          label={
+                                            uptimeEnabled
+                                              ? "Monitoring enabled"
+                                              : "Monitoring off"
+                                          }
+                                          tone={
+                                            uptimeEnabled
+                                              ? "success"
+                                              : "default"
+                                          }
+                                        />
+                                        {uptimeStatus && (
+                                          <StatusBadge
+                                            label={formatUptimeStatusLabel(
+                                              uptimeStatus.status,
+                                            )}
+                                            tone={getUptimeStatusTone(
+                                              uptimeStatus.status,
+                                            )}
+                                          />
+                                        )}
+                                      </div>
+                                      <div className="app-settings-summary-grid">
+                                        <div className="app-settings-summary-item">
+                                          <strong>Last checked</strong>
+                                          <span>
+                                            {formatDate(
+                                              uptimeStatus?.lastCheckedAt ??
+                                                null,
+                                            )}
+                                          </span>
+                                        </div>
+                                        <div className="app-settings-summary-item">
+                                          <strong>30-day uptime</strong>
+                                          <span>
+                                            {uptimeStatus?.uptime30d == null
+                                              ? "Pending"
+                                              : `${uptimeStatus.uptime30d.toFixed(2)}%`}
+                                          </span>
+                                        </div>
+                                        <div className="app-settings-summary-item">
+                                          <strong>Last response</strong>
+                                          <span>
+                                            {uptimeStatus?.lastResponseTimeMs ==
+                                            null
+                                              ? "-"
+                                              : `${uptimeStatus.lastResponseTimeMs} ms`}
+                                          </span>
+                                        </div>
+                                        <div className="app-settings-summary-item">
+                                          <strong>Consecutive failures</strong>
+                                          <span>
+                                            {uptimeStatus?.consecutiveFailures ??
+                                              0}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      {uptimeError && (
+                                        <div
+                                          style={{
+                                            fontSize: "12px",
+                                            color: "var(--warning)",
+                                          }}
+                                        >
+                                          {uptimeError}
+                                        </div>
+                                      )}
+                                      <div>
+                                        <button
+                                          onClick={() =>
+                                            void handleSaveUptimeSettings()
+                                          }
+                                          disabled={
+                                            uptimeSaving || uptimeLoading
+                                          }
+                                          className="primary-button"
+                                        >
+                                          {uptimeSaving
+                                            ? "Saving..."
+                                            : "Save monitoring"}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+
+                            {siteSettingsSection === "alerts" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    Alerts
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Email delivery and notification rules
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Decide when Scanlark should email you about
+                                    new issues and keep test sends in one
+                                    dedicated place.
+                                  </div>
+                                </div>
+
+                                <div className="app-settings-card">
+                                  <div className="app-form-grid">
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        gap: "10px",
+                                        fontSize: "13px",
+                                      }}
+                                    >
+                                      <span>Email alerts</span>
+                                      <input
+                                        type="checkbox"
+                                        checked={notifyEnabled}
+                                        disabled={notifyLoading}
+                                        onChange={(e) =>
+                                          setNotifyEnabled(e.target.checked)
+                                        }
+                                      />
+                                    </label>
+                                    <div className="app-form-grid app-form-grid--two">
+                                      <label className="field-label">
+                                        Email address
+                                        <input
+                                          type="email"
+                                          value={notifyEmail}
+                                          onChange={(e) =>
+                                            setNotifyEmail(e.target.value)
+                                          }
+                                          placeholder="you@example.com"
+                                          disabled={notifyLoading}
+                                          className="app-input"
+                                        />
+                                      </label>
+                                      <label className="field-label">
+                                        Notify on
+                                        <select
+                                          value={notifyOn}
+                                          onChange={(e) =>
+                                            setNotifyOn(
+                                              e.target.value as NotifyOnOption,
+                                            )
+                                          }
+                                          disabled={notifyLoading}
+                                          className="app-input"
+                                        >
+                                          <option value="new_issues_only">
+                                            Only when NEW issues appear
+                                          </option>
+                                          <option value="issues_exist">
+                                            Only when issues exist
+                                          </option>
+                                          <option value="always">Always</option>
+                                          <option value="never">Never</option>
+                                        </select>
+                                      </label>
+                                    </div>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        gap: "8px",
+                                        alignItems: "center",
+                                        fontSize: "13px",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={notifyIncludeCsv}
+                                        onChange={(e) =>
+                                          setNotifyIncludeCsv(e.target.checked)
+                                        }
+                                        disabled={notifyLoading}
+                                      />
+                                      Include CSV attachment (coming soon)
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        gap: "8px",
+                                        alignItems: "center",
+                                        fontSize: "13px",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={summaryEnabled}
+                                        onChange={(e) =>
+                                          setSummaryEnabled(e.target.checked)
+                                        }
+                                        disabled={notifyLoading}
+                                      />
+                                      Weekly summary
+                                    </label>
+                                    {notifyLoading && (
+                                      <div
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--muted)",
+                                        }}
+                                      >
+                                        Loading notification settings...
+                                      </div>
+                                    )}
+                                    {notifyError && (
+                                      <div
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {notifyError}
+                                      </div>
+                                    )}
+                                    <div
+                                      style={{
+                                        display: "flex",
+                                        gap: "10px",
+                                        flexWrap: "wrap",
+                                      }}
+                                    >
+                                      <button
+                                        onClick={() =>
+                                          void handleSaveNotifications()
+                                        }
+                                        disabled={
+                                          notifySaving ||
+                                          notifyLoading ||
+                                          (notifyEnabled &&
+                                            notifyOn !== "never" &&
+                                            !notifyEmail.trim())
+                                        }
+                                        className="primary-button"
+                                      >
+                                        {notifySaving
+                                          ? "Saving..."
+                                          : "Save alerts"}
+                                      </button>
+                                      <button
+                                        onClick={() =>
+                                          void handleSendTestEmail()
+                                        }
+                                        disabled={
+                                          notifyTestSending ||
+                                          !notifyEmail.trim() ||
+                                          !notifyEnabled ||
+                                          notifyOn === "never" ||
+                                          notifyLoading
+                                        }
+                                        className="secondary-button"
+                                      >
+                                        {notifyTestSending
+                                          ? "Sending..."
+                                          : "Send test alert"}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </>
+                            )}
+
+                            {siteSettingsSection === "ignore_rules" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    Ignore rules
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Exclude known-safe patterns
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Ignore rules help you suppress expected
+                                    links or paths so reports stay useful
+                                    without changing crawler behavior.
+                                  </div>
+                                </div>
+
+                                <div className="app-settings-card">
+                                  <div
+                                    className="app-form-grid app-form-grid--two"
+                                    style={{ alignItems: "end" }}
+                                  >
+                                    <label className="field-label">
+                                      Scope
+                                      <select
+                                        value={newRuleScope}
+                                        onChange={(e) =>
+                                          setNewRuleScope(
+                                            e.target.value as "site" | "global",
+                                          )
+                                        }
+                                        className="app-input"
+                                      >
+                                        <option value="site">This site</option>
+                                        <option value="global">Global</option>
+                                      </select>
+                                    </label>
+                                    <label className="field-label">
+                                      Rule type
+                                      <select
+                                        value={newRuleType}
+                                        onChange={(e) =>
+                                          setNewRuleType(
+                                            e.target
+                                              .value as IgnoreRule["rule_type"],
+                                          )
+                                        }
+                                        className="app-input"
+                                      >
+                                        <option value="domain">domain</option>
+                                        <option value="path_prefix">
+                                          path_prefix
+                                        </option>
+                                        <option value="regex">regex</option>
+                                        <option value="status_code">
+                                          status_code
+                                        </option>
+                                      </select>
+                                    </label>
+                                  </div>
+                                  <label className="field-label">
+                                    Pattern
+                                    <input
+                                      value={newRulePattern}
+                                      onChange={(e) =>
+                                        setNewRulePattern(e.target.value)
+                                      }
+                                      placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
+                                      className="app-input"
+                                    />
+                                  </label>
+                                  <button
+                                    onClick={handleCreateIgnoreRule}
+                                    disabled={
+                                      !selectedSiteId || !newRulePattern.trim()
+                                    }
+                                    className="primary-button"
+                                  >
+                                    Add rule
+                                  </button>
+                                  {ignoreRulesError && (
+                                    <div
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--warning)",
+                                      }}
+                                    >
+                                      {ignoreRulesError}
+                                    </div>
+                                  )}
+                                  {!ignoreRulesLoading &&
+                                    ignoreRules.length > 0 && (
+                                      <div className="app-site-list">
+                                        {ignoreRules.map((rule) => (
+                                          <div
+                                            key={rule.id}
+                                            className="app-site-row"
+                                          >
+                                            <div>
+                                              <div
+                                                style={{
+                                                  fontSize: "13px",
+                                                  fontWeight: 700,
+                                                }}
+                                              >
+                                                {rule.rule_type}{" "}
+                                                {rule.site_id ? "" : "· global"}
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontSize: "12px",
+                                                  color: "var(--muted)",
+                                                  overflowWrap: "anywhere",
+                                                }}
+                                              >
+                                                {rule.pattern}
+                                              </div>
+                                            </div>
+                                            <div
+                                              style={{
+                                                display: "flex",
+                                                gap: "8px",
+                                                flexWrap: "wrap",
+                                              }}
+                                            >
+                                              <button
+                                                onClick={() =>
+                                                  handleToggleIgnoreRule(rule)
+                                                }
+                                                className="secondary-button"
+                                              >
+                                                {rule.is_enabled
+                                                  ? "Enabled"
+                                                  : "Disabled"}
+                                              </button>
+                                              <button
+                                                onClick={() =>
+                                                  handleDeleteIgnoreRule(rule)
+                                                }
+                                                className="ghost-button"
+                                              >
+                                                Delete
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  {ignoreRulesLoading && (
+                                    <div
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      Loading rules…
+                                    </div>
+                                  )}
+                                  {!ignoreRulesLoading &&
+                                    ignoreRules.length === 0 && (
+                                      <div
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--muted)",
+                                        }}
+                                      >
+                                        No ignore rules yet.
+                                      </div>
+                                    )}
+                                </div>
+                              </>
+                            )}
+
+                            {siteSettingsSection === "danger" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    Danger zone
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Remove this site from the workspace
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Keep destructive actions separate from
+                                    everyday settings. Only use this when you no
+                                    longer want Scanlark to track the selected
+                                    site.
+                                  </div>
+                                </div>
+
+                                <div
+                                  className="app-settings-card app-settings-danger"
+                                  style={{
+                                    display: "flex",
+                                    flexDirection: "column",
+                                  }}
                                 >
-                                  {isSelected ? "Selected" : "Select"}
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteSite(site.id)}
-                                  disabled={isDeleting}
-                                  className="ghost-button"
-                                  style={{ color: "var(--danger)" }}
-                                >
-                                  {isDeleting ? "Deleting..." : "Delete"}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
+                                  <div
+                                    style={{
+                                      display: "grid",
+                                      gap: "8px",
+                                      fontSize: "13px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    <div>
+                                      This removes the site from the
+                                      authenticated workspace.
+                                    </div>
+                                    <div>
+                                      Existing scan history, reports, and
+                                      monitoring settings for this site are
+                                      deleted with it.
+                                    </div>
+                                  </div>
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      gap: "10px",
+                                      flexWrap: "wrap",
+                                      alignItems: "center",
+                                      marginTop: "auto",
+                                    }}
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        handleDeleteSite(selectedSite.id)
+                                      }
+                                      disabled={
+                                        deletingSiteId === selectedSite.id
+                                      }
+                                      className="ghost-button"
+                                      style={{ color: "var(--danger)" }}
+                                    >
+                                      {deletingSiteId === selectedSite.id
+                                        ? "Deleting..."
+                                        : "Delete site"}
+                                    </button>
+                                    {deleteError && (
+                                      <span
+                                        style={{
+                                          fontSize: "12px",
+                                          color: "var(--warning)",
+                                        }}
+                                      >
+                                        {deleteError}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -15221,47 +17679,153 @@ const App: React.FC = () => {
                 {hasSites && appSection === "reports" && scanWorkspaceOpen && (
                   <div ref={scansRef} className="card" style={{ padding: "0" }}>
                     {showProgress && selectedRun && (
-                      <div
-                        style={{
-                          padding: "16px 16px 0 16px",
-                          display: "flex",
-                          gap: "12px",
-                          alignItems: "flex-start",
-                          flexWrap: "wrap",
-                        }}
-                      >
-                        <div style={{ flex: 1, minWidth: "240px" }}>
-                          <ScanProgressBar
-                            status={
-                              progressPhase === "completed"
-                                ? "completed"
-                                : selectedRun.status
-                            }
-                            totalLinks={selectedRun.total_links}
-                            checkedLinks={selectedRun.checked_links}
-                            brokenLinks={phase0BrokenCount}
-                            blockedLinks={phase0BlockedCount}
-                            noResponseLinks={phase0NoResponseCount}
-                            lastUpdateAt={lastProgressAt ?? null}
-                          />
-                        </div>
-                        {canCancelRun && (
-                          <button
-                            onClick={handleCancelScan}
-                            style={{
-                              padding: "10px 14px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--danger)",
-                              background: "var(--danger)",
-                              color: "white",
-                              fontSize: "12px",
-                              fontWeight: 600,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Cancel scan
-                          </button>
-                        )}
+                      <div style={{ padding: "16px 16px 0 16px" }}>
+                        <ScanProgressHero
+                          progress={
+                            selectedRun.total_links > 0
+                              ? (selectedRun.checked_links /
+                                  selectedRun.total_links) *
+                                100
+                              : 0
+                          }
+                          indeterminate={
+                            selectedRun.status === "queued" ||
+                            selectedRun.total_links <= 0
+                          }
+                          title={
+                            selectedRun.status === "completed"
+                              ? "Scan complete"
+                              : "Scan activity"
+                          }
+                          stage={getScanStageText(selectedRun)}
+                          summary={`${selectedRun.checked_links} / ${selectedRun.total_links || "?"} links checked · ${
+                            lastProgressAt
+                              ? `Last update ${formatDate(new Date(lastProgressAt).toISOString())}`
+                              : "Scan activity is live"
+                          }`}
+                          summaryStats={
+                            selectedRun?.status === "completed" &&
+                            selectedRunSummaryStats
+                              ? [
+                                  {
+                                    label: "Latest score",
+                                    value: selectedRunSummaryStats.latestScore,
+                                  },
+                                  {
+                                    label: "Open issues",
+                                    value: selectedRunSummaryStats.openIssues,
+                                  },
+                                  {
+                                    label: "High priority",
+                                    value: selectedRunSummaryStats.highPriority,
+                                  },
+                                  {
+                                    label: "New",
+                                    value: selectedRunSummaryStats.newIssues,
+                                  },
+                                  {
+                                    label: "Resolved",
+                                    value:
+                                      selectedRunSummaryStats.resolvedIssues,
+                                  },
+                                  {
+                                    label: "Links checked",
+                                    value: selectedRunSummaryStats.linksChecked,
+                                  },
+                                ]
+                              : undefined
+                          }
+                          counters={[
+                            {
+                              label: "Links checked",
+                              value: selectedRun.checked_links,
+                            },
+                            {
+                              label: "Broken",
+                              value: phase0BrokenCount,
+                            },
+                            {
+                              label: "Blocked",
+                              value: phase0BlockedCount,
+                            },
+                            {
+                              label: "No response",
+                              value: phase0NoResponseCount,
+                            },
+                            {
+                              label: "Ignored",
+                              value: phase0IgnoredSkippedCount,
+                            },
+                          ]}
+                          previewTitle={
+                            selectedRun.status === "completed"
+                              ? "Latest snapshot"
+                              : "Early findings"
+                          }
+                          previewItems={
+                            selectedRun.status === "completed"
+                              ? [
+                                  {
+                                    label: "Run quality",
+                                    detail: `${selectedRun.status.replace("_", " ")} with ${selectedRun.checked_links} links checked`,
+                                  },
+                                  {
+                                    label: "Issue activity",
+                                    detail: `${selectedRunSummaryStats?.openIssues ?? 0} open, ${selectedRunSummaryStats?.highPriority ?? 0} high-priority`,
+                                  },
+                                ]
+                              : [
+                                  {
+                                    label: "Scan activity",
+                                    detail: `${selectedRun.status.replace("_", " ")} as Scanlark discovers and checks links.`,
+                                  },
+                                  {
+                                    label: "Current findings",
+                                    detail: `Broken ${phase0BrokenCount}, blocked ${phase0BlockedCount}, no response ${phase0NoResponseCount}`,
+                                  },
+                                ]
+                          }
+                          note={
+                            selectedRun.status === "completed"
+                              ? "View the full report for evidence, affected pages, and recommended next steps."
+                              : "Early findings are updating while the scan runs. Open the full report when it completes."
+                          }
+                          statusTone={
+                            selectedRun.status === "completed"
+                              ? "success"
+                              : selectedRun.status === "failed"
+                                ? "danger"
+                                : selectedRun.status === "cancelled"
+                                  ? "warning"
+                                  : "accent"
+                          }
+                          primaryAction={
+                            canCancelRun ? (
+                              <button
+                                onClick={handleCancelScan}
+                                style={{
+                                  padding: "10px 14px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--danger)",
+                                  background: "var(--danger)",
+                                  color: "white",
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Cancel scan
+                              </button>
+                            ) : selectedRun.status === "completed" ? (
+                              <button
+                                onClick={() => openReport(selectedRun.id)}
+                                className="primary-button"
+                              >
+                                View report
+                              </button>
+                            ) : undefined
+                          }
+                        />
                       </div>
                     )}
                     {!showProgress && (
@@ -15353,21 +17917,9 @@ const App: React.FC = () => {
                           }}
                         >
                           <span>
-                            Duration{" "}
-                            {formatDuration(
-                              selectedRun.started_at,
-                              selectedRun.finished_at,
-                            )}
-                          </span>
-                          <span>
                             Finished{" "}
                             {formatDate(selectedRun.finished_at ?? null)}
                           </span>
-                          {selectedRun.error_message && (
-                            <span style={{ color: "var(--warning)" }}>
-                              {selectedRun.error_message}
-                            </span>
-                          )}
                         </div>
                       )}
                       {selectedRun && (
@@ -15382,16 +17934,8 @@ const App: React.FC = () => {
                             color: "var(--muted)",
                           }}
                         >
-                          <span
-                            style={{ fontWeight: 600, color: "var(--text)" }}
-                          >
-                            Technical diagnostics
-                          </span>
                           <span>
                             Status {selectedRun.status.replace("_", " ")}
-                          </span>
-                          <span>
-                            Started {formatDate(selectedRun.started_at)}
                           </span>
                           <span>
                             Finished{" "}
@@ -15404,69 +17948,13 @@ const App: React.FC = () => {
                               selectedRun.finished_at,
                             )}
                           </span>
-                          <span>Pages crawled not tracked</span>
                           <span>
                             Links checked {selectedRun.checked_links}/
                             {selectedRun.total_links}
                           </span>
-                          <span>Broken {phase0BrokenCount}</span>
-                          <span>Blocked {phase0BlockedCount}</span>
-                          <span>No response {phase0NoResponseCount}</span>
-                          <span>
-                            Ignored/skipped {phase0IgnoredSkippedCount}
-                          </span>
-                          <span>
-                            {formatSeoDiagnostics(
-                              currentPhase0Diagnostics?.seoBasic,
-                            )}
-                          </span>
-                          <span>
-                            {formatRobotsDiagnostics(
-                              currentPhase0Diagnostics?.robots,
-                            )}
-                          </span>
-                          <span>
-                            {formatSitemapDiagnostics(
-                              currentPhase0Diagnostics?.sitemap,
-                            )}
-                          </span>
-                          <span>
-                            {formatSslDiagnostics(
-                              currentPhase0Diagnostics?.sslHttps,
-                            )}
-                          </span>
-                          <span>
-                            {formatSecurityHeaderDiagnostics(
-                              currentPhase0Diagnostics?.securityHeader,
-                            )}
-                          </span>
-                          <span>
-                            {formatPerformanceDiagnostics(
-                              currentPhase0Diagnostics?.performanceBasic,
-                            )}
-                          </span>
-                          <span>Limits hit not tracked</span>
-                          {phase0DiagnosticsLoading && (
-                            <span>Refreshing...</span>
-                          )}
-                          {currentPhase0Diagnostics?.loadedAt && (
-                            <span>
-                              Diagnostics{" "}
-                              {formatRelative(
-                                new Date(
-                                  currentPhase0Diagnostics.loadedAt,
-                                ).toISOString(),
-                              )}
-                            </span>
-                          )}
                           {selectedRun.error_message && (
                             <span style={{ color: "var(--warning)" }}>
-                              Failure reason {selectedRun.error_message}
-                            </span>
-                          )}
-                          {currentPhase0Diagnostics?.error && (
-                            <span style={{ color: "var(--warning)" }}>
-                              Diagnostics error {currentPhase0Diagnostics.error}
+                              {selectedRun.error_message}
                             </span>
                           )}
                         </div>
@@ -17537,60 +20025,145 @@ const App: React.FC = () => {
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
-                            Paste a homepage URL to start monitoring.
+                            Add a website and give it customer-friendly names
+                            from the start.
                           </div>
                         </div>
-                        <label
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Site URL
-                          <input
-                            value={onboardingSiteUrl}
-                            onChange={(event) =>
-                              setOnboardingSiteUrl(event.target.value)
-                            }
-                            placeholder="https://example.com"
-                            autoFocus
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault();
-                                void handleOnboardingCreateSite();
+                        <div className="app-form-grid">
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Website URL
+                            <input
+                              value={onboardingSiteUrl}
+                              onChange={(event) =>
+                                setOnboardingSiteUrl(event.target.value)
                               }
-                            }}
-                            style={{
-                              marginTop: "6px",
-                              width: "100%",
-                              padding: "8px 10px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              boxSizing: "border-box",
-                            }}
-                          />
-                        </label>
-                        <label
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Site name (optional)
-                          <input
-                            value={onboardingSiteName}
-                            onChange={(event) =>
-                              setOnboardingSiteName(event.target.value)
-                            }
-                            placeholder="Marketing site"
-                            style={{
-                              marginTop: "6px",
-                              width: "100%",
-                              padding: "8px 10px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              boxSizing: "border-box",
-                            }}
-                          />
-                        </label>
+                              placeholder="https://example.com"
+                              autoFocus
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void handleOnboardingCreateSite();
+                                }
+                              }}
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "8px 10px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                                boxSizing: "border-box",
+                              }}
+                            />
+                          </label>
+                          <div
+                            className="app-form-grid app-form-grid--two"
+                            style={{ alignItems: "start" }}
+                          >
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Site display name
+                              <input
+                                value={onboardingSiteDisplayName}
+                                onChange={(event) => {
+                                  setOnboardingSiteDisplayNameTouched(true);
+                                  setOnboardingSiteDisplayName(
+                                    event.target.value,
+                                  );
+                                }}
+                                placeholder="Suggested from your domain"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void handleOnboardingCreateSite();
+                                  }
+                                }}
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "8px 10px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  boxSizing: "border-box",
+                                }}
+                              />
+                            </label>
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Client name (optional)
+                              <input
+                                value={onboardingClientName}
+                                onChange={(event) =>
+                                  setOnboardingClientName(event.target.value)
+                                }
+                                placeholder="Optional client label"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void handleOnboardingCreateSite();
+                                  }
+                                }}
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "8px 10px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  boxSizing: "border-box",
+                                }}
+                              />
+                            </label>
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Report display name (optional)
+                              <input
+                                value={onboardingReportDisplayName}
+                                onChange={(event) => {
+                                  setOnboardingReportDisplayNameTouched(true);
+                                  setOnboardingReportDisplayName(
+                                    event.target.value,
+                                  );
+                                }}
+                                placeholder="Optional report title"
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    void handleOnboardingCreateSite();
+                                  }
+                                }}
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "8px 10px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  boxSizing: "border-box",
+                                }}
+                              />
+                            </label>
+                          </div>
+                        </div>
                         {onboardingError && (
                           <div
                             style={{
@@ -18258,210 +20831,6 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {ignoreRulesOpen && (
-              <div
-                className="modal-backdrop"
-                onClick={() => setIgnoreRulesOpen(false)}
-              >
-                <div
-                  className="modal"
-                  role="dialog"
-                  aria-modal="true"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600 }}>Ignore rules</div>
-                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        Rules apply to the selected site.
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setIgnoreRulesOpen(false)}
-                      style={{
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        borderRadius: "10px",
-                        padding: "4px 6px",
-                        cursor: "pointer",
-                        fontSize: "12px",
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <div
-                    style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}
-                  >
-                    <select
-                      value={newRuleScope}
-                      onChange={(e) =>
-                        setNewRuleScope(e.target.value as "site" | "global")
-                      }
-                      style={{
-                        padding: "6px 8px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        color: "var(--text)",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <option value="site">This site</option>
-                      <option value="global">Global</option>
-                    </select>
-                    <select
-                      value={newRuleType}
-                      onChange={(e) =>
-                        setNewRuleType(
-                          e.target.value as IgnoreRule["rule_type"],
-                        )
-                      }
-                      style={{
-                        padding: "6px 8px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        color: "var(--text)",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <option value="domain">domain</option>
-                      <option value="path_prefix">path_prefix</option>
-                      <option value="regex">regex</option>
-                      <option value="status_code">status_code</option>
-                    </select>
-                    <input
-                      value={newRulePattern}
-                      onChange={(e) => setNewRulePattern(e.target.value)}
-                      placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
-                      style={{
-                        flex: 1,
-                        minWidth: "220px",
-                        padding: "6px 8px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        color: "var(--text)",
-                        fontSize: "12px",
-                      }}
-                    />
-                    <button
-                      onClick={handleCreateIgnoreRule}
-                      disabled={!selectedSiteId || !newRulePattern.trim()}
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--accent)",
-                        color: "white",
-                        fontSize: "12px",
-                        cursor:
-                          !selectedSiteId || !newRulePattern.trim()
-                            ? "not-allowed"
-                            : "pointer",
-                        opacity:
-                          !selectedSiteId || !newRulePattern.trim() ? 0.6 : 1,
-                      }}
-                    >
-                      Add rule
-                    </button>
-                  </div>
-
-                  {ignoreRulesError && (
-                    <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-                      {ignoreRulesError}
-                    </div>
-                  )}
-                  {ignoreRulesLoading && (
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Loading rules…
-                    </div>
-                  )}
-                  {!ignoreRulesLoading && ignoreRules.length === 0 && (
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      No ignore rules yet.
-                    </div>
-                  )}
-                  {!ignoreRulesLoading && ignoreRules.length > 0 && (
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "8px",
-                      }}
-                    >
-                      {ignoreRules.map((rule) => (
-                        <div
-                          key={rule.id}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            padding: "8px 10px",
-                            borderRadius: "10px",
-                            border: "1px solid var(--border)",
-                            background: "var(--panel-elev)",
-                          }}
-                        >
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: "12px", fontWeight: 600 }}>
-                              {rule.rule_type} {rule.site_id ? "" : "· global"}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                                overflowWrap: "anywhere",
-                              }}
-                            >
-                              {rule.pattern}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => handleToggleIgnoreRule(rule)}
-                            style={{
-                              padding: "4px 8px",
-                              borderRadius: "8px",
-                              border: "1px solid var(--border)",
-                              background: rule.is_enabled
-                                ? "var(--success)"
-                                : "var(--panel)",
-                              color: rule.is_enabled ? "white" : "var(--text)",
-                              fontSize: "11px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            {rule.is_enabled ? "Enabled" : "Disabled"}
-                          </button>
-                          <button
-                            onClick={() => handleDeleteIgnoreRule(rule)}
-                            style={{
-                              padding: "4px 8px",
-                              borderRadius: "8px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              fontSize: "11px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
             {noteModalOpen && (
               <div
                 className="modal-backdrop"
@@ -18608,62 +20977,145 @@ const App: React.FC = () => {
             )}
 
             {addSiteOpen && (
-              <div
-                className="modal-backdrop"
-                onClick={() => setAddSiteOpen(false)}
-              >
+              <div className="modal-backdrop" onClick={closeAddSiteModal}>
                 <div
                   className="modal"
                   role="dialog"
                   aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
+                  style={{ maxWidth: "560px" }}
                 >
                   <div
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
-                      alignItems: "center",
+                      alignItems: "flex-start",
+                      gap: "10px",
                     }}
                   >
                     <div>
-                      <div style={{ fontWeight: 600 }}>Add site</div>
+                      <div style={{ fontWeight: 700, fontSize: "20px" }}>
+                        Add site
+                      </div>
                       <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        Enter the root URL to start scanning.
+                        Add a website with customer-friendly labels used in
+                        reports and alerts.
                       </div>
                     </div>
                     <button
-                      onClick={() => setAddSiteOpen(false)}
+                      onClick={closeAddSiteModal}
                       className="icon-button"
                       style={{ borderColor: "var(--border)" }}
                     >
                       ✕
                     </button>
                   </div>
-                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                    Site URL
-                    <input
-                      value={newSiteUrl}
-                      onChange={(e) => setNewSiteUrl(e.target.value)}
-                      placeholder="https://example.com"
-                      autoFocus
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void handleCreateSite();
+                  <div className="app-form-grid">
+                    <label className="field-label">
+                      Website URL
+                      <input
+                        value={newSiteUrl}
+                        onChange={(event) => setNewSiteUrl(event.target.value)}
+                        placeholder="https://example.com"
+                        autoFocus
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleCreateSite();
+                          }
+                        }}
+                        className="app-input"
+                        style={
+                          newSiteUrlValidationError
+                            ? { borderColor: "var(--warning)" }
+                            : undefined
                         }
-                      }}
+                      />
+                      {newSiteUrlValidationError ? (
+                        <span
+                          style={{
+                            color: "var(--warning)",
+                            fontSize: "11px",
+                            marginTop: "-2px",
+                          }}
+                        >
+                          {newSiteUrlValidationError}
+                        </span>
+                      ) : null}
+                    </label>
+                    <p
                       style={{
-                        marginTop: "6px",
-                        width: "100%",
-                        padding: "8px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        color: "var(--text)",
-                        boxSizing: "border-box",
+                        margin: "0",
+                        gridColumn: "1 / -1",
+                        fontSize: "11px",
+                        color: "var(--muted)",
                       }}
-                    />
-                  </label>
+                    >
+                      Enter a valid website URL and Scanlark will suggest a
+                      display name from the domain.
+                    </p>
+                    <label className="field-label">
+                      Site display name (optional)
+                      <input
+                        value={newSiteDisplayName}
+                        onChange={(e) => {
+                          setNewSiteDisplayNameTouched(true);
+                          setNewSiteDisplayName(e.target.value);
+                        }}
+                        placeholder="Suggested from your domain"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleCreateSite();
+                          }
+                        }}
+                        className="app-input"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Client name (optional)
+                      <input
+                        value={newSiteClientName}
+                        onChange={(e) => setNewSiteClientName(e.target.value)}
+                        placeholder="Optional client or project label"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleCreateSite();
+                          }
+                        }}
+                        className="app-input"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Report display name (optional)
+                      <input
+                        value={newSiteReportDisplayName}
+                        onChange={(e) => {
+                          setNewSiteReportDisplayNameTouched(true);
+                          setNewSiteReportDisplayName(e.target.value);
+                        }}
+                        placeholder="Optional report title"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void handleCreateSite();
+                          }
+                        }}
+                        className="app-input"
+                      />
+                    </label>
+                    <div
+                      style={{
+                        gridColumn: "1 / -1",
+                        fontSize: "11px",
+                        color: "var(--muted)",
+                      }}
+                    >
+                      Report title is optional and appears in the report header
+                      and PDF.
+                    </div>
+                  </div>
                   {createError && (
                     <div style={{ fontSize: "12px", color: "var(--warning)" }}>
                       {createError}
@@ -18677,29 +21129,19 @@ const App: React.FC = () => {
                     }}
                   >
                     <button
-                      onClick={() => setAddSiteOpen(false)}
+                      onClick={closeAddSiteModal}
                       className="report-button"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={handleCreateSite}
-                      disabled={creatingSite || !newSiteUrl.trim()}
-                      style={{
-                        padding: "8px 12px",
-                        borderRadius: "10px",
-                        border: "none",
-                        background: creatingSite
-                          ? "var(--panel-elev)"
-                          : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                        color: "white",
-                        fontSize: "12px",
-                        fontWeight: 600,
-                        cursor:
-                          creatingSite || !newSiteUrl.trim()
-                            ? "not-allowed"
-                            : "pointer",
-                      }}
+                      disabled={
+                        creatingSite ||
+                        !newSiteUrl.trim() ||
+                        Boolean(newSiteUrlValidationError)
+                      }
+                      className="primary-button"
                     >
                       {creatingSite ? "Adding..." : "Add site"}
                     </button>
@@ -18808,7 +21250,7 @@ const App: React.FC = () => {
                       gap: "8px",
                     }}
                   >
-                    {history.map((run) => (
+                    {visibleHistoryItems.map((run) => (
                       <div
                         key={run.id}
                         style={{
@@ -18902,6 +21344,22 @@ const App: React.FC = () => {
                         </div>
                       </div>
                     ))}
+                    {history.length > 5 && (
+                      <button
+                        onClick={() => setHistoryExpanded((prev) => !prev)}
+                        className="ghost-button"
+                        style={{
+                          justifySelf: "flex-start",
+                          paddingLeft: "0",
+                          border: "none",
+                          textDecoration: "underline",
+                        }}
+                      >
+                        {historyExpanded
+                          ? "Show less"
+                          : `Show more (${history.length - 5} more)`}
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

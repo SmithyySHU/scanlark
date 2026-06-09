@@ -78,39 +78,47 @@ export const ScanProgressHero: React.FC<{
 
   return (
     <div className="scan-hero-card" data-tone={statusTone}>
-      <div className="scan-hero-card__ring">
-        <div
-          className={`scan-hero-card__ring-outer${indeterminate ? " is-indeterminate" : ""}`}
-          role="img"
-          aria-label={`${stage}: ${
-            indeterminate
-              ? "progress pending while links are discovered"
-              : `${displayedProgress.toFixed(0)} percent complete`
-          }`}
-          style={
-            {
-              "--scan-progress": `${displayedProgress}%`,
-              "--scan-ring-color": ringColor,
-            } as React.CSSProperties
-          }
-        >
-          <div className="scan-hero-card__ring-orbit" aria-hidden="true" />
-          <div className="scan-hero-card__ring-inner">
-            <strong>
-              {indeterminate ? "..." : `${displayedProgress.toFixed(0)}%`}
-            </strong>
-            <span>{stage}</span>
+      <div className="scan-hero-card__visual">
+        <div className="scan-hero-card__visual-surface">
+          <div className="scan-hero-card__ring">
+            <div
+              className={`scan-hero-card__ring-outer${indeterminate ? " is-indeterminate" : ""}`}
+              role="img"
+              aria-label={`${stage}: ${
+                indeterminate
+                  ? "progress pending while links are discovered"
+                  : `${displayedProgress.toFixed(0)} percent complete`
+              }`}
+              style={
+                {
+                  "--scan-progress": `${displayedProgress}%`,
+                  "--scan-ring-color": ringColor,
+                } as React.CSSProperties
+              }
+            >
+              <div className="scan-hero-card__ring-orbit" aria-hidden="true" />
+              <div className="scan-hero-card__ring-inner">
+                <strong>
+                  {indeterminate ? "..." : `${displayedProgress.toFixed(0)}%`}
+                </strong>
+                <span>{stage}</span>
+              </div>
+            </div>
+            <div className="scan-hero-card__ring-fallback">
+              {indeterminate
+                ? "Discovering links"
+                : `${displayedProgress.toFixed(0)}% complete`}
+            </div>
+          </div>
+          <div className="scan-hero-card__visual-copy">
+            <div className="scan-hero-card__eyebrow">Scan status</div>
+            <div className="scan-hero-card__title">{title}</div>
+            <div className="scan-hero-card__stage-chip">{stage}</div>
           </div>
         </div>
-        <div className="scan-hero-card__ring-fallback">
-          {indeterminate
-            ? "Discovering links"
-            : `${displayedProgress.toFixed(0)}% complete`}
-        </div>
       </div>
-      <div style={{ display: "grid", gap: "14px" }}>
+      <div className="scan-hero-card__content">
         <div>
-          <div className="scan-hero-card__title">{title}</div>
           <div className="scan-hero-card__summary">{summary}</div>
         </div>
         <div className="scan-hero-card__counter-grid">
@@ -124,7 +132,7 @@ export const ScanProgressHero: React.FC<{
         {previewItems && previewItems.length > 0 ? (
           <div className="scan-hero-card__preview">
             <div className="scan-hero-card__preview-title">
-              {previewTitle ?? "Live preview"}
+              {previewTitle ?? "Scan activity"}
             </div>
             <div className="scan-hero-card__preview-list">
               {previewItems.map((item) => (

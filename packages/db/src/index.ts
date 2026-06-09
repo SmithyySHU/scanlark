@@ -8,8 +8,9 @@ export {
   getSitesForUser,
   listSitesForUser,
   backfillSitesUserId,
+  updateSiteMetadataForUser,
 } from "./sites";
-export type { DbSiteRow } from "./sites";
+export type { DbSiteRow, SiteMetadataFields } from "./sites";
 
 export {
   computeNextScheduledAt,
@@ -124,6 +125,7 @@ export type {
 export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
 
 export {
+  listIssuesForScanRun,
   listIssuesForScanRunForUser,
   replaceIssuesForScanRun,
 } from "./scanIssues";
@@ -154,7 +156,10 @@ export type {
   ScanSiteCheckType,
 } from "./scanSiteChecks";
 
-export { getScanTechnicalDiagnosticsForUser } from "./scanTechnicalDiagnostics";
+export {
+  getScanTechnicalDiagnostics,
+  getScanTechnicalDiagnosticsForUser,
+} from "./scanTechnicalDiagnostics";
 export type { ScanTechnicalDiagnosticsSummary } from "./scanTechnicalDiagnostics";
 
 export {
@@ -169,6 +174,19 @@ export type { LinkNote, LinkNoteStatus } from "./linkNotes";
 
 export { enqueueEmailOutbox } from "./emailOutbox";
 export type { EmailOutboxEntry } from "./emailOutbox";
+
+export {
+  createOrRotateReportShareForRunForUser,
+  disableReportShareForRunForUser,
+  getReportShareForRunForUser,
+  getSharedReportAccessByToken,
+  recordReportShareView,
+} from "./reportShares";
+export type {
+  ReportShareRow,
+  ReportShareWithToken,
+  SharedReportAccess,
+} from "./reportShares";
 
 export {
   cancelScanJob,
@@ -242,6 +260,7 @@ export type {
 export {
   computeSeverityScore,
   createEmptySeverityCounts,
+  getScanCategoryScores,
   getScanCategoryScoresForUser,
   getScoreBand,
 } from "./scanCategoryScores";
