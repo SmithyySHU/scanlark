@@ -8,6 +8,7 @@ Practical setup and API notes for local Scanlark development.
 - PostgreSQL with `DATABASE_URL` set
 - SMTP env vars only when testing live email delivery: `EMAIL_ENABLED=true`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
 - `API_INTERNAL_TOKEN` shared by API and worker when testing scheduled scan completion callbacks
+- `REPORT_SHARE_TOKEN_SECRET` when testing production-like public share behavior
 
 ## Install
 
@@ -57,6 +58,15 @@ Important recent migrations:
 - `017_issue_change_detection.sql`: issue state tracking and `change_status`.
 - `018_scan_run_issue_generation_status.sql`: issue generation status for reports.
 
+Migration discipline:
+
+- apply migrations in filename order
+- take a backup before production migrations
+- production rollout should stop if migrations fail
+- future migrations should be idempotent where practical
+- historical migrations are schema history and may not be perfectly rerunnable on
+  every existing database state
+
 ## Current Behaviour
 
 - Scans can be manual or scheduled. Scheduled scans are queued by the worker and use `trigger_type = scheduled`.
@@ -65,6 +75,7 @@ Important recent migrations:
 - Reports include link results, technical diagnostics, issue summaries, issue generation status, and report scoring.
 - Issue change detection marks current issues as `new` or `existing` and keeps resolved issue state for report history.
 - Email writes every attempted send to `email_outbox`; live SMTP delivery only happens when `EMAIL_ENABLED=true`.
+- API liveness is `GET /health`; readiness is `GET /ready`.
 
 ## Key Endpoints
 
@@ -86,3 +97,9 @@ Base URL: `http://localhost:3001`
 - No live email with outbox rows usually means `EMAIL_ENABLED` is not `true` or SMTP env vars are incomplete.
 - Scheduled scans require the worker, API, database, and matching `API_INTERNAL_TOKEN`.
 - If a report shows pending or failed issue generation, check `issue_generation_status` and API/worker logs for that scan run.
+- If public share routes fail in production-like mode, confirm `REPORT_SHARE_TOKEN_SECRET` is set.
+- If PDF export fails in deployment, verify Playwright browser binaries and host OS dependencies.
+
+For startup order, restart guidance, Playwright deployment notes, and beta smoke
+checks, see
+[docs/BETA_DEPLOYMENT.md](/home/smithyy/Projects/scanlark/docs/BETA_DEPLOYMENT.md).

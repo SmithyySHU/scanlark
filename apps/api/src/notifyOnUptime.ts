@@ -5,9 +5,9 @@ import {
   type NotificationEventKind,
 } from "@scanlark/db";
 import { sendEmail } from "./email";
+import { apiRuntimeConfig } from "./runtimeConfig";
 
-const APP_URL =
-  process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
+const APP_URL = apiRuntimeConfig.appBaseUrl ?? "http://localhost:5173";
 
 function escapeHtml(value: string) {
   return value

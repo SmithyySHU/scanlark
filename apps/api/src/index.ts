@@ -20,6 +20,7 @@ import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
   cancelScanRun,
+  ensureConnected,
   createOrRotateReportShareForRunForUser,
   createSiteForUser,
   createIgnoreRule,
@@ -113,6 +114,7 @@ import {
   buildReportPdfDocumentForUser,
   generateReportPdfBuffer,
 } from "./reportPdf";
+import { apiRuntimeConfig } from "./runtimeConfig";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -172,8 +174,8 @@ const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
   "info",
 ]);
 const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
-const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
-const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const EMAIL_TEST_TO = apiRuntimeConfig.emailTestTo;
+const API_INTERNAL_TOKEN = apiRuntimeConfig.apiInternalToken;
 const DASHBOARD_ISSUE_CATEGORIES: ScanIssueCategory[] = [
   "link_integrity",
   "seo_basic",
@@ -470,8 +472,7 @@ function setPublicReportHeaders(res: Response) {
 }
 
 function buildSharedReportUrl(token: string) {
-  const appUrl =
-    process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
+  const appUrl = apiRuntimeConfig.appBaseUrl ?? "http://localhost:5173";
   const base = appUrl.replace(/\/+$/, "");
   return `${base}/shared-reports/${encodeURIComponent(token)}`;
 }
@@ -671,7 +672,7 @@ function csvEscape(value: unknown): string {
 const app = express();
 
 const corsOrigins = new Set(
-  [process.env.WEB_ORIGIN, "http://localhost:5173", "http://localhost:3000"]
+  [apiRuntimeConfig.webOrigin, "http://localhost:5173", "http://localhost:3000"]
     .filter(Boolean)
     .map((origin) => origin as string),
 );
@@ -691,7 +692,7 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(sessionMiddleware);
 
-if (process.env.DEV_BYPASS_AUTH === "true") {
+if (apiRuntimeConfig.devBypassAuth) {
   void initDemoAuth();
 }
 
@@ -699,6 +700,27 @@ mountAuthRoutes(app);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "scanlark-api" });
+});
+
+app.get("/ready", async (_req, res) => {
+  try {
+    const client = await ensureConnected();
+    await client.query("SELECT 1");
+    return res.json({
+      status: "ready",
+      service: "scanlark-api",
+      database: "ok",
+      config: "ok",
+    });
+  } catch (err) {
+    console.error("Readiness check failed", err);
+    return res.status(503).json({
+      status: "not_ready",
+      service: "scanlark-api",
+      database: "unavailable",
+      config: "ok",
+    });
+  }
 });
 
 async function requireSharedReportAccess(

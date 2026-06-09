@@ -1,8 +1,9 @@
 import { Application, Request, Response } from "express";
 import { getScanRunByIdForUser } from "@scanlark/db";
 import { serializeScanRun } from "../serializers";
+import { apiRuntimeConfig } from "../runtimeConfig";
 
-const WEB_ORIGIN = process.env.WEB_ORIGIN || "http://localhost:5173";
+const WEB_ORIGIN = apiRuntimeConfig.webOrigin ?? "http://localhost:5173";
 
 export function mountScanRunEvents(app: Application) {
   app.get(

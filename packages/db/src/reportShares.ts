@@ -50,8 +50,16 @@ type SharedAccessRow = ScanRunRow & {
 };
 
 function getShareSecret() {
+  const nodeEnv = process.env.NODE_ENV ?? "development";
+  const isProductionLike = nodeEnv !== "development" && nodeEnv !== "test";
+  const explicitSecret = process.env.REPORT_SHARE_TOKEN_SECRET?.trim();
+  if (explicitSecret) return explicitSecret;
+  if (isProductionLike) {
+    throw new Error(
+      "REPORT_SHARE_TOKEN_SECRET is required in production-like mode",
+    );
+  }
   return (
-    process.env.REPORT_SHARE_TOKEN_SECRET ??
     process.env.SESSION_SECRET ??
     process.env.API_INTERNAL_TOKEN ??
     "scanlark-report-share-dev-secret"

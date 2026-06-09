@@ -1,11 +1,12 @@
 import type { NextFunction, Request, Response } from "express";
 import { getIronSession, type SessionOptions } from "iron-session";
+import { apiRuntimeConfig } from "./runtimeConfig";
 
-const NODE_ENV = process.env.NODE_ENV || "development";
-const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === "true";
-const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "ls_session";
-const SESSION_SECRET = process.env.SESSION_SECRET;
-const SESSION_TTL_DAYS = Number(process.env.AUTH_TOKEN_TTL_DAYS ?? "30");
+const NODE_ENV = apiRuntimeConfig.nodeEnv;
+const DEV_BYPASS_AUTH = apiRuntimeConfig.devBypassAuth;
+const AUTH_COOKIE_NAME = apiRuntimeConfig.authCookieName;
+const SESSION_SECRET = apiRuntimeConfig.sessionSecret;
+const SESSION_TTL_DAYS = apiRuntimeConfig.authTokenTtlDays;
 
 const fallbackSessionSecret =
   "dev-bypass-only-do-not-use-in-production-32-characters";

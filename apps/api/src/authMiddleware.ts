@@ -7,6 +7,7 @@ import {
   getUserById,
 } from "@scanlark/db";
 import { getSessionUserId } from "./auth";
+import { apiRuntimeConfig } from "./runtimeConfig";
 
 type AuthUser = {
   id: string;
@@ -14,9 +15,9 @@ type AuthUser = {
   name?: string;
 };
 
-const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === "true";
+const DEV_BYPASS_AUTH = apiRuntimeConfig.devBypassAuth;
 const DEMO_USER_EMAIL = process.env.DEMO_USER_EMAIL || "demo@scanlark.local";
-const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const API_INTERNAL_TOKEN = apiRuntimeConfig.apiInternalToken;
 
 let demoUserPromise: Promise<AuthUser> | null = null;
 let demoLogged = false;

@@ -147,6 +147,8 @@ Common environment variables:
 - `SESSION_SECRET`
 - `DEV_BYPASS_AUTH=true` for local auto-auth
 - `API_INTERNAL_TOKEN` shared between API and worker
+- `WORKER_API_BASE` for worker-to-API callbacks outside local defaults
+- `REPORT_SHARE_TOKEN_SECRET` for public share token signing in production-like deployments
 
 Optional email settings:
 
@@ -162,6 +164,14 @@ Optional app URL settings used in links:
 
 - `APP_URL`
 - `APP_BASE_URL`
+
+Production-like validation currently expects:
+
+- API: `DATABASE_URL`, `SESSION_SECRET`, `WEB_ORIGIN`, `APP_BASE_URL` or
+  `APP_URL`, `API_INTERNAL_TOKEN`, `REPORT_SHARE_TOKEN_SECRET`
+- Worker: `DATABASE_URL`, `WORKER_API_BASE`, `API_INTERNAL_TOKEN`
+- Email only when enabled: `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, and matching
+  SMTP auth fields when used
 
 ### Install
 
@@ -188,6 +198,15 @@ That includes recent migrations such as:
 - `021_add_report_shares.sql`
 
 If a feature appears to exist in code but fails at runtime, missing migrations are the first thing to check.
+
+Migration discipline:
+
+- migrations run in filename order
+- production rollout should stop if migrations fail
+- take a backup before production migrations
+- future migrations should be idempotent where practical
+- historical migrations may not be perfectly rerunnable on every existing
+  database shape
 
 ### Start services
 
@@ -218,6 +237,8 @@ npm run demo:site-history -- <siteId>
 - email delivery only happens when `EMAIL_ENABLED=true`
 - uptime monitoring is processed by the worker loop
 - public shared reports depend on the `report_shares` table and corresponding migration
+- API liveness is `GET /health`
+- API readiness is `GET /ready`
 
 ## Core routes and surfaces
 
@@ -234,6 +255,8 @@ Examples of current API/report surfaces:
 - `GET /scan-runs/:scanRunId/share`
 - `DELETE /scan-runs/:scanRunId/share`
 - `GET /public/reports/:token`
+- `GET /health`
+- `GET /ready`
 
 ## Scripts
 
@@ -267,9 +290,13 @@ npm run -w @scanlark/crawler typecheck
 - If report sharing fails, confirm `021_add_report_shares.sql` was applied.
 - If email appears in `email_outbox` but is not sent, check `EMAIL_ENABLED` and SMTP settings.
 - If a report is stuck with pending issue generation, inspect API and worker logs for that scan run.
+- If PDF export fails in deployment, verify Playwright browser binaries and OS
+  dependencies.
 
 ## Notes
 
 - This repository is under active development.
 - Some compiled `.js` files may exist alongside TypeScript sources in `packages/db`; treat the TypeScript sources as the primary code for changes.
 - For deeper setup and troubleshooting details, see [docs/DEV.md](/home/smithyy/Projects/scanlark/docs/DEV.md).
+- For private beta rollout guidance, see
+  [docs/BETA_DEPLOYMENT.md](/home/smithyy/Projects/scanlark/docs/BETA_DEPLOYMENT.md).

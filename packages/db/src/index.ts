@@ -226,6 +226,7 @@ export {
 export type { IgnoreRule, IgnoreRuleType } from "./ignoreRules";
 
 export { isValidEmailAddress, validateSafeRegexPattern } from "./validation";
+export { closeConnection, ensureConnected } from "./client";
 
 export {
   insertIgnoredOccurrence,

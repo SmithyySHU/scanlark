@@ -21,6 +21,7 @@ import {
 } from "@scanlark/db";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
 import { checkUptime } from "../../../packages/crawler/src/checkUptime";
+import { workerRuntimeConfig } from "./runtimeConfig";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -33,8 +34,8 @@ const REAPER_TICK_MS = 120000;
 const STALE_QUEUED_JOB_MINUTES = 15;
 const UPTIME_TICK_MS = 60000;
 const UPTIME_BATCH_SIZE = 25;
-const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
-const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const API_BASE_URL = workerRuntimeConfig.apiBaseUrl;
+const API_INTERNAL_TOKEN = workerRuntimeConfig.apiInternalToken;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));

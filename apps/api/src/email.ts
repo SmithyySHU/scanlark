@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import { enqueueEmailOutbox } from "@scanlark/db";
+import { apiRuntimeConfig } from "./runtimeConfig";
 
 type EmailPayload = {
   to: string;
@@ -12,12 +13,12 @@ type EmailPayload = {
   metadata?: Record<string, unknown> | null;
 };
 
-const EMAIL_ENABLED = process.env.EMAIL_ENABLED === "true";
-const EMAIL_FROM = process.env.EMAIL_FROM || "Scanlark <alerts@scanlark.local>";
-const SMTP_HOST = process.env.SMTP_HOST || "";
-const SMTP_PORT = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587;
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+const EMAIL_ENABLED = apiRuntimeConfig.email.enabled;
+const EMAIL_FROM = apiRuntimeConfig.email.from;
+const SMTP_HOST = apiRuntimeConfig.email.smtpHost;
+const SMTP_PORT = apiRuntimeConfig.email.smtpPort;
+const SMTP_USER = apiRuntimeConfig.email.smtpUser;
+const SMTP_PASS = apiRuntimeConfig.email.smtpPass;
 
 function getTransport() {
   if (!EMAIL_ENABLED) return null;
