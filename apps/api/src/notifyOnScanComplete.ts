@@ -196,19 +196,29 @@ async function sendNotification(params: {
   });
   if (!reserved) return false;
 
-  await sendEmail({
-    to: params.toEmail,
-    subject: params.subject,
-    html: params.html,
-    text: params.text,
-    userId: params.userId,
-    siteId: params.siteId,
-    scanRunId: params.scanRunId,
-    metadata: {
+  try {
+    await sendEmail({
+      to: params.toEmail,
+      subject: params.subject,
+      html: params.html,
+      text: params.text,
+      userId: params.userId,
+      siteId: params.siteId,
+      scanRunId: params.scanRunId,
+      metadata: {
+        kind: params.kind,
+        ...params.payload,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to send scan notification email", {
       kind: params.kind,
-      ...params.payload,
-    },
-  });
+      siteId: params.siteId,
+      scanRunId: params.scanRunId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
   return true;
 }
 
@@ -232,14 +242,25 @@ export async function notifyIfNeeded(
   let sentAny = false;
   if (run.status === "failed") {
     if (!settings.notifyEnabled || settings.notifyOn === "never") return;
-    const email = buildFailureEmail({
-      siteUrl: site.url,
-      siteId: run.site_id,
-      scanRunId: run.id,
-      startedAt: run.started_at,
-      finishedAt: run.finished_at,
-      errorMessage: run.error_message,
-    });
+    let email;
+    try {
+      email = buildFailureEmail({
+        siteUrl: site.url,
+        siteId: run.site_id,
+        scanRunId: run.id,
+        startedAt: run.started_at,
+        finishedAt: run.finished_at,
+        errorMessage: run.error_message,
+      });
+    } catch (err) {
+      console.error("Failed to build failed-scan email", {
+        kind: "scan_failed",
+        siteId: run.site_id,
+        scanRunId: run.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
     sentAny = await sendNotification({
       kind: "scan_failed",
       toEmail: settings.notifyEmail,
@@ -263,14 +284,25 @@ export async function notifyIfNeeded(
       settings.notifyOn !== "never" &&
       digest.highPriorityCount > 0
     ) {
-      const email = buildIssueEmail({
-        kind: "high_priority_issues_found",
-        siteUrl: site.url,
-        siteId: run.site_id,
-        scanRunId: run.id,
-        finishedAt: run.finished_at,
-        digest,
-      });
+      let email;
+      try {
+        email = buildIssueEmail({
+          kind: "high_priority_issues_found",
+          siteUrl: site.url,
+          siteId: run.site_id,
+          scanRunId: run.id,
+          finishedAt: run.finished_at,
+          digest,
+        });
+      } catch (err) {
+        console.error("Failed to build issue notification email", {
+          kind: "high_priority_issues_found",
+          siteId: run.site_id,
+          scanRunId: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       sentAny =
         (await sendNotification({
           kind: "high_priority_issues_found",
@@ -286,14 +318,25 @@ export async function notifyIfNeeded(
     }
 
     if (settings.summaryEnabled && site.schedule_frequency === "weekly") {
-      const email = buildIssueEmail({
-        kind: "weekly_scan_summary",
-        siteUrl: site.url,
-        siteId: run.site_id,
-        scanRunId: run.id,
-        finishedAt: run.finished_at,
-        digest,
-      });
+      let email;
+      try {
+        email = buildIssueEmail({
+          kind: "weekly_scan_summary",
+          siteUrl: site.url,
+          siteId: run.site_id,
+          scanRunId: run.id,
+          finishedAt: run.finished_at,
+          digest,
+        });
+      } catch (err) {
+        console.error("Failed to build weekly summary email", {
+          kind: "weekly_scan_summary",
+          siteId: run.site_id,
+          scanRunId: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       sentAny =
         (await sendNotification({
           kind: "weekly_scan_summary",
@@ -324,12 +367,24 @@ export async function sendTestEmail(
   const latestRun = await getLatestScanForSiteForUser(userId, siteId);
   if (!latestRun) {
     const subject = `Scanlark: test alert for ${getSiteHost(site.url)}`;
-    const html = `
-      <p>This is a test alert for ${escapeHtml(site.url)}.</p>
-      <p>No scans have completed yet, so there is no data to summarize.</p>
-      <p><a href="${escapeHtml(APP_URL)}">Open dashboard</a></p>
-    `;
-    const text = `This is a test alert for ${site.url}.\nNo scans have completed yet, so there is no data to summarize.\nOpen dashboard: ${APP_URL}`;
+    let html;
+    let text;
+    try {
+      html = `
+        <p>This is a test alert for ${escapeHtml(site.url)}.</p>
+        <p>No scans have completed yet, so there is no data to summarize.</p>
+        <p><a href="${escapeHtml(APP_URL)}">Open dashboard</a></p>
+      `;
+      text = `This is a test alert for ${site.url}.\nNo scans have completed yet, so there is no data to summarize.\nOpen dashboard: ${APP_URL}`;
+    } catch (err) {
+      console.error("Failed to build test alert email", {
+        kind: "test",
+        siteId,
+        scanRunId: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
     await sendEmail({
       to: toEmail,
       subject,
@@ -352,14 +407,25 @@ export async function sendTestEmail(
   }
 
   const digest = await getIssueNotificationDigestForRun(latestRun.id);
-  const email = buildIssueEmail({
-    kind: "weekly_scan_summary",
-    siteUrl: site.url,
-    siteId,
-    scanRunId: latestRun.id,
-    finishedAt: latestRun.finished_at,
-    digest,
-  });
+  let email;
+  try {
+    email = buildIssueEmail({
+      kind: "weekly_scan_summary",
+      siteUrl: site.url,
+      siteId,
+      scanRunId: latestRun.id,
+      finishedAt: latestRun.finished_at,
+      digest,
+    });
+  } catch (err) {
+    console.error("Failed to build test summary email", {
+      kind: "test",
+      siteId,
+      scanRunId: latestRun.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
   await sendEmail({
     to: toEmail,
     subject: `Scanlark: test alert for ${getSiteHost(site.url)}`,

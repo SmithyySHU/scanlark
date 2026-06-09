@@ -495,6 +495,20 @@ function buildSharedReportUrl(token: string) {
   return `${base}/shared-reports/${encodeURIComponent(token)}`;
 }
 
+function logPdfFailure(params: {
+  route: "authenticated" | "shared";
+  scanRunId: string | null;
+  shareId?: string | null;
+  error: unknown;
+}) {
+  console.error("PDF export failed", {
+    route: params.route,
+    scanRunId: params.scanRunId,
+    shareId: params.shareId ?? null,
+    error: getErrorMessage(params.error),
+  });
+}
+
 function parseOptionalTextBodyValue(value: unknown) {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -864,8 +878,11 @@ app.get(
   "/public/reports/:token/report.pdf",
   publicSharedPdfLimiter,
   async (req, res) => {
+    let access: Awaited<
+      ReturnType<typeof getSharedReportAccessByToken>
+    > | null = null;
     try {
-      const access = await requireSharedReportAccess(req, res);
+      access = await requireSharedReportAccess(req, res);
       if (!access) return;
       if (access.run.status !== "completed") {
         return sendApiError(
@@ -894,7 +911,20 @@ app.get(
       );
       return res.status(200).send(pdf);
     } catch (err: unknown) {
-      if (err instanceof Error && err.message === "pdf_generation_timeout") {
+      if (
+        err instanceof Error &&
+        [
+          "pdf_generation_timeout",
+          "pdf_render_timeout",
+          "pdf_launch_timeout",
+        ].includes(err.message)
+      ) {
+        logPdfFailure({
+          route: "shared",
+          scanRunId: access?.run.id ?? null,
+          shareId: access?.share.id ?? null,
+          error: err,
+        });
         return sendApiError(
           res,
           503,
@@ -902,7 +932,12 @@ app.get(
           "PDF export is temporarily unavailable. Please try again shortly.",
         );
       }
-      console.error("Error in GET /public/reports/:token/report.pdf", err);
+      logPdfFailure({
+        route: "shared",
+        scanRunId: access?.run.id ?? null,
+        shareId: access?.share.id ?? null,
+        error: err,
+      });
       return sendInternalError(res, "Failed to export shared report PDF", err);
     }
   },
@@ -2552,7 +2587,19 @@ app.get(
       );
       return res.status(200).send(pdf);
     } catch (err: unknown) {
-      if (err instanceof Error && err.message === "pdf_generation_timeout") {
+      if (
+        err instanceof Error &&
+        [
+          "pdf_generation_timeout",
+          "pdf_render_timeout",
+          "pdf_launch_timeout",
+        ].includes(err.message)
+      ) {
+        logPdfFailure({
+          route: "authenticated",
+          scanRunId,
+          error: err,
+        });
         return sendApiError(
           res,
           503,
@@ -2560,7 +2607,11 @@ app.get(
           "PDF export is temporarily unavailable. Please try again shortly.",
         );
       }
-      console.error("Error in GET /scan-runs/:scanRunId/report.pdf", err);
+      logPdfFailure({
+        route: "authenticated",
+        scanRunId,
+        error: err,
+      });
       return sendInternalError(res, "Failed to export report PDF", err);
     }
   },

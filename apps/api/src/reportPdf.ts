@@ -1,4 +1,4 @@
-import { chromium, type Browser } from "playwright";
+import { chromium } from "playwright";
 import {
   formatSiteChangeCategoryLabel,
   formatSiteChangeImportanceLabel,
@@ -120,13 +120,20 @@ const ISSUE_CATEGORIES: ScanIssueCategory[] = [
   "performance_basic",
 ];
 
-let browserPromise: Promise<Browser> | null = null;
+const PDF_RENDER_TIMEOUT_MS = 15000;
+const PDF_BROWSER_CLOSE_TIMEOUT_MS = 5000;
 
-function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true });
-  }
-  return browserPromise;
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutErrorCode: string,
+) {
+  return Promise.race<T>([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(timeoutErrorCode)), timeoutMs);
+    }),
+  ]);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1410,32 +1417,52 @@ export function renderReportPdfHtml(document: ReportPdfDocument) {
 }
 
 export async function generateReportPdfBuffer(document: ReportPdfDocument) {
-  const browser = await getBrowser();
+  const browser = await withTimeout(
+    chromium.launch({ headless: true }),
+    PDF_RENDER_TIMEOUT_MS,
+    "pdf_launch_timeout",
+  );
   const page = await browser.newPage();
   try {
-    await page.setContent(renderReportPdfHtml(document), {
-      waitUntil: "domcontentloaded",
-    });
-    const pdf = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: {
-        top: "16mm",
-        right: "12mm",
-        bottom: "18mm",
-        left: "12mm",
-      },
-      displayHeaderFooter: true,
-      headerTemplate: `<div></div>`,
-      footerTemplate: `
-        <div style="width:100%;font-size:8px;color:#60708a;padding:0 12mm;display:flex;justify-content:space-between;">
-          <span>Scanlark PDF Report</span>
-          <span><span class="pageNumber"></span> / <span class="totalPages"></span></span>
-        </div>
-      `,
-    });
+    page.setDefaultTimeout(PDF_RENDER_TIMEOUT_MS);
+    await withTimeout(
+      page.setContent(renderReportPdfHtml(document), {
+        waitUntil: "domcontentloaded",
+      }),
+      PDF_RENDER_TIMEOUT_MS,
+      "pdf_render_timeout",
+    );
+    const pdf = await withTimeout(
+      page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: {
+          top: "16mm",
+          right: "12mm",
+          bottom: "18mm",
+          left: "12mm",
+        },
+        displayHeaderFooter: true,
+        headerTemplate: `<div></div>`,
+        footerTemplate: `
+          <div style="width:100%;font-size:8px;color:#60708a;padding:0 12mm;display:flex;justify-content:space-between;">
+            <span>Scanlark PDF Report</span>
+            <span><span class="pageNumber"></span> / <span class="totalPages"></span></span>
+          </div>
+        `,
+      }),
+      PDF_RENDER_TIMEOUT_MS,
+      "pdf_render_timeout",
+    );
     return Buffer.from(pdf);
   } finally {
-    await page.close();
+    await Promise.allSettled([
+      page.close(),
+      withTimeout(
+        browser.close(),
+        PDF_BROWSER_CLOSE_TIMEOUT_MS,
+        "pdf_browser_close_timeout",
+      ),
+    ]);
   }
 }

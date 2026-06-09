@@ -127,16 +127,28 @@ export async function sendUptimeNotification(
       : context.incident.recovery_notification_sent_at;
   if (!transitionAt) return false;
 
-  const email = buildUptimeEmail({
-    kind,
-    siteUrl: context.site_url,
-    siteId: context.settings.site_id,
-    checkUrl: context.settings.check_url,
-    checkedAt: transitionAt,
-    statusCode: context.incident.last_status_code,
-    responseTimeMs: context.incident.last_response_time_ms,
-    errorMessage: context.incident.last_error,
-  });
+  let email;
+  try {
+    email = buildUptimeEmail({
+      kind,
+      siteUrl: context.site_url,
+      siteId: context.settings.site_id,
+      checkUrl: context.settings.check_url,
+      checkedAt: transitionAt,
+      statusCode: context.incident.last_status_code,
+      responseTimeMs: context.incident.last_response_time_ms,
+      errorMessage: context.incident.last_error,
+    });
+  } catch (err) {
+    console.error("Failed to build uptime notification email", {
+      kind,
+      siteId: context.settings.site_id,
+      monitorId: context.settings.id,
+      incidentId: context.incident.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 
   const reserved = await tryRecordNotificationEvent({
     siteId: context.settings.site_id,
@@ -155,19 +167,30 @@ export async function sendUptimeNotification(
   });
   if (!reserved) return false;
 
-  await sendEmail({
-    to: settings.notifyEmail,
-    subject: email.subject,
-    html: email.html,
-    text: email.text,
-    userId: context.settings.user_id,
-    siteId: context.settings.site_id,
-    scanRunId: null,
-    metadata: {
+  try {
+    await sendEmail({
+      to: settings.notifyEmail,
+      subject: email.subject,
+      html: email.html,
+      text: email.text,
+      userId: context.settings.user_id,
+      siteId: context.settings.site_id,
+      scanRunId: null,
+      metadata: {
+        kind,
+        incidentId: context.incident.id,
+        transitionAt: transitionAt.toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error("Failed to send uptime notification email", {
       kind,
+      siteId: context.settings.site_id,
+      monitorId: context.settings.id,
       incidentId: context.incident.id,
-      transitionAt: transitionAt.toISOString(),
-    },
-  });
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
   return true;
 }

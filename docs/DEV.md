@@ -99,6 +99,12 @@ Base URL: `http://localhost:3001`
 - If a report shows pending or failed issue generation, check `issue_generation_status` and API/worker logs for that scan run.
 - If public share routes fail in production-like mode, confirm `REPORT_SHARE_TOKEN_SECRET` is set.
 - If PDF export fails in deployment, verify Playwright browser binaries and host OS dependencies.
+- For local PDF setup, run `npx playwright install chromium`.
+- For Linux boxes missing Chromium dependencies, run `npx playwright install --with-deps chromium`.
+- To send a test email for a site, use the existing Notifications test path:
+  `POST /sites/:siteId/notifications/test`
+- When `EMAIL_ENABLED=false`, alert paths should still write attempted sends to
+  `email_outbox` without opening SMTP connections.
 
 For startup order, restart guidance, Playwright deployment notes, and beta smoke
 checks, see

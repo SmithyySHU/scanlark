@@ -32,9 +32,27 @@ Alerts are generated from scheduled scan completion. Every attempted send should
 
 5. Send test alert
    - Use "Send test alert" in Notifications.
+   - API route: `POST /sites/:siteId/notifications/test`
    - Verify an outbox entry is created for the site.
 
 6. SMTP disabled
    - Leave `EMAIL_ENABLED` unset or not `true`.
    - Trigger any alert.
    - Verify the outbox row exists and logs show email was not sent over SMTP.
+
+## Inspecting Outbox
+
+- Query `email_outbox` after any alert or test send.
+- Expected behavior:
+  - an outbox row should exist for each attempted send
+  - SMTP delivery only happens when `EMAIL_ENABLED=true`
+  - duplicate-protected notifications should not create repeated notification
+    events for the same guarded scenario
+
+## Common SMTP Failures
+
+- missing `EMAIL_FROM`
+- missing `SMTP_HOST` or `SMTP_PORT`
+- only one of `SMTP_USER` / `SMTP_PASS` set
+- blocked outbound SMTP from the host
+- provider-side sender/domain approval missing

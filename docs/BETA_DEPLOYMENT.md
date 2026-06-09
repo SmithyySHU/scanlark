@@ -116,6 +116,18 @@ Deployment requirements:
 If PDF export fails in a deployment but works locally, verify browser binaries
 and Chromium runtime dependencies first.
 
+Recommended validation commands:
+
+```bash
+npx playwright install chromium
+```
+
+On Linux hosts that do not already include Chromium dependencies:
+
+```bash
+npx playwright install --with-deps chromium
+```
+
 Beta API guardrails:
 
 - public tokenized report routes send `X-Robots-Tag: noindex, nofollow`
@@ -123,6 +135,10 @@ Beta API guardrails:
 - public PDF export is rate limited more strictly than public JSON views
 - PDF generation failures return client-safe errors; production responses do not
   expose Playwright internals or stack traces
+- PDF generation is bounded by explicit API and renderer timeouts; requests
+  should fail rather than hang indefinitely
+- after deploy, verify one authenticated PDF export and one shared PDF export
+  end-to-end before treating the environment as ready
 
 ## SMTP / Email Notes
 
@@ -130,6 +146,11 @@ Beta API guardrails:
 - live SMTP delivery only happens when `EMAIL_ENABLED=true`
 - when authenticated SMTP is used, `SMTP_USER` and `SMTP_PASS` must both be set
 - failed delivery should be investigated in API logs and `email_outbox`
+- `POST /sites/:siteId/notifications/test` is the existing test-email path
+- leave `EMAIL_ENABLED` unset or `false` in local/dev when only validating outbox
+  writes and notification flow
+- common SMTP failures in beta are missing credentials, blocked outbound SMTP,
+  missing TLS support on the chosen port, or absent sender/domain approval
 
 ## Worker Logging and Recovery
 
@@ -159,8 +180,65 @@ Beta API guardrails:
 - look for `event: "api.rate_limited"` in API logs when diagnosing request
   throttling
 
+## Failure Runbook
+
+### PDF export failing
+
+- verify the API is healthy on `/health` and `/ready`
+- verify Playwright browser binaries are installed
+- verify host OS Chromium dependencies are present
+- retry an authenticated PDF and a shared PDF
+- inspect API logs for PDF export failures with `scanRunId` and route context
+
+### SMTP failing
+
+- verify `EMAIL_ENABLED=true`
+- verify `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, and paired SMTP auth vars
+- use `POST /sites/:siteId/notifications/test`
+- check API logs for SMTP send failures
+- check `email_outbox` for attempted send records
+
+### Worker stopped
+
+- restart the worker
+- confirm API and worker share the same `API_INTERNAL_TOKEN`
+- inspect worker logs for loop or shutdown events
+- confirm scheduled scans and uptime checks resume
+
+### Stuck scan run or scan job
+
+- inspect `scan_jobs` and `scan_runs`
+- expired running jobs should be recovered by the worker reaper loop
+- if the worker was down, restart it and confirm recovery occurs
+- if scans still do not advance, inspect worker and API logs for the affected
+  `scanRunId`
+
+### Uptime alerts not sending
+
+- verify uptime monitoring is enabled for the site
+- verify site notification settings allow email
+- verify SMTP config and `EMAIL_ENABLED=true`
+- inspect API logs and `email_outbox`
+- inspect worker logs for uptime incident notify failures
+
+### Public share link returns 404
+
+- verify the share has not been revoked
+- verify the scan run is still the intended shared run
+- verify `REPORT_SHARE_TOKEN_SECRET` is correct for the environment
+- avoid logging or copying raw tokens into shared diagnostics
+
+### Migration failed
+
+- stop rollout
+- restore from backup if needed
+- fix the migration issue before starting API/worker on the new code
+- verify schema shape after rerun before resuming rollout
+
 ## Beta Smoke Checklist
 
+- apply migrations
+- verify required env vars for API and worker
 - create a real account with dev bypass off
 - log in through the normal auth flow
 - add a real site
@@ -176,5 +254,7 @@ Beta API guardrails:
 - request the shared PDF repeatedly and confirm the API eventually returns `429`
 - restart API and confirm `/health` and `/ready`
 - restart worker and confirm scheduled scans continue
+- inspect API and worker logs for rate limit, PDF, SMTP, worker, and recovery
+  events
 - stop the worker with `SIGTERM` and confirm it logs shutdown start, drains
   current work, and exits cleanly or times out explicitly
