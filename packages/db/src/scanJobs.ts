@@ -514,20 +514,58 @@ export async function requeueExpiredScanJobs(): Promise<ScanJobRow[]> {
   const client = await ensureConnected();
   const res = await client.query<ScanJobRow>(
     `
-      UPDATE scan_jobs
-      SET status = 'queued',
-          run_at = NOW(),
-          locked_at = NULL,
-          lock_expires_at = NULL,
-          last_error = CASE
-            WHEN last_error IS NULL THEN 'lock_expired_requeued'
-            ELSE last_error || E'\\nlock_expired_requeued'
-          END,
-          updated_at = NOW()
-      WHERE status = 'running'
-        AND lock_expires_at IS NOT NULL
-        AND lock_expires_at < NOW()
-      RETURNING *
+      WITH recovered AS (
+        UPDATE scan_jobs
+        SET status = CASE
+              WHEN attempts < max_attempts THEN 'queued'
+              ELSE 'failed'
+            END,
+            run_at = CASE
+              WHEN attempts < max_attempts THEN NOW()
+              ELSE run_at
+            END,
+            locked_at = NULL,
+            lock_expires_at = NULL,
+            last_error = CASE
+              WHEN attempts < max_attempts THEN
+                CASE
+                  WHEN last_error IS NULL THEN 'lock_expired_requeued'
+                  ELSE last_error || E'\\nlock_expired_requeued'
+                END
+              ELSE
+                CASE
+                  WHEN last_error IS NULL THEN 'lock_expired_failed_max_attempts'
+                  ELSE last_error || E'\\nlock_expired_failed_max_attempts'
+                END
+            END,
+            updated_at = NOW()
+        WHERE status = 'running'
+          AND lock_expires_at IS NOT NULL
+          AND lock_expires_at < NOW()
+        RETURNING *
+      ),
+      reset_runs AS (
+        UPDATE scan_runs r
+        SET status = CASE
+              WHEN recovered.status = 'queued' THEN 'queued'
+              ELSE 'failed'
+            END,
+            error_message = CASE
+              WHEN recovered.status = 'queued' THEN NULL
+              ELSE recovered.last_error
+            END,
+            finished_at = CASE
+              WHEN recovered.status = 'queued' THEN NULL
+              ELSE COALESCE(r.finished_at, NOW())
+            END,
+            updated_at = NOW()
+        FROM recovered
+        WHERE r.id = recovered.scan_run_id
+          AND r.status = 'in_progress'
+        RETURNING r.id
+      )
+      SELECT *
+      FROM recovered
     `,
   );
   return res.rows;

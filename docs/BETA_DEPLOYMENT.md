@@ -95,6 +95,13 @@ Production guidance:
 - worker and API must share the same `API_INTERNAL_TOKEN`
 - if scheduled jobs do not advance after restart, inspect worker logs and DB
   `scan_jobs` / `scan_runs` state
+- send `SIGTERM` or `SIGINT` for normal shutdown; the worker stops claiming new
+  scan jobs, scheduled scans, and uptime checks before exiting
+- the worker allows in-flight work to finish where practical, but forces exit
+  after its graceful shutdown timeout if a task does not return
+- after restart, expired running jobs are recovered by the reaper loop and their
+  associated `scan_runs` are reset from `in_progress` to `queued` or `failed`
+  based on remaining attempts
 
 ## Playwright / PDF Notes
 
@@ -116,6 +123,19 @@ and Chromium runtime dependencies first.
 - when authenticated SMTP is used, `SMTP_USER` and `SMTP_PASS` must both be set
 - failed delivery should be investigated in API logs and `email_outbox`
 
+## Worker Logging and Recovery
+
+- worker logs are structured JSON and include `event`, `message`, and relevant
+  IDs such as `jobId`, `siteId`, `scanRunId`, or `monitorId`
+- scan loop, scheduler loop, reaper loop, and uptime loop are supervised
+  independently; a failure in one loop is logged and does not stop the others
+- scan job lease expiry recovery is handled by the reaper loop
+- expired running jobs are requeued only while attempts remain; exhausted jobs
+  are marked failed instead of being retried forever
+- uptime check failures are logged per monitor and do not stop the uptime loop
+- notification request failures are logged with scan run or incident IDs; tokens
+  and secrets are not logged
+
 ## Beta Smoke Checklist
 
 - create a real account with dev bypass off
@@ -130,3 +150,5 @@ and Chromium runtime dependencies first.
 - create and revoke a share link
 - restart API and confirm `/health` and `/ready`
 - restart worker and confirm scheduled scans continue
+- stop the worker with `SIGTERM` and confirm it logs shutdown start, drains
+  current work, and exits cleanly or times out explicitly

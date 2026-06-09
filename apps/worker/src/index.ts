@@ -1,4 +1,3 @@
-import dotenv from "dotenv";
 import * as os from "node:os";
 import {
   cancelScanJob,
@@ -21,9 +20,8 @@ import {
 } from "@scanlark/db";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
 import { checkUptime } from "../../../packages/crawler/src/checkUptime";
+import { createLogger } from "./logger";
 import { workerRuntimeConfig } from "./runtimeConfig";
-
-dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const workerId = `${os.hostname()}-${process.pid}`;
 const IDLE_WAIT_MS = 1200;
@@ -34,11 +32,54 @@ const REAPER_TICK_MS = 120000;
 const STALE_QUEUED_JOB_MINUTES = 15;
 const UPTIME_TICK_MS = 60000;
 const UPTIME_BATCH_SIZE = 25;
+const SHUTDOWN_GRACE_MS = 30000;
+const LOOP_RESTART_DELAY_MS = 1000;
 const API_BASE_URL = workerRuntimeConfig.apiBaseUrl;
 const API_INTERNAL_TOKEN = workerRuntimeConfig.apiInternalToken;
+const logger = createLogger({
+  service: "scanlark-worker",
+  workerId,
+  pid: process.pid,
+  hostname: os.hostname(),
+});
+
+let shutdownRequested = false;
+let shutdownSignal: string | null = null;
+let shutdownPromise: Promise<void> | null = null;
+const sleepResolvers = new Set<() => void>();
+const activeOperations = new Set<Promise<unknown>>();
+let supervisedLoops: Promise<void>[] = [];
 
 function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  if (shutdownRequested) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      sleepResolvers.delete(wake);
+      resolve();
+    }, ms);
+    const wake = () => {
+      clearTimeout(timer);
+      sleepResolvers.delete(wake);
+      resolve();
+    };
+    sleepResolvers.add(wake);
+  });
+}
+
+function wakeSleeps() {
+  for (const wake of sleepResolvers) {
+    wake();
+  }
+}
+
+async function trackOperation<T>(_operation: string, fn: () => Promise<T>) {
+  const promise = fn();
+  activeOperations.add(promise);
+  try {
+    return await promise;
+  } finally {
+    activeOperations.delete(promise);
+  }
 }
 
 function logJobEvent(
@@ -46,13 +87,18 @@ function logJobEvent(
   job: { id: string; site_id: string; scan_run_id: string | null },
   details?: string,
 ) {
-  const suffix = details ? ` ${details}` : "";
-  console.log(
-    `[worker ${workerId}] ${event} job=${job.id} site=${job.site_id} run=${job.scan_run_id ?? "none"}${suffix}`,
-  );
+  logger.info("worker.scan_job", "Scan job event", {
+    jobId: job.id,
+    siteId: job.site_id,
+    scanRunId: job.scan_run_id,
+    status: event,
+    details,
+  });
 }
 
 async function processJob() {
+  if (shutdownRequested) return false;
+
   const job = await claimNextScanJob({
     workerId,
     leaseSeconds: CLAIM_LEASE_SECONDS,
@@ -97,8 +143,23 @@ async function processJob() {
     void extendScanJobLease(job.id, {
       leaseSeconds: CLAIM_LEASE_SECONDS,
     }).catch((err) => {
-      console.warn(
-        `[worker ${workerId}] lease heartbeat failed job=${job.id}`,
+      logger.warn(
+        "worker.scan_job.lease_heartbeat_failed",
+        "Lease heartbeat failed",
+        {
+          jobId: job.id,
+          siteId: job.site_id,
+          scanRunId: run.id,
+        },
+      );
+      logger.error(
+        "worker.scan_job.lease_heartbeat_failed.error",
+        "Lease heartbeat error",
+        {
+          jobId: job.id,
+          siteId: job.site_id,
+          scanRunId: run.id,
+        },
         err,
       );
     });
@@ -192,83 +253,149 @@ async function notifyScanRun(scanRunId: string) {
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.warn(
-        `[worker ${workerId}] notify failed ${res.status}: ${text.slice(0, 120)}`,
+      logger.warn(
+        "worker.scan_run_notify.failed",
+        "Scan run notify request failed",
+        {
+          scanRunId,
+          statusCode: res.status,
+          responseSnippet: text.slice(0, 120),
+        },
       );
     }
   } catch (err) {
-    console.warn(`[worker ${workerId}] notify error`, err);
+    logger.error(
+      "worker.scan_run_notify.error",
+      "Scan run notify request errored",
+      { scanRunId },
+      err,
+    );
   }
 }
 
 async function runLoop() {
-  console.log(`[worker ${workerId}] started`);
-  while (true) {
-    const didWork = await processJob();
-    if (!didWork) {
+  logger.info("worker.scan_loop.started", "Scan job loop started");
+  while (!shutdownRequested) {
+    try {
+      const didWork = await trackOperation("scan_job_tick", () => processJob());
+      if (!didWork) {
+        await sleep(IDLE_WAIT_MS);
+      }
+    } catch (err) {
+      logger.error(
+        "worker.scan_loop.tick_failed",
+        "Scan job loop tick failed",
+        {},
+        err,
+      );
       await sleep(IDLE_WAIT_MS);
     }
   }
+  logger.info("worker.scan_loop.stopped", "Scan job loop stopped");
 }
 
 async function reapLoop() {
-  console.log(`[reaper ${workerId}] started`);
-  while (true) {
-    const recovered = await requeueExpiredScanJobs();
-    for (const job of recovered) {
-      logJobEvent(
-        "abandoned-recovered",
-        job,
-        `attempts=${job.attempts}/${job.max_attempts}`,
+  logger.info("worker.reaper_loop.started", "Scan job reaper loop started");
+  while (!shutdownRequested) {
+    try {
+      const recovered = await trackOperation("scan_job_reaper_tick", () =>
+        requeueExpiredScanJobs(),
       );
-    }
-    const staleQueued = await recoverStaleQueuedScanJobs({
-      olderThanMinutes: STALE_QUEUED_JOB_MINUTES,
-    });
-    for (const job of staleQueued) {
-      logJobEvent("stale-queued-recovered", job);
+      for (const job of recovered) {
+        logJobEvent(
+          job.status === "failed" ? "abandoned-failed" : "abandoned-recovered",
+          job,
+          `attempts=${job.attempts}/${job.max_attempts}`,
+        );
+      }
+      const staleQueued = await trackOperation(
+        "stale_queued_job_recovery_tick",
+        () =>
+          recoverStaleQueuedScanJobs({
+            olderThanMinutes: STALE_QUEUED_JOB_MINUTES,
+          }),
+      );
+      for (const job of staleQueued) {
+        logJobEvent("stale-queued-recovered", job);
+      }
+    } catch (err) {
+      logger.error(
+        "worker.reaper_loop.tick_failed",
+        "Reaper loop tick failed",
+        {},
+        err,
+      );
     }
     await sleep(REAPER_TICK_MS);
   }
+  logger.info("worker.reaper_loop.stopped", "Scan job reaper loop stopped");
 }
 
 async function schedulerTick() {
+  if (shutdownRequested) return;
+
   const now = new Date();
   const dueSites = await getDueSites(25);
   let enqueued = 0;
   let skipped = 0;
 
   for (const site of dueSites) {
-    const result = await enqueueScheduledScanIfDue(site.id, now);
-    if (result.created) {
-      enqueued += 1;
-      console.log(
-        `[scheduler] enqueued site=${site.id} run=${result.scanRunId} next=${result.nextScheduledAt?.toISOString() ?? "none"}`,
-      );
-      continue;
-    }
+    if (shutdownRequested) break;
+    try {
+      const result = await enqueueScheduledScanIfDue(site.id, now);
+      if (result.created) {
+        enqueued += 1;
+        logger.info("worker.scheduler.enqueued", "Scheduled scan enqueued", {
+          siteId: site.id,
+          scanRunId: result.scanRunId,
+          jobId: result.jobId,
+          nextScheduledAt: result.nextScheduledAt?.toISOString() ?? null,
+        });
+        continue;
+      }
 
-    skipped += 1;
-    console.log(
-      `[scheduler] skipped site=${site.id} reason=${result.reason}${result.active?.scanRunId ? ` activeRun=${result.active.scanRunId}` : ""}${result.active?.jobId ? ` activeJob=${result.active.jobId}` : ""}`,
-    );
+      skipped += 1;
+      logger.info("worker.scheduler.skipped", "Scheduled scan skipped", {
+        siteId: site.id,
+        reason: result.reason,
+        activeScanRunId: result.active?.scanRunId ?? null,
+        activeJobId: result.active?.jobId ?? null,
+      });
+    } catch (err) {
+      skipped += 1;
+      logger.error(
+        "worker.scheduler.site_failed",
+        "Scheduled scan decision failed for site",
+        { siteId: site.id },
+        err,
+      );
+    }
   }
 
-  console.log(
-    `[scheduler] due=${dueSites.length} enqueued=${enqueued} skipped=${skipped}`,
-  );
+  logger.info("worker.scheduler.summary", "Scheduler tick completed", {
+    dueSites: dueSites.length,
+    enqueued,
+    skipped,
+    interruptedByShutdown: shutdownRequested,
+  });
 }
 
 async function runSchedulerLoop() {
-  console.log(`[scheduler ${workerId}] started`);
-  while (true) {
+  logger.info("worker.scheduler_loop.started", "Scheduler loop started");
+  while (!shutdownRequested) {
     try {
-      await schedulerTick();
+      await trackOperation("scheduler_tick", () => schedulerTick());
     } catch (err) {
-      console.error(`[scheduler ${workerId}] error`, err);
+      logger.error(
+        "worker.scheduler_loop.tick_failed",
+        "Scheduler loop tick failed",
+        {},
+        err,
+      );
     }
     await sleep(SCHEDULE_TICK_MS);
   }
+  logger.info("worker.scheduler_loop.stopped", "Scheduler loop stopped");
 }
 
 async function notifyUptimeIncident(
@@ -292,70 +419,194 @@ async function notifyUptimeIncident(
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.warn(
-        `[uptime ${workerId}] notify failed ${res.status}: ${text.slice(0, 120)}`,
+      logger.warn(
+        "worker.uptime_notify.failed",
+        "Uptime notification request failed",
+        {
+          incidentId,
+          kind,
+          statusCode: res.status,
+          responseSnippet: text.slice(0, 120),
+        },
       );
     }
   } catch (err) {
-    console.warn(`[uptime ${workerId}] notify error`, err);
+    logger.error(
+      "worker.uptime_notify.error",
+      "Uptime notification request errored",
+      { incidentId, kind },
+      err,
+    );
   }
 }
 
 async function uptimeTick() {
+  if (shutdownRequested) return;
+
   const monitors = await claimDueUptimeMonitors(UPTIME_BATCH_SIZE);
   if (monitors.length === 0) {
-    console.log("[uptime] due=0 processed=0");
+    logger.info("worker.uptime.summary", "Uptime tick completed", {
+      dueMonitors: 0,
+      processed: 0,
+    });
     return;
   }
 
+  let processed = 0;
   for (const monitor of monitors) {
+    if (shutdownRequested) {
+      logger.info(
+        "worker.uptime.interrupted",
+        "Uptime tick interrupted by shutdown",
+        {
+          processed,
+          claimed: monitors.length,
+        },
+      );
+      break;
+    }
+
     try {
       const result = await checkUptime(monitor.check_url);
       const recorded = await recordUptimeCheck(monitor.id, result);
-      console.log(
-        `[uptime] checked site=${monitor.site_id} settings=${monitor.id} status=${recorded.check.status} failures=${recorded.incident?.failure_count ?? 0}`,
-      );
+      processed += 1;
+      logger.info("worker.uptime.checked", "Uptime monitor checked", {
+        siteId: monitor.site_id,
+        monitorId: monitor.id,
+        status: recorded.check.status,
+        failureCount: recorded.incident?.failure_count ?? 0,
+      });
       if (recorded.shouldSendDownAlert && recorded.incident) {
         await notifyUptimeIncident(recorded.incident.id, "uptime_down");
       } else if (recorded.shouldSendRecoveryAlert && recorded.incident) {
         await notifyUptimeIncident(recorded.incident.id, "uptime_recovered");
       }
     } catch (err) {
-      console.error(
-        `[uptime ${workerId}] check failed site=${monitor.site_id} monitor=${monitor.id}`,
+      logger.error(
+        "worker.uptime.check_failed",
+        "Uptime monitor check failed",
+        {
+          siteId: monitor.site_id,
+          monitorId: monitor.id,
+          checkUrl: monitor.check_url,
+        },
         err,
       );
     }
   }
 
-  console.log(`[uptime] due=${monitors.length} processed=${monitors.length}`);
+  logger.info("worker.uptime.summary", "Uptime tick completed", {
+    dueMonitors: monitors.length,
+    processed,
+  });
 }
 
 async function runUptimeLoop() {
-  console.log(`[uptime ${workerId}] started`);
-  while (true) {
+  logger.info("worker.uptime_loop.started", "Uptime loop started");
+  while (!shutdownRequested) {
     try {
-      await uptimeTick();
+      await trackOperation("uptime_tick", () => uptimeTick());
     } catch (err) {
-      console.error(`[uptime ${workerId}] error`, err);
+      logger.error(
+        "worker.uptime_loop.tick_failed",
+        "Uptime loop tick failed",
+        {},
+        err,
+      );
     }
     await sleep(UPTIME_TICK_MS);
   }
+  logger.info("worker.uptime_loop.stopped", "Uptime loop stopped");
 }
 
-runLoop().catch((err) => {
-  console.error(`[worker ${workerId}] fatal`, err);
+async function superviseLoop(name: string, runner: () => Promise<void>) {
+  while (!shutdownRequested) {
+    try {
+      await runner();
+      if (!shutdownRequested) {
+        logger.warn("worker.loop.exited", "Worker loop exited unexpectedly", {
+          loop: name,
+        });
+      }
+    } catch (err) {
+      logger.error(
+        "worker.loop.crashed",
+        "Worker loop crashed",
+        { loop: name },
+        err,
+      );
+    }
+    if (!shutdownRequested) {
+      await sleep(LOOP_RESTART_DELAY_MS);
+    }
+  }
+}
+
+async function shutdown(signal: string) {
+  if (shutdownPromise) return shutdownPromise;
+
+  shutdownRequested = true;
+  shutdownSignal = signal;
+  wakeSleeps();
+  logger.warn("worker.shutdown.started", "Worker shutdown requested", {
+    signal,
+    activeOperations: activeOperations.size,
+  });
+
+  shutdownPromise = (async () => {
+    const timeout = new Promise<"timeout">((resolve) => {
+      setTimeout(() => resolve("timeout"), SHUTDOWN_GRACE_MS);
+    });
+    const settled = Promise.allSettled(supervisedLoops).then(
+      () => "completed" as const,
+    );
+    const result = await Promise.race([settled, timeout]);
+
+    if (result === "timeout") {
+      logger.error("worker.shutdown.timed_out", "Worker shutdown timed out", {
+        signal: shutdownSignal,
+        activeOperations: activeOperations.size,
+        graceMs: SHUTDOWN_GRACE_MS,
+      });
+      process.exit(1);
+      return;
+    }
+
+    logger.info("worker.shutdown.completed", "Worker shutdown completed", {
+      signal: shutdownSignal,
+      activeOperations: activeOperations.size,
+    });
+    process.exit(0);
+  })();
+
+  return shutdownPromise;
+}
+
+function registerSignalHandlers() {
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+}
+
+async function main() {
+  registerSignalHandlers();
+  logger.info("worker.started", "Worker started", {
+    nodeEnv: workerRuntimeConfig.nodeEnv,
+    apiBaseUrl: API_BASE_URL,
+  });
+  supervisedLoops = [
+    superviseLoop("scan", runLoop),
+    superviseLoop("reaper", reapLoop),
+    superviseLoop("scheduler", runSchedulerLoop),
+    superviseLoop("uptime", runUptimeLoop),
+  ];
+  await Promise.all(supervisedLoops);
+}
+
+main().catch((err) => {
+  logger.error("worker.fatal", "Worker process failed", {}, err);
   process.exit(1);
-});
-
-reapLoop().catch((err) => {
-  console.error(`[reaper ${workerId}] fatal`, err);
-});
-
-runSchedulerLoop().catch((err) => {
-  console.error(`[scheduler ${workerId}] fatal`, err);
-});
-
-runUptimeLoop().catch((err) => {
-  console.error(`[uptime ${workerId}] fatal`, err);
 });
