@@ -2,56 +2,73 @@ import React, { useEffect, useState } from "react";
 
 type MarketingPageProps = {
   isAuthenticated: boolean;
-  onOpenApp: () => void;
-  onOpenLogin: () => void;
+  primaryLabel: string;
+  secondaryLabel: string;
+  onOpenPrimary: () => void;
+  onOpenSecondary: () => void;
   onOpenLearn: () => void;
+  onOpenAccount?: () => void;
 };
 
 const featureCards = [
   {
-    title: "Health dashboard",
-    body: "See overall health, key categories, issue movement, and the next action without opening raw tables first.",
+    title: "Reports and scan history",
+    body: "Keep a timeline of runs with trend details, score movement, and customer-friendly history context.",
   },
   {
-    title: "Reports and evidence",
-    body: "Keep detailed evidence, issue tracking, diagnostics, and raw link findings in structured scan reports.",
+    title: "Website issue detection",
+    body: "Catch broken links, SEO gaps, robots/sitemap problems, SSL and security-header findings, and speed/weight checks.",
   },
   {
     title: "Change detection",
-    body: "Track what is new, what persists, and what got fixed between completed scans.",
+    body: "See what is new, what is still present, and what changed between completed scans.",
   },
   {
-    title: "Alerts and summaries",
-    body: "Use SMTP delivery, summaries, and notification events to keep stakeholders informed.",
+    title: "Uptime and availability",
+    body: "Monitor whether key pages remain reachable and keep an eye on status trends for planned checks.",
+  },
+  {
+    title: "Shareable reports and PDF export",
+    body: "Share clean report links and export PDF outputs for stakeholders when that option is enabled.",
+  },
+  {
+    title: "Scanlark Learn",
+    body: "Use practical guides for interpreting issue categories, prioritizing fixes, and publishing client-facing summaries.",
   },
 ];
 
 const faqItems = [
   {
     q: "What does Scanlark check?",
-    a: "Scanlark monitors external site health, trust signals, issue changes, and report evidence using passive website scans.",
+    a: "Scanlark performs passive external checks of public website signals: broken links, SEO basics, robots/sitemap, SSL/HTTPS, security headers, speed basics, issue changes, and scheduled uptime checks.",
   },
   {
     q: "How often can scans run?",
-    a: "Users can run manual scans and configure scheduled daily, weekly, or monthly scans.",
+    a: "You can run scans manually or on a daily, weekly, or monthly schedule for each site.",
   },
   {
     q: "What happens when issues change?",
     a: "Completed scans compare against the previous baseline so new, existing, and resolved issues stay visible.",
   },
   {
-    q: "What does passive external monitoring mean?",
-    a: "Scanlark checks what a public visitor or crawler can observe. It does not install agents or scan internal systems.",
+    q: "What does passive monitoring mean?",
+    a: "Scanlark checks public website signals from outside. It does not log in, submit forms, scan ports, attack, or exploit websites.",
+  },
+  {
+    q: "What is not in the current MVP?",
+    a: "We do not advertise billing/subscription tiers, teams, client portals, white-label, or private authenticated/internal security testing on this landing page.",
   },
 ];
 
 export const MarketingPage: React.FC<MarketingPageProps> = ({
   isAuthenticated,
-  onOpenApp,
-  onOpenLogin,
+  primaryLabel,
+  secondaryLabel,
+  onOpenPrimary,
+  onOpenSecondary,
   onOpenLearn,
+  onOpenAccount,
 }) => {
-  const primaryLabel = isAuthenticated ? "Open dashboard" : "Start monitoring";
   const finalIssueCount = 18;
   const [animatedIssueCount, setAnimatedIssueCount] = useState(0);
 
@@ -137,13 +154,16 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             <button className="ghost-button" onClick={onOpenLearn}>
               Learn
             </button>
-            <button className="ghost-button">Pricing</button>
-            {!isAuthenticated && (
-              <button className="ghost-button" onClick={onOpenLogin}>
-                Login
+            {isAuthenticated && onOpenAccount ? (
+              <button className="ghost-button" onClick={onOpenAccount}>
+                Account
+              </button>
+            ) : (
+              <button className="ghost-button" onClick={onOpenSecondary}>
+                {secondaryLabel}
               </button>
             )}
-            <button className="primary-button" onClick={onOpenApp}>
+            <button className="primary-button" onClick={onOpenPrimary}>
               {primaryLabel}
             </button>
           </div>
@@ -151,44 +171,28 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
 
         <section className="marketing-hero">
           <div className="marketing-hero__content">
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: "8px",
-                width: "fit-content",
-                padding: "8px 12px",
-                borderRadius: "999px",
-                background: "rgba(15, 23, 42, 0.36)",
-                border: "1px solid var(--border)",
-                fontSize: "12px",
-                color: "var(--text-muted)",
-              }}
-            >
-              External-only monitoring
-            </div>
             <div className="marketing-hero__headline">
-              Monitor site health with clear reports, alerts, and change
+              Monitor public website health with clean reports and change
               tracking.
             </div>
             <div className="marketing-hero__body">
-              Scanlark checks your public website like a careful external
-              visitor. Track trust signals, scan issues, and report history
-              without mixing marketing pages with operational monitoring
-              workflows.
+              Scanlark checks your public website signals from the outside and
+              helps you track issues, score movement, and report outputs. It
+              does not log in, submit forms, scan ports, attack, or exploit
+              websites.
             </div>
             <div className="marketing-hero__actions">
               <button
                 className="primary-button primary-button--large"
-                onClick={onOpenApp}
+                onClick={onOpenPrimary}
               >
                 {primaryLabel}
               </button>
               <button
                 className="secondary-button primary-button--large"
-                onClick={onOpenLogin}
+                onClick={onOpenSecondary}
               >
-                View product
+                {secondaryLabel}
               </button>
               <button
                 className="ghost-button primary-button--large"
@@ -201,7 +205,9 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
               {[
                 "Manual and scheduled scans",
                 "Issue change detection",
-                "SMTP alerts and summaries",
+                "Email alerts and in-app notifications",
+                "Client and site metadata context",
+                "Shareable report links",
                 "Raw evidence in reports",
               ].map((item) => (
                 <div key={item} className="marketing-chip">
@@ -259,8 +265,9 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
                   ["SEO basics", "4 issues"],
                   ["Robots / sitemap", "2 issues"],
                   ["SSL / HTTPS", "1 warning"],
-                  ["Security setup", "1 issue"],
+                  ["Security headers", "1 issue"],
                   ["Speed basics", "1 warning"],
+                  ["Uptime", "Stable"],
                 ].map(([title, status]) => (
                   <div key={title} className="marketing-category-card">
                     <div>{title}</div>
@@ -332,7 +339,7 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
               "Add a site and set the canonical URL.",
               "Run a scan now or configure the schedule.",
               "Review issues, diagnostics, and score movement.",
-              "Receive alerts and summaries through your configured SMTP flow.",
+              "Receive email alerts and in-app notifications through your settings.",
             ].map((item, index) => (
               <div key={item} className="marketing-step-card">
                 <div className="marketing-step-card__index">0{index + 1}</div>
@@ -347,29 +354,22 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             <div className="marketing-kicker">Boundaries</div>
             <h2>Clear passive scope, clear expectations.</h2>
             <ul>
-              <li>External-only monitoring of public website signals</li>
-              <li>No uptime agent or synthetic browser stack in this phase</li>
-              <li>No internal vulnerability scanning</li>
-              <li>Detailed evidence stays in report artifacts</li>
+              <li>Only passive checks of public URLs are in scope.</li>
+              <li>
+                Mixed-content checks are shown when present in scan results.
+              </li>
+              <li>
+                No private authenticated scanning or exploit testing is
+                presented.
+              </li>
+              <li>
+                No billing, team management, client portal, or white-label
+                claims.
+              </li>
+              <li>
+                No desktop notifications are advertised on the landing page.
+              </li>
             </ul>
-          </div>
-          <div className="marketing-pricing-card">
-            <div className="marketing-kicker">Pricing preview</div>
-            <h2>Commercial structure later, product clarity now.</h2>
-            <div className="marketing-pricing-grid">
-              <div>
-                <strong>Starter</strong>
-                <span>Single-site monitoring, reports, alerts</span>
-              </div>
-              <div>
-                <strong>Growth</strong>
-                <span>More sites, more history, more team workflows</span>
-              </div>
-              <div>
-                <strong>Enterprise</strong>
-                <span>Expanded reporting, governance, and support</span>
-              </div>
-            </div>
           </div>
         </section>
 
@@ -400,17 +400,18 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
               Scanlark
             </div>
             <div style={{ color: "var(--muted)", fontSize: "13px" }}>
-              Premium external monitoring for site health and trust signals.
+              Public website monitoring for site health, reliability, and trust
+              signals.
             </div>
           </div>
           <div className="marketing-footer__actions">
             <button className="ghost-button" onClick={onOpenLearn}>
               Learn
             </button>
-            <button className="ghost-button" onClick={onOpenLogin}>
-              Login
+            <button className="ghost-button" onClick={onOpenSecondary}>
+              {secondaryLabel}
             </button>
-            <button className="primary-button" onClick={onOpenApp}>
+            <button className="primary-button" onClick={onOpenPrimary}>
               {primaryLabel}
             </button>
           </div>

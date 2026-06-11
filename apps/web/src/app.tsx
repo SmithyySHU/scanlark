@@ -10,6 +10,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { createPortal } from "react-dom";
 import { AuthPage } from "./components/AuthPage";
 import {
   CategoryStatusCard,
@@ -28,7 +29,6 @@ import {
   type LearnArticleCategory,
 } from "./learnArticles";
 import { ScanProgressHero } from "./components/ScanProgressHero";
-import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
   | "queued"
@@ -60,11 +60,13 @@ type FixQueueView = "results" | "changes" | "fix_queue";
 type AppRoute =
   | "landing"
   | "login"
+  | "onboarding"
+  | "new_site"
   | "app"
   | "report"
   | "shared_report"
   | "learn";
-type AppSection = "dashboard" | "reports" | "site_settings";
+type AppSection = "dashboard" | "reports" | "site_settings" | "account";
 type LearnCategoryFilter = LearnArticleCategory | "all";
 type SiteSettingsSection =
   | "general"
@@ -135,6 +137,72 @@ interface AuthUser {
   name?: string;
 }
 
+type AppNotificationSeverity = "info" | "success" | "warning" | "critical";
+type AppNotificationKind =
+  | "scan_completed"
+  | "scan_failed"
+  | "high_priority_issues"
+  | "uptime_down"
+  | "uptime_recovered";
+
+interface AppNotification {
+  id: string;
+  user_id: string;
+  site_id: string | null;
+  scan_run_id: string | null;
+  kind: AppNotificationKind;
+  severity: AppNotificationSeverity;
+  title: string;
+  message: string;
+  action_url: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+interface NotificationsResponse {
+  notifications: AppNotification[];
+}
+
+interface UnreadNotificationsResponse {
+  unreadCount: number;
+}
+
+interface ReadNotificationResponse {
+  notification: AppNotification;
+  unreadCount: number;
+}
+
+interface MarkAllNotificationsReadResponse {
+  updatedCount: number;
+  unreadCount: number;
+  readAt: string | null;
+}
+
+type UserNotificationPreferenceField =
+  | "inAppEnabled"
+  | "scanCompletedEnabled"
+  | "scanFailedEnabled"
+  | "highPriorityIssuesEnabled"
+  | "uptimeDownEnabled"
+  | "uptimeRecoveredEnabled"
+  | "systemNoticesEnabled";
+
+interface UserNotificationPreferences {
+  inAppEnabled: boolean;
+  scanCompletedEnabled: boolean;
+  scanFailedEnabled: boolean;
+  highPriorityIssuesEnabled: boolean;
+  uptimeDownEnabled: boolean;
+  uptimeRecoveredEnabled: boolean;
+  systemNoticesEnabled: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+interface UserNotificationPreferencesResponse {
+  preferences: UserNotificationPreferences;
+}
+
 interface SitesResponse {
   userId?: string;
   count: number;
@@ -153,6 +221,16 @@ interface ScanRunSummary {
   total_links: number;
   checked_links: number;
   broken_links: number;
+  blocked_links?: number;
+  no_response_links?: number;
+  score?: number | null;
+  overall_score?: number | null;
+  open_issues?: number;
+  new_issues?: number;
+  resolved_issues?: number;
+  openIssues?: number;
+  newIssues?: number;
+  resolvedIssues?: number;
   issue_generation_status?: "pending" | "completed" | "failed";
   issue_generation_error?: string | null;
 }
@@ -762,22 +840,53 @@ type ScheduleEventPayload = {
   last_scheduled_at: string | null;
 };
 
-type SsePayload = ScanEventPayload | ScheduleEventPayload;
+type NotificationCreatedEventPayload = {
+  type: "notification_created";
+  user_id: string;
+  notification: AppNotification;
+  unread_count: number;
+};
+
+type NotificationCountUpdatedEventPayload = {
+  type: "notification_count_updated";
+  user_id: string;
+  unread_count: number;
+};
+
+type SsePayload =
+  | ScanEventPayload
+  | ScheduleEventPayload
+  | NotificationCreatedEventPayload
+  | NotificationCountUpdatedEventPayload;
 
 const API_BASE = "http://localhost:3001";
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const MAX_HISTORY_RESULTS = 100;
+const DASHBOARD_HISTORY_INITIAL_ROWS = 10;
 const REPORT_INITIAL_VISIBLE_ROWS = 10;
 const REPORT_OK_INITIAL_VISIBLE_ROWS = 5;
 const REPORT_VISIBLE_ROWS_INCREMENT = 10;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
+const NOTIFICATION_REFRESH_INTERVAL_MS = 30000;
+const DEFAULT_USER_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
+  inAppEnabled: true,
+  scanCompletedEnabled: true,
+  scanFailedEnabled: true,
+  highPriorityIssuesEnabled: true,
+  uptimeDownEnabled: true,
+  uptimeRecoveredEnabled: true,
+  systemNoticesEnabled: true,
+  createdAt: null,
+  updatedAt: null,
+};
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const SAMPLE_SITE_URL = "https://example.com";
 const SAMPLE_SITE_NAME = "Sample site";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
+const SITE_SETUP_STORAGE_PREFIX = "site_setup:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
 const COMMON_HOST_SUFFIX_WORDS = [
   "agency",
@@ -985,10 +1094,55 @@ function formatDate(value: string | null) {
   return d.toLocaleString();
 }
 
-function percentBroken(total: number, broken: number) {
-  if (!total) return "0.0%";
-  const p = (broken / total) * 100;
-  return `${p.toFixed(1)}%`;
+type RunMetricAvailability = "ready" | "pending" | "not_available";
+
+function getRunMetricAvailability(run: ScanRunSummary): RunMetricAvailability {
+  if (run.status === "completed") {
+    if (run.issue_generation_status === "completed") return "ready";
+    if (run.issue_generation_status === "failed") return "not_available";
+    return "pending";
+  }
+
+  if (run.status === "failed" || run.status === "cancelled") {
+    return "not_available";
+  }
+
+  return "pending";
+}
+
+function formatRunMetricValue(
+  run: ScanRunSummary,
+  value: number | string | null | undefined,
+  options?: { asPercent?: boolean },
+) {
+  const availability = getRunMetricAvailability(run);
+
+  if (availability === "pending") {
+    return "Pending";
+  }
+
+  if (availability === "not_available") {
+    return "Not available";
+  }
+
+  if (value == null) {
+    return "Not available";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return options?.asPercent ? `${value}%` : String(value);
+}
+
+function renderRunMetricPill(label: string, value: string | number) {
+  return (
+    <span className="dashboard-run-metric-pill">
+      <span>{label}</span>
+      <span>{value}</span>
+    </span>
+  );
 }
 
 function progressPercent(checked: number, total: number) {
@@ -1670,6 +1824,26 @@ function runStatusTone(status: string | null | undefined) {
   return "neutral";
 }
 
+const RUN_STATUS_LABELS: Record<string, string> = {
+  completed: "Completed",
+  in_progress: "Running",
+  running: "Running",
+  queued: "Queued",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  pending: "Pending",
+};
+
+function formatRunStatusLabel(status: string | null | undefined) {
+  const normalized = status?.trim().toLowerCase();
+  if (!normalized) return "Unknown";
+  if (RUN_STATUS_LABELS[normalized]) return RUN_STATUS_LABELS[normalized];
+  return normalized
+    .split("_")
+    .map((chunk) => `${chunk[0]?.toUpperCase() ?? ""}${chunk.slice(1)}`)
+    .join(" ");
+}
+
 function formatDuration(
   start: string | null | undefined,
   end: string | null | undefined,
@@ -1794,9 +1968,18 @@ function getReportScanRunIdFromLocation() {
   return null;
 }
 
+function normalizeDashboardCompatPath(pathname: string) {
+  const path = pathname.replace(/\/+$/, "") || "/";
+  if (path === "/app") return "/dashboard";
+  if (path.startsWith("/app/")) return `/dashboard${path.slice(4)}`;
+  return path;
+}
+
 function getSharedReportTokenFromLocation() {
   if (typeof window === "undefined") return null;
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
   if (!path.startsWith("/shared-reports/")) return null;
   const rawToken = path.slice("/shared-reports/".length);
   return rawToken ? decodeURIComponent(rawToken) : null;
@@ -1804,21 +1987,19 @@ function getSharedReportTokenFromLocation() {
 
 function getAppSectionFromLocation(): AppSection {
   if (typeof window === "undefined") return "dashboard";
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
   if (
     path === "/dashboard/settings" ||
-    path.startsWith("/dashboard/settings/") ||
-    path === "/app/settings" ||
-    path.startsWith("/app/settings/")
+    path.startsWith("/dashboard/settings/")
   ) {
     return "site_settings";
   }
-  if (
-    path === "/dashboard/reports" ||
-    path.startsWith("/dashboard/reports/") ||
-    path === "/app/reports" ||
-    path.startsWith("/app/reports/")
-  ) {
+  if (path === "/dashboard/account" || path.startsWith("/dashboard/account/")) {
+    return "account";
+  }
+  if (path === "/dashboard/reports" || path.startsWith("/dashboard/reports/")) {
     return "reports";
   }
   return "dashboard";
@@ -1826,20 +2007,25 @@ function getAppSectionFromLocation(): AppSection {
 
 function getRouteFromLocation(): AppRoute {
   if (typeof window === "undefined") return "landing";
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
   if (path === "/" || path === "/landing") return "landing";
   if (path === "/login") return "login";
+  if (path === "/onboarding") return "onboarding";
+  if (path === "/sites/new") return "new_site";
   if (path === "/report") return "report";
   if (path.startsWith("/shared-reports/")) return "shared_report";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
-  if (path === "/app" || path.startsWith("/app/")) return "app";
   if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
   return "app";
 }
 
 function getLearnSlugFromLocation() {
   if (typeof window === "undefined") return null;
-  const path = window.location.pathname.replace(/\/+$/, "") || "/";
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
   if (path === "/learn") return null;
   if (!path.startsWith("/learn/")) return null;
   const rawSlug = path.slice("/learn/".length);
@@ -1849,6 +2035,19 @@ function getLearnSlugFromLocation() {
   } catch {
     return rawSlug;
   }
+}
+
+function resolveViewMode(
+  nextRoute: AppRoute,
+  nextReportId: string | null,
+  nextSharedToken: string | null,
+  nextIsSharedReportPath = false,
+): "dashboard" | "report" {
+  return (nextRoute === "report" && !!nextReportId) ||
+    (nextRoute === "shared_report" && !!nextSharedToken) ||
+    nextIsSharedReportPath
+    ? "report"
+    : "dashboard";
 }
 
 function getErrorMessage(err: unknown, fallback: string) {
@@ -2176,6 +2375,7 @@ function buildLearnArticlePath(slug: string) {
 function buildAppSectionPath(section: AppSection) {
   if (section === "reports") return "/dashboard/reports";
   if (section === "site_settings") return "/dashboard/settings";
+  if (section === "account") return "/dashboard/account";
   return "/dashboard";
 }
 
@@ -2562,6 +2762,12 @@ const App: React.FC = () => {
   const dashboardCompletionPollTimerRef = useRef<number | null>(null);
   const dashboardCompletionPollKeyRef = useRef<string | null>(null);
   const dashboardCompletionPollAttemptsRef = useRef(0);
+  const reportLinkSourcePageCacheRef = useRef<Map<string, string | null>>(
+    new Map(),
+  );
+  const reportIgnoredLinkSourcePageCacheRef = useRef<
+    Map<string, string | null>
+  >(new Map());
   const lastRunStatusRef = useRef<{
     id: string | null;
     status: ScanStatus | null;
@@ -2604,8 +2810,10 @@ const App: React.FC = () => {
   const [siteInternalNotesDraft, setSiteInternalNotesDraft] = useState("");
   const [siteDetailsSaving, setSiteDetailsSaving] = useState(false);
   const [siteDetailsError, setSiteDetailsError] = useState<string | null>(null);
-  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingRequired, setOnboardingRequired] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
+  const [setupSiteId, setSetupSiteId] = useState<string | null>(null);
+  const setupRouteRef = useRef<AppRoute | null>(null);
   const [onboardingSiteUrl, setOnboardingSiteUrl] = useState("");
   const [onboardingSiteDisplayName, setOnboardingSiteDisplayName] =
     useState("");
@@ -2648,9 +2856,16 @@ const App: React.FC = () => {
     getAppSectionFromLocation(),
   );
   const [viewMode, setViewMode] = useState<"dashboard" | "report">(() =>
-    getReportScanRunIdFromLocation() || getSharedReportTokenFromLocation()
-      ? "report"
-      : "dashboard",
+    resolveViewMode(
+      getRouteFromLocation(),
+      getReportScanRunIdFromLocation(),
+      getSharedReportTokenFromLocation(),
+      typeof window === "undefined"
+        ? false
+        : window.location.pathname
+            .replace(/\/+$/, "")
+            .startsWith("/shared-reports"),
+    ),
   );
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
     getReportScanRunIdFromLocation(),
@@ -2715,6 +2930,15 @@ const App: React.FC = () => {
   const [reportShareSaving, setReportShareSaving] = useState(false);
   const [reportShareError, setReportShareError] = useState<string | null>(null);
   const [reportSharePanelOpen, setReportSharePanelOpen] = useState(false);
+  const [workspaceTopPriorityIssues, setWorkspaceTopPriorityIssues] = useState<
+    ScanIssue[]
+  >([]);
+  const [
+    workspaceTopPriorityIssuesLoading,
+    setWorkspaceTopPriorityIssuesLoading,
+  ] = useState(false);
+  const [workspaceTopPriorityIssuesError, setWorkspaceTopPriorityIssuesError] =
+    useState<string | null>(null);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -2783,6 +3007,10 @@ const App: React.FC = () => {
     () => getSiteUrlValidationError(newSiteUrl),
     [newSiteUrl],
   );
+  const onboardingSiteUrlValidationError = useMemo(
+    () => getSiteUrlValidationError(onboardingSiteUrl),
+    [onboardingSiteUrl],
+  );
 
   const [deletingSiteId, setDeletingSiteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -2822,6 +3050,38 @@ const App: React.FC = () => {
   const [detailsLinkId, setDetailsLinkId] = useState<string | null>(null);
   const [recheckLoadingId, setRecheckLoadingId] = useState<string | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
+  const [notificationMenuPosition, setNotificationMenuPosition] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(
+    null,
+  );
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const [accountNotificationPreferences, setAccountNotificationPreferences] =
+    useState<UserNotificationPreferences>(
+      DEFAULT_USER_NOTIFICATION_PREFERENCES,
+    );
+  const [
+    accountNotificationPreferencesLoading,
+    setAccountNotificationPreferencesLoading,
+  ] = useState(false);
+  const [
+    accountNotificationPreferencesSaving,
+    setAccountNotificationPreferencesSaving,
+  ] = useState(false);
+  const [
+    accountNotificationPreferencesSavedAt,
+    setAccountNotificationPreferencesSavedAt,
+  ] = useState<string | null>(null);
+  const [
+    accountNotificationPreferencesError,
+    setAccountNotificationPreferencesError,
+  ] = useState<string | null>(null);
   const [addSiteOpen, setAddSiteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [ignoreRules, setIgnoreRules] = useState<IgnoreRule[]>([]);
@@ -2876,6 +3136,13 @@ const App: React.FC = () => {
     "all" | "new_issue" | "fixed" | "changed" | "added" | "removed"
   >("all");
   const [actionMenuOpenId, setActionMenuOpenId] = useState<string | null>(null);
+  const [actionMenuPosition, setActionMenuPosition] = useState<{
+    top: number;
+    left: number;
+    placement: "above" | "below";
+    maxHeight: number;
+  } | null>(null);
+  const [runActionBusyId, setRunActionBusyId] = useState<string | null>(null);
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteTargetUrl, setNoteTargetUrl] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -2902,10 +3169,15 @@ const App: React.FC = () => {
   const onboardingStorageKey = authUser
     ? getStorageKey(ONBOARDING_STORAGE_PREFIX, authUser.id)
     : null;
+  const siteSetupStorageKey = authUser
+    ? getStorageKey(SITE_SETUP_STORAGE_PREFIX, authUser.id)
+    : null;
   const siteNamesStorageKey = authUser
     ? getStorageKey(SITE_NAME_STORAGE_PREFIX, authUser.id)
     : null;
   const showLocalTimeZone = localTimeZone && localTimeZone !== "UTC";
+  const canAddSite = true;
+  const limitReason: string | null = null;
 
   useEffect(() => {
     selectedSiteIdRef.current = selectedSiteId;
@@ -2930,19 +3202,35 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handlePopState = () => {
+      const currentPathname =
+        window.location.pathname.replace(/\/+$/, "") || "/";
+      const normalizedPath = normalizeDashboardCompatPath(currentPathname);
+      const { search, hash } = window.location;
+      if (currentPathname !== normalizedPath) {
+        window.history.replaceState(
+          {},
+          "",
+          `${normalizedPath}${search}${hash}`,
+        );
+      }
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
       const nextSharedToken = getSharedReportTokenFromLocation();
+      const isSharedReportPath = window.location.pathname
+        .replace(/\/+$/, "")
+        .startsWith("/shared-reports");
       setRoute(nextRoute);
       setAppSection(getAppSectionFromLocation());
       setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
       setSharedReportToken(nextSharedToken);
       setViewMode(
-        (nextRoute === "report" && nextReportId) ||
-          (nextRoute === "shared_report" && nextSharedToken)
-          ? "report"
-          : "dashboard",
+        resolveViewMode(
+          nextRoute,
+          nextReportId,
+          nextSharedToken,
+          isSharedReportPath,
+        ),
       );
     };
     window.addEventListener("popstate", handlePopState);
@@ -2961,8 +3249,17 @@ const App: React.FC = () => {
   useEffect(() => {
     if (typeof window === "undefined" || route !== "app") return;
     const { pathname, search, hash } = window.location;
-    if (pathname !== "/app" && !pathname.startsWith("/app/")) return;
-    const dashboardPath = pathname.replace(/^\/app(?=\/|$)/, "/dashboard");
+    const normalizedPath = normalizeDashboardCompatPath(
+      pathname.replace(/\/+$/, "") || "/",
+    );
+    if (!normalizedPath.startsWith("/dashboard")) return;
+    const dashboardPath = normalizedPath;
+    if (
+      dashboardPath === pathname.replace(/\/+$/, "") ||
+      pathname === dashboardPath
+    ) {
+      return;
+    }
     window.history.replaceState({}, "", `${dashboardPath}${search}${hash}`);
   }, [route]);
 
@@ -2991,14 +3288,56 @@ const App: React.FC = () => {
   }, [userMenuOpen]);
 
   useEffect(() => {
+    if (!notificationMenuOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-notification-menu]")) return;
+      setNotificationMenuOpen(false);
+    };
+    const closeMenu = () => {
+      setNotificationMenuOpen(false);
+      setNotificationMenuPosition(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [notificationMenuOpen]);
+
+  useEffect(() => {
     if (!actionMenuOpenId) return;
     const handleClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-action-menu]")) return;
       setActionMenuOpenId(null);
+      setActionMenuPosition(null);
+    };
+    const closeMenu = () => {
+      setActionMenuOpenId(null);
+      setActionMenuPosition(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
     };
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("resize", closeMenu);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("resize", closeMenu);
+    };
   }, [actionMenuOpenId]);
 
   const pinnedRunId = activeRunId ?? selectedRunId;
@@ -4596,7 +4935,10 @@ const App: React.FC = () => {
   const reportIssueSummaryPending =
     reportRun?.status === "completed" &&
     reportRun.issue_generation_status !== "completed";
-  const topPriorityIssues = useMemo(() => {
+  function getIssuePriorityRank(
+    issues: ScanIssue[] | null,
+    limit = 4,
+  ): ScanIssue[] {
     const severityRank = (severity: IssueSeverity) => {
       if (severity === "critical") return 0;
       if (severity === "high") return 1;
@@ -4604,6 +4946,7 @@ const App: React.FC = () => {
       if (severity === "low") return 3;
       return 4;
     };
+
     const changeRank = (
       changeStatus: Exclude<IssueChangeStatus, "resolved"> | null,
     ) => {
@@ -4612,7 +4955,7 @@ const App: React.FC = () => {
       return 2;
     };
 
-    return [...reportIssues.issues]
+    return [...(issues ?? [])]
       .sort((a, b) => {
         const severityDiff =
           severityRank(a.severity) - severityRank(b.severity);
@@ -4625,8 +4968,12 @@ const App: React.FC = () => {
           new Date(a.last_seen_at).getTime()
         );
       })
-      .slice(0, 4);
-  }, [reportIssues.issues]);
+      .slice(0, limit);
+  }
+  const topPriorityIssues = useMemo(
+    () => getIssuePriorityRank(reportIssues.issues, 4),
+    [reportIssues.issues],
+  );
   const reportTechnicalDiagnosticsNeedsAttention =
     !!reportRun?.issue_generation_error ||
     reportRun?.issue_generation_status === "failed" ||
@@ -4651,7 +4998,7 @@ const App: React.FC = () => {
   const reportDisplayName =
     reportSiteSnapshot?.report_display_name ??
     reportSiteSnapshot?.site_display_name ??
-    selectedSiteName;
+    null;
   const reportClientName = reportSiteSnapshot?.client_name ?? null;
   const selectedSiteHost = selectedSite
     ? (() => {
@@ -4662,6 +5009,26 @@ const App: React.FC = () => {
         }
       })()
     : null;
+  const setupTargetSite =
+    route === "new_site"
+      ? setupSiteId
+        ? (sites.find((site) => site.id === setupSiteId) ?? null)
+        : null
+      : selectedSite;
+  const setupTargetSiteName = getSiteDisplayName(setupTargetSite);
+  const setupTargetSiteHost = setupTargetSite
+    ? (() => {
+        try {
+          return trimDisplayHost(new URL(setupTargetSite.url).hostname);
+        } catch {
+          return setupTargetSite.url.replace(/^https?:\/\//i, "");
+        }
+      })()
+    : null;
+  const setupTargetRun =
+    setupTargetSite && selectedRun?.site_id === setupTargetSite.id
+      ? selectedRun
+      : null;
   const currentLearnArticle = useMemo(
     () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
     [learnSlug],
@@ -5112,8 +5479,10 @@ const App: React.FC = () => {
     history.length > 0 ? history : (dashboardSummary?.history ?? []);
   const visibleDashboardHistoryItems = dashboardHistoryExpanded
     ? dashboardHistoryItems
-    : dashboardHistoryItems.slice(0, 5);
-  const visibleHistoryItems = historyExpanded ? history : history.slice(0, 5);
+    : dashboardHistoryItems.slice(0, DASHBOARD_HISTORY_INITIAL_ROWS);
+  const visibleHistoryItems = historyExpanded
+    ? history
+    : history.slice(0, DASHBOARD_HISTORY_INITIAL_ROWS);
   const scheduleSummaryText = selectedSite
     ? formatScheduleSummary(
         scheduleEnabled,
@@ -5153,10 +5522,28 @@ const App: React.FC = () => {
   ];
   const isPublicLandingRoute = route === "landing";
   const isLoginRoute = route === "login";
+  const isOnboardingRoute = route === "onboarding";
+  const isNewSiteRoute = route === "new_site";
+  const isSiteSetupRoute = isOnboardingRoute || isNewSiteRoute;
+  const showOnboardingExistingUserOptions =
+    isOnboardingRoute && hasSites && !onboardingRequired;
+  const siteSetupHeaderLabel = isNewSiteRoute
+    ? "New site setup"
+    : "First-run setup";
+  const siteSetupHeroTitle = isNewSiteRoute
+    ? "Add another website"
+    : "Set up your first website";
+  const siteSetupHeroCopy = isNewSiteRoute
+    ? "Set up monitoring for a new site with customer-facing names, default checks, and a first scan."
+    : "Set the customer-facing names now so reports and alerts are ready from the first scan.";
   const isReportRoute = route === "report";
   const isSharedReportRoute = route === "shared_report";
   const isReadOnlyReport = isSharedReportRoute;
-  const protectedRouteRequiresAuth = route === "app" || route === "report";
+  const protectedRouteRequiresAuth =
+    route === "app" ||
+    route === "report" ||
+    route === "onboarding" ||
+    route === "new_site";
   const authPageTitle =
     isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
   const authPageSubtitle =
@@ -5245,6 +5632,7 @@ const App: React.FC = () => {
       <details className="report-issue-guidance">
         <summary>{contextLabel}</summary>
         <div className="report-issue-guidance__body">
+          {renderIssueLearnLink(issue)}
           <div className="report-issue-guidance__section">
             <div className="report-label">What it means</div>
             <p>{presentation.whatItMeans}</p>
@@ -5284,6 +5672,36 @@ const App: React.FC = () => {
           </details>
         </div>
       </details>
+    );
+  };
+
+  const renderIssueLearnLink = (issue: {
+    presentation?: IssuePresentation | null;
+  }) => {
+    const slug = issue.presentation?.learnSlug;
+    if (!slug) return null;
+    const article = LEARN_ARTICLES_BY_SLUG[slug];
+    if (!article) return null;
+    const href = buildLearnArticlePath(slug);
+    if (isReadOnlyReport) {
+      return (
+        <a className="report-learn-link" href={href}>
+          Read guide
+        </a>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="report-learn-link"
+        title={article.summary}
+        onClick={(event) => {
+          event.preventDefault();
+          openLearnArticle(slug);
+        }}
+      >
+        Read guide
+      </button>
     );
   };
 
@@ -5485,6 +5903,7 @@ const App: React.FC = () => {
       copyLabel?: string;
       openLabel?: string;
       emptyLabel?: string;
+      showActions?: boolean;
     },
   ) => {
     if (!url) {
@@ -5496,7 +5915,7 @@ const App: React.FC = () => {
         <span className="report-url-text" title={url}>
           {formatReportUrlLabel(url)}
         </span>
-        {!isReadOnlyReport && (
+        {options?.showActions !== false && !isReadOnlyReport && (
           <div className="report-url-actions">
             <button
               type="button"
@@ -5532,6 +5951,7 @@ const App: React.FC = () => {
     children: React.ReactNode,
   ) => {
     const isOpen = actionMenuOpenId === menuId;
+    const menuWidth = 240;
     return (
       <div
         style={{ position: "relative", display: "inline-flex" }}
@@ -5542,7 +5962,46 @@ const App: React.FC = () => {
           className="icon-button"
           aria-label={ariaLabel}
           title={ariaLabel}
-          onClick={() => setActionMenuOpenId(isOpen ? null : menuId)}
+          data-no-drawer
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (isOpen) {
+              setActionMenuOpenId(null);
+              setActionMenuPosition(null);
+              return;
+            }
+            const rect = event.currentTarget.getBoundingClientRect();
+            const viewportWidth = window.innerWidth;
+            const viewportHeight = window.innerHeight;
+            const estimatedMenuHeight = 300;
+            const gap = 8;
+            const placement =
+              rect.bottom + estimatedMenuHeight <= viewportHeight ||
+              rect.top < estimatedMenuHeight
+                ? "below"
+                : "above";
+            const top =
+              placement === "below" ? rect.bottom + gap : rect.top - gap;
+            const left = Math.min(
+              Math.max(gap, rect.right - menuWidth),
+              Math.max(gap, viewportWidth - menuWidth - gap),
+            );
+            const maxHeight =
+              placement === "below"
+                ? Math.max(160, viewportHeight - top - gap)
+                : Math.max(160, top - gap);
+            setActionMenuPosition({
+              top,
+              left,
+              placement,
+              maxHeight,
+            });
+            setActionMenuOpenId(menuId);
+          }}
+          onMouseDown={(event) => {
+            event.stopPropagation();
+          }}
         >
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
             <circle cx="5" cy="12" r="1.6" fill="currentColor" />
@@ -5550,33 +6009,37 @@ const App: React.FC = () => {
             <circle cx="19" cy="12" r="1.6" fill="currentColor" />
           </svg>
         </button>
-        {isOpen && (
-          <div
-            className="action-menu"
-            style={{
-              position: "absolute",
-              right: 0,
-              top: "calc(100% + 6px)",
-              background: "var(--panel)",
-              border: "1px solid var(--border)",
-              borderRadius: "12px",
-              boxShadow: "var(--shadow)",
-              padding: "6px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "4px",
-              minWidth: "220px",
-              zIndex: 40,
-            }}
-          >
-            {children}
-          </div>
-        )}
+        {isOpen &&
+          actionMenuPosition &&
+          createPortal(
+            <div
+              className="action-menu action-menu--portal"
+              data-action-menu
+              style={{
+                position: "fixed",
+                left: actionMenuPosition.left,
+                top: actionMenuPosition.top,
+                transform:
+                  actionMenuPosition.placement === "above"
+                    ? "translateY(-100%)"
+                    : undefined,
+                maxHeight: actionMenuPosition.maxHeight,
+                width: menuWidth,
+                zIndex: 1000,
+              }}
+            >
+              {children}
+            </div>,
+            document.body,
+          )}
       </div>
     );
   };
 
-  const renderReportIssueActionMenu = (issue: ScanIssue, menuId: string) => {
+  const renderReportIssueActionMenu = (
+    issue: ScanIssue | ResolvedScanIssue,
+    menuId: string,
+  ) => {
     if (isReadOnlyReport) return null;
     return renderActionMenuTrigger(
       menuId,
@@ -5660,12 +6123,150 @@ const App: React.FC = () => {
     );
   };
 
-  async function openFirstSourceForIgnoredReportLink(row: IgnoredLinkRow) {
-    const existing = ignoredOccurrences[row.id] ?? [];
+  const renderReportTopPriorityIssueActionMenu = (
+    issue: ScanIssue,
+    menuId: string,
+  ) => {
+    if (isReadOnlyReport) return null;
+    const targetUrl = issue.affected_url || issue.source_url;
+
+    return renderActionMenuTrigger(
+      menuId,
+      "Issue actions",
+      <>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              window.open(targetUrl, "_blank", "noopener,noreferrer");
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Open target URL
+        </button>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              void copyToClipboard(targetUrl, undefined, "Copied target URL");
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Copy target URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              openSourcePage(issue.source_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Open source page
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              void copyToClipboard(
+                issue.source_url,
+                undefined,
+                "Copied source page URL",
+              );
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Copy source page URL
+        </button>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              void handleIgnoreLinkByUrl(targetUrl, reportScanRunId);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Ignore this URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              openNoteModal(issue.affected_url);
+            } else if (issue.source_url) {
+              openNoteModal(issue.source_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url && !issue.source_url}
+        >
+          Edit note
+        </button>
+      </>,
+    );
+  };
+
+  async function getReportLinkSourceUrl(row: ScanLink) {
+    const cached = reportLinkSourcePageCacheRef.current.get(row.id);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const existing = occurrencesByLinkId[row.id] ?? [];
     if (existing.length > 0) {
-      openSourcePage(existing[0].source_page);
+      const source = existing[0].source_page;
+      reportLinkSourcePageCacheRef.current.set(row.id, source);
+      return source;
+    }
+
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to fetch source page: ${res.status}`);
+      }
+      const data = (await res.json()) as ScanLinkOccurrencesResponse;
+      const source = data.occurrences?.[0]?.source_page ?? null;
+      reportLinkSourcePageCacheRef.current.set(row.id, source);
+      return source;
+    } catch (err: unknown) {
+      pushToast(
+        getErrorMessage(err, "Failed to resolve source page"),
+        "warning",
+      );
+      reportLinkSourcePageCacheRef.current.set(row.id, null);
+      return null;
+    }
+  }
+
+  async function openFirstSourceForIgnoredReportLink(row: IgnoredLinkRow) {
+    const sourcePage = await getIgnoredReportLinkSourceUrl(row);
+    if (sourcePage) {
+      openSourcePage(sourcePage);
       return;
     }
+    pushToast("No source page available", "warning");
+  }
+
+  async function getIgnoredReportLinkSourceUrl(row: IgnoredLinkRow) {
+    const cached = reportIgnoredLinkSourcePageCacheRef.current.get(row.id);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const existing = ignoredOccurrences[row.id] ?? [];
+    if (existing.length > 0) {
+      const source = existing[0].source_page;
+      reportIgnoredLinkSourcePageCacheRef.current.set(row.id, source);
+      return source;
+    }
+
     try {
       const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(row.scan_run_id)}/ignored/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
@@ -5675,15 +6276,35 @@ const App: React.FC = () => {
         throw new Error(`Failed to fetch source page: ${res.status}`);
       }
       const data = (await res.json()) as IgnoredOccurrencesResponse;
-      const first = data.occurrences?.[0];
-      if (first?.source_page) {
-        openSourcePage(first.source_page);
-      } else {
-        pushToast("No source page available", "warning");
-      }
+      const source = data.occurrences?.[0]?.source_page ?? null;
+      reportIgnoredLinkSourcePageCacheRef.current.set(row.id, source);
+      return source;
     } catch (err: unknown) {
-      pushToast(getErrorMessage(err, "Failed to open source page"), "warning");
+      reportIgnoredLinkSourcePageCacheRef.current.set(row.id, null);
+      pushToast(
+        getErrorMessage(err, "Failed to resolve source page"),
+        "warning",
+      );
+      return null;
     }
+  }
+
+  async function copyReportLinkSourceUrl(row: ScanLink) {
+    const sourcePage = await getReportLinkSourceUrl(row);
+    if (!sourcePage) {
+      pushToast("No source page available", "warning");
+      return;
+    }
+    await copyToClipboard(sourcePage, undefined, "Copied source page URL");
+  }
+
+  async function copyIgnoredReportLinkSourceUrl(row: IgnoredLinkRow) {
+    const sourcePage = await getIgnoredReportLinkSourceUrl(row);
+    if (!sourcePage) {
+      pushToast("No source page available", "warning");
+      return;
+    }
+    await copyToClipboard(sourcePage, undefined, "Copied source page URL");
   }
 
   const renderReportLinkActionMenu = (
@@ -5703,7 +6324,7 @@ const App: React.FC = () => {
             setActionMenuOpenId(null);
           }}
         >
-          Copy link URL
+          Copy target URL
         </button>
         <button
           onClick={() => {
@@ -5711,7 +6332,7 @@ const App: React.FC = () => {
             setActionMenuOpenId(null);
           }}
         >
-          Open link
+          Open target URL
         </button>
         <button
           onClick={() => {
@@ -5720,6 +6341,14 @@ const App: React.FC = () => {
           }}
         >
           Open source page
+        </button>
+        <button
+          onClick={() => {
+            void copyReportLinkSourceUrl(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy source page URL
         </button>
         {options?.allowIgnore !== false && (
           <button
@@ -5760,7 +6389,7 @@ const App: React.FC = () => {
             setActionMenuOpenId(null);
           }}
         >
-          Copy link URL
+          Copy target URL
         </button>
         <button
           onClick={() => {
@@ -5768,7 +6397,7 @@ const App: React.FC = () => {
             setActionMenuOpenId(null);
           }}
         >
-          Open link
+          Open target URL
         </button>
         <button
           onClick={() => {
@@ -5777,6 +6406,14 @@ const App: React.FC = () => {
           }}
         >
           Open source page
+        </button>
+        <button
+          onClick={() => {
+            void copyIgnoredReportLinkSourceUrl(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy source page URL
         </button>
         <button
           onClick={() => {
@@ -5804,6 +6441,15 @@ const App: React.FC = () => {
     const shownCount = Math.min(visibleLinks.length, count);
     const showLinkActions = !isReadOnlyReport && sectionKey !== "ok";
     const columnCount = showLinkActions ? 6 : 5;
+    const emptyMessage =
+      sectionKey === "blocked"
+        ? "No blocked links were recorded in this scan."
+        : sectionKey === "no_response"
+          ? "No no-response links were recorded in this scan."
+          : sectionKey === "broken"
+            ? "No broken links were recorded in this scan."
+            : "No OK links were recorded in this scan.";
+    const showTable = section.loading || section.links.length > 0;
     return (
       <div
         className={`report-card report-link-section report-link-section--${sectionKey}`}
@@ -5828,65 +6474,70 @@ const App: React.FC = () => {
             {section.error}
           </div>
         )}
-        <div className="report-table-wrap">
-          <table className="report-table report-links-table">
-            <thead>
-              <tr>
-                <th>Link</th>
-                <th>Status</th>
-                <th>Result</th>
-                <th>Occurrences</th>
-                <th>Last seen</th>
-                {showLinkActions && (
-                  <th className="report-actions-col">Actions</th>
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {section.loading && section.links.length === 0 ? (
-                <tr>
-                  <td colSpan={columnCount} className="report-empty">
-                    Loading…
-                  </td>
-                </tr>
-              ) : section.links.length === 0 ? (
-                <tr>
-                  <td colSpan={columnCount} className="report-empty">
-                    No links in this section for this scan.
-                  </td>
-                </tr>
-              ) : (
-                visibleLinks.map((row) => (
-                  <tr key={row.id}>
-                    <td data-label="Link">
-                      {renderReportUrlCell(row.link_url)}
-                    </td>
-                    <td data-label="Status">{row.status_code ?? "-"}</td>
-                    <td data-label="Result">
-                      {row.error_message ??
-                        formatClassification(row.classification)}
-                    </td>
-                    <td data-label="Occurrences">{row.occurrence_count}</td>
-                    <td data-label="Last seen">
-                      {formatDate(row.last_seen_at)}
-                    </td>
+        {showTable ? (
+          <>
+            <div className="report-table-wrap">
+              <table className="report-table report-links-table">
+                <thead>
+                  <tr>
+                    <th>Link</th>
+                    <th>Status</th>
+                    <th>Result</th>
+                    <th>Occurrences</th>
+                    <th>Last seen</th>
                     {showLinkActions && (
-                      <td data-label="Actions" className="report-actions-col">
-                        {renderReportLinkActionMenu(
-                          row,
-                          `report-link:${sectionKey}:${row.id}`,
-                        )}
-                      </td>
+                      <th className="report-actions-col">Actions</th>
                     )}
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div className="report-table-meta report-link-section__count">
-          Showing {shownCount} of {count} links
-        </div>
+                </thead>
+                <tbody>
+                  {section.loading && section.links.length === 0 ? (
+                    <tr>
+                      <td colSpan={columnCount} className="report-empty">
+                        Loading…
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleLinks.map((row) => (
+                      <tr key={row.id}>
+                        <td data-label="Link">
+                          {renderReportUrlCell(row.link_url, {
+                            showActions: false,
+                          })}
+                        </td>
+                        <td data-label="Status">{row.status_code ?? "-"}</td>
+                        <td data-label="Result">
+                          {row.error_message ??
+                            formatClassification(row.classification)}
+                        </td>
+                        <td data-label="Occurrences">{row.occurrence_count}</td>
+                        <td data-label="Last seen">
+                          {formatDate(row.last_seen_at)}
+                        </td>
+                        {showLinkActions && (
+                          <td
+                            data-label="Actions"
+                            className="report-actions-col"
+                          >
+                            {renderReportLinkActionMenu(
+                              row,
+                              `report-link:${sectionKey}:${row.id}`,
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="report-table-meta report-link-section__count">
+              Showing {shownCount} of {count} links
+            </div>
+          </>
+        ) : (
+          <div className="report-empty-state">{emptyMessage}</div>
+        )}
         {(shownCount < count || section.hasMore) && (
           <button
             className="report-button"
@@ -5913,6 +6564,8 @@ const App: React.FC = () => {
     );
     const showIgnoredActions = !isReadOnlyReport;
     const columnCount = showIgnoredActions ? 6 : 5;
+    const showIgnoredTable =
+      reportIgnoredSection.loading || reportIgnoredSection.links.length > 0;
     return (
       <div className="report-card">
         <div className="report-card__header">
@@ -5928,71 +6581,80 @@ const App: React.FC = () => {
             {reportIgnoredSection.error}
           </div>
         )}
-        <div className="report-table-wrap">
-          <table className="report-table report-links-table">
-            <thead>
-              <tr>
-                <th>Link</th>
-                <th>Status</th>
-                <th>Reason</th>
-                <th>Occurrences</th>
-                <th>Last seen</th>
-                {showIgnoredActions && (
-                  <th className="report-actions-col">Actions</th>
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {reportIgnoredSection.loading &&
-              reportIgnoredSection.links.length === 0 ? (
-                <tr>
-                  <td colSpan={columnCount} className="report-empty">
-                    Loading…
-                  </td>
-                </tr>
-              ) : reportIgnoredSection.links.length === 0 ? (
-                <tr>
-                  <td colSpan={columnCount} className="report-empty">
-                    No ignored or skipped links were recorded for this scan.
-                  </td>
-                </tr>
-              ) : (
-                visibleIgnoredLinks.map((row) => (
-                  <tr key={row.id}>
-                    <td data-label="Link">
-                      {renderReportUrlCell(row.link_url)}
-                    </td>
-                    <td data-label="Status">{row.status_code ?? "-"}</td>
-                    <td data-label="Reason">
-                      <div>{getIgnoredRowSummary(row)}</div>
-                      <div style={{ color: "var(--muted)", fontSize: "12px" }}>
-                        {row.error_message ??
-                          row.rule_pattern ??
-                          row.rule_type ??
-                          "No reason recorded"}
-                      </div>
-                    </td>
-                    <td data-label="Occurrences">{row.occurrence_count}</td>
-                    <td data-label="Last seen">
-                      {formatDate(row.last_seen_at)}
-                    </td>
+        {showIgnoredTable ? (
+          <>
+            <div className="report-table-wrap">
+              <table className="report-table report-links-table report-links-table--ignored">
+                <thead>
+                  <tr>
+                    <th>Link</th>
+                    <th>Status</th>
+                    <th>Reason</th>
+                    <th>Occurrences</th>
+                    <th>Last seen</th>
                     {showIgnoredActions && (
-                      <td data-label="Actions" className="report-actions-col">
-                        {renderReportIgnoredLinkActionMenu(
-                          row,
-                          `report-ignored-link:${row.id}`,
-                        )}
-                      </td>
+                      <th className="report-actions-col">Actions</th>
                     )}
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-        <div className="report-table-meta">
-          Showing {shownCount} of {reportIgnoredDisplayTotal} links
-        </div>
+                </thead>
+                <tbody>
+                  {reportIgnoredSection.loading &&
+                  reportIgnoredSection.links.length === 0 ? (
+                    <tr>
+                      <td colSpan={columnCount} className="report-empty">
+                        Loading…
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleIgnoredLinks.map((row) => (
+                      <tr key={row.id}>
+                        <td data-label="Link">
+                          {renderReportUrlCell(row.link_url, {
+                            showActions: false,
+                          })}
+                        </td>
+                        <td data-label="Status">{row.status_code ?? "-"}</td>
+                        <td data-label="Reason">
+                          <div>{getIgnoredRowSummary(row)}</div>
+                          <div
+                            style={{ color: "var(--muted)", fontSize: "12px" }}
+                          >
+                            {row.error_message ??
+                              row.rule_pattern ??
+                              row.rule_type ??
+                              "No reason recorded"}
+                          </div>
+                        </td>
+                        <td data-label="Occurrences">{row.occurrence_count}</td>
+                        <td data-label="Last seen">
+                          {formatDate(row.last_seen_at)}
+                        </td>
+                        {showIgnoredActions && (
+                          <td
+                            data-label="Actions"
+                            className="report-actions-col"
+                          >
+                            {renderReportIgnoredLinkActionMenu(
+                              row,
+                              `report-ignored-link:${row.id}`,
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="report-table-meta">
+              Showing {shownCount} of {reportIgnoredDisplayTotal} links
+            </div>
+          </>
+        ) : (
+          <div className="report-empty-state">
+            No ignored or skipped links were recorded in this scan.
+          </div>
+        )}
         {(shownCount < reportIgnoredDisplayTotal ||
           reportIgnoredSection.hasMore) && (
           <button
@@ -6006,6 +6668,287 @@ const App: React.FC = () => {
             {reportIgnoredSection.loading ? "Loading..." : "Show more"}
           </button>
         )}
+      </div>
+    );
+  };
+
+  const renderWorkspaceTopPriorityIssueActionMenu = (
+    issue: ScanIssue,
+    menuId: string,
+  ) => {
+    const targetUrl = issue.affected_url || issue.source_url;
+
+    return renderActionMenuTrigger(
+      menuId,
+      "Issue actions",
+      <>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              window.open(targetUrl, "_blank", "noopener,noreferrer");
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Open target URL
+        </button>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              void copyToClipboard(targetUrl, undefined, "Copied target URL");
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Copy target URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              openSourcePage(issue.source_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Open source page
+        </button>
+        <button
+          onClick={() => {
+            if (issue.source_url) {
+              void copyToClipboard(
+                issue.source_url,
+                undefined,
+                "Copied source page URL",
+              );
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.source_url}
+        >
+          Copy source page URL
+        </button>
+        <button
+          onClick={() => {
+            if (targetUrl) {
+              void handleIgnoreLinkByUrl(targetUrl, selectedRunId);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!targetUrl}
+        >
+          Ignore this URL
+        </button>
+        <button
+          onClick={() => {
+            if (issue.affected_url) {
+              openNoteModal(issue.affected_url);
+            } else if (issue.source_url) {
+              openNoteModal(issue.source_url);
+            }
+            setActionMenuOpenId(null);
+          }}
+          disabled={!issue.affected_url && !issue.source_url}
+        >
+          Edit note
+        </button>
+      </>,
+    );
+  };
+
+  const renderWorkspaceIgnoredLinkActionMenu = (
+    row: IgnoredLinkRow,
+    menuId: string,
+  ) => {
+    const hasNote = linkNotesByUrl.has(row.link_url);
+
+    return renderActionMenuTrigger(
+      menuId,
+      "Ignored link actions",
+      <>
+        <button
+          onClick={() => {
+            void copyToClipboard(row.link_url, undefined, "Copied target URL");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy target URL
+        </button>
+        <button
+          onClick={() => {
+            window.open(row.link_url, "_blank", "noopener,noreferrer");
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open target URL
+        </button>
+        <button
+          onClick={() => {
+            void openFirstSourceForIgnoredReportLink(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Open source page
+        </button>
+        <button
+          onClick={() => {
+            void copyIgnoredReportLinkSourceUrl(row);
+            setActionMenuOpenId(null);
+          }}
+        >
+          Copy source page URL
+        </button>
+        <button
+          onClick={() => {
+            openNoteModal(row.link_url);
+            setActionMenuOpenId(null);
+          }}
+        >
+          {hasNote ? "Edit note" : "Add note"}
+        </button>
+      </>,
+    );
+  };
+
+  const renderWorkspaceTopPriorityIssues = () => {
+    if (!selectedRunId || isSelectedRunInProgress) return null;
+
+    if (workspaceTopPriorityIssuesLoading) {
+      return (
+        <div className="app-settings-card">
+          <div className="app-settings-card__title">Top priority issues</div>
+          <div className="app-settings-card__subtitle">
+            Loading top priority issues…
+          </div>
+        </div>
+      );
+    }
+
+    if (workspaceTopPriorityIssuesError) {
+      return (
+        <div className="app-settings-card">
+          <div className="app-settings-card__title">Top priority issues</div>
+          <div style={{ color: "var(--warning)" }}>
+            {workspaceTopPriorityIssuesError}
+          </div>
+        </div>
+      );
+    }
+
+    if (workspaceTopPriorityIssues.length === 0) return null;
+
+    return (
+      <div className="app-settings-card">
+        <div className="app-settings-card__title">Top priority issues</div>
+        <div
+          style={{
+            display: "grid",
+            gap: "10px",
+            fontSize: "13px",
+          }}
+        >
+          {workspaceTopPriorityIssues.map((issue) => {
+            const issueTarget = issue.affected_url;
+            const hasNote = issue.affected_url
+              ? linkNotesByUrl.has(issue.affected_url)
+              : issue.source_url
+                ? linkNotesByUrl.has(issue.source_url)
+                : false;
+
+            return (
+              <div
+                key={issue.id}
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: "10px",
+                  padding: "10px",
+                  background: "var(--panel-elev)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    gap: "8px",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        flexWrap: "wrap",
+                        gap: "6px",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <div
+                        className={`report-badge report-badge--severity severity-${issue.severity}`}
+                      >
+                        {formatIssueSeverity(issue.severity)}
+                      </div>
+                      <div style={{ fontWeight: 600 }}>
+                        {formatIssueCategoryLabel(issue.category)}
+                      </div>
+                      {issue.change_status && (
+                        <div
+                          className={`report-badge report-badge--change change-${issue.change_status}`}
+                        >
+                          {formatIssueChangeStatus(issue.change_status)}
+                        </div>
+                      )}
+                      {hasNote && (
+                        <span
+                          style={{
+                            color: "var(--muted)",
+                            fontSize: "11px",
+                            padding: "2px 6px",
+                            borderRadius: "999px",
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          Note
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontWeight: 600, marginBottom: "4px" }}>
+                      {getIssueDisplayTitle(issue)}
+                    </div>
+                    <div
+                      style={{
+                        color: "var(--muted)",
+                        fontSize: "12px",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      {getIssueSummaryText(issue)}
+                    </div>
+                    {issueTarget && (
+                      <div
+                        style={{
+                          color: "var(--text)",
+                          overflowWrap: "anywhere",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {issueTarget}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ marginTop: "2px", marginLeft: "8px" }}>
+                    {renderWorkspaceTopPriorityIssueActionMenu(
+                      issue,
+                      `workspace-top-priority-issue:${issue.id}`,
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   };
@@ -6127,11 +7070,13 @@ const App: React.FC = () => {
                   <td>
                     {renderReportUrlCell(issue.affected_url, {
                       copyLabel: "Copied affected URL",
+                      showActions: false,
                     })}
                   </td>
                   <td>
                     {renderReportUrlCell(issue.source_url, {
                       copyLabel: "Copied source URL",
+                      showActions: false,
                     })}
                   </td>
                   <td>
@@ -6151,155 +7096,10 @@ const App: React.FC = () => {
                   <td>{formatDate(issue.last_seen_at)}</td>
                   {!isReadOnlyReport && (
                     <td>
-                      <div
-                        style={{
-                          position: "relative",
-                          display: "inline-flex",
-                        }}
-                        data-action-menu
-                      >
-                        <button
-                          type="button"
-                          className="icon-button"
-                          aria-label="Issue actions"
-                          title="Issue actions"
-                          onClick={() =>
-                            setActionMenuOpenId(
-                              actionMenuOpenId === `report-issue:${issue.id}`
-                                ? null
-                                : `report-issue:${issue.id}`,
-                            )
-                          }
-                        >
-                          <svg
-                            viewBox="0 0 24 24"
-                            width="14"
-                            height="14"
-                            aria-hidden="true"
-                          >
-                            <circle
-                              cx="5"
-                              cy="12"
-                              r="1.6"
-                              fill="currentColor"
-                            />
-                            <circle
-                              cx="12"
-                              cy="12"
-                              r="1.6"
-                              fill="currentColor"
-                            />
-                            <circle
-                              cx="19"
-                              cy="12"
-                              r="1.6"
-                              fill="currentColor"
-                            />
-                          </svg>
-                        </button>
-                        {actionMenuOpenId === `report-issue:${issue.id}` && (
-                          <div
-                            className="action-menu"
-                            style={{
-                              position: "absolute",
-                              right: 0,
-                              top: "calc(100% + 6px)",
-                              background: "var(--panel)",
-                              border: "1px solid var(--border)",
-                              borderRadius: "12px",
-                              boxShadow: "var(--shadow)",
-                              padding: "6px",
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: "4px",
-                              minWidth: "220px",
-                              zIndex: 40,
-                            }}
-                          >
-                            <button
-                              onClick={() => {
-                                if (issue.affected_url) {
-                                  window.open(
-                                    issue.affected_url,
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  );
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.affected_url}
-                            >
-                              Open affected URL
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (issue.affected_url) {
-                                  void copyToClipboard(
-                                    issue.affected_url,
-                                    undefined,
-                                    "Copied affected URL",
-                                  );
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.affected_url}
-                            >
-                              Copy affected URL
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (issue.source_url) {
-                                  openSourcePage(issue.source_url);
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.source_url}
-                            >
-                              Open source page
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (issue.source_url) {
-                                  void copyToClipboard(
-                                    issue.source_url,
-                                    undefined,
-                                    "Copied source page URL",
-                                  );
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.source_url}
-                            >
-                              Copy source page URL
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (issue.affected_url) {
-                                  void handleIgnoreLinkByUrl(
-                                    issue.affected_url,
-                                    reportScanRunId,
-                                  );
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.affected_url}
-                            >
-                              Ignore exact URL
-                            </button>
-                            <button
-                              onClick={() => {
-                                if (issue.affected_url) {
-                                  openNoteModal(issue.affected_url);
-                                }
-                                setActionMenuOpenId(null);
-                              }}
-                              disabled={!issue.affected_url}
-                            >
-                              Edit note
-                            </button>
-                          </div>
-                        )}
-                      </div>
+                      {renderReportIssueActionMenu(
+                        issue,
+                        `report-issue:${issue.id}`,
+                      )}
                     </td>
                   )}
                 </tr>
@@ -6400,11 +7200,13 @@ const App: React.FC = () => {
                       <td>
                         {renderReportUrlCell(issue.affected_url, {
                           copyLabel: "Copied affected URL",
+                          showActions: false,
                         })}
                       </td>
                       <td>
                         {renderReportUrlCell(issue.source_url, {
                           copyLabel: "Copied source URL",
+                          showActions: false,
                         })}
                       </td>
                       <td>
@@ -6415,143 +7217,10 @@ const App: React.FC = () => {
                       <td>{formatDate(issue.resolved_at)}</td>
                       {!isReadOnlyReport && (
                         <td>
-                          <div
-                            style={{
-                              position: "relative",
-                              display: "inline-flex",
-                            }}
-                            data-action-menu
-                          >
-                            <button
-                              type="button"
-                              className="icon-button"
-                              aria-label="Resolved issue actions"
-                              title="Resolved issue actions"
-                              onClick={() =>
-                                setActionMenuOpenId(
-                                  actionMenuOpenId ===
-                                    `report-resolved-issue:${issue.id}`
-                                    ? null
-                                    : `report-resolved-issue:${issue.id}`,
-                                )
-                              }
-                            >
-                              <svg
-                                viewBox="0 0 24 24"
-                                width="14"
-                                height="14"
-                                aria-hidden="true"
-                              >
-                                <circle
-                                  cx="5"
-                                  cy="12"
-                                  r="1.6"
-                                  fill="currentColor"
-                                />
-                                <circle
-                                  cx="12"
-                                  cy="12"
-                                  r="1.6"
-                                  fill="currentColor"
-                                />
-                                <circle
-                                  cx="19"
-                                  cy="12"
-                                  r="1.6"
-                                  fill="currentColor"
-                                />
-                              </svg>
-                            </button>
-                            {actionMenuOpenId ===
-                              `report-resolved-issue:${issue.id}` && (
-                              <div
-                                className="action-menu"
-                                style={{
-                                  position: "absolute",
-                                  right: 0,
-                                  top: "calc(100% + 6px)",
-                                  background: "var(--panel)",
-                                  border: "1px solid var(--border)",
-                                  borderRadius: "12px",
-                                  boxShadow: "var(--shadow)",
-                                  padding: "6px",
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  gap: "4px",
-                                  minWidth: "220px",
-                                  zIndex: 40,
-                                }}
-                              >
-                                <button
-                                  onClick={() => {
-                                    if (issue.affected_url) {
-                                      window.open(
-                                        issue.affected_url,
-                                        "_blank",
-                                        "noopener,noreferrer",
-                                      );
-                                    }
-                                    setActionMenuOpenId(null);
-                                  }}
-                                  disabled={!issue.affected_url}
-                                >
-                                  Open affected URL
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (issue.affected_url) {
-                                      void copyToClipboard(
-                                        issue.affected_url,
-                                        undefined,
-                                        "Copied affected URL",
-                                      );
-                                    }
-                                    setActionMenuOpenId(null);
-                                  }}
-                                  disabled={!issue.affected_url}
-                                >
-                                  Copy affected URL
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (issue.source_url) {
-                                      openSourcePage(issue.source_url);
-                                    }
-                                    setActionMenuOpenId(null);
-                                  }}
-                                  disabled={!issue.source_url}
-                                >
-                                  Open source page
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (issue.source_url) {
-                                      void copyToClipboard(
-                                        issue.source_url,
-                                        undefined,
-                                        "Copied source page URL",
-                                      );
-                                    }
-                                    setActionMenuOpenId(null);
-                                  }}
-                                  disabled={!issue.source_url}
-                                >
-                                  Copy source page URL
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (issue.affected_url) {
-                                      openNoteModal(issue.affected_url);
-                                    }
-                                    setActionMenuOpenId(null);
-                                  }}
-                                  disabled={!issue.affected_url}
-                                >
-                                  Edit note
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                          {renderReportIssueActionMenu(
+                            issue,
+                            `report-resolved-issue:${issue.id}`,
+                          )}
                         </td>
                       )}
                     </tr>
@@ -6600,7 +7269,9 @@ const App: React.FC = () => {
                       {formatIssueChangeStatus(issue.change_status)}
                     </span>
                   )}
-                  {renderReportIssueActionMenu(
+                </div>
+                <div className="report-priority-item__actions">
+                  {renderReportTopPriorityIssueActionMenu(
                     issue,
                     `report-priority-issue:${issue.id}`,
                   )}
@@ -6626,12 +7297,14 @@ const App: React.FC = () => {
                   <div className="report-label">Affected URL</div>
                   {renderReportUrlCell(issue.affected_url, {
                     copyLabel: "Copied affected URL",
+                    showActions: false,
                   })}
                 </div>
                 <div>
                   <div className="report-label">Source URL</div>
                   {renderReportUrlCell(issue.source_url, {
                     copyLabel: "Copied source URL",
+                    showActions: false,
                   })}
                 </div>
               </div>
@@ -6662,16 +7335,19 @@ const App: React.FC = () => {
         : "Selected run"
     : "Run summary";
   const onboardingSteps = [
-    "Add your first site",
-    "Run your first scan",
+    "Add site",
+    "Monitoring",
+    "First scan",
     "Review results",
-    "Set a schedule",
-    "Enable alerts",
   ];
   const onboardingStepIndex = Math.min(
     onboardingStep,
     onboardingSteps.length - 1,
   );
+  const onboardingScheduleFrequency: "manual" | "weekly" | "monthly" =
+    scheduleFrequency === "weekly" || scheduleFrequency === "monthly"
+      ? scheduleFrequency
+      : "manual";
 
   function markRunProgress(runId: string) {
     setLastProgressAtByRunId((prev) => ({
@@ -6708,6 +7384,8 @@ const App: React.FC = () => {
       void refreshSelectedRun(runId);
     }
     void refreshSites();
+    void loadAppNotifications({ showLoading: false });
+    void loadUnreadNotificationCount();
   }
 
   function scheduleFallbackSync() {
@@ -6798,6 +7476,8 @@ const App: React.FC = () => {
         payload.status === "failed" ||
         payload.status === "cancelled"
       ) {
+        void loadAppNotifications({ showLoading: false });
+        void loadUnreadNotificationCount();
         void refreshDashboardSummary(payload.site_id, "scan_event_terminal", {
           targetRunId: runId,
           waitForIssueSummary: payload.status === "completed",
@@ -6838,6 +7518,28 @@ const App: React.FC = () => {
     );
   }
 
+  function handleNotificationCreatedEvent(
+    payload: NotificationCreatedEventPayload,
+  ) {
+    const notification = payload.notification;
+    if (!notification || notification.read_at) {
+      setUnreadNotificationCount(payload.unread_count ?? 0);
+      return;
+    }
+    setNotifications((prev) => {
+      if (prev.some((item) => item.id === notification.id)) return prev;
+      return [notification, ...prev].slice(0, 20);
+    });
+    setUnreadNotificationCount(payload.unread_count ?? 0);
+  }
+
+  function handleNotificationCountUpdatedEvent(
+    payload: NotificationCountUpdatedEventPayload,
+  ) {
+    setUnreadNotificationCount(payload.unread_count ?? 0);
+    void loadAppNotifications({ showLoading: false });
+  }
+
   function startEventStream() {
     if (sseRef.current) return;
     if (!authUser) return;
@@ -6866,6 +7568,14 @@ const App: React.FC = () => {
           handleScheduleEvent(payload);
           return;
         }
+        if (payload.type === "notification_created") {
+          handleNotificationCreatedEvent(payload);
+          return;
+        }
+        if (payload.type === "notification_count_updated") {
+          handleNotificationCountUpdatedEvent(payload);
+          return;
+        }
         handleScanEvent(payload as ScanEventPayload);
       } catch {}
     };
@@ -6875,6 +7585,14 @@ const App: React.FC = () => {
     source.addEventListener("scan_completed", handleMessage as EventListener);
     source.addEventListener("scan_failed", handleMessage as EventListener);
     source.addEventListener("schedule_updated", handleMessage as EventListener);
+    source.addEventListener(
+      "notification_created",
+      handleMessage as EventListener,
+    );
+    source.addEventListener(
+      "notification_count_updated",
+      handleMessage as EventListener,
+    );
 
     source.onerror = () => {
       if (sseRef.current !== source) return;
@@ -6898,31 +7616,96 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!authUser || !onboardingStorageKey) return;
-    if (onboardingOpen) return;
     if (authLoading || sitesLoading) return;
-    if (sites.length === 0) {
-      const stored = localStorage.getItem(onboardingStorageKey);
-      if (!stored) {
-        setOnboardingStep(0);
-        setOnboardingOpen(true);
-      }
+    if (
+      route === "report" ||
+      route === "shared_report" ||
+      route === "learn" ||
+      route === "new_site" ||
+      (route === "app" && appSection === "account")
+    ) {
       return;
     }
-    if (historyLoading) return;
-    if (history.length === 0) {
-      const stored = localStorage.getItem(onboardingStorageKey);
-      if (!stored) {
-        setOnboardingStep(1);
-        setOnboardingOpen(true);
-      }
+    const stored =
+      typeof window === "undefined"
+        ? null
+        : window.localStorage.getItem(onboardingStorageKey);
+    const needsFirstRun = sites.length === 0 || onboardingRequired;
+    if (sites.length === 0 && !stored) {
+      setOnboardingRequired(true);
+    }
+    if (needsFirstRun && !stored && route !== "onboarding") {
+      navigateTo("/onboarding");
     }
   }, [
     authLoading,
     authUser,
-    history.length,
-    historyLoading,
-    onboardingOpen,
+    appSection,
+    onboardingRequired,
     onboardingStorageKey,
+    route,
+    sites.length,
+    sitesLoading,
+  ]);
+
+  useEffect(() => {
+    if (route === "new_site" && setupRouteRef.current !== "new_site") {
+      setupRouteRef.current = "new_site";
+      if (siteSetupStorageKey && typeof window !== "undefined") {
+        const raw = window.sessionStorage.getItem(siteSetupStorageKey);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as { siteId?: string };
+            if (parsed.siteId) {
+              setSetupSiteId(parsed.siteId);
+              const target = sites.find((site) => site.id === parsed.siteId);
+              if (target && selectedSiteIdRef.current !== target.id) {
+                void handleSelectSite(target);
+              }
+              return;
+            }
+          } catch {}
+        }
+      }
+      resetSiteSetupState({ clearSession: false });
+      return;
+    }
+    if (route !== "new_site" && setupRouteRef.current === "new_site") {
+      setupRouteRef.current = null;
+    }
+  }, [route, siteSetupStorageKey, sites]);
+
+  useEffect(() => {
+    if (route !== "onboarding" && route !== "new_site") return;
+    if (authLoading || sitesLoading || historyLoading) return;
+    if (route === "new_site" && !setupTargetSite) {
+      setOnboardingStep(0);
+      return;
+    }
+    if (route === "onboarding" && sites.length > 0 && !onboardingRequired) {
+      setOnboardingStep(0);
+      return;
+    }
+    if (sites.length === 0) {
+      setOnboardingStep(0);
+      return;
+    }
+    if (setupTargetRun?.status === "completed") {
+      setOnboardingStep((step) => Math.max(step, 3));
+      return;
+    }
+    if (setupTargetRun && isInProgress(setupTargetRun.status)) {
+      setOnboardingStep((step) => Math.max(step, 2));
+      return;
+    }
+    setOnboardingStep((step) => Math.max(step, 1));
+  }, [
+    authLoading,
+    historyLoading,
+    onboardingRequired,
+    route,
+    setupTargetRun,
+    setupTargetSite,
     sites.length,
     sitesLoading,
   ]);
@@ -6930,18 +7713,25 @@ const App: React.FC = () => {
   useEffect(() => {
     if (authUser) {
       startEventStream();
+      void loadAppNotifications({ showLoading: false });
+      void loadUnreadNotificationCount();
+      void loadAccountNotificationPreferences();
     } else {
       stopEventStream();
     }
   }, [authUser]);
 
   useEffect(() => {
-    if (!onboardingOpen || onboardingStep !== 1) return;
-    if (!onboardingScanRequested || !selectedRun) return;
-    if (selectedRun.status === "completed") {
-      setOnboardingStep(2);
+    if (
+      (route !== "onboarding" && route !== "new_site") ||
+      onboardingStep !== 2
+    )
+      return;
+    if (!onboardingScanRequested || !setupTargetRun) return;
+    if (setupTargetRun.status === "completed") {
+      setOnboardingStep(3);
     }
-  }, [onboardingOpen, onboardingScanRequested, onboardingStep, selectedRun]);
+  }, [onboardingScanRequested, onboardingStep, route, setupTargetRun]);
 
   useEffect(() => {
     const handleVisibility = () => {
@@ -6949,9 +7739,27 @@ const App: React.FC = () => {
         void syncStateOnce();
       }
     };
+    const handleFocus = () => {
+      if (authUser) {
+        void loadAppNotifications({ showLoading: false });
+        void loadUnreadNotificationCount();
+      }
+    };
     document.addEventListener("visibilitychange", handleVisibility);
-    return () =>
+    window.addEventListener("focus", handleFocus);
+    return () => {
       document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [authUser]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const intervalId = window.setInterval(() => {
+      void loadAppNotifications({ showLoading: false });
+      void loadUnreadNotificationCount();
+    }, NOTIFICATION_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
   }, [authUser]);
 
   useEffect(() => {
@@ -7151,6 +7959,16 @@ const App: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!authUser) {
+      setNotifications([]);
+      setUnreadNotificationCount(0);
+      setNotificationMenuOpen(false);
+      return;
+    }
+    void loadUnreadNotificationCount();
+  }, [authUser]);
+
   function resetSessionState() {
     setSites([]);
     setSelectedSiteId(null);
@@ -7171,8 +7989,10 @@ const App: React.FC = () => {
     setDetailsOpen(false);
     setDetailsLinkId(null);
     setSiteNameById({});
-    setOnboardingOpen(false);
+    setOnboardingRequired(false);
     setOnboardingStep(0);
+    setSetupSiteId(null);
+    setupRouteRef.current = null;
     setOnboardingSiteUrl("");
     setOnboardingSiteDisplayName("");
     setOnboardingClientName("");
@@ -7182,6 +8002,116 @@ const App: React.FC = () => {
     setOnboardingWorking(false);
     setOnboardingError(null);
     setOnboardingScanRequested(false);
+    setNotifications([]);
+    setUnreadNotificationCount(0);
+    setNotificationMenuOpen(false);
+    setAccountNotificationPreferences(DEFAULT_USER_NOTIFICATION_PREFERENCES);
+    setAccountNotificationPreferencesLoading(false);
+    setAccountNotificationPreferencesSaving(false);
+    setAccountNotificationPreferencesSavedAt(null);
+    setAccountNotificationPreferencesError(null);
+  }
+
+  async function loadUnreadNotificationCount() {
+    if (!authUser) return;
+    try {
+      const res = await apiFetch(`${API_BASE}/notifications/unread-count`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as UnreadNotificationsResponse;
+      setUnreadNotificationCount(data.unreadCount ?? 0);
+    } catch {
+      setUnreadNotificationCount(0);
+    }
+  }
+
+  async function loadAppNotifications(options?: { showLoading?: boolean }) {
+    if (!authUser) return;
+    const showLoading = options?.showLoading ?? true;
+    if (showLoading) setNotificationsLoading(true);
+    setNotificationsError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/notifications?status=unread&limit=20`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as NotificationsResponse;
+      setNotifications(
+        (data.notifications ?? []).filter(
+          (notification) => !notification.read_at,
+        ),
+      );
+    } catch (err: unknown) {
+      setNotificationsError(
+        getErrorMessage(err, "Failed to load notifications"),
+      );
+    } finally {
+      if (showLoading) setNotificationsLoading(false);
+    }
+  }
+
+  async function loadAccountNotificationPreferences() {
+    if (!authUser) return;
+    setAccountNotificationPreferencesLoading(true);
+    setAccountNotificationPreferencesError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/account/notification-preferences`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as UserNotificationPreferencesResponse;
+      setAccountNotificationPreferences(data.preferences);
+    } catch (err: unknown) {
+      console.warn("Failed to load notification preferences", err);
+      setAccountNotificationPreferencesError(
+        "Could not load in-app notification preferences.",
+      );
+    } finally {
+      setAccountNotificationPreferencesLoading(false);
+    }
+  }
+
+  async function updateAccountNotificationPreference(
+    field: UserNotificationPreferenceField,
+    value: boolean,
+  ) {
+    const previous = accountNotificationPreferences;
+    setAccountNotificationPreferences((current) => ({
+      ...current,
+      [field]: value,
+    }));
+    setAccountNotificationPreferencesSaving(true);
+    setAccountNotificationPreferencesSavedAt(null);
+    setAccountNotificationPreferencesError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/account/notification-preferences`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ [field]: value }),
+        },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as UserNotificationPreferencesResponse;
+      setAccountNotificationPreferences(data.preferences);
+      setAccountNotificationPreferencesSavedAt(new Date().toISOString());
+    } catch (err: unknown) {
+      console.warn("Failed to update notification preferences", err);
+      setAccountNotificationPreferences(previous);
+      setAccountNotificationPreferencesError(
+        "Could not save notification preferences.",
+      );
+    } finally {
+      setAccountNotificationPreferencesSaving(false);
+    }
   }
 
   async function loadMe() {
@@ -7259,6 +8189,11 @@ const App: React.FC = () => {
     }
   }
 
+  function openAuth(mode: "login" | "register") {
+    setAuthMode(mode);
+    navigateTo("/login");
+  }
+
   function persistSiteName(siteId: string, name: string) {
     if (!siteNamesStorageKey || !name.trim()) return;
     setSiteNameById((prev) => {
@@ -7289,6 +8224,42 @@ const App: React.FC = () => {
   function clearOnboardingState() {
     if (!onboardingStorageKey || typeof window === "undefined") return;
     window.localStorage.removeItem(onboardingStorageKey);
+    setOnboardingRequired(true);
+  }
+
+  function saveSiteSetupSession(siteId: string | null) {
+    if (!siteSetupStorageKey || typeof window === "undefined") return;
+    if (!siteId) {
+      window.sessionStorage.removeItem(siteSetupStorageKey);
+      return;
+    }
+    window.sessionStorage.setItem(
+      siteSetupStorageKey,
+      JSON.stringify({ siteId }),
+    );
+  }
+
+  function resetSiteSetupState(options?: { clearSession?: boolean }) {
+    setOnboardingStep(0);
+    setSetupSiteId(null);
+    setOnboardingScanRequested(false);
+    setOnboardingSiteUrl("");
+    setOnboardingSiteDisplayName("");
+    setOnboardingClientName("");
+    setOnboardingReportDisplayName("");
+    setOnboardingSiteDisplayNameTouched(false);
+    setOnboardingReportDisplayNameTouched(false);
+    setOnboardingError(null);
+    setOnboardingWorking(false);
+    setTriggerError(null);
+    if (options?.clearSession !== false) {
+      saveSiteSetupSession(null);
+    }
+  }
+
+  function openNewSiteSetup() {
+    resetSiteSetupState();
+    navigateTo("/sites/new");
   }
 
   function resetAddSiteForm() {
@@ -7302,8 +8273,7 @@ const App: React.FC = () => {
   }
 
   function openAddSiteModal() {
-    resetAddSiteForm();
-    setAddSiteOpen(true);
+    openNewSiteSetup();
   }
 
   function closeAddSiteModal() {
@@ -7312,13 +8282,19 @@ const App: React.FC = () => {
   }
 
   function completeOnboarding() {
-    if (onboardingStorageKey && typeof window !== "undefined") {
+    if (
+      route === "onboarding" &&
+      onboardingStorageKey &&
+      typeof window !== "undefined"
+    ) {
       window.localStorage.setItem(
         onboardingStorageKey,
         new Date().toISOString(),
       );
     }
-    setOnboardingOpen(false);
+    setOnboardingRequired(false);
+    saveSiteSetupSession(null);
+    setSetupSiteId(null);
     setOnboardingStep(0);
     setOnboardingScanRequested(false);
     setOnboardingSiteUrl("");
@@ -7329,13 +8305,17 @@ const App: React.FC = () => {
     setOnboardingReportDisplayNameTouched(false);
     setOnboardingError(null);
     setOnboardingWorking(false);
+    navigateTo("/dashboard");
   }
 
   function openOnboarding(step = 0) {
     setOnboardingError(null);
     setOnboardingScanRequested(false);
     setOnboardingStep(step);
-    setOnboardingOpen(true);
+    if (sites.length === 0) {
+      setOnboardingRequired(true);
+    }
+    navigateTo("/onboarding");
   }
 
   async function loadSites() {
@@ -7615,6 +8595,38 @@ const App: React.FC = () => {
     }
   }
 
+  async function loadWorkspaceTopPriorityIssues(runId: string) {
+    setWorkspaceTopPriorityIssuesLoading(true);
+    setWorkspaceTopPriorityIssuesError(null);
+    setWorkspaceTopPriorityIssues([]);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(
+          runId,
+        )}/issues?limit=60&offset=0`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(`Failed to load issue priority: ${res.status}`);
+      }
+      const data = (await res.json()) as ScanIssuesResponse;
+      if (selectedRunIdRef.current !== runId) {
+        return;
+      }
+      setWorkspaceTopPriorityIssues(getIssuePriorityRank(data.issues ?? [], 4));
+    } catch (err: unknown) {
+      if (selectedRunIdRef.current === runId) {
+        setWorkspaceTopPriorityIssuesError(
+          getErrorMessage(err, "Failed to load top priority issues"),
+        );
+      }
+    } finally {
+      if (selectedRunIdRef.current === runId) {
+        setWorkspaceTopPriorityIssuesLoading(false);
+      }
+    }
+  }
+
   async function loadMoreBrokenResults(runId: string) {
     if (resultsLoading) return;
 
@@ -7808,6 +8820,16 @@ const App: React.FC = () => {
     if (isInProgress(selectedRun?.status)) return;
     void loadResults(selectedRunId);
   }, [selectedRunId, statusGroup, showIgnored]);
+
+  useEffect(() => {
+    if (!selectedRunId || isInProgress(selectedRun?.status)) {
+      setWorkspaceTopPriorityIssues([]);
+      setWorkspaceTopPriorityIssuesLoading(false);
+      setWorkspaceTopPriorityIssuesError(null);
+      return;
+    }
+    void loadWorkspaceTopPriorityIssues(selectedRunId);
+  }, [selectedRunId, selectedRun?.status]);
 
   useEffect(() => {
     if (!selectedRunId) return;
@@ -8194,7 +9216,7 @@ const App: React.FC = () => {
 
   function handleNewScanAction() {
     if (!hasSites) {
-      openAddSiteModal();
+      openOnboarding(0);
       return;
     }
     if (!selectedSiteId) {
@@ -8347,6 +9369,8 @@ const App: React.FC = () => {
 
       if (existing) {
         applyCreatedSite(existing, getSiteDisplayName(existing) ?? undefined);
+        setSetupSiteId(existing.id);
+        saveSiteSetupSession(existing.id);
         setOnboardingStep(1);
         pushToast("That site is already in your workspace", "info");
         return;
@@ -8358,6 +9382,8 @@ const App: React.FC = () => {
         reportDisplayName: onboardingReportDisplayName,
       });
       applyCreatedSite(site, onboardingSiteDisplayName);
+      setSetupSiteId(site.id);
+      saveSiteSetupSession(site.id);
       setOnboardingSiteUrl("");
       setOnboardingSiteDisplayName("");
       setOnboardingClientName("");
@@ -8390,12 +9416,16 @@ const App: React.FC = () => {
       const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
       if (existing) {
         await handleSelectSite(existing);
+        setSetupSiteId(existing.id);
+        saveSiteSetupSession(existing.id);
       } else {
         const site = await createSiteRecord(SAMPLE_SITE_URL, {
           siteDisplayName: SAMPLE_SITE_NAME,
           reportDisplayName: SAMPLE_SITE_NAME,
         });
         applyCreatedSite(site, SAMPLE_SITE_NAME);
+        setSetupSiteId(site.id);
+        saveSiteSetupSession(site.id);
       }
       setOnboardingStep(1);
     } catch (err: unknown) {
@@ -8405,8 +9435,152 @@ const App: React.FC = () => {
     }
   }
 
+  async function handleOnboardingSaveMonitoring() {
+    if (!selectedSiteId) {
+      setOnboardingError("Add a website before choosing monitoring settings.");
+      return;
+    }
+
+    setOnboardingWorking(true);
+    setOnboardingError(null);
+    setScheduleError(null);
+    setNotifyError(null);
+    setUptimeError(null);
+    try {
+      const nextScheduleEnabled = onboardingScheduleFrequency !== "manual";
+      const scheduleRes = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/schedule`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: nextScheduleEnabled,
+            frequency: onboardingScheduleFrequency,
+            timeUtc: scheduleTimeUtc,
+            dayOfWeek:
+              onboardingScheduleFrequency === "weekly"
+                ? scheduleDayOfWeek
+                : null,
+            dayOfMonth:
+              onboardingScheduleFrequency === "monthly"
+                ? scheduleDayOfMonth
+                : null,
+          }),
+        },
+      );
+      if (!scheduleRes.ok) {
+        const text = await scheduleRes.text().catch(() => "");
+        throw new Error(
+          `Schedule update failed: ${scheduleRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const scheduleData = (await scheduleRes.json()) as {
+        scheduleEnabled: boolean;
+        scheduleFrequency: "manual" | "daily" | "weekly" | "monthly";
+        scheduleTimeUtc: string;
+        scheduleDayOfWeek: number | null;
+        scheduleDayOfMonth: number | null;
+        nextScheduledAt: string | null;
+        lastScheduledAt: string | null;
+      };
+
+      const nextNotifyEmail = notifyEnabled
+        ? notifyEmail.trim() || authUser?.email || null
+        : null;
+      const notifyRes = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notification-settings`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: notifyEnabled,
+            email: nextNotifyEmail,
+            notifyOn,
+            includeCsv: notifyIncludeCsv,
+            summaryEnabled,
+          }),
+        },
+      );
+      if (!notifyRes.ok) {
+        const text = await notifyRes.text().catch(() => "");
+        throw new Error(
+          `Notifications update failed: ${notifyRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const notifyData = (await notifyRes.json()) as {
+        notifyEnabled: boolean;
+        notifyEmail: string | null;
+        notifyOn: NotifyOnOption;
+        notifyIncludeCsv: boolean;
+        summaryEnabled: boolean;
+      };
+
+      const uptimeRes = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/uptime`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: uptimeEnabled,
+            checkUrl: (setupTargetSite?.url || uptimeCheckUrl.trim()).trim(),
+            failureThreshold: uptimeFailureThreshold,
+          }),
+        },
+      );
+      if (!uptimeRes.ok) {
+        const text = await uptimeRes.text().catch(() => "");
+        throw new Error(
+          `Availability update failed: ${uptimeRes.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      setScheduleEnabled(scheduleData.scheduleEnabled);
+      setScheduleFrequency(scheduleData.scheduleFrequency);
+      setScheduleTimeUtc(normalizeTimeInput(scheduleData.scheduleTimeUtc));
+      setScheduleDayOfWeek(scheduleData.scheduleDayOfWeek ?? 1);
+      setScheduleDayOfMonth(scheduleData.scheduleDayOfMonth ?? 1);
+      setNotifyEnabled(notifyData.notifyEnabled);
+      setNotifyEmail(notifyData.notifyEmail ?? "");
+      setNotifyOn(normalizeNotifyOn(notifyData.notifyOn));
+      setNotifyIncludeCsv(notifyData.notifyIncludeCsv);
+      setSummaryEnabled(notifyData.summaryEnabled);
+
+      setSites((prev) =>
+        prev.map((site) =>
+          site.id === selectedSiteId
+            ? {
+                ...site,
+                schedule_enabled: scheduleData.scheduleEnabled,
+                schedule_frequency: scheduleData.scheduleFrequency,
+                schedule_time_utc: scheduleData.scheduleTimeUtc,
+                schedule_day_of_week: scheduleData.scheduleDayOfWeek,
+                schedule_day_of_month: scheduleData.scheduleDayOfMonth,
+                next_scheduled_at: scheduleData.nextScheduledAt,
+                last_scheduled_at: scheduleData.lastScheduledAt,
+                notify_enabled: notifyData.notifyEnabled,
+                notify_email: notifyData.notifyEmail,
+                notify_on: normalizeNotifyOn(notifyData.notifyOn),
+                notify_include_csv: notifyData.notifyIncludeCsv,
+                summary_enabled: notifyData.summaryEnabled,
+              }
+            : site,
+        ),
+      );
+
+      await loadUptimeStatus(selectedSiteId);
+      setOnboardingStep(2);
+    } catch (err: unknown) {
+      setOnboardingError(
+        getErrorMessage(err, "Failed to save monitoring settings"),
+      );
+    } finally {
+      setOnboardingWorking(false);
+    }
+  }
+
   async function handleOnboardingRunScan() {
     if (!selectedSiteId) return;
+    setOnboardingStep(2);
     setOnboardingScanRequested(true);
     await handleRunScan();
   }
@@ -8970,29 +10144,20 @@ const App: React.FC = () => {
   }
 
   async function openFirstSourceForResult(row: ScanLink) {
-    const existing = occurrencesByLinkId[row.id] ?? [];
-    if (existing.length > 0) {
-      openSourcePage(existing[0].source_page);
+    const sourcePage = await getReportLinkSourceUrl(row);
+    if (!sourcePage) {
+      pushToast("No source page available", "warning");
       return;
     }
-    try {
-      const res = await apiFetch(
-        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/occurrences?limit=1&offset=0`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) {
-        throw new Error(`Failed to fetch source page: ${res.status}`);
-      }
-      const data = (await res.json()) as ScanLinkOccurrencesResponse;
-      const first = data.occurrences?.[0];
-      if (first?.source_page) {
-        openSourcePage(first.source_page);
-      } else {
-        pushToast("No source page available", "warning");
-      }
-    } catch (err: unknown) {
-      pushToast(getErrorMessage(err, "Failed to open source page"), "warning");
+    openSourcePage(sourcePage);
+  }
+
+  async function copyFirstSourceForResult(row: ScanLink) {
+    const sourcePage = await getReportLinkSourceUrl(row);
+    if (!sourcePage) {
+      return;
     }
+    await copyToClipboard(sourcePage, undefined, "Copied source page URL");
   }
 
   function getExportClassification(): LinkClassification | "all" {
@@ -9011,14 +10176,71 @@ const App: React.FC = () => {
     return buildAppUrl("/report", { scanRunId });
   }
 
+  function buildReportPdfLink(scanRunId: string) {
+    return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/report.pdf`;
+  }
+
+  async function handleCreateRunShareLink(scanRunId: string) {
+    if (runActionBusyId === scanRunId) return;
+    setRunActionBusyId(scanRunId);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/share`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          text
+            ? `Failed to create share link (${res.status}): ${text.slice(0, 200)}`
+            : `Failed to create share link (${res.status})`,
+        );
+      }
+      const data = (await res.json()) as ReportShareResponse;
+      if (!data.share?.shareUrl) {
+        throw new Error("Share link is missing in response");
+      }
+      await copyToClipboard(
+        data.share.shareUrl,
+        undefined,
+        "Share link copied",
+      );
+      pushToast("Share link ready", "success");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to create share link"), "warning");
+    } finally {
+      setRunActionBusyId(null);
+    }
+  }
+
   function navigateTo(pathname: string) {
-    const url = buildAppUrl(pathname);
+    const normalizedPath = normalizeDashboardCompatPath(
+      pathname.replace(/\/+$/, "") || "/",
+    );
+    const url = buildAppUrl(normalizedPath);
     window.history.pushState({}, "", url);
     const nextRoute = getRouteFromLocation();
+    const nextReportId = getReportScanRunIdFromLocation();
+    const nextSharedToken = getSharedReportTokenFromLocation();
+    const isSharedReportPath = window.location.pathname
+      .replace(/\/+$/, "")
+      .startsWith("/shared-reports");
     setRoute(nextRoute);
     setAppSection(getAppSectionFromLocation());
     setLearnSlug(getLearnSlugFromLocation());
-    setViewMode(nextRoute === "report" ? "report" : "dashboard");
+    setReportScanRunId(nextReportId);
+    setSharedReportToken(nextSharedToken);
+    setViewMode(
+      resolveViewMode(
+        nextRoute,
+        nextReportId,
+        nextSharedToken,
+        isSharedReportPath,
+      ),
+    );
   }
 
   function openLearnArticle(slug: string) {
@@ -9663,6 +10885,378 @@ const App: React.FC = () => {
     handleThemeChange(next);
   }
 
+  const renderThemeIcon = (theme: ThemePreference) => {
+    if (theme === "light") {
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" />
+          <path
+            d="M12 2.8v2.4M12 18.8v2.4M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2.8 12h2.4M18.8 12h2.4M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"
+            fill="none"
+            stroke="currentColor"
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    }
+
+    if (theme === "dark") {
+      return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M20.2 15.4A8.2 8.2 0 0 1 8.6 3.8 8.7 8.7 0 1 0 20.2 15.4Z"
+            fill="none"
+            stroke="currentColor"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    }
+
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect
+          x="4"
+          y="5"
+          width="16"
+          height="11"
+          rx="2"
+          fill="none"
+          stroke="currentColor"
+        />
+        <path
+          d="M9 20h6M12 16v4M12 8v5M8.8 10.5h6.4"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  };
+
+  const renderThemeSegmentedControl = () => (
+    <div className="theme-segmented-control" aria-label="Theme preference">
+      {(
+        [
+          { key: "light", label: "Light" },
+          { key: "system", label: "System" },
+          { key: "dark", label: "Dark" },
+        ] as Array<{ key: ThemePreference; label: string }>
+      ).map((option) => (
+        <button
+          key={option.key}
+          type="button"
+          className={themePreference === option.key ? "active" : undefined}
+          onClick={() => handleThemeChange(option.key)}
+        >
+          <span aria-hidden="true">{renderThemeIcon(option.key)}</span>
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  const renderNotificationIcon = () => (
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+      <path
+        d="M18 10.8V9a6 6 0 0 0-12 0v1.8c0 2-.7 3.4-1.5 4.4-.5.7 0 1.8.9 1.8h13.2c.9 0 1.4-1 .9-1.8-.8-1-1.5-2.4-1.5-4.4Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.6 19a2.6 2.6 0 0 0 4.8 0"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+
+  function getNotificationActionLabel(notification: AppNotification) {
+    if (notification.scan_run_id) return "View report";
+    if (notification.kind === "uptime_down") return "View site settings";
+    return "View dashboard";
+  }
+
+  async function markNotificationRead(notification: AppNotification) {
+    if (notification.read_at) return;
+    setNotificationsError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/notifications/${encodeURIComponent(notification.id)}/read`,
+        { method: "PATCH" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as ReadNotificationResponse;
+      setNotifications((prev) =>
+        prev.filter((item) => item.id !== notification.id),
+      );
+      setUnreadNotificationCount(data.unreadCount ?? 0);
+    } catch (err: unknown) {
+      setNotificationsError(
+        getErrorMessage(err, "Failed to mark notification read"),
+      );
+    }
+  }
+
+  async function handleMarkAllNotificationsRead() {
+    setNotificationsError(null);
+    try {
+      const res = await apiFetch(`${API_BASE}/notifications/mark-all-read`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as MarkAllNotificationsReadResponse;
+      setNotifications([]);
+      setUnreadNotificationCount(data.unreadCount ?? 0);
+    } catch (err: unknown) {
+      setNotificationsError(
+        getErrorMessage(err, "Failed to mark notifications read"),
+      );
+    }
+  }
+
+  function handleNotificationAction(notification: AppNotification) {
+    void markNotificationRead(notification);
+    setNotificationMenuOpen(false);
+    setNotificationMenuPosition(null);
+    if (notification.scan_run_id) {
+      openReport(notification.scan_run_id);
+      return;
+    }
+    if (notification.site_id) {
+      const site = sites.find((item) => item.id === notification.site_id);
+      if (site) {
+        void handleSelectSite(site);
+      }
+    }
+    openAppSection(
+      notification.kind === "uptime_down" ? "site_settings" : "dashboard",
+    );
+  }
+
+  function toggleNotificationMenu(event: React.MouseEvent<HTMLButtonElement>) {
+    if (notificationMenuOpen) {
+      setNotificationMenuOpen(false);
+      setNotificationMenuPosition(null);
+      return;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = Math.min(360, window.innerWidth - 16);
+    setNotificationMenuPosition({
+      top: rect.bottom + 10,
+      left: Math.min(
+        Math.max(8, rect.right - width),
+        Math.max(8, window.innerWidth - width - 8),
+      ),
+      width,
+    });
+    setNotificationMenuOpen(true);
+    void loadAppNotifications();
+    void loadUnreadNotificationCount();
+  }
+
+  const renderNotificationMenu = () => {
+    if (!notificationMenuOpen || !notificationMenuPosition) return null;
+    const unreadNotifications = notifications.filter(
+      (notification) => !notification.read_at,
+    );
+    const menuUnreadCount = Math.max(
+      unreadNotificationCount,
+      unreadNotifications.length,
+    );
+    const hasUnreadNotifications = menuUnreadCount > 0;
+    const notificationMeta =
+      menuUnreadCount > 0
+        ? `${menuUnreadCount} unread notification${
+            menuUnreadCount === 1 ? "" : "s"
+          }`
+        : "No unread notifications.";
+
+    return createPortal(
+      <div
+        className="notification-menu"
+        data-notification-menu
+        style={{
+          position: "fixed",
+          top: notificationMenuPosition.top,
+          left: notificationMenuPosition.left,
+          width: notificationMenuPosition.width,
+          zIndex: 1000,
+        }}
+      >
+        <div className="notification-menu__header">
+          <div>
+            <div className="notification-menu__title">Notifications</div>
+            <div className="notification-menu__meta">{notificationMeta}</div>
+          </div>
+          <button
+            type="button"
+            className="notification-menu__mark"
+            disabled={!hasUnreadNotifications}
+            onClick={() => void handleMarkAllNotificationsRead()}
+          >
+            Mark all as read
+          </button>
+        </div>
+
+        <div className="notification-menu__body">
+          {notificationsLoading && (
+            <div className="notification-menu__empty">
+              Loading notifications...
+            </div>
+          )}
+          {notificationsError && (
+            <div className="notification-menu__error">{notificationsError}</div>
+          )}
+          {!notificationsLoading &&
+            !notificationsError &&
+            unreadNotifications.length === 0 && (
+              <div className="notification-menu__empty">
+                No unread notifications.
+              </div>
+            )}
+          {!notificationsLoading &&
+            !notificationsError &&
+            unreadNotifications.map((notification) => (
+              <div key={notification.id} className="notification-item unread">
+                <div className="notification-item__top">
+                  <span
+                    className={`notification-severity notification-severity--${notification.severity}`}
+                  >
+                    {notification.severity}
+                  </span>
+                  <div className="notification-item__tools">
+                    <span className="notification-item__time">
+                      {formatDate(notification.created_at)}
+                    </span>
+                    <button
+                      type="button"
+                      className="notification-item__dismiss"
+                      title="Mark as read"
+                      aria-label="Mark notification as read"
+                      onClick={() => void markNotificationRead(notification)}
+                    >
+                      x
+                    </button>
+                  </div>
+                </div>
+                <div className="notification-item__title">
+                  {notification.title}
+                </div>
+                <div className="notification-item__message">
+                  {notification.message}
+                </div>
+                <button
+                  type="button"
+                  className="notification-item__action"
+                  onClick={() => handleNotificationAction(notification)}
+                >
+                  {getNotificationActionLabel(notification)}
+                </button>
+              </div>
+            ))}
+        </div>
+      </div>,
+      document.body,
+    );
+  };
+
+  const renderNotificationBell = () => (
+    <div data-notification-menu>
+      <button
+        type="button"
+        className="notification-bell"
+        aria-label="Notifications"
+        title="Notifications"
+        onClick={toggleNotificationMenu}
+      >
+        {renderNotificationIcon()}
+        {unreadNotificationCount > 0 && (
+          <span className="notification-bell__badge">
+            {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
+          </span>
+        )}
+      </button>
+      {renderNotificationMenu()}
+    </div>
+  );
+
+  function renderAccountNotificationPreferenceToggle(
+    field: UserNotificationPreferenceField,
+    title: string,
+    help: string,
+    options?: { master?: boolean },
+  ) {
+    const checked = accountNotificationPreferences[field];
+    const disabled =
+      accountNotificationPreferencesLoading ||
+      accountNotificationPreferencesSaving ||
+      (!options?.master && !accountNotificationPreferences.inAppEnabled);
+    return (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        className={`account-notification-toggle ${
+          checked ? "is-active" : ""
+        } ${disabled ? "is-disabled" : ""}`}
+        disabled={disabled}
+        onClick={() =>
+          void updateAccountNotificationPreference(field, !checked)
+        }
+      >
+        <span className="account-notification-toggle__copy">
+          <span className="account-notification-toggle__title">{title}</span>
+          <span className="account-notification-toggle__help">{help}</span>
+        </span>
+        <span className="account-notification-toggle__switch" />
+      </button>
+    );
+  }
+
+  const renderAccountMenu = () => (
+    <div className="theme-menu account-menu">
+      <div className="account-menu__section">
+        <div className="account-menu__label">Theme</div>
+        {renderThemeSegmentedControl()}
+      </div>
+      <div className="account-menu__section">
+        <div className="account-menu__label">Account</div>
+        <button
+          onClick={() => {
+            openAppSection("account");
+            setUserMenuOpen(false);
+          }}
+        >
+          Account settings
+        </button>
+      </div>
+      <div className="account-menu__section">
+        <div className="account-menu__label">Help & Learn</div>
+        <button
+          onClick={() => {
+            navigateTo("/learn");
+            setUserMenuOpen(false);
+          }}
+        >
+          Scanlark Learn
+        </button>
+        <button
+          onClick={() => {
+            setShortcutsOpen(true);
+            setUserMenuOpen(false);
+          }}
+        >
+          Keyboard shortcuts
+        </button>
+      </div>
+      <div className="account-menu__divider" />
+      <button onClick={() => void handleLogout()}>Logout</button>
+    </div>
+  );
+
   function pushToast(
     message: string,
     tone: "success" | "warning" | "info" = "info",
@@ -9765,7 +11359,12 @@ const App: React.FC = () => {
     row: ScanLink,
   ) {
     const target = event.target as HTMLElement | null;
-    if (target?.closest("[data-no-drawer]")) return;
+    if (
+      target?.closest("[data-no-drawer]") ||
+      target?.closest("[data-action-menu]")
+    ) {
+      return;
+    }
     openDetails(row);
   }
 
@@ -9799,6 +11398,7 @@ const App: React.FC = () => {
       );
       const menuId = `result:${row.id}`;
       const menuOpen = actionMenuOpenId === menuId;
+      const showActions = row.classification !== "ok";
       const statusChipBg =
         row.status_code == null
           ? "var(--border)"
@@ -9880,148 +11480,159 @@ const App: React.FC = () => {
               {row.occurrence_count === 1 ? "occurrence" : "occurrences"}
             </div>
           </div>
-          <div
-            className="result-cell result-actions row-actions"
-            data-no-drawer
-          >
+          {showActions && (
             <div
-              style={{ position: "relative", display: "inline-flex" }}
-              data-action-menu
+              className="result-cell result-actions row-actions"
+              data-no-drawer
             >
-              <button
-                onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
-                className="icon-button"
-                style={{
-                  borderColor: theme.copyBorder,
-                  color: theme.copyColor,
-                  padding: "6px",
-                }}
-                aria-label="Open actions"
-                title="Actions"
+              <div
+                style={{ position: "relative", display: "inline-flex" }}
+                data-action-menu
               >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="14"
-                  height="14"
-                  aria-hidden="true"
-                >
-                  <circle cx="5" cy="12" r="1.6" fill="currentColor" />
-                  <circle cx="12" cy="12" r="1.6" fill="currentColor" />
-                  <circle cx="19" cy="12" r="1.6" fill="currentColor" />
-                </svg>
-              </button>
-              {menuOpen && (
-                <div
-                  className="action-menu"
+                <button
+                  onClick={() => setActionMenuOpenId(menuOpen ? null : menuId)}
+                  className="icon-button"
                   style={{
-                    position: "absolute",
-                    right: 0,
-                    top: "calc(100% + 6px)",
-                    background: "var(--panel)",
-                    border: "1px solid var(--border)",
-                    borderRadius: "12px",
-                    boxShadow: "var(--shadow)",
+                    borderColor: theme.copyBorder,
+                    color: theme.copyColor,
                     padding: "6px",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "4px",
-                    minWidth: "220px",
-                    zIndex: 40,
                   }}
+                  aria-label="Open actions"
+                  title="Actions"
                 >
-                  <button
-                    onClick={() => {
-                      void copyToClipboard(
-                        row.link_url,
-                        linkCopyKey,
-                        "Copied link URL",
-                      );
-                      setActionMenuOpenId(null);
-                    }}
-                    data-no-drawer
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="14"
+                    height="14"
+                    aria-hidden="true"
                   >
-                    Copy Link URL
-                  </button>
-                  <button
-                    onClick={() => {
-                      window.open(
-                        row.link_url,
-                        "_blank",
-                        "noopener,noreferrer",
-                      );
-                      setActionMenuOpenId(null);
+                    <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+                    <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+                    <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+                  </svg>
+                </button>
+                {menuOpen && (
+                  <div
+                    className="action-menu"
+                    style={{
+                      position: "absolute",
+                      right: 0,
+                      top: "calc(100% + 6px)",
+                      background: "var(--panel)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "12px",
+                      boxShadow: "var(--shadow)",
+                      padding: "6px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                      minWidth: "220px",
+                      zIndex: 40,
                     }}
-                    data-no-drawer
                   >
-                    Open Link
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (sourcePages.length > 0) {
-                        openSourcePage(sourcePages[0]);
-                      } else {
-                        void openFirstSourceForResult(row);
-                      }
-                      setActionMenuOpenId(null);
-                    }}
-                    data-no-drawer
-                  >
-                    Open Source Page
-                  </button>
-                  {sourcePages.length > 1 && (
-                    <div
-                      style={{
-                        borderTop: "1px solid var(--border)",
-                        paddingTop: "6px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "4px",
+                    <button
+                      onClick={() => {
+                        void copyToClipboard(
+                          row.link_url,
+                          linkCopyKey,
+                          "Copied link URL",
+                        );
+                        setActionMenuOpenId(null);
                       }}
+                      data-no-drawer
                     >
-                      {sourcePages.map((page) => (
-                        <button
-                          key={page}
-                          onClick={() => {
-                            openSourcePage(page);
-                            setActionMenuOpenId(null);
-                          }}
-                          style={{
-                            fontSize: "11px",
-                            textAlign: "left",
-                            color: "var(--muted)",
-                            background: "transparent",
-                            border: "1px solid transparent",
-                            padding: "4px 6px",
-                          }}
-                        >
-                          {page}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  <button
-                    onClick={() => {
-                      handleIgnoreLink(row, "site_rule_exact");
-                      setActionMenuOpenId(null);
-                    }}
-                    disabled={row.ignored}
-                    data-no-drawer
-                  >
-                    {row.ignored ? "Ignored" : "Ignore this link"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      openNoteModal(row.link_url);
-                      setActionMenuOpenId(null);
-                    }}
-                    data-no-drawer
-                  >
-                    {hasNote ? "Edit Note" : "Add Note"}
-                  </button>
-                </div>
-              )}
+                      Copy target URL
+                    </button>
+                    <button
+                      onClick={() => {
+                        window.open(
+                          row.link_url,
+                          "_blank",
+                          "noopener,noreferrer",
+                        );
+                        setActionMenuOpenId(null);
+                      }}
+                      data-no-drawer
+                    >
+                      Open target URL
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (sourcePages.length > 0) {
+                          openSourcePage(sourcePages[0]);
+                        } else {
+                          void openFirstSourceForResult(row);
+                        }
+                        setActionMenuOpenId(null);
+                      }}
+                      data-no-drawer
+                    >
+                      Open source page
+                    </button>
+                    <button
+                      onClick={() => {
+                        void copyFirstSourceForResult(row);
+                        setActionMenuOpenId(null);
+                      }}
+                      data-no-drawer
+                    >
+                      Copy source page URL
+                    </button>
+                    {sourcePages.length > 1 && (
+                      <div
+                        style={{
+                          borderTop: "1px solid var(--border)",
+                          paddingTop: "6px",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "4px",
+                        }}
+                      >
+                        {sourcePages.map((page) => (
+                          <button
+                            key={page}
+                            onClick={() => {
+                              openSourcePage(page);
+                              setActionMenuOpenId(null);
+                            }}
+                            style={{
+                              fontSize: "11px",
+                              textAlign: "left",
+                              color: "var(--muted)",
+                              background: "transparent",
+                              border: "1px solid transparent",
+                              padding: "4px 6px",
+                            }}
+                          >
+                            {page}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => {
+                        handleIgnoreLink(row, "site_rule_exact");
+                        setActionMenuOpenId(null);
+                      }}
+                      disabled={row.ignored}
+                      data-no-drawer
+                    >
+                      {row.ignored ? "Ignored" : "Ignore this link"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        openNoteModal(row.link_url);
+                        setActionMenuOpenId(null);
+                      }}
+                      data-no-drawer
+                    >
+                      {hasNote ? "Edit Note" : "Add Note"}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       );
     });
@@ -11408,11 +13019,32 @@ const App: React.FC = () => {
           flex-wrap: wrap;
         }
         .dashboard-history-row__stats {
-          display: grid;
-          gap: 4px;
-          font-size: 12px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          align-items: stretch;
+        }
+        .dashboard-run-metric-pill {
+          display: inline-flex;
+          flex-direction: column;
+          gap: 2px;
+          padding: 7px 9px;
+          min-width: 86px;
+          border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+          border-radius: 10px;
+          background: color-mix(in srgb, var(--panel-elev) 75%, transparent);
+        }
+        .dashboard-run-metric-pill span:first-child {
+          font-size: 10px;
           color: var(--text-muted);
-          line-height: 1.5;
+          text-transform: none;
+          letter-spacing: 0.02em;
+        }
+        .dashboard-run-metric-pill span:last-child {
+          font-size: 12px;
+          color: var(--text);
+          line-height: 1.1;
+          font-weight: 600;
         }
         .dashboard-history-row__stats strong {
           font-size: 13px;
@@ -11736,6 +13368,420 @@ const App: React.FC = () => {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
+        }
+        .onboarding-page {
+          min-height: 100vh;
+          background:
+            radial-gradient(
+              900px 460px at 14% -8%,
+              color-mix(in srgb, var(--accent) 18%, transparent),
+              transparent 58%
+            ),
+            radial-gradient(
+              680px 360px at 88% 4%,
+              rgba(20, 184, 166, 0.12),
+              transparent 58%
+            ),
+            linear-gradient(
+              180deg,
+              color-mix(in srgb, var(--bg) 90%, black 10%) 0%,
+              var(--bg) 100%
+            );
+        }
+        .onboarding-shell {
+          width: min(1120px, 100%);
+          margin: 0 auto;
+          padding: clamp(20px, 4vw, 42px);
+          display: grid;
+          gap: 22px;
+        }
+        .onboarding-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          align-items: flex-start;
+        }
+        .onboarding-brand {
+          display: grid;
+          gap: 4px;
+        }
+        .onboarding-brand strong {
+          font-family: var(--font-display);
+          font-size: 20px;
+        }
+        .onboarding-brand span {
+          color: var(--text-muted);
+          font-size: 12px;
+        }
+        .onboarding-layout {
+          display: grid;
+          grid-template-columns: minmax(220px, 0.36fr) minmax(0, 1fr);
+          gap: 18px;
+          align-items: start;
+        }
+        .onboarding-stepper,
+        .onboarding-panel {
+          border: 1px solid var(--border);
+          background: color-mix(
+            in srgb,
+            var(--panel) 92%,
+            rgba(255, 255, 255, 0.025)
+          );
+          box-shadow: var(--shadow);
+        }
+        .onboarding-stepper {
+          border-radius: 16px;
+          padding: 14px;
+          display: grid;
+          gap: 8px;
+          position: sticky;
+          top: 20px;
+        }
+        .onboarding-step {
+          display: grid;
+          grid-template-columns: 30px minmax(0, 1fr);
+          gap: 10px;
+          align-items: center;
+          padding: 10px;
+          border-radius: 12px;
+          color: var(--text-muted);
+        }
+        .onboarding-step.is-active {
+          color: var(--text);
+          background: color-mix(in srgb, var(--accent) 16%, transparent);
+        }
+        .onboarding-step.is-complete {
+          color: var(--text);
+        }
+        .onboarding-step__index {
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+          display: inline-grid;
+          place-items: center;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .onboarding-step.is-active .onboarding-step__index,
+        .onboarding-step.is-complete .onboarding-step__index {
+          border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+          color: var(--accent);
+        }
+        .onboarding-step__label {
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .onboarding-panel {
+          border-radius: 20px;
+          padding: clamp(20px, 4vw, 34px);
+          display: grid;
+          gap: 20px;
+          min-height: 560px;
+        }
+        .onboarding-panel__header {
+          display: grid;
+          gap: 8px;
+          max-width: 760px;
+        }
+        .onboarding-panel__eyebrow {
+          color: var(--accent);
+          font-size: 12px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+        }
+        .onboarding-panel h1,
+        .onboarding-panel h2 {
+          margin: 0;
+          font-family: var(--font-display);
+          line-height: 1.08;
+        }
+        .onboarding-panel h1 {
+          font-size: clamp(32px, 4.6vw, 56px);
+          max-width: 12ch;
+        }
+        .onboarding-panel h2 {
+          font-size: clamp(26px, 3vw, 38px);
+        }
+        .onboarding-panel p {
+          margin: 0;
+          color: var(--text-muted);
+          line-height: 1.65;
+        }
+        .onboarding-form {
+          display: grid;
+          gap: 14px;
+          max-width: 760px;
+        }
+        .onboarding-settings-section {
+          border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+          border-radius: 18px;
+          padding: 16px;
+          display: grid;
+          gap: 14px;
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 72%,
+            rgba(255, 255, 255, 0.025)
+          );
+        }
+        .onboarding-settings-section__header {
+          display: grid;
+          gap: 5px;
+        }
+        .onboarding-settings-section__header h3 {
+          margin: 0;
+          font-family: var(--font-display);
+          font-size: 18px;
+          line-height: 1.2;
+        }
+        .onboarding-settings-section__header p {
+          margin: 0;
+          color: var(--text-muted);
+          font-size: 13px;
+          line-height: 1.55;
+        }
+        .onboarding-form-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+        .onboarding-field {
+          display: grid;
+          gap: 7px;
+          font-size: 12px;
+          color: var(--text-muted);
+          font-weight: 700;
+        }
+        .onboarding-input,
+        .onboarding-select {
+          width: 100%;
+          min-height: 44px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 84%, black 4%);
+          color: var(--text);
+          padding: 10px 12px;
+          box-sizing: border-box;
+          font: inherit;
+        }
+        .onboarding-choice-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px;
+        }
+        .onboarding-choice-grid--scan-types {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .onboarding-choice {
+          text-align: left;
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 76%, transparent);
+          color: var(--text);
+          padding: 14px;
+          display: grid;
+          gap: 6px;
+          cursor: pointer;
+        }
+        .onboarding-choice:disabled {
+          cursor: not-allowed;
+          opacity: 0.58;
+        }
+        .onboarding-choice.is-active {
+          border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+          background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+        }
+        .onboarding-choice strong {
+          font-size: 14px;
+        }
+        .onboarding-choice span {
+          color: var(--text-muted);
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .onboarding-toggle-card {
+          width: 100%;
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          padding: 14px 16px;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 16px;
+          align-items: center;
+          background: color-mix(in srgb, var(--panel-elev) 76%, transparent);
+          color: var(--text);
+          cursor: pointer;
+          box-sizing: border-box;
+        }
+        .onboarding-toggle-card.is-active {
+          border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+          background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+        }
+        .onboarding-toggle-card__copy {
+          display: grid;
+          gap: 5px;
+        }
+        .onboarding-toggle-card__topline {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .onboarding-toggle-card__title {
+          font-size: 14px;
+          font-weight: 800;
+          color: var(--text);
+        }
+        .onboarding-toggle-card__state {
+          width: max-content;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          padding: 3px 8px;
+          color: var(--text-muted);
+          background: color-mix(in srgb, var(--panel) 80%, transparent);
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+        }
+        .onboarding-toggle-card.is-active .onboarding-toggle-card__state {
+          color: var(--accent);
+          border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+          background: color-mix(in srgb, var(--accent) 14%, transparent);
+        }
+        .onboarding-toggle-card__help {
+          color: var(--text-muted);
+          font-size: 12px;
+          line-height: 1.55;
+        }
+        .onboarding-switch {
+          position: relative;
+          width: 50px;
+          height: 28px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+          background: color-mix(in srgb, var(--panel) 72%, black 10%);
+          box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.24);
+          transition:
+            background 160ms ease,
+            border-color 160ms ease;
+        }
+        .onboarding-switch::after {
+          content: "";
+          position: absolute;
+          top: 4px;
+          left: 4px;
+          width: 18px;
+          height: 18px;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--text-muted) 80%, white 20%);
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+          transition:
+            transform 160ms ease,
+            background 160ms ease;
+        }
+        .onboarding-toggle-card.is-active .onboarding-switch {
+          border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+          background: color-mix(in srgb, var(--accent) 34%, var(--panel));
+        }
+        .onboarding-toggle-card.is-active .onboarding-switch::after {
+          transform: translateX(22px);
+          background: var(--accent);
+        }
+        .onboarding-toggle-card input {
+          position: absolute;
+          width: 0;
+          height: 0;
+          margin: 0;
+          opacity: 0;
+          pointer-events: none;
+        }
+        .onboarding-inline-note {
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel) 76%, transparent);
+          color: var(--text-muted);
+          padding: 10px 12px;
+          font-size: 12px;
+          line-height: 1.5;
+          overflow-wrap: anywhere;
+        }
+        .onboarding-inline-note strong {
+          color: var(--text);
+          font-weight: 800;
+        }
+        .onboarding-actions {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .onboarding-error {
+          border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+          background: color-mix(in srgb, var(--warning) 10%, transparent);
+          color: var(--warning);
+          padding: 10px 12px;
+          border-radius: 12px;
+          font-size: 13px;
+        }
+        .onboarding-summary-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+          gap: 12px;
+        }
+        .onboarding-summary-card {
+          border-radius: 14px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 80%, transparent);
+          padding: 14px;
+          display: grid;
+          gap: 6px;
+        }
+        .onboarding-summary-card span {
+          color: var(--text-muted);
+          font-size: 12px;
+        }
+        .onboarding-summary-card strong {
+          font-family: var(--font-display);
+          font-size: 24px;
+        }
+        @media (max-width: 880px) {
+          .onboarding-header,
+          .onboarding-layout {
+            grid-template-columns: 1fr;
+          }
+          .onboarding-layout {
+            display: grid;
+          }
+          .onboarding-stepper {
+            position: static;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+          }
+          .onboarding-step {
+            grid-template-columns: 1fr;
+            justify-items: center;
+            text-align: center;
+          }
+          .onboarding-form-grid,
+          .onboarding-choice-grid {
+            grid-template-columns: 1fr;
+          }
+          .onboarding-toggle-card {
+            grid-template-columns: 1fr;
+          }
+        }
+        @media (max-width: 560px) {
+          .onboarding-shell {
+            padding: 16px;
+          }
+          .onboarding-stepper {
+            grid-template-columns: 1fr 1fr;
+          }
+          .onboarding-panel {
+            min-height: auto;
+          }
         }
         @keyframes scanRingPulse {
           0%, 100% {
@@ -13043,6 +15089,590 @@ const App: React.FC = () => {
           min-width: 160px;
           z-index: 30;
         }
+        .account-menu {
+          min-width: 280px;
+          padding: 8px;
+          display: grid;
+          gap: 8px;
+        }
+        .account-menu__section {
+          display: grid;
+          gap: 8px;
+        }
+        .account-menu__label {
+          font-size: 11px;
+          color: var(--muted);
+          padding: 2px 4px;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          font-weight: 700;
+        }
+        .account-menu__divider {
+          height: 1px;
+          background: var(--border);
+          margin: 2px 0;
+        }
+        .notification-bell {
+          position: relative;
+          width: 38px;
+          height: 38px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
+          color: var(--text);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          box-shadow: var(--soft-shadow);
+        }
+        .notification-bell:hover {
+          border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+          background: color-mix(in srgb, var(--panel-elev) 74%, var(--accent) 10%);
+        }
+        .notification-bell:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+          outline-offset: 2px;
+        }
+        .notification-bell svg {
+          stroke-width: 1.9;
+        }
+        .notification-bell__badge {
+          position: absolute;
+          top: -5px;
+          right: -5px;
+          min-width: 18px;
+          height: 18px;
+          padding: 0 5px;
+          border-radius: 999px;
+          background: #ef4444;
+          color: white;
+          border: 2px solid var(--panel);
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 14px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .notification-menu {
+          border: 1px solid var(--border);
+          border-radius: 16px;
+          background: color-mix(in srgb, var(--panel) 94%, black 6%);
+          box-shadow: var(--shadow);
+          overflow: hidden;
+          animation: dropdownIn 160ms ease;
+        }
+        .notification-menu__header {
+          padding: 12px;
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          border-bottom: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
+        }
+        .notification-menu__title {
+          font-family: var(--font-display);
+          font-size: 14px;
+          font-weight: 800;
+          color: var(--text);
+        }
+        .notification-menu__meta {
+          font-size: 11px;
+          color: var(--muted);
+          margin-top: 2px;
+        }
+        .notification-menu__mark {
+          width: auto;
+          padding: 6px 8px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          color: var(--text);
+          font-size: 11px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .notification-menu__mark:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .notification-menu__body {
+          max-height: min(440px, calc(100vh - 120px));
+          overflow: auto;
+          padding: 8px;
+          display: grid;
+          gap: 8px;
+          scrollbar-width: thin;
+        }
+        .notification-menu__empty,
+        .notification-menu__error {
+          padding: 18px 12px;
+          border-radius: 12px;
+          border: 1px dashed var(--border);
+          color: var(--muted);
+          text-align: center;
+          font-size: 12px;
+        }
+        .notification-menu__error {
+          color: var(--warning);
+          border-style: solid;
+        }
+        .notification-item {
+          position: relative;
+          padding: 12px;
+          border-radius: 13px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 78%, transparent);
+          display: grid;
+          gap: 7px;
+          opacity: 0.72;
+        }
+        .notification-item.unread {
+          border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+          background: color-mix(in srgb, var(--accent) 8%, var(--panel-elev));
+          opacity: 1;
+        }
+        .notification-item.unread::before {
+          content: "";
+          position: absolute;
+          top: 14px;
+          left: 12px;
+          width: 7px;
+          height: 7px;
+          border-radius: 999px;
+          background: #ef4444;
+        }
+        .notification-item__top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          padding-right: 14px;
+        }
+        .notification-item.unread .notification-item__top {
+          padding-left: 12px;
+        }
+        .notification-item__tools {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          min-width: 0;
+        }
+        .notification-item__dismiss {
+          width: 20px;
+          height: 20px;
+          padding: 0;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, #ef4444 48%, var(--border));
+          background: color-mix(in srgb, #ef4444 9%, transparent);
+          color: #f87171;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 13px;
+          font-weight: 900;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .notification-item__dismiss:hover {
+          background: color-mix(in srgb, #ef4444 16%, transparent);
+          color: #fecaca;
+        }
+        .notification-item__dismiss:focus-visible {
+          outline: 2px solid color-mix(in srgb, #ef4444 70%, white);
+          outline-offset: 2px;
+        }
+        .notification-severity {
+          padding: 3px 7px;
+          border-radius: 999px;
+          font-size: 10px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          border: 1px solid var(--border);
+          color: var(--muted);
+        }
+        .notification-severity--success {
+          color: var(--success);
+          border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+          background: color-mix(in srgb, var(--success) 9%, transparent);
+        }
+        .notification-severity--warning {
+          color: var(--warning);
+          border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+          background: color-mix(in srgb, var(--warning) 9%, transparent);
+        }
+        .notification-severity--critical {
+          color: var(--danger);
+          border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+          background: color-mix(in srgb, var(--danger) 9%, transparent);
+        }
+        .notification-item__time {
+          color: var(--muted);
+          font-size: 11px;
+        }
+        .notification-item__title {
+          color: var(--text);
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.35;
+          padding-right: 12px;
+        }
+        .notification-item__message {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .notification-item__action {
+          width: fit-content;
+          padding: 6px 9px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+          background: color-mix(in srgb, var(--accent) 10%, transparent);
+          color: var(--text);
+          font-size: 11px;
+          font-weight: 800;
+          cursor: pointer;
+        }
+        .notification-item__action:hover {
+          background: color-mix(in srgb, var(--accent) 18%, transparent);
+        }
+        .theme-segmented-control {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 4px;
+          padding: 4px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 78%, transparent);
+        }
+        .theme-segmented-control button {
+          padding: 7px 8px;
+          text-align: center;
+          border-radius: 9px;
+          font-size: 11px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 5px;
+          border: 1px solid transparent;
+          background: color-mix(in srgb, var(--panel) 58%, transparent);
+          color: var(--muted);
+          box-shadow: none;
+          transition:
+            background 0.16s ease,
+            border-color 0.16s ease,
+            color 0.16s ease,
+            box-shadow 0.16s ease;
+        }
+        .theme-segmented-control button:hover {
+          background: color-mix(in srgb, var(--panel-elev) 82%, var(--accent) 6%);
+          border-color: color-mix(in srgb, var(--border) 78%, var(--accent) 22%);
+          color: var(--text);
+        }
+        .theme-segmented-control button:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+          outline-offset: 2px;
+        }
+        .theme-segmented-control button span {
+          width: 14px;
+          height: 14px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          line-height: 1;
+        }
+        .theme-segmented-control button svg {
+          width: 14px;
+          height: 14px;
+          stroke-width: 1.8;
+          color: currentColor;
+        }
+        .theme-segmented-control button.active {
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--accent) 92%, white 8%),
+            color-mix(in srgb, var(--accent-strong) 82%, var(--accent) 18%)
+          );
+          border-color: color-mix(in srgb, var(--accent) 82%, white 18%);
+          color: white;
+          box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 24%, transparent);
+        }
+        .theme-segmented-control button.active:hover {
+          background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--accent) 96%, white 4%),
+            color-mix(in srgb, var(--accent-strong) 88%, var(--accent) 12%)
+          );
+          color: white;
+        }
+        .account-settings-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 14px;
+          align-items: center;
+          flex-wrap: wrap;
+        }
+        .account-settings-header__main {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          gap: 12px;
+          min-width: 0;
+        }
+        .account-settings-grid {
+          display: grid;
+          grid-template-columns: minmax(320px, 1.15fr) minmax(420px, 1.2fr);
+          gap: 14px;
+          align-items: start;
+        }
+        .account-settings-column {
+          display: grid;
+          gap: 14px;
+          min-width: 0;
+        }
+        .account-settings-card {
+          display: grid;
+          gap: 10px;
+          padding: 15px;
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 78%, transparent);
+          box-shadow: 0 14px 36px rgba(11, 18, 32, 0.2);
+          align-content: start;
+          align-self: start;
+          overflow: hidden;
+          position: relative;
+          isolation: isolate;
+        }
+        .account-settings-card--notifications {
+          border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+        }
+        .account-settings-card--premium {
+          background:
+            linear-gradient(
+              150deg,
+              color-mix(in srgb, var(--panel-elev) 94%, var(--accent) 4%) 0%,
+              color-mix(in srgb, var(--panel-elev) 82%, transparent) 100%
+            );
+          border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+        }
+        .account-settings-card--compact {
+          gap: 8px;
+        }
+        .account-settings-card--compact .account-settings-card__meta {
+          margin: 0;
+        }
+        .account-settings-card--compact .account-settings-card__meta {
+          line-height: 1.45;
+        }
+        .account-settings-user {
+          display: flex;
+          gap: 11px;
+          align-items: center;
+        }
+        .account-settings-user__avatar {
+          width: 32px;
+          height: 32px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: linear-gradient(
+            160deg,
+            color-mix(in srgb, var(--accent) 42%, transparent),
+            color-mix(in srgb, var(--accent-strong) 16%, transparent)
+          );
+          color: white;
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+        }
+        .account-settings-user__meta {
+          display: grid;
+          gap: 2px;
+          min-width: 0;
+        }
+        .account-settings-user__label {
+          font-size: 11px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+          color: var(--muted);
+        }
+        .account-settings-user__email {
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 700;
+          overflow-wrap: anywhere;
+        }
+        .account-settings-card__title {
+          font-family: var(--font-display);
+          font-size: 15px;
+          font-weight: 800;
+          letter-spacing: 0.01em;
+        }
+        .account-settings-card__meta {
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.6;
+          overflow-wrap: anywhere;
+        }
+        .account-settings-card__label {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          color: var(--muted);
+          margin-bottom: 2px;
+          font-weight: 700;
+        }
+        .account-settings-card__value {
+          color: var(--text);
+          font-size: 14px;
+          font-weight: 600;
+        }
+        .account-settings-card__top {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          align-items: flex-start;
+        }
+        .account-settings-badge {
+          width: fit-content;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+          background: color-mix(in srgb, var(--accent) 10%, transparent);
+          color: var(--accent);
+          font-size: 11px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .account-notification-controls {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+        }
+        .account-notification-section {
+          display: grid;
+          gap: 8px;
+          padding: 8px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+          background: color-mix(in srgb, var(--panel) 88%, transparent);
+        }
+        .account-notification-section__label {
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          color: var(--muted);
+          font-weight: 800;
+        }
+        .account-notification-controls__master {
+          grid-column: 1 / -1;
+        }
+        .account-notification-section .account-notification-toggle {
+          width: 100%;
+          min-height: 58px;
+        }
+        .account-notification-toggle {
+          width: 100%;
+          min-height: 52px;
+          padding: 8px 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 76%, transparent);
+          color: var(--text);
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          text-align: left;
+          cursor: pointer;
+        }
+        .account-notification-toggle:hover {
+          border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+          background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+        }
+        .account-notification-toggle.is-disabled {
+          opacity: 0.52;
+          cursor: not-allowed;
+        }
+        .account-notification-toggle__copy {
+          min-width: 0;
+          display: grid;
+          gap: 3px;
+        }
+        .account-notification-toggle__title {
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .account-notification-toggle__help {
+          color: var(--muted);
+          font-size: 11px;
+          line-height: 1.3;
+        }
+        .account-notification-toggle__switch {
+          position: relative;
+          flex: 0 0 auto;
+          width: 36px;
+          height: 20px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--muted) 18%, transparent);
+        }
+        .account-notification-toggle__switch::after {
+          content: "";
+          position: absolute;
+          top: 50%;
+          left: 3px;
+          width: 14px;
+          height: 14px;
+          border-radius: 999px;
+          background: var(--muted);
+          transform: translateY(-50%);
+          transition:
+            left 140ms ease,
+            background 140ms ease;
+        }
+        .account-notification-toggle.is-active
+          .account-notification-toggle__switch {
+          border-color: color-mix(in srgb, var(--accent) 52%, var(--border));
+          background: color-mix(in srgb, var(--accent) 26%, transparent);
+        }
+        .account-notification-toggle.is-active
+          .account-notification-toggle__switch::after {
+          left: 18px;
+          background: var(--accent);
+        }
+        .account-notification-status {
+          min-height: 17px;
+          color: var(--muted);
+          font-size: 12px;
+        }
+        .account-notification-retry {
+          width: auto;
+          margin-left: 8px;
+          padding: 3px 7px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          color: var(--text);
+          font-size: 11px;
+          cursor: pointer;
+        }
+        .account-notification-retry:hover {
+          border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+        }
+        @media (max-width: 820px) {
+          .account-settings-grid {
+            grid-template-columns: 1fr;
+          }
+          .account-notification-controls {
+            grid-template-columns: 1fr;
+          }
+        }
         .theme-menu button {
           width: 100%;
           text-align: left;
@@ -13068,6 +15698,20 @@ const App: React.FC = () => {
           color: var(--text);
           cursor: pointer;
           font-size: 12px;
+        }
+        .action-menu--portal {
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          box-shadow: var(--shadow);
+          padding: 6px;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          overflow-y: auto;
+          scrollbar-width: thin;
+          scrollbar-color: color-mix(in srgb, var(--border) 72%, transparent)
+            transparent;
         }
         .action-menu button:hover {
           background: var(--surface-2);
@@ -13574,7 +16218,7 @@ const App: React.FC = () => {
         }
         .report-table-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+          grid-template-columns: 1fr;
           gap: 16px;
         }
         .report-table-title {
@@ -13612,6 +16256,19 @@ const App: React.FC = () => {
           min-width: 0;
           border-radius: 14px;
           border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          scrollbar-width: thin;
+          scrollbar-color: color-mix(in srgb, var(--border) 72%, transparent)
+            transparent;
+        }
+        .report-table-wrap::-webkit-scrollbar {
+          height: 8px;
+        }
+        .report-table-wrap::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .report-table-wrap::-webkit-scrollbar-thumb {
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--border) 72%, transparent);
         }
         .report-table {
           width: 100%;
@@ -13622,19 +16279,21 @@ const App: React.FC = () => {
         }
         .report-table th,
         .report-table td {
-          padding: 12px 12px;
+          padding: 12px 14px;
           border-bottom: 1px solid var(--border);
           text-align: left;
           vertical-align: top;
+          min-width: 0;
         }
         .report-table th {
           font-size: 10px;
           color: var(--text-muted);
           text-transform: uppercase;
-          letter-spacing: 0.06em;
+          letter-spacing: 0.045em;
+          line-height: 1.35;
           font-weight: 700;
           background: color-mix(in srgb, var(--panel-elev) 82%, transparent);
-          white-space: nowrap;
+          white-space: normal;
         }
         .report-table td {
           overflow-wrap: normal;
@@ -13642,11 +16301,15 @@ const App: React.FC = () => {
         }
         .report-links-table th:nth-child(1),
         .report-links-table td:nth-child(1) {
-          width: 48%;
+          width: 38%;
         }
         .report-links-table th:nth-child(2),
         .report-links-table td:nth-child(2) {
           width: 10%;
+        }
+        .report-links-table th:nth-child(3),
+        .report-links-table td:nth-child(3) {
+          width: 22%;
         }
         .report-links-table th:nth-child(4),
         .report-links-table td:nth-child(4) {
@@ -13654,10 +16317,26 @@ const App: React.FC = () => {
         }
         .report-links-table th:nth-child(5),
         .report-links-table td:nth-child(5) {
-          width: 18%;
+          width: 13%;
+        }
+        .report-links-table .report-actions-col {
+          width: 5%;
+          text-align: right;
         }
         .report-links-table {
-          min-width: 720px;
+          min-width: 0;
+        }
+        .report-links-table--ignored th:nth-child(1),
+        .report-links-table--ignored td:nth-child(1) {
+          width: 35%;
+        }
+        .report-links-table--ignored th:nth-child(3),
+        .report-links-table--ignored td:nth-child(3) {
+          width: 25%;
+        }
+        .report-links-table--ignored th:nth-child(4),
+        .report-links-table--ignored td:nth-child(4) {
+          width: 13%;
         }
         .report-issues-table th:nth-child(1),
         .report-issues-table td:nth-child(1) {
@@ -13665,23 +16344,28 @@ const App: React.FC = () => {
         }
         .report-issues-table th:nth-child(2),
         .report-issues-table td:nth-child(2) {
-          width: 20%;
+          width: 28%;
         }
         .report-issues-table th:nth-child(3),
         .report-issues-table td:nth-child(3) {
-          width: 27%;
+          width: 19%;
         }
         .report-issues-table th:nth-child(4),
         .report-issues-table td:nth-child(4) {
-          width: 22%;
+          width: 17%;
         }
         .report-issues-table th:nth-child(5),
         .report-issues-table td:nth-child(5) {
-          width: 8%;
+          width: 10%;
         }
         .report-issues-table th:nth-child(6),
         .report-issues-table td:nth-child(6) {
-          width: 14%;
+          width: 12%;
+        }
+        .report-issues-table th:nth-child(7),
+        .report-issues-table td:nth-child(7) {
+          width: 5%;
+          text-align: right;
         }
         .report-url-cell {
           display: flex;
@@ -13727,9 +16411,19 @@ const App: React.FC = () => {
         .report-issue-support {
           font-size: 12px;
           color: var(--text-muted);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
+          white-space: normal;
+          overflow-wrap: anywhere;
+          line-height: 1.55;
+        }
+        .report-empty-state {
+          border: 1px dashed color-mix(in srgb, var(--border) 86%, transparent);
+          border-radius: 14px;
+          background: color-mix(in srgb, var(--panel-elev) 58%, transparent);
+          color: var(--text-muted);
+          padding: 18px;
+          text-align: center;
+          font-size: 13px;
+          line-height: 1.6;
         }
         .report-issue-guidance {
           margin-top: 10px;
@@ -13882,6 +16576,12 @@ const App: React.FC = () => {
           align-items: flex-start;
           flex-wrap: wrap;
         }
+        .report-priority-item__actions {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 24px;
+        }
         .report-priority-item__title {
           font-size: 15px;
           font-weight: 700;
@@ -13913,6 +16613,29 @@ const App: React.FC = () => {
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
           gap: 10px 12px;
         }
+        .report-learn-link {
+          width: fit-content;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 5px 9px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+          background: color-mix(in srgb, var(--accent) 10%, transparent);
+          color: var(--text);
+          font-size: 11px;
+          font-weight: 800;
+          text-decoration: none;
+          cursor: pointer;
+        }
+        .report-learn-link:hover {
+          background: color-mix(in srgb, var(--accent) 18%, transparent);
+          color: var(--text);
+        }
+        .report-learn-link:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+          outline-offset: 2px;
+        }
         .report-footer {
           font-size: 12px;
           color: var(--text-muted);
@@ -13927,6 +16650,7 @@ const App: React.FC = () => {
           .report-share-panel,
           .report-developer-diagnostics,
           .toast-stack,
+          .report-learn-link,
           .icon-button {
             display: none !important;
           }
@@ -14080,9 +16804,10 @@ const App: React.FC = () => {
             border-bottom: 1px solid var(--border);
           }
           .report-links-table td {
+            width: auto !important;
             display: grid;
-            grid-template-columns: minmax(92px, 0.34fr) minmax(0, 1fr);
-            gap: 10px;
+            grid-template-columns: 1fr;
+            gap: 5px;
             padding: 6px 0;
             border-bottom: 0;
             overflow-wrap: anywhere;
@@ -14192,7 +16917,7 @@ const App: React.FC = () => {
             onBackToIndex={() => navigateTo("/learn")}
             onBackToLanding={() => navigateTo("/landing")}
             onOpenApp={() => navigateTo("/dashboard")}
-            onOpenLogin={() => navigateTo("/login")}
+            onOpenLogin={() => openAuth("login")}
             onClearFilters={() => {
               setLearnSearchQuery("");
               setLearnCategoryFilter("all");
@@ -14215,9 +16940,12 @@ const App: React.FC = () => {
           isPublicLandingRoute ? (
             <MarketingPage
               isAuthenticated={false}
-              onOpenApp={() => navigateTo("/login")}
-              onOpenLogin={() => navigateTo("/login")}
+              primaryLabel="Get started"
+              secondaryLabel="Login"
+              onOpenPrimary={() => openAuth("register")}
+              onOpenSecondary={() => openAuth("login")}
               onOpenLearn={() => navigateTo("/learn")}
+              onOpenAccount={undefined}
             />
           ) : isLoginRoute || protectedRouteRequiresAuth ? (
             <AuthPage
@@ -14241,10 +16969,623 @@ const App: React.FC = () => {
         ) : isPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
-            onOpenApp={() => navigateTo("/dashboard")}
-            onOpenLogin={() => navigateTo("/dashboard")}
+            primaryLabel="Open dashboard"
+            secondaryLabel="Account"
+            onOpenPrimary={() => navigateTo("/dashboard")}
+            onOpenSecondary={() => navigateTo("/dashboard/account")}
             onOpenLearn={() => navigateTo("/learn")}
+            onOpenAccount={() => navigateTo("/dashboard/account")}
           />
+        ) : isSiteSetupRoute ? (
+          <div className="onboarding-page">
+            <div className="onboarding-shell">
+              <header className="onboarding-header">
+                <div className="onboarding-brand">
+                  <strong>Scanlark</strong>
+                  <span>{siteSetupHeaderLabel}</span>
+                </div>
+                <div className="onboarding-actions">
+                  <button
+                    className="ghost-button"
+                    onClick={() => {
+                      completeOnboarding();
+                      pushToast(
+                        isNewSiteRoute
+                          ? "New site setup closed"
+                          : "Onboarding skipped",
+                        "info",
+                      );
+                    }}
+                  >
+                    {isNewSiteRoute ? "Cancel setup" : "Skip setup"}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => void handleLogout()}
+                  >
+                    Logout
+                  </button>
+                </div>
+              </header>
+
+              <div className="onboarding-layout">
+                <aside className="onboarding-stepper" aria-label="Setup steps">
+                  {onboardingSteps.map((step, index) => (
+                    <div
+                      key={step}
+                      className={`onboarding-step ${
+                        index === onboardingStepIndex ? "is-active" : ""
+                      } ${index < onboardingStepIndex ? "is-complete" : ""}`}
+                    >
+                      <span className="onboarding-step__index">
+                        {index < onboardingStepIndex ? "✓" : index + 1}
+                      </span>
+                      <span className="onboarding-step__label">{step}</span>
+                    </div>
+                  ))}
+                </aside>
+
+                <main className="onboarding-panel">
+                  {showOnboardingExistingUserOptions && (
+                    <>
+                      <div className="onboarding-panel__header">
+                        <div className="onboarding-panel__eyebrow">
+                          Onboarding
+                        </div>
+                        <h1>You're already set up</h1>
+                        <p>
+                          Your dashboard is ready. Start from the dashboard or
+                          use the same guided setup to add another website.
+                        </p>
+                      </div>
+                      <div className="onboarding-actions">
+                        <button
+                          className="primary-button primary-button--large"
+                          onClick={() => navigateTo("/dashboard")}
+                        >
+                          Go to dashboard
+                        </button>
+                        <button
+                          className="secondary-button primary-button--large"
+                          onClick={openNewSiteSetup}
+                        >
+                          Add another site
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {!showOnboardingExistingUserOptions &&
+                    onboardingStepIndex === 0 && (
+                      <>
+                        <div className="onboarding-panel__header">
+                          <div className="onboarding-panel__eyebrow">
+                            Step 1
+                          </div>
+                          <h1>{siteSetupHeroTitle}</h1>
+                          <p>{siteSetupHeroCopy}</p>
+                        </div>
+                        <div className="onboarding-form">
+                          {!canAddSite && (
+                            <div className="onboarding-error">
+                              {limitReason ??
+                                "You cannot add another site yet."}
+                            </div>
+                          )}
+                          <label className="onboarding-field">
+                            Website URL
+                            <input
+                              className="onboarding-input"
+                              value={onboardingSiteUrl}
+                              onChange={(event) =>
+                                setOnboardingSiteUrl(event.target.value)
+                              }
+                              placeholder="https://example.com"
+                              autoFocus
+                            />
+                          </label>
+                          <div className="onboarding-form-grid">
+                            <label className="onboarding-field">
+                              Site display name
+                              <input
+                                className="onboarding-input"
+                                value={onboardingSiteDisplayName}
+                                onChange={(event) => {
+                                  setOnboardingSiteDisplayNameTouched(true);
+                                  setOnboardingSiteDisplayName(
+                                    event.target.value,
+                                  );
+                                }}
+                                placeholder="Suggested from your domain"
+                              />
+                            </label>
+                            <label className="onboarding-field">
+                              Client name
+                              <input
+                                className="onboarding-input"
+                                value={onboardingClientName}
+                                onChange={(event) =>
+                                  setOnboardingClientName(event.target.value)
+                                }
+                                placeholder="Optional"
+                              />
+                            </label>
+                            <label className="onboarding-field">
+                              Report display name
+                              <input
+                                className="onboarding-input"
+                                value={onboardingReportDisplayName}
+                                onChange={(event) => {
+                                  setOnboardingReportDisplayNameTouched(true);
+                                  setOnboardingReportDisplayName(
+                                    event.target.value,
+                                  );
+                                }}
+                                placeholder="Optional report title"
+                              />
+                            </label>
+                          </div>
+                          {onboardingError && (
+                            <div className="onboarding-error">
+                              {onboardingError}
+                            </div>
+                          )}
+                          <div className="onboarding-actions">
+                            <button
+                              className="primary-button primary-button--large"
+                              onClick={() => void handleOnboardingCreateSite()}
+                              disabled={
+                                onboardingWorking ||
+                                !canAddSite ||
+                                !!onboardingSiteUrlValidationError
+                              }
+                            >
+                              {onboardingWorking ? "Adding..." : "Add website"}
+                            </button>
+                            <button
+                              className="secondary-button primary-button--large"
+                              onClick={() => void handleOnboardingSampleSite()}
+                              disabled={onboardingWorking || !canAddSite}
+                            >
+                              Try sample site
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                  {onboardingStepIndex === 1 && (
+                    <>
+                      <div className="onboarding-panel__header">
+                        <div className="onboarding-panel__eyebrow">Step 2</div>
+                        <h2>Choose monitoring defaults</h2>
+                        <p>
+                          Set the scan cadence, alert delivery, and passive
+                          availability checks for this website.
+                        </p>
+                      </div>
+                      <div className="onboarding-form">
+                        <section className="onboarding-settings-section">
+                          <div className="onboarding-settings-section__header">
+                            <h3>Scan type</h3>
+                            <p>
+                              Choose how often Scanlark should run a full
+                              website scan.
+                            </p>
+                          </div>
+                          <div className="onboarding-choice-grid onboarding-choice-grid--scan-types">
+                            <button
+                              type="button"
+                              className={`onboarding-choice ${
+                                onboardingScheduleFrequency === "manual"
+                                  ? "is-active"
+                                  : ""
+                              }`}
+                              onClick={() => {
+                                setScheduleFrequency("manual");
+                                setScheduleEnabled(false);
+                              }}
+                            >
+                              <strong>Manual</strong>
+                              <span>Run scans only when you choose.</span>
+                            </button>
+                            <button
+                              type="button"
+                              className={`onboarding-choice ${
+                                onboardingScheduleFrequency === "weekly"
+                                  ? "is-active"
+                                  : ""
+                              }`}
+                              onClick={() => {
+                                setScheduleFrequency("weekly");
+                                setScheduleEnabled(true);
+                              }}
+                            >
+                              <strong>Weekly</strong>
+                              <span>Automatically scan once a week.</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="onboarding-choice"
+                              disabled
+                              title="Bi-weekly schedules are not supported yet."
+                            >
+                              <strong>Bi-weekly</strong>
+                              <span>
+                                Automatically scan every two weeks. Not
+                                available yet.
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className={`onboarding-choice ${
+                                onboardingScheduleFrequency === "monthly"
+                                  ? "is-active"
+                                  : ""
+                              }`}
+                              onClick={() => {
+                                setScheduleFrequency("monthly");
+                                setScheduleEnabled(true);
+                              }}
+                            >
+                              <strong>Monthly</strong>
+                              <span>Automatically scan once a month.</span>
+                            </button>
+                          </div>
+                          {onboardingScheduleFrequency !== "manual" && (
+                            <div className="onboarding-form-grid">
+                              {onboardingScheduleFrequency === "weekly" && (
+                                <label className="onboarding-field">
+                                  Weekly scan day
+                                  <select
+                                    className="onboarding-select"
+                                    value={scheduleDayOfWeek}
+                                    onChange={(event) =>
+                                      setScheduleDayOfWeek(
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                  >
+                                    <option value={0}>Sunday</option>
+                                    <option value={1}>Monday</option>
+                                    <option value={2}>Tuesday</option>
+                                    <option value={3}>Wednesday</option>
+                                    <option value={4}>Thursday</option>
+                                    <option value={5}>Friday</option>
+                                    <option value={6}>Saturday</option>
+                                  </select>
+                                </label>
+                              )}
+                              {onboardingScheduleFrequency === "monthly" && (
+                                <label className="onboarding-field">
+                                  Monthly scan day
+                                  <select
+                                    className="onboarding-select"
+                                    value={scheduleDayOfMonth}
+                                    onChange={(event) =>
+                                      setScheduleDayOfMonth(
+                                        Number(event.target.value),
+                                      )
+                                    }
+                                  >
+                                    {Array.from(
+                                      { length: 28 },
+                                      (_, index) => index + 1,
+                                    ).map((day) => (
+                                      <option key={day} value={day}>
+                                        Day {day}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              )}
+                              <label className="onboarding-field">
+                                Scan time UTC
+                                <input
+                                  className="onboarding-input"
+                                  type="time"
+                                  value={scheduleTimeUtc}
+                                  onChange={(event) =>
+                                    setScheduleTimeUtc(event.target.value)
+                                  }
+                                />
+                              </label>
+                            </div>
+                          )}
+                        </section>
+
+                        <section className="onboarding-settings-section">
+                          <div className="onboarding-settings-section__header">
+                            <h3>Email alerts</h3>
+                            <p>
+                              Send alerts when important findings are detected.
+                            </p>
+                          </div>
+                          <label
+                            className={`onboarding-toggle-card ${
+                              notifyEnabled ? "is-active" : ""
+                            }`}
+                          >
+                            <div className="onboarding-toggle-card__copy">
+                              <div className="onboarding-toggle-card__topline">
+                                <span className="onboarding-toggle-card__title">
+                                  Email alerts
+                                </span>
+                                <span className="onboarding-toggle-card__state">
+                                  {notifyEnabled ? "Alerts on" : "Alerts off"}
+                                </span>
+                              </div>
+                              <span className="onboarding-toggle-card__help">
+                                Send alerts when important findings are
+                                detected.
+                              </span>
+                            </div>
+                            <span className="onboarding-switch" />
+                            <input
+                              type="checkbox"
+                              checked={notifyEnabled}
+                              onChange={(event) => {
+                                const next = event.target.checked;
+                                setNotifyEnabled(next);
+                                if (next && !notifyEmail.trim()) {
+                                  setNotifyEmail(authUser?.email ?? "");
+                                }
+                              }}
+                            />
+                          </label>
+                          <label className="onboarding-field">
+                            Alert email
+                            <input
+                              className="onboarding-input"
+                              value={notifyEmail}
+                              onChange={(event) =>
+                                setNotifyEmail(event.target.value)
+                              }
+                              placeholder={authUser?.email ?? "you@example.com"}
+                              disabled={!notifyEnabled}
+                            />
+                          </label>
+                        </section>
+
+                        <section className="onboarding-settings-section">
+                          <div className="onboarding-settings-section__header">
+                            <h3>Availability monitoring</h3>
+                            <p>
+                              Check whether your homepage is reachable between
+                              full scans.
+                            </p>
+                          </div>
+                          <label
+                            className={`onboarding-toggle-card ${
+                              uptimeEnabled ? "is-active" : ""
+                            }`}
+                          >
+                            <div className="onboarding-toggle-card__copy">
+                              <div className="onboarding-toggle-card__topline">
+                                <span className="onboarding-toggle-card__title">
+                                  Availability monitoring
+                                </span>
+                                <span className="onboarding-toggle-card__state">
+                                  {uptimeEnabled
+                                    ? "Availability checks on"
+                                    : "Availability checks off"}
+                                </span>
+                              </div>
+                              <span className="onboarding-toggle-card__help">
+                                Check whether your homepage is reachable between
+                                full scans.
+                              </span>
+                            </div>
+                            <span className="onboarding-switch" />
+                            <input
+                              type="checkbox"
+                              checked={uptimeEnabled}
+                              onChange={(event) => {
+                                const next = event.target.checked;
+                                setUptimeEnabled(next);
+                                if (next)
+                                  setUptimeCheckUrl(setupTargetSite?.url ?? "");
+                              }}
+                            />
+                          </label>
+                          {uptimeEnabled && setupTargetSite?.url && (
+                            <div className="onboarding-inline-note">
+                              Checking homepage:{" "}
+                              <strong>{setupTargetSite.url}</strong>
+                            </div>
+                          )}
+                        </section>
+                        {onboardingError && (
+                          <div className="onboarding-error">
+                            {onboardingError}
+                          </div>
+                        )}
+                        <div className="onboarding-actions">
+                          <button
+                            className="primary-button primary-button--large"
+                            onClick={() =>
+                              void handleOnboardingSaveMonitoring()
+                            }
+                            disabled={onboardingWorking || !selectedSiteId}
+                          >
+                            {onboardingWorking
+                              ? "Saving..."
+                              : "Save monitoring setup"}
+                          </button>
+                          <button
+                            className="ghost-button"
+                            onClick={() => setOnboardingStep(0)}
+                          >
+                            Back
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {onboardingStepIndex === 2 && (
+                    <>
+                      <div className="onboarding-panel__header">
+                        <div className="onboarding-panel__eyebrow">Step 3</div>
+                        <h2>Run the first scan</h2>
+                        <p>
+                          Scanlark will discover links, classify responses, and
+                          prepare the first report without a page refresh.
+                        </p>
+                      </div>
+                      <ScanProgressHero
+                        progress={dashboardProgress}
+                        indeterminate={
+                          !setupTargetRun ||
+                          setupTargetRun.status === "queued" ||
+                          setupTargetRun.total_links <= 0
+                        }
+                        title={
+                          setupTargetRun
+                            ? isInProgress(setupTargetRun.status)
+                              ? "Checking your website"
+                              : setupTargetRun.status === "completed"
+                                ? "First scan complete"
+                                : formatRunStatusLabel(setupTargetRun.status)
+                            : "Ready to start"
+                        }
+                        stage={
+                          setupTargetRun
+                            ? getScanStageText(setupTargetRun)
+                            : "Waiting to scan"
+                        }
+                        summary={
+                          setupTargetRun
+                            ? `${setupTargetRun.checked_links} / ${
+                                setupTargetRun.total_links || "?"
+                              } links checked`
+                            : "Start the scan when your setup choices look right."
+                        }
+                        counters={[
+                          {
+                            label: "Links checked",
+                            value: setupTargetRun?.checked_links ?? 0,
+                          },
+                          { label: "Broken", value: phase0BrokenCount },
+                          { label: "Blocked", value: phase0BlockedCount },
+                          {
+                            label: "No response",
+                            value: phase0NoResponseCount,
+                          },
+                        ]}
+                        note={
+                          setupTargetRun?.status === "completed"
+                            ? "Your first report is ready for review."
+                            : "Progress updates here as the scan runs."
+                        }
+                        statusTone={
+                          setupTargetRun?.status === "completed"
+                            ? "success"
+                            : setupTargetRun?.status === "failed"
+                              ? "danger"
+                              : "accent"
+                        }
+                        primaryAction={
+                          setupTargetRun?.status === "completed" ? (
+                            <button
+                              className="primary-button primary-button--large"
+                              onClick={() => setOnboardingStep(3)}
+                            >
+                              Review results
+                            </button>
+                          ) : (
+                            <button
+                              className="primary-button primary-button--large"
+                              onClick={() => void handleOnboardingRunScan()}
+                              disabled={!selectedSiteId || triggeringScan}
+                            >
+                              {triggeringScan ? "Starting..." : "Start scan"}
+                            </button>
+                          )
+                        }
+                        secondaryAction={
+                          <button
+                            className="ghost-button"
+                            onClick={() => setOnboardingStep(1)}
+                          >
+                            Back
+                          </button>
+                        }
+                      />
+                      {triggerError && (
+                        <div className="onboarding-error">{triggerError}</div>
+                      )}
+                    </>
+                  )}
+
+                  {onboardingStepIndex === 3 && (
+                    <>
+                      <div className="onboarding-panel__header">
+                        <div className="onboarding-panel__eyebrow">Step 4</div>
+                        <h2>Your first report is ready</h2>
+                        <p>
+                          The dashboard now has a baseline scan, report history,
+                          and monitoring settings for{" "}
+                          {setupTargetSiteName ??
+                            setupTargetSiteHost ??
+                            "your site"}
+                          .
+                        </p>
+                      </div>
+                      <div className="onboarding-summary-grid">
+                        <div className="onboarding-summary-card">
+                          <span>Links checked</span>
+                          <strong>{setupTargetRun?.checked_links ?? 0}</strong>
+                        </div>
+                        <div className="onboarding-summary-card">
+                          <span>Broken</span>
+                          <strong>{phase0BrokenCount}</strong>
+                        </div>
+                        <div className="onboarding-summary-card">
+                          <span>Blocked</span>
+                          <strong>{phase0BlockedCount}</strong>
+                        </div>
+                        <div className="onboarding-summary-card">
+                          <span>No response</span>
+                          <strong>{phase0NoResponseCount}</strong>
+                        </div>
+                      </div>
+                      <div className="onboarding-actions">
+                        <button
+                          className="primary-button primary-button--large"
+                          onClick={completeOnboarding}
+                        >
+                          Go to dashboard
+                        </button>
+                        <button
+                          className="secondary-button primary-button--large"
+                          disabled={setupTargetRun?.status !== "completed"}
+                          onClick={() => {
+                            if (!setupTargetRun) return;
+                            if (
+                              route === "onboarding" &&
+                              onboardingStorageKey
+                            ) {
+                              window.localStorage.setItem(
+                                onboardingStorageKey,
+                                new Date().toISOString(),
+                              );
+                            }
+                            setOnboardingRequired(false);
+                            saveSiteSetupSession(null);
+                            setSetupSiteId(null);
+                            openReport(setupTargetRun.id);
+                          }}
+                        >
+                          View report
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </main>
+              </div>
+            </div>
+          </div>
         ) : reportView ? (
           <>
             {!isReadOnlyReport && (
@@ -14294,7 +17635,12 @@ const App: React.FC = () => {
                         const nextSite = sites.find(
                           (site) => site.id === event.target.value,
                         );
-                        if (nextSite) void handleSelectSite(nextSite);
+                        if (nextSite) {
+                          void (async () => {
+                            await handleSelectSite(nextSite);
+                            navigateTo("/dashboard");
+                          })();
+                        }
                       }}
                       className="app-input"
                       style={{ minHeight: "44px" }}
@@ -14318,15 +17664,7 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="app-toolbar">
-                  <button
-                    onClick={handleNewScanAction}
-                    disabled={
-                      !!selectedSiteId && (triggeringScan || canCancelRun)
-                    }
-                    className="primary-button"
-                  >
-                    {triggeringScan ? "Starting..." : "Run scan"}
-                  </button>
+                  {authUser && <>{renderNotificationBell()}</>}
                   {authUser && (
                     <div
                       ref={userMenuRef}
@@ -14346,95 +17684,7 @@ const App: React.FC = () => {
                       >
                         Account
                       </button>
-                      {userMenuOpen && (
-                        <div className="theme-menu">
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              color: "var(--muted)",
-                              padding: "4px 8px",
-                            }}
-                          >
-                            Theme
-                          </div>
-                          <button onClick={handleThemeToggle}>
-                            Toggle {themeMode === "dark" ? "Light" : "Dark"}
-                          </button>
-                          {(["system", "dark", "light"] as const).map(
-                            (mode) => (
-                              <button
-                                key={mode}
-                                className={
-                                  themePreference === mode
-                                    ? "active"
-                                    : undefined
-                                }
-                                onClick={() => {
-                                  handleThemeChange(mode);
-                                  setUserMenuOpen(false);
-                                }}
-                              >
-                                {mode === "system"
-                                  ? "System"
-                                  : mode === "dark"
-                                    ? "Dark"
-                                    : "Light"}
-                              </button>
-                            ),
-                          )}
-                          <div
-                            style={{
-                              height: "1px",
-                              margin: "6px 0",
-                              background: "var(--border)",
-                            }}
-                          />
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              color: "var(--muted)",
-                              padding: "4px 8px",
-                            }}
-                          >
-                            Help
-                          </div>
-                          <button
-                            onClick={() => {
-                              openOnboarding(0);
-                              setUserMenuOpen(false);
-                            }}
-                          >
-                            Run onboarding
-                          </button>
-                          <button
-                            onClick={() => {
-                              clearOnboardingState();
-                              openOnboarding(0);
-                              setUserMenuOpen(false);
-                            }}
-                          >
-                            Reset onboarding
-                          </button>
-                          <button
-                            onClick={() => {
-                              setShortcutsOpen(true);
-                              setUserMenuOpen(false);
-                            }}
-                          >
-                            Keyboard shortcuts
-                          </button>
-                          <div
-                            style={{
-                              height: "1px",
-                              margin: "6px 0",
-                              background: "var(--border)",
-                            }}
-                          />
-                          <button onClick={() => void handleLogout()}>
-                            Logout
-                          </button>
-                        </div>
-                      )}
+                      {userMenuOpen && renderAccountMenu()}
                     </div>
                   )}
                 </div>
@@ -14452,7 +17702,11 @@ const App: React.FC = () => {
                   </div>
                   <div className="report-status-row">
                     <StatusBadge
-                      label={reportRun?.status.replace("_", " ") ?? "Loading"}
+                      label={
+                        reportRun
+                          ? formatRunStatusLabel(reportRun.status)
+                          : "Loading"
+                      }
                       tone={
                         reportRun?.status === "completed"
                           ? "success"
@@ -14884,7 +18138,9 @@ const App: React.FC = () => {
                       <div className="report-meta-item">
                         <div className="report-label">Status</div>
                         <div className="report-value">
-                          {reportRun?.status.replace("_", " ") ?? "-"}
+                          {reportRun
+                            ? formatRunStatusLabel(reportRun.status)
+                            : "-"}
                         </div>
                       </div>
                       <div className="report-meta-item">
@@ -15189,7 +18445,9 @@ const App: React.FC = () => {
                         color: "var(--muted)",
                       }}
                     >
-                      <span>Raw status {reportRun.status}</span>
+                      <span>
+                        Status {formatRunStatusLabel(reportRun.status)}
+                      </span>
                       <span>Site id {reportRun.site_id}</span>
                       <span>
                         Checked {reportRun.checked_links} /{" "}
@@ -15326,15 +18584,7 @@ const App: React.FC = () => {
               </div>
 
               <div className="app-toolbar">
-                <button
-                  onClick={handleNewScanAction}
-                  disabled={
-                    !!selectedSiteId && (triggeringScan || canCancelRun)
-                  }
-                  className="primary-button"
-                >
-                  {triggeringScan ? "Starting..." : "Run scan"}
-                </button>
+                {authUser && renderNotificationBell()}
                 {authUser && (
                   <div
                     ref={userMenuRef}
@@ -15354,91 +18604,7 @@ const App: React.FC = () => {
                     >
                       Account
                     </button>
-                    {userMenuOpen && (
-                      <div className="theme-menu">
-                        <div
-                          style={{
-                            fontSize: "11px",
-                            color: "var(--muted)",
-                            padding: "4px 8px",
-                          }}
-                        >
-                          Theme
-                        </div>
-                        <button onClick={handleThemeToggle}>
-                          Toggle {themeMode === "dark" ? "Light" : "Dark"}
-                        </button>
-                        {(["system", "dark", "light"] as const).map((mode) => (
-                          <button
-                            key={mode}
-                            className={
-                              themePreference === mode ? "active" : undefined
-                            }
-                            onClick={() => {
-                              handleThemeChange(mode);
-                              setUserMenuOpen(false);
-                            }}
-                          >
-                            {mode === "system"
-                              ? "System"
-                              : mode === "dark"
-                                ? "Dark"
-                                : "Light"}
-                          </button>
-                        ))}
-                        <div
-                          style={{
-                            height: "1px",
-                            margin: "6px 0",
-                            background: "var(--border)",
-                          }}
-                        />
-                        <div
-                          style={{
-                            fontSize: "11px",
-                            color: "var(--muted)",
-                            padding: "4px 8px",
-                          }}
-                        >
-                          Help
-                        </div>
-                        <button
-                          onClick={() => {
-                            openOnboarding(0);
-                            setUserMenuOpen(false);
-                          }}
-                        >
-                          Run onboarding
-                        </button>
-                        <button
-                          onClick={() => {
-                            clearOnboardingState();
-                            openOnboarding(0);
-                            setUserMenuOpen(false);
-                          }}
-                        >
-                          Reset onboarding
-                        </button>
-                        <button
-                          onClick={() => {
-                            setShortcutsOpen(true);
-                            setUserMenuOpen(false);
-                          }}
-                        >
-                          Keyboard shortcuts
-                        </button>
-                        <div
-                          style={{
-                            height: "1px",
-                            margin: "6px 0",
-                            background: "var(--border)",
-                          }}
-                        />
-                        <button onClick={() => void handleLogout()}>
-                          Logout
-                        </button>
-                      </div>
-                    )}
+                    {userMenuOpen && renderAccountMenu()}
                   </div>
                 )}
               </div>
@@ -15821,17 +18987,15 @@ const App: React.FC = () => {
                                 fontWeight: 500,
                               }}
                             >
-                              Broken
+                              Health score
                             </th>
                           </tr>
                         </thead>
                         <tbody>
                           {history.map((run) => {
                             const isSelected = run.id === pinnedRunId;
-                            const brokenPct = percentBroken(
-                              run.checked_links || run.total_links,
-                              run.broken_links,
-                            );
+                            const runHealthScore =
+                              run.overall_score ?? run.score ?? null;
                             return (
                               <tr
                                 key={run.id}
@@ -15873,7 +19037,9 @@ const App: React.FC = () => {
                                     textAlign: "right",
                                   }}
                                 >
-                                  {run.broken_links} ({brokenPct})
+                                  {typeof runHealthScore === "number"
+                                    ? `${runHealthScore}%`
+                                    : "—"}
                                 </td>
                               </tr>
                             );
@@ -15927,7 +19093,236 @@ const App: React.FC = () => {
 
               <main className="main">
                 <div className="app-section-shell">
-                  {!hasSites && (
+                  {appSection === "account" && (
+                    <div style={{ display: "grid", gap: "18px" }}>
+                      <div className="account-settings-header">
+                        <div className="account-settings-header__main">
+                          <div className="app-section-heading">
+                            <div className="app-section-heading__title">
+                              Account settings
+                            </div>
+                            <div className="app-section-heading__meta">
+                              Manage your Scanlark profile, preferences, and
+                              account foundations.
+                            </div>
+                          </div>
+                          <div className="account-settings-user">
+                            <div className="account-settings-user__avatar">
+                              {(authUser?.name || authUser?.email || "?")
+                                .trim()
+                                .split(/\\s+/)
+                                .map((part) => part[0]?.toUpperCase())
+                                .filter(Boolean)
+                                .slice(0, 2)
+                                .join("") || "?"}
+                            </div>
+                            <div className="account-settings-user__meta">
+                              <div className="account-settings-user__label">
+                                Signed in as
+                              </div>
+                              <div className="account-settings-user__email">
+                                {authUser?.email ?? "Not signed in"}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          className="secondary-button"
+                          onClick={() => openAppSection("dashboard")}
+                        >
+                          Back to dashboard
+                        </button>
+                      </div>
+
+                      <div className="account-settings-grid">
+                        <div className="account-settings-column">
+                          <section className="account-settings-card account-settings-card--compact">
+                            <div className="account-settings-card__title">
+                              Profile
+                            </div>
+                            <div className="account-settings-card__meta">
+                              <div className="account-settings-card__label">
+                                Email
+                              </div>
+                              <div className="account-settings-card__value">
+                                {authUser?.email ?? "Not available"}
+                              </div>
+                            </div>
+                            <div className="account-settings-card__meta">
+                              <div className="account-settings-card__label">
+                                Name
+                              </div>
+                              <div>
+                                {authUser?.name ?? "No display name set"}
+                              </div>
+                            </div>
+                            <div className="account-settings-card__meta">
+                              Profile editing coming later.
+                            </div>
+                          </section>
+
+                          <section className="account-settings-card account-settings-card--compact">
+                            <div className="account-settings-card__top">
+                              <div className="account-settings-card__title">
+                                Subscription
+                              </div>
+                              <span className="account-settings-badge">
+                                Coming later
+                              </span>
+                            </div>
+                            <div className="account-settings-card__meta">
+                              Billing and subscription management will be added
+                              later.
+                            </div>
+                          </section>
+
+                          <section className="account-settings-card account-settings-card--compact">
+                            <div className="account-settings-card__top">
+                              <div className="account-settings-card__title">
+                                Security
+                              </div>
+                              <span className="account-settings-badge">
+                                Coming later
+                              </span>
+                            </div>
+                            <div className="account-settings-card__meta">
+                              Password and session controls will be added later.
+                            </div>
+                          </section>
+                        </div>
+
+                        <div className="account-settings-column">
+                          <section className="account-settings-card account-settings-card--premium">
+                            <div className="account-settings-card__title">
+                              Preferences
+                            </div>
+                            <div className="account-settings-card__meta">
+                              Choose how Scanlark should appear on this device.
+                            </div>
+                            {renderThemeSegmentedControl()}
+                          </section>
+
+                          <section className="account-settings-card account-settings-card--notifications account-settings-card--premium">
+                            <div className="account-settings-card__title">
+                              Notifications
+                            </div>
+                            <div className="account-settings-card__meta">
+                              Choose which in-app bell notifications Scanlark
+                              creates for your account.
+                            </div>
+
+                            <div className="account-notification-section">
+                              <div className="account-notification-section__label">
+                                Master
+                              </div>
+                              {renderAccountNotificationPreferenceToggle(
+                                "inAppEnabled",
+                                "In-app notifications",
+                                "Create bell notifications for this account.",
+                                { master: true },
+                              )}
+                            </div>
+
+                            <div className="account-notification-section">
+                              <div className="account-notification-section__label">
+                                Scan updates
+                              </div>
+                              {renderAccountNotificationPreferenceToggle(
+                                "scanCompletedEnabled",
+                                "Scan completed",
+                                "Notify when a scan finishes successfully.",
+                              )}
+                              {renderAccountNotificationPreferenceToggle(
+                                "scanFailedEnabled",
+                                "Scan failed",
+                                "Notify when a scan cannot complete.",
+                              )}
+                            </div>
+
+                            <div className="account-notification-section">
+                              <div className="account-notification-section__label">
+                                Issue alerts
+                              </div>
+                              {renderAccountNotificationPreferenceToggle(
+                                "highPriorityIssuesEnabled",
+                                "High-priority issues",
+                                "Notify when new critical or high issues appear.",
+                              )}
+                            </div>
+
+                            <div className="account-notification-section">
+                              <div className="account-notification-section__label">
+                                Availability
+                              </div>
+                              {renderAccountNotificationPreferenceToggle(
+                                "uptimeDownEnabled",
+                                "Availability down",
+                                "Notify when availability monitoring detects downtime.",
+                              )}
+                              {renderAccountNotificationPreferenceToggle(
+                                "uptimeRecoveredEnabled",
+                                "Availability recovered",
+                                "Notify when a monitored site recovers.",
+                              )}
+                            </div>
+
+                            <div className="account-notification-section">
+                              <div className="account-notification-section__label">
+                                System
+                              </div>
+                              {renderAccountNotificationPreferenceToggle(
+                                "systemNoticesEnabled",
+                                "System notices",
+                                "Reserved for future product and account notices.",
+                              )}
+                            </div>
+
+                            <div className="account-settings-card__meta">
+                              Email alerts are managed per site in Site
+                              Settings.
+                            </div>
+                            <button
+                              className="secondary-button"
+                              onClick={() => openAppSection("site_settings")}
+                              disabled={!selectedSiteId}
+                            >
+                              Open site settings
+                            </button>
+                            <div className="account-notification-status">
+                              {accountNotificationPreferencesLoading &&
+                                "Loading preferences..."}
+                              {!accountNotificationPreferencesLoading &&
+                                accountNotificationPreferencesSaving &&
+                                "Saving..."}
+                              {!accountNotificationPreferencesLoading &&
+                                !accountNotificationPreferencesSaving &&
+                                accountNotificationPreferencesError && (
+                                  <>
+                                    {accountNotificationPreferencesError}
+                                    <button
+                                      type="button"
+                                      className="account-notification-retry"
+                                      onClick={() =>
+                                        void loadAccountNotificationPreferences()
+                                      }
+                                    >
+                                      Retry
+                                    </button>
+                                  </>
+                                )}
+                              {!accountNotificationPreferencesLoading &&
+                                !accountNotificationPreferencesSaving &&
+                                !accountNotificationPreferencesError &&
+                                accountNotificationPreferencesSavedAt &&
+                                "Saved"}
+                            </div>
+                          </section>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {!hasSites && appSection !== "account" && (
                     <div className="app-section-heading">
                       <div className="app-section-heading__title">
                         Add your first site
@@ -16068,7 +19463,9 @@ const App: React.FC = () => {
                               <span>Status</span>
                               <span>
                                 {dashboardLatestRun
-                                  ? dashboardLatestRun.status.replace("_", " ")
+                                  ? formatRunStatusLabel(
+                                      dashboardLatestRun.status,
+                                    )
                                   : "Ready"}
                               </span>
                             </div>
@@ -16105,11 +19502,10 @@ const App: React.FC = () => {
                             <button
                               onClick={() => {
                                 openAppSection("reports");
-                                setScanWorkspaceOpen(true);
                               }}
                               className="ghost-button"
                             >
-                              Open reports workspace
+                              Open reports
                             </button>
                           </div>
                         </div>
@@ -16289,11 +19685,11 @@ const App: React.FC = () => {
                                 : 0
                             }
                             title={
-                              dashboardLatestRun.status === "completed"
-                                ? "Scan complete"
-                                : dashboardLatestRun.status === "failed"
-                                  ? "Scan failed"
-                                  : "Scan cancelled"
+                              dashboardSummaryPending
+                                ? "Finalizing report"
+                                : formatRunStatusLabel(
+                                    dashboardLatestRun.status,
+                                  )
                             }
                             stage={dashboardStage}
                             summary={
@@ -16464,7 +19860,7 @@ const App: React.FC = () => {
                           label="Last scan"
                           value={
                             dashboardLatestRun
-                              ? dashboardLatestRun.status.replace("_", " ")
+                              ? formatRunStatusLabel(dashboardLatestRun.status)
                               : "None"
                           }
                           detail={formatDate(
@@ -16536,52 +19932,59 @@ const App: React.FC = () => {
                             detailed evidence and issue breakdown.
                           </div>
                         </div>
-                        {visibleDashboardHistoryItems.map((run) => (
-                          <div key={run.id} className="dashboard-history-row">
-                            <div>
-                              <div className="dashboard-history-row__title">
-                                {formatDate(run.started_at)}
+                        {visibleDashboardHistoryItems.map((run) => {
+                          const rowScoreText = formatRunMetricValue(
+                            run,
+                            run.overall_score ?? run.score ?? null,
+                            { asPercent: true },
+                          );
+                          const linksCheckedText = `${run.checked_links}/${run.total_links}`;
+                          return (
+                            <div key={run.id} className="dashboard-history-row">
+                              <div>
+                                <div className="dashboard-history-row__title">
+                                  {formatDate(run.started_at)}
+                                </div>
+                                <div className="dashboard-history-row__meta">
+                                  <span className="dashboard-history-row__meta-status">
+                                    <span>
+                                      {formatRelative(run.started_at)}
+                                    </span>
+                                    <StatusBadge
+                                      label={formatRunStatusLabel(run.status)}
+                                      tone={
+                                        run.status === "completed"
+                                          ? "success"
+                                          : run.status === "failed"
+                                            ? "danger"
+                                            : run.status === "cancelled"
+                                              ? "warning"
+                                              : "accent"
+                                      }
+                                    />
+                                  </span>
+                                </div>
                               </div>
-                              <div className="dashboard-history-row__meta">
-                                <span className="dashboard-history-row__meta-status">
-                                  <span>{formatRelative(run.started_at)}</span>
-                                  <StatusBadge
-                                    label={run.status.replace("_", " ")}
-                                    tone={
-                                      run.status === "completed"
-                                        ? "success"
-                                        : run.status === "failed"
-                                          ? "danger"
-                                          : run.status === "cancelled"
-                                            ? "warning"
-                                            : "accent"
-                                    }
-                                  />
-                                </span>
-                              </div>
-                            </div>
-                            <div className="dashboard-history-row__stats">
-                              <strong>
-                                Checked {run.checked_links}/{run.total_links}
-                              </strong>
-                              <span>
-                                Broken {run.broken_links} (
-                                {percentBroken(
-                                  run.checked_links || run.total_links,
-                                  run.broken_links,
+                              <div className="dashboard-history-row__stats">
+                                {renderRunMetricPill(
+                                  "Health score",
+                                  rowScoreText,
                                 )}
-                                )
-                              </span>
+                                {renderRunMetricPill(
+                                  "Links checked",
+                                  linksCheckedText,
+                                )}
+                              </div>
+                              <button
+                                onClick={() => openReport(run.id)}
+                                disabled={run.status !== "completed"}
+                                className="secondary-button"
+                              >
+                                View report
+                              </button>
                             </div>
-                            <button
-                              onClick={() => openReport(run.id)}
-                              disabled={run.status !== "completed"}
-                              className="secondary-button"
-                            >
-                              View report
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                         {dashboardHistoryItems.length === 0 && (
                           <div
                             style={{
@@ -16593,7 +19996,8 @@ const App: React.FC = () => {
                             No scans yet.
                           </div>
                         )}
-                        {dashboardHistoryItems.length > 5 && (
+                        {dashboardHistoryItems.length >
+                          DASHBOARD_HISTORY_INITIAL_ROWS && (
                           <div
                             style={{
                               padding: "0 20px 20px",
@@ -16609,7 +20013,7 @@ const App: React.FC = () => {
                             >
                               {dashboardHistoryExpanded
                                 ? "Show less"
-                                : `Show more (${dashboardHistoryItems.length - 5} more)`}
+                                : `Show more (${dashboardHistoryItems.length - DASHBOARD_HISTORY_INITIAL_ROWS} more)`}
                             </button>
                           </div>
                         )}
@@ -16715,162 +20119,214 @@ const App: React.FC = () => {
                     <div style={{ display: "grid", gap: "18px" }}>
                       <div className="app-section-heading">
                         <div className="app-section-heading__title">
-                          Reports and Scan History
+                          Scan history
                         </div>
                         <div className="app-section-heading__meta">
-                          Review recent runs, open detailed reports, and use the
-                          existing results workspace for raw evidence, changes,
-                          and fix-queue workflows.
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "10px",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <button
-                            className="primary-button"
-                            onClick={handleNewScanAction}
-                            disabled={
-                              !!selectedSiteId &&
-                              (triggeringScan || canCancelRun)
-                            }
-                          >
-                            {triggeringScan ? "Starting..." : "Run scan"}
-                          </button>
-                          <button
-                            className="secondary-button"
-                            onClick={() =>
-                              setScanWorkspaceOpen((prev) => !prev)
-                            }
-                          >
-                            {scanWorkspaceOpen
-                              ? "Hide results workspace"
-                              : "Open results workspace"}
-                          </button>
+                          Review previous scans and open detailed reports.
                         </div>
                       </div>
 
-                      <div className="app-section-grid">
-                        <div className="app-settings-card">
-                          <div className="app-settings-card__title">
+                      <div className="surface-card surface-card--history">
+                        <div className="dashboard-history-card__header">
+                          <div className="dashboard-history-card__title">
                             Scan history
                           </div>
-                          <div className="app-settings-card__subtitle">
-                            Select a run for the workspace or open the final
-                            report artifact directly.
+                          <div className="dashboard-history-card__meta">
+                            Review previous scans and open detailed reports.
                           </div>
-                          <div className="app-site-list">
-                            {visibleHistoryItems.map((run) => (
-                              <div key={run.id} className="app-site-row">
-                                <div>
-                                  <div
+                        </div>
+                        {visibleHistoryItems.map((run) => {
+                          const rowScore =
+                            run.overall_score ?? run.score ?? null;
+                          const rowScoreText = formatRunMetricValue(
+                            run,
+                            rowScore,
+                            { asPercent: true },
+                          );
+                          const linksCheckedText = `${run.checked_links}/${run.total_links}`;
+                          const noResponseText = formatRunMetricValue(
+                            run,
+                            run.no_response_links,
+                          );
+                          const blockedText = formatRunMetricValue(
+                            run,
+                            run.blocked_links,
+                          );
+                          const brokenText = formatRunMetricValue(
+                            run,
+                            run.broken_links,
+                          );
+                          const openIssues =
+                            run.open_issues ?? run.openIssues ?? null;
+                          const newIssues =
+                            run.new_issues ?? run.newIssues ?? null;
+                          const resolvedIssues =
+                            run.resolved_issues ?? run.resolvedIssues ?? null;
+                          const openIssuesText = formatRunMetricValue(
+                            run,
+                            openIssues,
+                          );
+                          const newIssuesText = formatRunMetricValue(
+                            run,
+                            newIssues,
+                          );
+                          const resolvedIssuesText = formatRunMetricValue(
+                            run,
+                            resolvedIssues,
+                          );
+
+                          return (
+                            <div key={run.id} className="dashboard-history-row">
+                              <div>
+                                <div className="dashboard-history-row__title">
+                                  {formatDate(run.started_at)}
+                                  <span
                                     style={{
-                                      fontWeight: 700,
-                                      fontSize: "14px",
-                                    }}
-                                  >
-                                    {formatRelative(run.started_at)}
-                                  </div>
-                                  <div
-                                    style={{
-                                      fontSize: "12px",
                                       color: "var(--muted)",
+                                      fontSize: "12px",
+                                      fontWeight: "400",
+                                      marginLeft: "8px",
                                     }}
                                   >
-                                    {run.status.replace("_", " ")} · Checked{" "}
-                                    {run.checked_links}/{run.total_links} ·
-                                    Broken {run.broken_links}
-                                  </div>
+                                    ({formatRelative(run.started_at)})
+                                  </span>
                                 </div>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: "8px",
-                                    flexWrap: "wrap",
-                                  }}
-                                >
-                                  <button
-                                    className="secondary-button"
-                                    onClick={() => {
-                                      void handleSelectRunForWorkspace(run);
-                                      setScanWorkspaceOpen(true);
-                                    }}
-                                  >
-                                    Open workspace
-                                  </button>
-                                  <button
-                                    className="ghost-button"
-                                    disabled={run.status !== "completed"}
-                                    onClick={() => openReport(run.id)}
-                                  >
-                                    View report
-                                  </button>
+                                <div className="dashboard-history-row__meta">
+                                  <span className="dashboard-history-row__meta-status">
+                                    <StatusBadge
+                                      label={formatRunStatusLabel(run.status)}
+                                      tone={
+                                        run.status === "completed"
+                                          ? "success"
+                                          : run.status === "failed"
+                                            ? "danger"
+                                            : run.status === "cancelled"
+                                              ? "warning"
+                                              : "accent"
+                                      }
+                                    />
+                                    <span>
+                                      Checked {run.checked_links}/
+                                      {run.total_links}
+                                    </span>
+                                  </span>
                                 </div>
                               </div>
-                            ))}
-                            {history.length === 0 && !historyLoading && (
+                              <div className="dashboard-history-row__stats">
+                                {renderRunMetricPill(
+                                  "Health score",
+                                  rowScoreText,
+                                )}
+                                {renderRunMetricPill("Open", openIssuesText)}
+                                {renderRunMetricPill("New", newIssuesText)}
+                                {renderRunMetricPill(
+                                  "Resolved",
+                                  resolvedIssuesText,
+                                )}
+                                {renderRunMetricPill(
+                                  "Links checked",
+                                  linksCheckedText,
+                                )}
+                                {renderRunMetricPill("Broken", brokenText)}
+                                {renderRunMetricPill("Blocked", blockedText)}
+                                {renderRunMetricPill(
+                                  "No response",
+                                  noResponseText,
+                                )}
+                              </div>
                               <div
                                 style={{
-                                  color: "var(--muted)",
-                                  fontSize: "13px",
+                                  display: "flex",
+                                  flexWrap: "wrap",
+                                  gap: "8px",
+                                  justifyContent: "flex-end",
                                 }}
                               >
-                                No scans yet.
+                                <button
+                                  className="primary-button"
+                                  disabled={run.status !== "completed"}
+                                  onClick={() => openReport(run.id)}
+                                >
+                                  View report
+                                </button>
+                                <button
+                                  className="ghost-button"
+                                  disabled={run.status !== "completed"}
+                                  onClick={() => {
+                                    if (run.status === "completed") {
+                                      window.open(
+                                        buildReportPdfLink(run.id),
+                                        "_blank",
+                                        "noopener,noreferrer",
+                                      );
+                                    }
+                                  }}
+                                >
+                                  Export PDF
+                                </button>
+                                <button
+                                  className="secondary-button"
+                                  disabled={
+                                    run.status !== "completed" ||
+                                    runActionBusyId === run.id
+                                  }
+                                  onClick={() => {
+                                    if (run.status === "completed") {
+                                      void handleCreateRunShareLink(run.id);
+                                    }
+                                  }}
+                                >
+                                  {run.status === "completed"
+                                    ? runActionBusyId === run.id
+                                      ? "Preparing share link..."
+                                      : "Create share link"
+                                    : "Create share link"}
+                                </button>
                               </div>
-                            )}
-                            {!historyLoading && history.length > 5 && (
+                            </div>
+                          );
+                        })}
+                        {history.length === 0 && !historyLoading && (
+                          <div
+                            style={{
+                              padding: "16px",
+                              color: "var(--muted)",
+                              fontSize: "13px",
+                              textAlign: "center",
+                              display: "grid",
+                              gap: "4px",
+                            }}
+                          >
+                            <div>No scans yet</div>
+                            <div>Run your first scan from the dashboard.</div>
+                          </div>
+                        )}
+                        {!historyLoading &&
+                          history.length > DASHBOARD_HISTORY_INITIAL_ROWS && (
+                            <div
+                              style={{
+                                padding: "0 16px 16px",
+                                display: "flex",
+                                justifyContent: "flex-start",
+                              }}
+                            >
                               <button
                                 onClick={() =>
                                   setHistoryExpanded((prev) => !prev)
                                 }
                                 className="ghost-button"
                                 style={{
-                                  justifySelf: "flex-start",
-                                  paddingLeft: "0",
                                   border: "none",
                                   textDecoration: "underline",
+                                  paddingLeft: "0",
                                 }}
                               >
                                 {historyExpanded
                                   ? "Show less"
-                                  : `Show more (${history.length - 5} more)`}
+                                  : `Show more (${history.length - DASHBOARD_HISTORY_INITIAL_ROWS} more)`}
                               </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="app-settings-card">
-                          <div className="app-settings-card__title">
-                            Current report context
-                          </div>
-                          <div className="app-settings-card__subtitle">
-                            Keep the dashboard focused on health. Use this area
-                            when you need deeper evidence and detailed scan
-                            operations.
-                          </div>
-                          <div
-                            style={{
-                              display: "grid",
-                              gap: "10px",
-                              fontSize: "13px",
-                            }}
-                          >
-                            <StatusBadge
-                              label={`Selected run ${selectedRun ? formatRelative(selectedRun.started_at) : "none"}`}
-                              tone="default"
-                            />
-                            <StatusBadge
-                              label={`Workspace ${scanWorkspaceOpen ? "open" : "hidden"}`}
-                              tone="accent"
-                            />
-                            <div style={{ color: "var(--muted)" }}>
-                              {selectedRun
-                                ? `Current status: ${selectedRun.status.replace("_", " ")} · ${selectedRun.checked_links}/${selectedRun.total_links} links checked`
-                                : "Select a run to load results, changes, or fix queue data."}
                             </div>
-                          </div>
-                        </div>
+                          )}
                       </div>
                     </div>
                   )}
@@ -17971,899 +21427,905 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                {hasSites && appSection === "reports" && scanWorkspaceOpen && (
-                  <div ref={scansRef} className="card" style={{ padding: "0" }}>
-                    {showProgress && selectedRun && (
-                      <div style={{ padding: "16px 16px 0 16px" }}>
-                        <ScanProgressHero
-                          progress={
-                            selectedRun.total_links > 0
-                              ? (selectedRun.checked_links /
-                                  selectedRun.total_links) *
-                                100
-                              : 0
-                          }
-                          indeterminate={
-                            selectedRun.status === "queued" ||
-                            selectedRun.total_links <= 0
-                          }
-                          title={
-                            selectedRun.status === "completed"
-                              ? "Scan complete"
-                              : "Scan activity"
-                          }
-                          stage={getScanStageText(selectedRun)}
-                          summary={`${selectedRun.checked_links} / ${selectedRun.total_links || "?"} links checked · ${
-                            lastProgressAt
-                              ? `Last update ${formatDate(new Date(lastProgressAt).toISOString())}`
-                              : "Scan activity is live"
-                          }`}
-                          summaryStats={
-                            selectedRun?.status === "completed" &&
-                            selectedRunSummaryStats
-                              ? [
-                                  {
-                                    label: "Latest score",
-                                    value: selectedRunSummaryStats.latestScore,
-                                  },
-                                  {
-                                    label: "Open issues",
-                                    value: selectedRunSummaryStats.openIssues,
-                                  },
-                                  {
-                                    label: "High priority",
-                                    value: selectedRunSummaryStats.highPriority,
-                                  },
-                                  {
-                                    label: "New",
-                                    value: selectedRunSummaryStats.newIssues,
-                                  },
-                                  {
-                                    label: "Resolved",
-                                    value:
-                                      selectedRunSummaryStats.resolvedIssues,
-                                  },
-                                  {
-                                    label: "Links checked",
-                                    value: selectedRunSummaryStats.linksChecked,
-                                  },
-                                ]
-                              : undefined
-                          }
-                          counters={[
-                            {
-                              label: "Links checked",
-                              value: selectedRun.checked_links,
-                            },
-                            {
-                              label: "Broken",
-                              value: phase0BrokenCount,
-                            },
-                            {
-                              label: "Blocked",
-                              value: phase0BlockedCount,
-                            },
-                            {
-                              label: "No response",
-                              value: phase0NoResponseCount,
-                            },
-                            {
-                              label: "Ignored",
-                              value: phase0IgnoredSkippedCount,
-                            },
-                          ]}
-                          previewTitle={
-                            selectedRun.status === "completed"
-                              ? "Latest snapshot"
-                              : "Early findings"
-                          }
-                          previewItems={
-                            selectedRun.status === "completed"
-                              ? [
-                                  {
-                                    label: "Run quality",
-                                    detail: `${selectedRun.status.replace("_", " ")} with ${selectedRun.checked_links} links checked`,
-                                  },
-                                  {
-                                    label: "Issue activity",
-                                    detail: `${selectedRunSummaryStats?.openIssues ?? 0} open, ${selectedRunSummaryStats?.highPriority ?? 0} high-priority`,
-                                  },
-                                ]
-                              : [
-                                  {
-                                    label: "Scan activity",
-                                    detail: `${selectedRun.status.replace("_", " ")} as Scanlark discovers and checks links.`,
-                                  },
-                                  {
-                                    label: "Current findings",
-                                    detail: `Broken ${phase0BrokenCount}, blocked ${phase0BlockedCount}, no response ${phase0NoResponseCount}`,
-                                  },
-                                ]
-                          }
-                          note={
-                            selectedRun.status === "completed"
-                              ? "View the full report for evidence, affected pages, and recommended next steps."
-                              : "Early findings are updating while the scan runs. Open the full report when it completes."
-                          }
-                          statusTone={
-                            selectedRun.status === "completed"
-                              ? "success"
-                              : selectedRun.status === "failed"
-                                ? "danger"
-                                : selectedRun.status === "cancelled"
-                                  ? "warning"
-                                  : "accent"
-                          }
-                          primaryAction={
-                            canCancelRun ? (
-                              <button
-                                onClick={handleCancelScan}
-                                style={{
-                                  padding: "10px 14px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--danger)",
-                                  background: "var(--danger)",
-                                  color: "white",
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                }}
-                              >
-                                Cancel scan
-                              </button>
-                            ) : selectedRun.status === "completed" ? (
-                              <button
-                                onClick={() => openReport(selectedRun.id)}
-                                className="primary-button"
-                              >
-                                View report
-                              </button>
-                            ) : undefined
-                          }
-                        />
-                      </div>
-                    )}
-                    {!showProgress && (
-                      <div style={{ padding: "16px 16px 0 16px" }} />
-                    )}
+                {hasSites &&
+                  appSection === "dashboard" &&
+                  scanWorkspaceOpen &&
+                  !!selectedRun && (
                     <div
-                      style={{
-                        padding: "16px",
-                        borderBottom: "1px solid var(--border)",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "12px",
-                      }}
+                      ref={scansRef}
+                      className="card"
+                      style={{ padding: "0" }}
                     >
+                      {showProgress && selectedRun && (
+                        <div style={{ padding: "16px 16px 0 16px" }}>
+                          <ScanProgressHero
+                            progress={
+                              selectedRun.total_links > 0
+                                ? (selectedRun.checked_links /
+                                    selectedRun.total_links) *
+                                  100
+                                : 0
+                            }
+                            indeterminate={
+                              selectedRun.status === "queued" ||
+                              selectedRun.total_links <= 0
+                            }
+                            title={
+                              selectedRun.status === "completed"
+                                ? "Scan complete"
+                                : "Scan activity"
+                            }
+                            stage={getScanStageText(selectedRun)}
+                            summary={`${selectedRun.checked_links} / ${selectedRun.total_links || "?"} links checked · ${
+                              lastProgressAt
+                                ? `Last update ${formatDate(new Date(lastProgressAt).toISOString())}`
+                                : "Scan activity is live"
+                            }`}
+                            summaryStats={
+                              selectedRun?.status === "completed" &&
+                              selectedRunSummaryStats
+                                ? [
+                                    {
+                                      label: "Latest score",
+                                      value:
+                                        selectedRunSummaryStats.latestScore,
+                                    },
+                                    {
+                                      label: "Open issues",
+                                      value: selectedRunSummaryStats.openIssues,
+                                    },
+                                    {
+                                      label: "High priority",
+                                      value:
+                                        selectedRunSummaryStats.highPriority,
+                                    },
+                                    {
+                                      label: "New",
+                                      value: selectedRunSummaryStats.newIssues,
+                                    },
+                                    {
+                                      label: "Resolved",
+                                      value:
+                                        selectedRunSummaryStats.resolvedIssues,
+                                    },
+                                    {
+                                      label: "Links checked",
+                                      value:
+                                        selectedRunSummaryStats.linksChecked,
+                                    },
+                                  ]
+                                : undefined
+                            }
+                            counters={[
+                              {
+                                label: "Links checked",
+                                value: selectedRun.checked_links,
+                              },
+                              {
+                                label: "Broken",
+                                value: phase0BrokenCount,
+                              },
+                              {
+                                label: "Blocked",
+                                value: phase0BlockedCount,
+                              },
+                              {
+                                label: "No response",
+                                value: phase0NoResponseCount,
+                              },
+                              {
+                                label: "Ignored",
+                                value: phase0IgnoredSkippedCount,
+                              },
+                            ]}
+                            previewTitle={
+                              selectedRun.status === "completed"
+                                ? "Latest snapshot"
+                                : "Early findings"
+                            }
+                            previewItems={
+                              selectedRun.status === "completed"
+                                ? [
+                                    {
+                                      label: "Run quality",
+                                      detail: `${formatRunStatusLabel(selectedRun.status)} with ${selectedRun.checked_links} links checked`,
+                                    },
+                                    {
+                                      label: "Issue activity",
+                                      detail: `${selectedRunSummaryStats?.openIssues ?? 0} open, ${selectedRunSummaryStats?.highPriority ?? 0} high-priority`,
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      label: "Scan activity",
+                                      detail: `${formatRunStatusLabel(selectedRun.status)} as Scanlark discovers and checks links.`,
+                                    },
+                                    {
+                                      label: "Current findings",
+                                      detail: `Broken ${phase0BrokenCount}, blocked ${phase0BlockedCount}, no response ${phase0NoResponseCount}`,
+                                    },
+                                  ]
+                            }
+                            note={
+                              selectedRun.status === "completed"
+                                ? "View the full report for evidence, affected pages, and recommended next steps."
+                                : "Early findings are updating while the scan runs. Open the full report when it completes."
+                            }
+                            statusTone={
+                              selectedRun.status === "completed"
+                                ? "success"
+                                : selectedRun.status === "failed"
+                                  ? "danger"
+                                  : selectedRun.status === "cancelled"
+                                    ? "warning"
+                                    : "accent"
+                            }
+                            primaryAction={
+                              canCancelRun ? (
+                                <button
+                                  onClick={handleCancelScan}
+                                  style={{
+                                    padding: "10px 14px",
+                                    borderRadius: "10px",
+                                    border: "1px solid var(--danger)",
+                                    background: "var(--danger)",
+                                    color: "white",
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  Cancel scan
+                                </button>
+                              ) : selectedRun.status === "completed" ? (
+                                <button
+                                  onClick={() => openReport(selectedRun.id)}
+                                  className="primary-button"
+                                >
+                                  View report
+                                </button>
+                              ) : undefined
+                            }
+                          />
+                        </div>
+                      )}
+                      {!showProgress && (
+                        <div style={{ padding: "16px 16px 0 16px" }} />
+                      )}
                       <div
                         style={{
+                          padding: "16px",
+                          borderBottom: "1px solid var(--border)",
                           display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
+                          flexDirection: "column",
                           gap: "12px",
-                          flexWrap: "wrap",
                         }}
                       >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>
-                            {runHeadingText}
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "12px",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 600 }}>
+                              {runHeadingText}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              {selectedRun
+                                ? `Started ${formatRelative(selectedRun.started_at)}`
+                                : "No scans yet"}
+                            </div>
                           </div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            {selectedRun
-                              ? `Started ${formatRelative(selectedRun.started_at)}`
-                              : "No scans yet"}
-                          </div>
+                          {selectedRun && (
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "8px",
+                              }}
+                            >
+                              <span
+                                className={`status-chip run-status ${runStatusTone(
+                                  selectedRun.status,
+                                )}`}
+                              >
+                                {formatRunStatusLabel(selectedRun.status)}
+                              </span>
+                              {selectedRun.status === "completed" && (
+                                <button
+                                  onClick={() => openReport(selectedRun.id)}
+                                  className="report-button"
+                                >
+                                  View report
+                                </button>
+                              )}
+                              {(canRetryRun || canRescan) && (
+                                <button
+                                  onClick={() => {
+                                    if (canRescan) {
+                                      void handleRunScan();
+                                    } else {
+                                      void handleRetryScan();
+                                    }
+                                  }}
+                                  className="report-button"
+                                  disabled={
+                                    (canRescan &&
+                                      (!selectedSiteId || triggeringScan)) ||
+                                    (!canRescan && !canRetryRun)
+                                  }
+                                >
+                                  Retry scan
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
                         {selectedRun && (
                           <div
                             style={{
                               display: "flex",
-                              alignItems: "center",
-                              gap: "8px",
+                              flexWrap: "wrap",
+                              gap: "16px",
+                              fontSize: "12px",
+                              color: "var(--muted)",
                             }}
                           >
-                            <span
-                              className={`status-chip run-status ${runStatusTone(
-                                selectedRun.status,
-                              )}`}
-                            >
-                              {selectedRun.status.replace("_", " ")}
+                            <span>
+                              Finished{" "}
+                              {formatDate(selectedRun.finished_at ?? null)}
                             </span>
-                            {selectedRun.status === "completed" && (
-                              <button
-                                onClick={() => openReport(selectedRun.id)}
-                                className="report-button"
-                              >
-                                View report
-                              </button>
+                          </div>
+                        )}
+                        {selectedRun && (
+                          <div
+                            style={{
+                              paddingTop: "10px",
+                              borderTop: "1px solid var(--border)",
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "12px",
+                              fontSize: "12px",
+                              color: "var(--muted)",
+                            }}
+                          >
+                            <span>
+                              Status {formatRunStatusLabel(selectedRun.status)}
+                            </span>
+                            <span>
+                              Finished{" "}
+                              {formatDate(selectedRun.finished_at ?? null)}
+                            </span>
+                            <span>
+                              Duration{" "}
+                              {formatDuration(
+                                selectedRun.started_at,
+                                selectedRun.finished_at,
+                              )}
+                            </span>
+                            <span>
+                              Links checked {selectedRun.checked_links}/
+                              {selectedRun.total_links}
+                            </span>
+                            {selectedRun.error_message && (
+                              <span style={{ color: "var(--warning)" }}>
+                                {selectedRun.error_message}
+                              </span>
                             )}
-                            {(canRetryRun || canRescan) && (
-                              <button
-                                onClick={() => {
-                                  if (canRescan) {
-                                    void handleRunScan();
-                                  } else {
-                                    void handleRetryScan();
-                                  }
-                                }}
-                                className="report-button"
-                                disabled={
-                                  (canRescan &&
-                                    (!selectedSiteId || triggeringScan)) ||
-                                  (!canRescan && !canRetryRun)
-                                }
-                              >
-                                Retry scan
-                              </button>
+                          </div>
+                        )}
+                        {selectedRun && diffBaselineRun && diffSummary && (
+                          <div
+                            style={{
+                              paddingTop: "10px",
+                              borderTop: "1px solid var(--border)",
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "8px",
+                              fontSize: "12px",
+                            }}
+                          >
+                            <span style={{ color: "var(--muted)" }}>
+                              Compared to{" "}
+                              {formatRelative(diffBaselineRun.started_at)} ·{" "}
+                              {formatDate(diffBaselineRun.started_at)}
+                            </span>
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: "12px",
+                                color: "var(--text)",
+                                fontWeight: 600,
+                              }}
+                            >
+                              <span>New issues {diffSummary.newIssues}</span>
+                              <span>Fixed {diffSummary.fixedIssues}</span>
+                              <span>Changed {diffSummary.changed}</span>
+                              <span>
+                                Outstanding issues{" "}
+                                {diffSummary.outstandingIssues}
+                              </span>
+                              {!diffIssuesOnly && <span>OK {diffOkTotal}</span>}
+                              {!diffIssuesOnly && (
+                                <span>Added {diffSummary.added}</span>
+                              )}
+                              {!diffIssuesOnly && (
+                                <span>Removed {diffSummary.removed}</span>
+                              )}
+                            </div>
+                            {!hasDiffChanges && (
+                              <span style={{ color: "var(--muted)" }}>
+                                {diffIssuesOnly
+                                  ? "No issue changes since last run."
+                                  : "No changes since last run."}
+                              </span>
                             )}
                           </div>
                         )}
                       </div>
-                      {selectedRun && (
-                        <div
-                          style={{
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: "16px",
-                            fontSize: "12px",
-                            color: "var(--muted)",
-                          }}
-                        >
-                          <span>
-                            Finished{" "}
-                            {formatDate(selectedRun.finished_at ?? null)}
-                          </span>
-                        </div>
-                      )}
-                      {selectedRun && (
-                        <div
-                          style={{
-                            paddingTop: "10px",
-                            borderTop: "1px solid var(--border)",
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: "12px",
-                            fontSize: "12px",
-                            color: "var(--muted)",
-                          }}
-                        >
-                          <span>
-                            Status {selectedRun.status.replace("_", " ")}
-                          </span>
-                          <span>
-                            Finished{" "}
-                            {formatDate(selectedRun.finished_at ?? null)}
-                          </span>
-                          <span>
-                            Duration{" "}
-                            {formatDuration(
-                              selectedRun.started_at,
-                              selectedRun.finished_at,
-                            )}
-                          </span>
-                          <span>
-                            Links checked {selectedRun.checked_links}/
-                            {selectedRun.total_links}
-                          </span>
-                          {selectedRun.error_message && (
-                            <span style={{ color: "var(--warning)" }}>
-                              {selectedRun.error_message}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {selectedRun && diffBaselineRun && diffSummary && (
-                        <div
-                          style={{
-                            paddingTop: "10px",
-                            borderTop: "1px solid var(--border)",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                            fontSize: "12px",
-                          }}
-                        >
-                          <span style={{ color: "var(--muted)" }}>
-                            Compared to{" "}
-                            {formatRelative(diffBaselineRun.started_at)} ·{" "}
-                            {formatDate(diffBaselineRun.started_at)}
-                          </span>
+                      {!selectedRunId && (
+                        <div style={{ padding: "16px" }}>
                           <div
                             style={{
-                              display: "flex",
-                              flexWrap: "wrap",
-                              gap: "12px",
-                              color: "var(--text)",
-                              fontWeight: 600,
+                              padding: "20px",
+                              borderRadius: "12px",
+                              border: "1px dashed var(--border)",
+                              textAlign: "center",
+                              color: "var(--muted)",
                             }}
                           >
-                            <span>New issues {diffSummary.newIssues}</span>
-                            <span>Fixed {diffSummary.fixedIssues}</span>
-                            <span>Changed {diffSummary.changed}</span>
-                            <span>
-                              Outstanding issues {diffSummary.outstandingIssues}
-                            </span>
-                            {!diffIssuesOnly && <span>OK {diffOkTotal}</span>}
-                            {!diffIssuesOnly && (
-                              <span>Added {diffSummary.added}</span>
-                            )}
-                            {!diffIssuesOnly && (
-                              <span>Removed {diffSummary.removed}</span>
-                            )}
+                            Select a scan run to explore results, or start a new
+                            scan from the site panel.
                           </div>
-                          {!hasDiffChanges && (
-                            <span style={{ color: "var(--muted)" }}>
-                              {diffIssuesOnly
-                                ? "No issue changes since last run."
-                                : "No changes since last run."}
-                            </span>
-                          )}
                         </div>
                       )}
-                    </div>
-                    {!selectedRunId && (
-                      <div style={{ padding: "16px" }}>
-                        <div
-                          style={{
-                            padding: "20px",
-                            borderRadius: "12px",
-                            border: "1px dashed var(--border)",
-                            textAlign: "center",
-                            color: "var(--muted)",
-                          }}
-                        >
-                          Select a scan run to explore results, or start a new
-                          scan from the site panel.
-                        </div>
-                      </div>
-                    )}
-                    <div style={{ marginBottom: "12px" }}>
-                      <div className="results-summary">
-                        <div className="results-summary__top">
-                          {!isSelectedRunInProgress && (
-                            <div className="results-summary__stats">
-                              {resultsView === "changes" ? (
-                                diffLoading ? (
-                                  <div
-                                    className="skeleton"
-                                    style={{ height: "16px", width: "240px" }}
-                                  />
-                                ) : diffBaselineRun ? (
-                                  <>
-                                    Comparing to{" "}
-                                    {formatRelative(diffBaselineRun.started_at)}{" "}
-                                    · {formatDate(diffBaselineRun.started_at)}
-                                  </>
-                                ) : (
-                                  "No previous scan to compare yet."
-                                )
-                              ) : resultsView === "fix_queue" ? (
-                                fixQueueUnavailableReason ? (
-                                  fixQueueUnavailableReason
-                                ) : fixQueueSummary ? (
-                                  <>
-                                    New {fixQueueSummary.newIssues} •
-                                    Outstanding{" "}
-                                    {fixQueueSummary.outstandingIssues} • Total{" "}
-                                    {fixQueueSummary.totalQueueItems}
-                                  </>
-                                ) : fixQueueLoading ? (
+                      {!isSelectedRunInProgress &&
+                        renderWorkspaceTopPriorityIssues()}
+                      <div style={{ marginBottom: "12px" }}>
+                        <div className="results-summary">
+                          <div className="results-summary__top">
+                            {!isSelectedRunInProgress && (
+                              <div className="results-summary__stats">
+                                {resultsView === "changes" ? (
+                                  diffLoading ? (
+                                    <div
+                                      className="skeleton"
+                                      style={{ height: "16px", width: "240px" }}
+                                    />
+                                  ) : diffBaselineRun ? (
+                                    <>
+                                      Comparing to{" "}
+                                      {formatRelative(
+                                        diffBaselineRun.started_at,
+                                      )}{" "}
+                                      · {formatDate(diffBaselineRun.started_at)}
+                                    </>
+                                  ) : (
+                                    "No previous scan to compare yet."
+                                  )
+                                ) : resultsView === "fix_queue" ? (
+                                  fixQueueUnavailableReason ? (
+                                    fixQueueUnavailableReason
+                                  ) : fixQueueSummary ? (
+                                    <>
+                                      New {fixQueueSummary.newIssues} •
+                                      Outstanding{" "}
+                                      {fixQueueSummary.outstandingIssues} •
+                                      Total {fixQueueSummary.totalQueueItems}
+                                    </>
+                                  ) : fixQueueLoading ? (
+                                    <div
+                                      className="skeleton"
+                                      style={{ height: "16px", width: "260px" }}
+                                    />
+                                  ) : (
+                                    "No fix queue items yet."
+                                  )
+                                ) : resultsLoading ? (
                                   <div
                                     className="skeleton"
                                     style={{ height: "16px", width: "260px" }}
                                   />
                                 ) : (
-                                  "No fix queue items yet."
-                                )
-                              ) : resultsLoading ? (
-                                <div
-                                  className="skeleton"
-                                  style={{ height: "16px", width: "260px" }}
-                                />
-                              ) : (
-                                <>
-                                  Checked {selectedRun?.checked_links ?? 0} /{" "}
-                                  {selectedRun?.total_links ?? 0} • Broken{" "}
-                                  {phase0BrokenCount} • Blocked{" "}
-                                  {phase0BlockedCount} • No response{" "}
-                                  {phase0NoResponseCount} • Ignored/skipped{" "}
-                                  {phase0IgnoredSkippedCount}
-                                </>
-                              )}
-                            </div>
-                          )}
-                          {hasActiveFilters && (
-                            <span className="results-summary__chip">
-                              Filters active
-                              <button
-                                onClick={() => {
-                                  setStatusFilters({});
-                                  setMinOccurrencesOnly(false);
-                                  setSearchQuery("");
-                                  setActiveTab("all");
-                                  setStatusGroup("all");
-                                  setShowIgnored(false);
-                                }}
-                                className="report-button"
-                                style={{ padding: "2px 8px" }}
-                              >
-                                Clear
-                              </button>
-                            </span>
-                          )}
-                        </div>
-                        <div className="results-summary__controls">
-                          <div className="results-tabs">
-                            <button
-                              className={`tab-pill ${resultsView === "results" ? "active" : ""}`}
-                              onClick={() => setResultsView("results")}
-                            >
-                              Results
-                            </button>
-                            <button
-                              className={`tab-pill ${resultsView === "changes" ? "active" : ""}`}
-                              onClick={() => setResultsView("changes")}
-                            >
-                              Changes
-                            </button>
-                            <button
-                              className={`tab-pill ${resultsView === "fix_queue" ? "active" : ""}`}
-                              onClick={() => setResultsView("fix_queue")}
-                            >
-                              Fix Queue
-                            </button>
-                            {resultsView === "results" &&
-                              (
-                                [
-                                  "all",
-                                  "broken",
-                                  "blocked",
-                                  "no_response",
-                                  "ok",
-                                  "ignored",
-                                ] as const
-                              ).map((tab) => (
-                                <button
-                                  key={tab}
-                                  className={`tab-pill ${activeTab === tab ? "active" : ""}`}
-                                  onClick={() => setActiveTab(tab)}
-                                >
-                                  {tab === "ok"
-                                    ? "OK"
-                                    : tab === "no_response"
-                                      ? "No response"
-                                      : tab === "ignored"
-                                        ? "Ignored"
-                                        : tab[0].toUpperCase() + tab.slice(1)}
-                                </button>
-                              ))}
-                          </div>
-                          <div className="results-controls">
-                            {resultsView === "results" ? (
-                              <>
-                                <div
-                                  className="filter-dropdown"
-                                  ref={filterDropdownRef}
-                                >
-                                  <button
-                                    onClick={() =>
-                                      setFiltersOpen((prev) => !prev)
-                                    }
-                                    className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
-                                  >
-                                    Filters {filtersOpen ? "▴" : "▾"}
-                                  </button>
-                                  {filtersOpen && (
-                                    <div className="filter-dropdown__panel">
-                                      <div className="filter-row">
-                                        {(
-                                          [
-                                            "all",
-                                            "http_error",
-                                            "no_response",
-                                          ] as const
-                                        ).map((group) => (
-                                          <button
-                                            key={group}
-                                            onClick={() =>
-                                              setStatusGroup(group)
-                                            }
-                                            className={`tab-pill ${statusGroup === group ? "active" : ""}`}
-                                          >
-                                            {group === "all"
-                                              ? "All responses"
-                                              : group === "http_error"
-                                                ? "HTTP response"
-                                                : "No response"}
-                                          </button>
-                                        ))}
-                                      </div>
-                                      <div className="filter-row">
-                                        {["401/403/429", "404", "5xx"].map(
-                                          (key) => (
-                                            <button
-                                              key={key}
-                                              onClick={() =>
-                                                toggleStatusFilter(key)
-                                              }
-                                              className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
-                                            >
-                                              {key}
-                                            </button>
-                                          ),
-                                        )}
-                                        <button
-                                          onClick={() =>
-                                            toggleStatusFilter("no_response")
-                                          }
-                                          className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
-                                        >
-                                          No response
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            setMinOccurrencesOnly(
-                                              (prev) => !prev,
-                                            )
-                                          }
-                                          className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
-                                        >
-                                          Occurrences &gt; 1
-                                        </button>
-                                        <button
-                                          onClick={() =>
-                                            setShowIgnored((prev) => !prev)
-                                          }
-                                          className={`tab-pill ${showIgnored ? "active" : ""}`}
-                                        >
-                                          {showIgnored
-                                            ? "Showing ignored"
-                                            : "Show ignored"}
-                                        </button>
-                                      </div>
-                                      <div className="filter-row">
-                                        <button
-                                          onClick={() => {
-                                            setStatusFilters({});
-                                            setMinOccurrencesOnly(false);
-                                            setSearchQuery("");
-                                            setActiveTab("all");
-                                            setStatusGroup("all");
-                                            setShowIgnored(false);
-                                          }}
-                                          className="tab-pill"
-                                        >
-                                          Reset filters
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                                <input
-                                  ref={searchInputRef}
-                                  value={searchQuery}
-                                  onChange={(e) =>
-                                    setSearchQuery(e.target.value)
-                                  }
-                                  placeholder="Search links"
-                                  style={{ width: "200px" }}
-                                />
-                                <select
-                                  value={sortOption}
-                                  onChange={(e) =>
-                                    setSortOption(
-                                      e.target.value as typeof sortOption,
-                                    )
-                                  }
-                                >
-                                  <option value="severity">Severity</option>
-                                  <option value="occ_desc">
-                                    Most occurrences
-                                  </option>
-                                  <option value="status_desc">
-                                    Status code
-                                  </option>
-                                  <option value="recent">Recently seen</option>
-                                </select>
-                                {isSelectedRunInProgress && (
-                                  <span
-                                    style={{
-                                      fontSize: "12px",
-                                      color: "var(--muted)",
-                                    }}
-                                  >
-                                    Updating…
-                                  </span>
+                                  <>
+                                    Checked {selectedRun?.checked_links ?? 0} /{" "}
+                                    {selectedRun?.total_links ?? 0} • Broken{" "}
+                                    {phase0BrokenCount} • Blocked{" "}
+                                    {phase0BlockedCount} • No response{" "}
+                                    {phase0NoResponseCount} • Ignored/skipped{" "}
+                                    {phase0IgnoredSkippedCount}
+                                  </>
                                 )}
+                              </div>
+                            )}
+                            {hasActiveFilters && (
+                              <span className="results-summary__chip">
+                                Filters active
                                 <button
-                                  onClick={() => setHistoryOpen(true)}
-                                  style={{
-                                    padding: "6px 10px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                    cursor: "pointer",
-                                    fontSize: "12px",
-                                    fontWeight: 600,
+                                  onClick={() => {
+                                    setStatusFilters({});
+                                    setMinOccurrencesOnly(false);
+                                    setSearchQuery("");
+                                    setActiveTab("all");
+                                    setStatusGroup("all");
+                                    setShowIgnored(false);
                                   }}
+                                  className="report-button"
+                                  style={{ padding: "2px 8px" }}
                                 >
-                                  History
+                                  Clear
                                 </button>
-                                <div
-                                  ref={exportMenuRef}
-                                  style={{ position: "relative" }}
-                                >
+                              </span>
+                            )}
+                          </div>
+                          <div className="results-summary__controls">
+                            <div className="results-tabs">
+                              <button
+                                className={`tab-pill ${resultsView === "results" ? "active" : ""}`}
+                                onClick={() => setResultsView("results")}
+                              >
+                                Results
+                              </button>
+                              <button
+                                className={`tab-pill ${resultsView === "changes" ? "active" : ""}`}
+                                onClick={() => setResultsView("changes")}
+                              >
+                                Changes
+                              </button>
+                              <button
+                                className={`tab-pill ${resultsView === "fix_queue" ? "active" : ""}`}
+                                onClick={() => setResultsView("fix_queue")}
+                              >
+                                Fix Queue
+                              </button>
+                              {resultsView === "results" &&
+                                (
+                                  [
+                                    "all",
+                                    "broken",
+                                    "blocked",
+                                    "no_response",
+                                    "ok",
+                                    "ignored",
+                                  ] as const
+                                ).map((tab) => (
                                   <button
-                                    onClick={() =>
-                                      setExportMenuOpen((prev) => !prev)
+                                    key={tab}
+                                    className={`tab-pill ${activeTab === tab ? "active" : ""}`}
+                                    onClick={() => setActiveTab(tab)}
+                                  >
+                                    {tab === "ok"
+                                      ? "OK"
+                                      : tab === "no_response"
+                                        ? "No response"
+                                        : tab === "ignored"
+                                          ? "Ignored"
+                                          : tab[0].toUpperCase() + tab.slice(1)}
+                                  </button>
+                                ))}
+                            </div>
+                            <div className="results-controls">
+                              {resultsView === "results" ? (
+                                <>
+                                  <div
+                                    className="filter-dropdown"
+                                    ref={filterDropdownRef}
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        setFiltersOpen((prev) => !prev)
+                                      }
+                                      className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
+                                    >
+                                      Filters {filtersOpen ? "▴" : "▾"}
+                                    </button>
+                                    {filtersOpen && (
+                                      <div className="filter-dropdown__panel">
+                                        <div className="filter-row">
+                                          {(
+                                            [
+                                              "all",
+                                              "http_error",
+                                              "no_response",
+                                            ] as const
+                                          ).map((group) => (
+                                            <button
+                                              key={group}
+                                              onClick={() =>
+                                                setStatusGroup(group)
+                                              }
+                                              className={`tab-pill ${statusGroup === group ? "active" : ""}`}
+                                            >
+                                              {group === "all"
+                                                ? "All responses"
+                                                : group === "http_error"
+                                                  ? "HTTP response"
+                                                  : "No response"}
+                                            </button>
+                                          ))}
+                                        </div>
+                                        <div className="filter-row">
+                                          {["401/403/429", "404", "5xx"].map(
+                                            (key) => (
+                                              <button
+                                                key={key}
+                                                onClick={() =>
+                                                  toggleStatusFilter(key)
+                                                }
+                                                className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
+                                              >
+                                                {key}
+                                              </button>
+                                            ),
+                                          )}
+                                          <button
+                                            onClick={() =>
+                                              toggleStatusFilter("no_response")
+                                            }
+                                            className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
+                                          >
+                                            No response
+                                          </button>
+                                          <button
+                                            onClick={() =>
+                                              setMinOccurrencesOnly(
+                                                (prev) => !prev,
+                                              )
+                                            }
+                                            className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
+                                          >
+                                            Occurrences &gt; 1
+                                          </button>
+                                          <button
+                                            onClick={() =>
+                                              setShowIgnored((prev) => !prev)
+                                            }
+                                            className={`tab-pill ${showIgnored ? "active" : ""}`}
+                                          >
+                                            {showIgnored
+                                              ? "Showing ignored"
+                                              : "Show ignored"}
+                                          </button>
+                                        </div>
+                                        <div className="filter-row">
+                                          <button
+                                            onClick={() => {
+                                              setStatusFilters({});
+                                              setMinOccurrencesOnly(false);
+                                              setSearchQuery("");
+                                              setActiveTab("all");
+                                              setStatusGroup("all");
+                                              setShowIgnored(false);
+                                            }}
+                                            className="tab-pill"
+                                          >
+                                            Reset filters
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <input
+                                    ref={searchInputRef}
+                                    value={searchQuery}
+                                    onChange={(e) =>
+                                      setSearchQuery(e.target.value)
                                     }
-                                    disabled={exportDisabled}
+                                    placeholder="Search links"
+                                    style={{ width: "200px" }}
+                                  />
+                                  <select
+                                    value={sortOption}
+                                    onChange={(e) =>
+                                      setSortOption(
+                                        e.target.value as typeof sortOption,
+                                      )
+                                    }
+                                  >
+                                    <option value="severity">Severity</option>
+                                    <option value="occ_desc">
+                                      Most occurrences
+                                    </option>
+                                    <option value="status_desc">
+                                      Status code
+                                    </option>
+                                    <option value="recent">
+                                      Recently seen
+                                    </option>
+                                  </select>
+                                  {isSelectedRunInProgress && (
+                                    <span
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      Updating…
+                                    </span>
+                                  )}
+                                  <button
+                                    onClick={() => setHistoryOpen(true)}
                                     style={{
                                       padding: "6px 10px",
                                       borderRadius: "999px",
                                       border: "1px solid var(--border)",
                                       background: "var(--panel)",
                                       color: "var(--text)",
-                                      cursor: exportDisabled
-                                        ? "not-allowed"
-                                        : "pointer",
+                                      cursor: "pointer",
                                       fontSize: "12px",
                                       fontWeight: 600,
                                     }}
                                   >
-                                    Export
+                                    History
                                   </button>
-                                  {exportMenuOpen && !exportDisabled && (
-                                    <div
-                                      className="export-menu"
+                                  <div
+                                    ref={exportMenuRef}
+                                    style={{ position: "relative" }}
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        setExportMenuOpen((prev) => !prev)
+                                      }
+                                      disabled={exportDisabled}
                                       style={{
-                                        position: "absolute",
-                                        right: 0,
-                                        top: "calc(100% + 6px)",
-                                        background: "var(--panel)",
+                                        padding: "6px 10px",
+                                        borderRadius: "999px",
                                         border: "1px solid var(--border)",
-                                        borderRadius: "12px",
-                                        boxShadow: "var(--shadow)",
-                                        padding: "6px",
-                                        display: "flex",
-                                        flexDirection: "column",
-                                        gap: "4px",
-                                        minWidth: "180px",
-                                        zIndex: 30,
+                                        background: "var(--panel)",
+                                        color: "var(--text)",
+                                        cursor: exportDisabled
+                                          ? "not-allowed"
+                                          : "pointer",
+                                        fontSize: "12px",
+                                        fontWeight: 600,
                                       }}
                                     >
-                                      <button
-                                        onClick={() => triggerExport("csv")}
-                                        disabled={exportLinksDisabled}
+                                      Export
+                                    </button>
+                                    {exportMenuOpen && !exportDisabled && (
+                                      <div
+                                        className="export-menu"
                                         style={{
-                                          padding: "8px 10px",
-                                          borderRadius: "10px",
-                                          border: "1px solid transparent",
-                                          background: "transparent",
-                                          textAlign: "left",
-                                          cursor: exportLinksDisabled
-                                            ? "not-allowed"
-                                            : "pointer",
-                                          color: "var(--text)",
+                                          position: "absolute",
+                                          right: 0,
+                                          top: "calc(100% + 6px)",
+                                          background: "var(--panel)",
+                                          border: "1px solid var(--border)",
+                                          borderRadius: "12px",
+                                          boxShadow: "var(--shadow)",
+                                          padding: "6px",
+                                          display: "flex",
+                                          flexDirection: "column",
+                                          gap: "4px",
+                                          minWidth: "180px",
+                                          zIndex: 30,
                                         }}
                                       >
-                                        Export CSV (current view)
-                                      </button>
-                                      <button
-                                        onClick={() => triggerExport("json")}
-                                        disabled={exportLinksDisabled}
+                                        <button
+                                          onClick={() => triggerExport("csv")}
+                                          disabled={exportLinksDisabled}
+                                          style={{
+                                            padding: "8px 10px",
+                                            borderRadius: "10px",
+                                            border: "1px solid transparent",
+                                            background: "transparent",
+                                            textAlign: "left",
+                                            cursor: exportLinksDisabled
+                                              ? "not-allowed"
+                                              : "pointer",
+                                            color: "var(--text)",
+                                          }}
+                                        >
+                                          Export CSV (current view)
+                                        </button>
+                                        <button
+                                          onClick={() => triggerExport("json")}
+                                          disabled={exportLinksDisabled}
+                                          style={{
+                                            padding: "8px 10px",
+                                            borderRadius: "10px",
+                                            border: "1px solid transparent",
+                                            background: "transparent",
+                                            textAlign: "left",
+                                            cursor: exportLinksDisabled
+                                              ? "not-allowed"
+                                              : "pointer",
+                                            color: "var(--text)",
+                                          }}
+                                        >
+                                          Export JSON (current view)
+                                        </button>
+                                        <button
+                                          onClick={() => {
+                                            if (!selectedRunId) return;
+                                            openReport(selectedRunId);
+                                            setExportMenuOpen(false);
+                                          }}
+                                          style={{
+                                            padding: "8px 10px",
+                                            borderRadius: "10px",
+                                            border: "1px solid transparent",
+                                            background: "transparent",
+                                            textAlign: "left",
+                                            cursor: "pointer",
+                                            color: "var(--text)",
+                                          }}
+                                        >
+                                          Open Report
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                </>
+                              ) : resultsView === "changes" ? (
+                                <>
+                                  <button
+                                    onClick={() =>
+                                      setDiffIssuesOnly((prev) => !prev)
+                                    }
+                                    className={`tab-pill ${diffIssuesOnly ? "active" : ""}`}
+                                  >
+                                    Issues only
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setIncludeUnchanged((prev) => !prev);
+                                      setUnchangedOnly(false);
+                                    }}
+                                    className={`tab-pill ${includeUnchanged ? "active" : ""}`}
+                                  >
+                                    Include unchanged
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      setDiffIncludeIgnored((prev) => !prev)
+                                    }
+                                    className={`tab-pill ${diffIncludeIgnored ? "active" : ""}`}
+                                  >
+                                    Include ignored
+                                  </button>
+                                  <select
+                                    value={diffExportFilter}
+                                    onChange={(e) =>
+                                      setDiffExportFilter(
+                                        e.target
+                                          .value as typeof diffExportFilter,
+                                      )
+                                    }
+                                    disabled={unchangedOnly}
+                                    title={
+                                      unchangedOnly
+                                        ? "Filters disabled in outstanding-only view"
+                                        : undefined
+                                    }
+                                  >
+                                    <option value="all">All changes</option>
+                                    <option value="new_issue">
+                                      New issues only
+                                    </option>
+                                    <option value="fixed">Fixed only</option>
+                                    <option value="changed">
+                                      Changed only
+                                    </option>
+                                    <option value="added">Added only</option>
+                                    <option value="removed">
+                                      Removed only
+                                    </option>
+                                  </select>
+                                  <button
+                                    onClick={exportDiffCsv}
+                                    style={{
+                                      padding: "6px 10px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: "pointer",
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    Export CSV
+                                  </button>
+                                  <button
+                                    onClick={() => setHistoryOpen(true)}
+                                    style={{
+                                      padding: "6px 10px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--border)",
+                                      background: "var(--panel)",
+                                      color: "var(--text)",
+                                      cursor: "pointer",
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    History
+                                  </button>
+                                </>
+                              ) : resultsView === "fix_queue" ? (
+                                <>
+                                  <div
+                                    className="changes-summary"
+                                    style={{
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: "8px",
+                                      padding: "12px 16px 0",
+                                    }}
+                                  >
+                                    {fixQueueSummary && (
+                                      <>
+                                        <span className="summary-chip">
+                                          New issues {fixQueueSummary.newIssues}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Outstanding{" "}
+                                          {fixQueueSummary.outstandingIssues}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Total{" "}
+                                          {fixQueueSummary.totalQueueItems}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Notes open{" "}
+                                          {fixQueueSummary.withNotesOpen}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Snoozed {fixQueueSummary.snoozed}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Resolved {fixQueueSummary.resolved}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                  {fixQueueData &&
+                                    !fixQueueData.baselineRun &&
+                                    fixQueueData.currentRun && (
+                                      <div
                                         style={{
-                                          padding: "8px 10px",
+                                          padding: "10px 12px",
                                           borderRadius: "10px",
-                                          border: "1px solid transparent",
-                                          background: "transparent",
-                                          textAlign: "left",
-                                          cursor: exportLinksDisabled
-                                            ? "not-allowed"
-                                            : "pointer",
-                                          color: "var(--text)",
+                                          border: "1px dashed var(--border)",
+                                          color: "var(--muted)",
+                                          margin: "12px 16px",
                                         }}
                                       >
-                                        Export JSON (current view)
-                                      </button>
-                                      <button
-                                        onClick={() => {
-                                          if (!selectedRunId) return;
-                                          openReport(selectedRunId);
-                                          setExportMenuOpen(false);
-                                        }}
-                                        style={{
-                                          padding: "8px 10px",
-                                          borderRadius: "10px",
-                                          border: "1px solid transparent",
-                                          background: "transparent",
-                                          textAlign: "left",
-                                          cursor: "pointer",
-                                          color: "var(--text)",
-                                        }}
-                                      >
-                                        Open Report
-                                      </button>
-                                    </div>
-                                  )}
-                                </div>
-                              </>
-                            ) : resultsView === "changes" ? (
-                              <>
-                                <button
-                                  onClick={() =>
-                                    setDiffIssuesOnly((prev) => !prev)
-                                  }
-                                  className={`tab-pill ${diffIssuesOnly ? "active" : ""}`}
-                                >
-                                  Issues only
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setIncludeUnchanged((prev) => !prev);
-                                    setUnchangedOnly(false);
-                                  }}
-                                  className={`tab-pill ${includeUnchanged ? "active" : ""}`}
-                                >
-                                  Include unchanged
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    setDiffIncludeIgnored((prev) => !prev)
-                                  }
-                                  className={`tab-pill ${diffIncludeIgnored ? "active" : ""}`}
-                                >
-                                  Include ignored
-                                </button>
-                                <select
-                                  value={diffExportFilter}
-                                  onChange={(e) =>
-                                    setDiffExportFilter(
-                                      e.target.value as typeof diffExportFilter,
-                                    )
-                                  }
-                                  disabled={unchangedOnly}
-                                  title={
-                                    unchangedOnly
-                                      ? "Filters disabled in outstanding-only view"
-                                      : undefined
-                                  }
-                                >
-                                  <option value="all">All changes</option>
-                                  <option value="new_issue">
-                                    New issues only
-                                  </option>
-                                  <option value="fixed">Fixed only</option>
-                                  <option value="changed">Changed only</option>
-                                  <option value="added">Added only</option>
-                                  <option value="removed">Removed only</option>
-                                </select>
-                                <button
-                                  onClick={exportDiffCsv}
-                                  style={{
-                                    padding: "6px 10px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                    cursor: "pointer",
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  Export CSV
-                                </button>
-                                <button
-                                  onClick={() => setHistoryOpen(true)}
-                                  style={{
-                                    padding: "6px 10px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    color: "var(--text)",
-                                    cursor: "pointer",
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  History
-                                </button>
-                              </>
-                            ) : resultsView === "fix_queue" ? (
-                              <>
-                                <div
-                                  className="changes-summary"
-                                  style={{
-                                    display: "flex",
-                                    flexWrap: "wrap",
-                                    gap: "8px",
-                                    padding: "12px 16px 0",
-                                  }}
-                                >
-                                  {fixQueueSummary && (
-                                    <>
-                                      <span className="summary-chip">
-                                        New issues {fixQueueSummary.newIssues}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Outstanding{" "}
-                                        {fixQueueSummary.outstandingIssues}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Total {fixQueueSummary.totalQueueItems}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Notes open{" "}
-                                        {fixQueueSummary.withNotesOpen}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Snoozed {fixQueueSummary.snoozed}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Resolved {fixQueueSummary.resolved}
-                                      </span>
-                                    </>
-                                  )}
-                                </div>
-                                {fixQueueData &&
-                                  !fixQueueData.baselineRun &&
-                                  fixQueueData.currentRun && (
+                                        No baseline yet. Showing current issues
+                                        as outstanding.
+                                      </div>
+                                    )}
+                                  <div className="results-header">
+                                    <div>Link</div>
+                                    <div>Status</div>
+                                    <div>Source pages</div>
+                                    <div>Actions</div>
+                                  </div>
+                                  {fixQueueError && (
                                     <div
                                       style={{
                                         padding: "10px 12px",
                                         borderRadius: "10px",
-                                        border: "1px dashed var(--border)",
-                                        color: "var(--muted)",
+                                        border: "1px solid var(--border)",
+                                        color: "var(--warning)",
                                         margin: "12px 16px",
                                       }}
                                     >
-                                      No baseline yet. Showing current issues as
-                                      outstanding.
+                                      {fixQueueError}
                                     </div>
                                   )}
-                                <div className="results-header">
-                                  <div>Link</div>
-                                  <div>Status</div>
-                                  <div>Source pages</div>
-                                  <div>Actions</div>
-                                </div>
-                                {fixQueueError && (
-                                  <div
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: "10px",
-                                      border: "1px solid var(--border)",
-                                      color: "var(--warning)",
-                                      margin: "12px 16px",
-                                    }}
-                                  >
-                                    {fixQueueError}
-                                  </div>
-                                )}
-                                {fixQueueUnavailableReason && (
-                                  <div
-                                    style={{
-                                      padding: "20px",
-                                      borderRadius: "12px",
-                                      border: "1px dashed var(--border)",
-                                      textAlign: "center",
-                                      color: "var(--muted)",
-                                      margin: "12px 16px",
-                                    }}
-                                  >
-                                    {fixQueueUnavailableReason}
-                                  </div>
-                                )}
-                                {fixQueueLoading &&
-                                  Array.from({ length: 5 }).map((_, idx) => (
-                                    <div key={idx} className="skeleton" />
-                                  ))}
-                                {!fixQueueUnavailableReason &&
-                                  !fixQueueLoading &&
-                                  fixQueueItems.length === 0 && (
+                                  {fixQueueUnavailableReason && (
                                     <div
                                       style={{
                                         padding: "20px",
@@ -18874,226 +22336,207 @@ const App: React.FC = () => {
                                         margin: "12px 16px",
                                       }}
                                     >
-                                      No queue items match these filters.
+                                      {fixQueueUnavailableReason}
                                     </div>
                                   )}
-                                {fixQueueItems.map(renderFixQueueRow)}
-                              </>
-                            ) : (
-                              <>
-                                <div style={{ display: "flex", gap: "8px" }}>
-                                  <button
-                                    onClick={() => {
-                                      setFixQueueIncludeNew(true);
-                                      setFixQueueIncludeOutstanding(true);
-                                    }}
-                                    className={`tab-pill ${fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
-                                  >
-                                    New + Outstanding
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setFixQueueIncludeNew(true);
-                                      setFixQueueIncludeOutstanding(false);
-                                    }}
-                                    className={`tab-pill ${fixQueueIncludeNew && !fixQueueIncludeOutstanding ? "active" : ""}`}
-                                  >
-                                    New only
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setFixQueueIncludeNew(false);
-                                      setFixQueueIncludeOutstanding(true);
-                                    }}
-                                    className={`tab-pill ${!fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
-                                  >
-                                    Outstanding only
-                                  </button>
-                                </div>
-                                <div style={{ display: "flex", gap: "8px" }}>
-                                  {(
-                                    [
-                                      "open",
-                                      "snoozed",
-                                      "resolved",
-                                      "all",
-                                    ] as const
-                                  ).map((status) => (
+                                  {fixQueueLoading &&
+                                    Array.from({ length: 5 }).map((_, idx) => (
+                                      <div key={idx} className="skeleton" />
+                                    ))}
+                                  {!fixQueueUnavailableReason &&
+                                    !fixQueueLoading &&
+                                    fixQueueItems.length === 0 && (
+                                      <div
+                                        style={{
+                                          padding: "20px",
+                                          borderRadius: "12px",
+                                          border: "1px dashed var(--border)",
+                                          textAlign: "center",
+                                          color: "var(--muted)",
+                                          margin: "12px 16px",
+                                        }}
+                                      >
+                                        No queue items match these filters.
+                                      </div>
+                                    )}
+                                  {fixQueueItems.map(renderFixQueueRow)}
+                                </>
+                              ) : (
+                                <>
+                                  <div style={{ display: "flex", gap: "8px" }}>
                                     <button
-                                      key={status}
-                                      onClick={() => setFixQueueStatus(status)}
-                                      className={`tab-pill ${fixQueueStatus === status ? "active" : ""}`}
+                                      onClick={() => {
+                                        setFixQueueIncludeNew(true);
+                                        setFixQueueIncludeOutstanding(true);
+                                      }}
+                                      className={`tab-pill ${fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
                                     >
-                                      {status === "open"
-                                        ? "Open"
-                                        : status === "snoozed"
-                                          ? "Snoozed"
-                                          : status === "resolved"
-                                            ? "Resolved"
-                                            : "All"}
+                                      New + Outstanding
                                     </button>
-                                  ))}
-                                </div>
-                                <button
-                                  onClick={() =>
-                                    setFixQueueIncludeIgnored((prev) => !prev)
-                                  }
-                                  className={`tab-pill ${fixQueueIncludeIgnored ? "active" : ""}`}
-                                >
-                                  {fixQueueIncludeIgnored
-                                    ? "Including ignored"
-                                    : "Exclude ignored"}
-                                </button>
-                                <span
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  Sorted by severity
-                                </span>
-                              </>
-                            )}
+                                    <button
+                                      onClick={() => {
+                                        setFixQueueIncludeNew(true);
+                                        setFixQueueIncludeOutstanding(false);
+                                      }}
+                                      className={`tab-pill ${fixQueueIncludeNew && !fixQueueIncludeOutstanding ? "active" : ""}`}
+                                    >
+                                      New only
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        setFixQueueIncludeNew(false);
+                                        setFixQueueIncludeOutstanding(true);
+                                      }}
+                                      className={`tab-pill ${!fixQueueIncludeNew && fixQueueIncludeOutstanding ? "active" : ""}`}
+                                    >
+                                      Outstanding only
+                                    </button>
+                                  </div>
+                                  <div style={{ display: "flex", gap: "8px" }}>
+                                    {(
+                                      [
+                                        "open",
+                                        "snoozed",
+                                        "resolved",
+                                        "all",
+                                      ] as const
+                                    ).map((status) => (
+                                      <button
+                                        key={status}
+                                        onClick={() =>
+                                          setFixQueueStatus(status)
+                                        }
+                                        className={`tab-pill ${fixQueueStatus === status ? "active" : ""}`}
+                                      >
+                                        {status === "open"
+                                          ? "Open"
+                                          : status === "snoozed"
+                                            ? "Snoozed"
+                                            : status === "resolved"
+                                              ? "Resolved"
+                                              : "All"}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <button
+                                    onClick={() =>
+                                      setFixQueueIncludeIgnored((prev) => !prev)
+                                    }
+                                    className={`tab-pill ${fixQueueIncludeIgnored ? "active" : ""}`}
+                                  >
+                                    {fixQueueIncludeIgnored
+                                      ? "Including ignored"
+                                      : "Exclude ignored"}
+                                  </button>
+                                  <span
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    Sorted by severity
+                                  </span>
+                                </>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
 
-                    <div
-                      className={`results-layout ${detailsOpen && !isNarrow ? "drawer-open" : ""}`}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div className="results-title">
-                          <div>
-                            <div className="results-title__label">
-                              {resultsView === "changes"
-                                ? "Changes"
-                                : resultsView === "fix_queue"
-                                  ? "Fix Queue"
-                                  : "Results"}
-                            </div>
-                            <div className="results-title__meta">
-                              Showing {resultsTitleCount}{" "}
-                              {resultsView === "changes"
-                                ? "change"
-                                : resultsView === "fix_queue"
-                                  ? "item"
-                                  : "link"}
-                              {resultsTitleCount === 1 ? "" : "s"}
+                      <div
+                        className={`results-layout ${detailsOpen && !isNarrow ? "drawer-open" : ""}`}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div className="results-title">
+                            <div>
+                              <div className="results-title__label">
+                                {resultsView === "changes"
+                                  ? "Changes"
+                                  : resultsView === "fix_queue"
+                                    ? "Fix Queue"
+                                    : "Results"}
+                              </div>
+                              <div className="results-title__meta">
+                                Showing {resultsTitleCount}{" "}
+                                {resultsView === "changes"
+                                  ? "change"
+                                  : resultsView === "fix_queue"
+                                    ? "item"
+                                    : "link"}
+                                {resultsTitleCount === 1 ? "" : "s"}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <div className="results-table">
-                          <div className="results-scroll">
-                            {resultsView === "changes" ? (
-                              <>
-                                <div
-                                  className="changes-summary"
-                                  style={{
-                                    display: "flex",
-                                    flexWrap: "wrap",
-                                    gap: "8px",
-                                    padding: "12px 16px 0",
-                                  }}
-                                >
-                                  {diffSummary && (
-                                    <>
-                                      <span className="summary-chip">
-                                        New issues {diffSummary.newIssues}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Fixed {diffSummary.fixedIssues}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Changed {diffSummary.changed}
-                                      </span>
-                                      <span className="summary-chip">
-                                        Outstanding issues{" "}
-                                        {diffSummary.outstandingIssues}
-                                      </span>
-                                      {!diffIssuesOnly && (
-                                        <span className="summary-chip">
-                                          OK {diffOkTotal}
-                                        </span>
-                                      )}
-                                      {!diffIssuesOnly && (
-                                        <span className="summary-chip">
-                                          Added {diffSummary.added}
-                                        </span>
-                                      )}
-                                      {!diffIssuesOnly && (
-                                        <span className="summary-chip">
-                                          Removed {diffSummary.removed}
-                                        </span>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                                <div className="results-header changes-header">
-                                  <div>Link</div>
-                                  <div>Change</div>
-                                  <div>Baseline → Current</div>
-                                  <div>Source pages</div>
-                                </div>
-                                {diffError && (
+                          <div className="results-table">
+                            <div className="results-scroll">
+                              {resultsView === "changes" ? (
+                                <>
                                   <div
+                                    className="changes-summary"
                                     style={{
-                                      padding: "10px 12px",
-                                      borderRadius: "10px",
-                                      border: "1px solid var(--border)",
-                                      color: "var(--warning)",
-                                      margin: "12px 16px",
+                                      display: "flex",
+                                      flexWrap: "wrap",
+                                      gap: "8px",
+                                      padding: "12px 16px 0",
                                     }}
                                   >
-                                    {diffError}
-                                  </div>
-                                )}
-                                {diffLoading &&
-                                  Array.from({ length: 5 }).map((_, idx) => (
-                                    <div key={idx} className="skeleton" />
-                                  ))}
-                                {!diffLoading && !diffBaselineRun && (
-                                  <div
-                                    style={{
-                                      padding: "20px",
-                                      borderRadius: "12px",
-                                      border: "1px dashed var(--border)",
-                                      textAlign: "center",
-                                      color: "var(--muted)",
-                                      margin: "12px 16px",
-                                    }}
-                                  >
-                                    <div style={{ marginBottom: "8px" }}>
-                                      No previous scan to compare yet. Run
-                                      another scan to see changes over time.
-                                    </div>
-                                    {selectedSiteId && (
-                                      <button
-                                        onClick={handleRunScan}
-                                        disabled={triggeringScan}
-                                        style={{
-                                          padding: "6px 10px",
-                                          borderRadius: "999px",
-                                          border: "1px solid var(--border)",
-                                          background: "var(--panel)",
-                                          fontSize: "12px",
-                                          cursor: triggeringScan
-                                            ? "not-allowed"
-                                            : "pointer",
-                                        }}
-                                      >
-                                        {triggeringScan
-                                          ? "Starting..."
-                                          : "Run a scan"}
-                                      </button>
+                                    {diffSummary && (
+                                      <>
+                                        <span className="summary-chip">
+                                          New issues {diffSummary.newIssues}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Fixed {diffSummary.fixedIssues}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Changed {diffSummary.changed}
+                                        </span>
+                                        <span className="summary-chip">
+                                          Outstanding issues{" "}
+                                          {diffSummary.outstandingIssues}
+                                        </span>
+                                        {!diffIssuesOnly && (
+                                          <span className="summary-chip">
+                                            OK {diffOkTotal}
+                                          </span>
+                                        )}
+                                        {!diffIssuesOnly && (
+                                          <span className="summary-chip">
+                                            Added {diffSummary.added}
+                                          </span>
+                                        )}
+                                        {!diffIssuesOnly && (
+                                          <span className="summary-chip">
+                                            Removed {diffSummary.removed}
+                                          </span>
+                                        )}
+                                      </>
                                     )}
                                   </div>
-                                )}
-                                {!diffLoading &&
-                                  diffBaselineRun &&
-                                  diffChangeItems.length === 0 &&
-                                  (!includeUnchanged ||
-                                    diffUnchangedItems.length === 0) && (
+                                  <div className="results-header changes-header">
+                                    <div>Link</div>
+                                    <div>Change</div>
+                                    <div>Baseline → Current</div>
+                                    <div>Source pages</div>
+                                  </div>
+                                  {diffError && (
+                                    <div
+                                      style={{
+                                        padding: "10px 12px",
+                                        borderRadius: "10px",
+                                        border: "1px solid var(--border)",
+                                        color: "var(--warning)",
+                                        margin: "12px 16px",
+                                      }}
+                                    >
+                                      {diffError}
+                                    </div>
+                                  )}
+                                  {diffLoading &&
+                                    Array.from({ length: 5 }).map((_, idx) => (
+                                      <div key={idx} className="skeleton" />
+                                    ))}
+                                  {!diffLoading && !diffBaselineRun && (
                                     <div
                                       style={{
                                         padding: "20px",
@@ -19105,27 +22548,274 @@ const App: React.FC = () => {
                                       }}
                                     >
                                       <div style={{ marginBottom: "8px" }}>
-                                        No changes match this view.
+                                        No previous scan to compare yet. Run
+                                        another scan to see changes over time.
                                       </div>
-                                      {diffIssuesOnly &&
-                                        !includeUnchanged &&
-                                        (diffSummary?.outstandingIssues ?? 0) >
-                                          0 && (
-                                          <>
+                                      {selectedSiteId && (
+                                        <button
+                                          onClick={handleRunScan}
+                                          disabled={triggeringScan}
+                                          style={{
+                                            padding: "6px 10px",
+                                            borderRadius: "999px",
+                                            border: "1px solid var(--border)",
+                                            background: "var(--panel)",
+                                            fontSize: "12px",
+                                            cursor: triggeringScan
+                                              ? "not-allowed"
+                                              : "pointer",
+                                          }}
+                                        >
+                                          {triggeringScan
+                                            ? "Starting..."
+                                            : "Run a scan"}
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                  {!diffLoading &&
+                                    diffBaselineRun &&
+                                    diffChangeItems.length === 0 &&
+                                    (!includeUnchanged ||
+                                      diffUnchangedItems.length === 0) && (
+                                      <div
+                                        style={{
+                                          padding: "20px",
+                                          borderRadius: "12px",
+                                          border: "1px dashed var(--border)",
+                                          textAlign: "center",
+                                          color: "var(--muted)",
+                                          margin: "12px 16px",
+                                        }}
+                                      >
+                                        <div style={{ marginBottom: "8px" }}>
+                                          No changes match this view.
+                                        </div>
+                                        {diffIssuesOnly &&
+                                          !includeUnchanged &&
+                                          (diffSummary?.outstandingIssues ??
+                                            0) > 0 && (
+                                            <>
+                                              <div
+                                                style={{ marginBottom: "8px" }}
+                                              >
+                                                No new issue changes since the
+                                                last scan. You still have{" "}
+                                                {diffSummary?.outstandingIssues ??
+                                                  0}{" "}
+                                                outstanding issues.
+                                              </div>
+                                              <button
+                                                onClick={() => {
+                                                  setIncludeUnchanged(true);
+                                                  setUnchangedOnly(true);
+                                                  setUnchangedOffset(0);
+                                                }}
+                                                style={{
+                                                  padding: "6px 10px",
+                                                  borderRadius: "999px",
+                                                  border:
+                                                    "1px solid var(--border)",
+                                                  background: "var(--panel)",
+                                                  fontSize: "12px",
+                                                  cursor: "pointer",
+                                                }}
+                                              >
+                                                Show outstanding issues
+                                              </button>
+                                            </>
+                                          )}
+                                      </div>
+                                    )}
+                                  {diffChangeItems.map(renderDiffRow)}
+                                  {includeUnchanged && (
+                                    <div
+                                      style={{
+                                        padding: "8px 16px 0",
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                        display: "flex",
+                                        flexWrap: "wrap",
+                                        gap: "8px",
+                                        justifyContent: "space-between",
+                                      }}
+                                    >
+                                      <span>
+                                        Outstanding (unchanged){" "}
+                                        {diffIssuesOnly
+                                          ? (diffSummary?.outstandingIssues ??
+                                            0)
+                                          : (diffSummary?.outstandingTotal ??
+                                            0)}
+                                      </span>
+                                      {diffMeta && (
+                                        <span>
+                                          Showing {diffMeta.unchangedReturned}{" "}
+                                          of{" "}
+                                          {diffIssuesOnly
+                                            ? (diffSummary?.outstandingIssues ??
+                                              0)
+                                            : (diffSummary?.outstandingTotal ??
+                                              0)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {includeUnchanged &&
+                                    diffUnchangedItems.length === 0 && (
+                                      <div
+                                        style={{
+                                          padding: "20px",
+                                          borderRadius: "12px",
+                                          border: "1px dashed var(--border)",
+                                          textAlign: "center",
+                                          color: "var(--muted)",
+                                          margin: "12px 16px",
+                                        }}
+                                      >
+                                        No unchanged items in this slice.
+                                      </div>
+                                    )}
+                                  {includeUnchanged &&
+                                    diffUnchangedItems.map(renderDiffRow)}
+                                </>
+                              ) : (
+                                <>
+                                  <div
+                                    className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
+                                  >
+                                    {activeTab === "ignored" ? (
+                                      <div>Ignored links</div>
+                                    ) : (
+                                      <>
+                                        <div>Link</div>
+                                        <div>Status</div>
+                                        <div>Hits</div>
+                                        <div>Actions</div>
+                                      </>
+                                    )}
+                                  </div>
+                                  {activeTab !== "ignored" && (
+                                    <>
+                                      {(activeTab === "broken" ||
+                                        activeTab === "blocked") && (
+                                        <div
+                                          style={{
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "center",
+                                            gap: "8px",
+                                          }}
+                                        >
+                                          <div
+                                            style={{
+                                              fontSize: "12px",
+                                              fontWeight: 600,
+                                            }}
+                                          >
+                                            {activeTab === "broken"
+                                              ? "Broken links"
+                                              : "Blocked links"}
+                                          </div>
+                                          <button
+                                            onClick={() =>
+                                              triggerExport("csv", activeTab)
+                                            }
+                                            disabled={!selectedRunId}
+                                            style={{
+                                              padding: "4px 8px",
+                                              borderRadius: "999px",
+                                              border: "1px solid var(--border)",
+                                              background: "var(--panel)",
+                                              fontSize: "11px",
+                                              cursor: !selectedRunId
+                                                ? "not-allowed"
+                                                : "pointer",
+                                            }}
+                                          >
+                                            Export CSV
+                                          </button>
+                                        </div>
+                                      )}
+                                      {resultsError && (
+                                        <div
+                                          style={{
+                                            padding: "10px 12px",
+                                            borderRadius: "10px",
+                                            border: "1px solid var(--border)",
+                                            color: "var(--warning)",
+                                          }}
+                                        >
+                                          {resultsError}
+                                        </div>
+                                      )}
+                                      {resultsLoading &&
+                                        Array.from({ length: 6 }).map(
+                                          (_, idx) => (
+                                            <div
+                                              key={idx}
+                                              className="skeleton"
+                                            />
+                                          ),
+                                        )}
+                                      {!resultsLoading &&
+                                        activeTab === "broken" &&
+                                        brokenResults.length === 0 &&
+                                        results.length > 0 &&
+                                        !hasSecondaryFilters && (
+                                          <div
+                                            style={{
+                                              padding: "20px",
+                                              borderRadius: "12px",
+                                              border:
+                                                "1px dashed var(--border)",
+                                              textAlign: "center",
+                                              color: "var(--muted)",
+                                            }}
+                                          >
                                             <div
                                               style={{ marginBottom: "8px" }}
                                             >
-                                              No new issue changes since the
-                                              last scan. You still have{" "}
-                                              {diffSummary?.outstandingIssues ??
-                                                0}{" "}
-                                              outstanding issues.
+                                              All clear. No broken links to fix
+                                              right now.
+                                            </div>
+                                            <div>
+                                              Consider enabling schedules and
+                                              alerts to stay ahead.
+                                            </div>
+                                          </div>
+                                        )}
+                                      {!resultsLoading &&
+                                        filteredResults.length === 0 &&
+                                        results.length > 0 &&
+                                        !(
+                                          activeTab === "broken" &&
+                                          brokenResults.length === 0 &&
+                                          !hasSecondaryFilters
+                                        ) && (
+                                          <div
+                                            style={{
+                                              padding: "20px",
+                                              borderRadius: "12px",
+                                              border:
+                                                "1px dashed var(--border)",
+                                              textAlign: "center",
+                                              color: "var(--muted)",
+                                            }}
+                                          >
+                                            <div
+                                              style={{ marginBottom: "8px" }}
+                                            >
+                                              No results match these filters.
                                             </div>
                                             <button
                                               onClick={() => {
-                                                setIncludeUnchanged(true);
-                                                setUnchangedOnly(true);
-                                                setUnchangedOffset(0);
+                                                setStatusFilters({});
+                                                setMinOccurrencesOnly(false);
+                                                setSearchQuery("");
+                                                setActiveTab("all");
+                                                setStatusGroup("all");
+                                                setShowIgnored(false);
                                               }}
                                               style={{
                                                 padding: "6px 10px",
@@ -19137,489 +22827,407 @@ const App: React.FC = () => {
                                                 cursor: "pointer",
                                               }}
                                             >
-                                              Show outstanding issues
+                                              Clear filters
                                             </button>
-                                          </>
+                                          </div>
                                         )}
-                                    </div>
-                                  )}
-                                {diffChangeItems.map(renderDiffRow)}
-                                {includeUnchanged && (
-                                  <div
-                                    style={{
-                                      padding: "8px 16px 0",
-                                      fontSize: "12px",
-                                      color: "var(--muted)",
-                                      display: "flex",
-                                      flexWrap: "wrap",
-                                      gap: "8px",
-                                      justifyContent: "space-between",
-                                    }}
-                                  >
-                                    <span>
-                                      Outstanding (unchanged){" "}
-                                      {diffIssuesOnly
-                                        ? (diffSummary?.outstandingIssues ?? 0)
-                                        : (diffSummary?.outstandingTotal ?? 0)}
-                                    </span>
-                                    {diffMeta && (
-                                      <span>
-                                        Showing {diffMeta.unchangedReturned} of{" "}
-                                        {diffIssuesOnly
-                                          ? (diffSummary?.outstandingIssues ??
-                                            0)
-                                          : (diffSummary?.outstandingTotal ??
-                                            0)}
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-                                {includeUnchanged &&
-                                  diffUnchangedItems.length === 0 && (
-                                    <div
-                                      style={{
-                                        padding: "20px",
-                                        borderRadius: "12px",
-                                        border: "1px dashed var(--border)",
-                                        textAlign: "center",
-                                        color: "var(--muted)",
-                                        margin: "12px 16px",
-                                      }}
-                                    >
-                                      No unchanged items in this slice.
-                                    </div>
-                                  )}
-                                {includeUnchanged &&
-                                  diffUnchangedItems.map(renderDiffRow)}
-                              </>
-                            ) : (
-                              <>
-                                <div
-                                  className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
-                                >
-                                  {activeTab === "ignored" ? (
-                                    <div>Ignored links</div>
-                                  ) : (
-                                    <>
-                                      <div>Link</div>
-                                      <div>Status</div>
-                                      <div>Hits</div>
-                                      <div>Actions</div>
-                                    </>
-                                  )}
-                                </div>
-                                {activeTab !== "ignored" && (
-                                  <>
-                                    {(activeTab === "broken" ||
-                                      activeTab === "blocked") && (
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          justifyContent: "space-between",
-                                          alignItems: "center",
-                                          gap: "8px",
-                                        }}
-                                      >
-                                        <div
-                                          style={{
-                                            fontSize: "12px",
-                                            fontWeight: 600,
-                                          }}
-                                        >
-                                          {activeTab === "broken"
-                                            ? "Broken links"
-                                            : "Blocked links"}
-                                        </div>
-                                        <button
-                                          onClick={() =>
-                                            triggerExport("csv", activeTab)
-                                          }
-                                          disabled={!selectedRunId}
-                                          style={{
-                                            padding: "4px 8px",
-                                            borderRadius: "999px",
-                                            border: "1px solid var(--border)",
-                                            background: "var(--panel)",
-                                            fontSize: "11px",
-                                            cursor: !selectedRunId
-                                              ? "not-allowed"
-                                              : "pointer",
-                                          }}
-                                        >
-                                          Export CSV
-                                        </button>
-                                      </div>
-                                    )}
-                                    {resultsError && (
-                                      <div
-                                        style={{
-                                          padding: "10px 12px",
-                                          borderRadius: "10px",
-                                          border: "1px solid var(--border)",
-                                          color: "var(--warning)",
-                                        }}
-                                      >
-                                        {resultsError}
-                                      </div>
-                                    )}
-                                    {resultsLoading &&
-                                      Array.from({ length: 6 }).map(
-                                        (_, idx) => (
-                                          <div key={idx} className="skeleton" />
-                                        ),
-                                      )}
-                                    {!resultsLoading &&
-                                      activeTab === "broken" &&
-                                      brokenResults.length === 0 &&
-                                      results.length > 0 &&
-                                      !hasSecondaryFilters && (
-                                        <div
-                                          style={{
-                                            padding: "20px",
-                                            borderRadius: "12px",
-                                            border: "1px dashed var(--border)",
-                                            textAlign: "center",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          <div style={{ marginBottom: "8px" }}>
-                                            All clear. No broken links to fix
-                                            right now.
-                                          </div>
-                                          <div>
-                                            Consider enabling schedules and
-                                            alerts to stay ahead.
-                                          </div>
-                                        </div>
-                                      )}
-                                    {!resultsLoading &&
-                                      filteredResults.length === 0 &&
-                                      results.length > 0 &&
-                                      !(
-                                        activeTab === "broken" &&
-                                        brokenResults.length === 0 &&
-                                        !hasSecondaryFilters
-                                      ) && (
-                                        <div
-                                          style={{
-                                            padding: "20px",
-                                            borderRadius: "12px",
-                                            border: "1px dashed var(--border)",
-                                            textAlign: "center",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          <div style={{ marginBottom: "8px" }}>
-                                            No results match these filters.
-                                          </div>
-                                          <button
-                                            onClick={() => {
-                                              setStatusFilters({});
-                                              setMinOccurrencesOnly(false);
-                                              setSearchQuery("");
-                                              setActiveTab("all");
-                                              setStatusGroup("all");
-                                              setShowIgnored(false);
-                                            }}
-                                            style={{
-                                              padding: "6px 10px",
-                                              borderRadius: "999px",
-                                              border: "1px solid var(--border)",
-                                              background: "var(--panel)",
-                                              fontSize: "12px",
-                                              cursor: "pointer",
-                                            }}
-                                          >
-                                            Clear filters
-                                          </button>
-                                        </div>
-                                      )}
-                                    {!resultsLoading &&
-                                      filteredResults.length === 0 &&
-                                      results.length === 0 && (
-                                        <div
-                                          style={{
-                                            padding: "20px",
-                                            borderRadius: "12px",
-                                            border: "1px dashed var(--border)",
-                                            textAlign: "center",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          <div style={{ marginBottom: "8px" }}>
-                                            No results yet. Run a scan to
-                                            populate this list (usually a minute
-                                            or two).
-                                          </div>
-                                          <button
-                                            onClick={handleRunScan}
-                                            disabled={
-                                              !selectedSiteId || triggeringScan
-                                            }
-                                            style={{
-                                              padding: "6px 10px",
-                                              borderRadius: "999px",
-                                              border: "1px solid var(--border)",
-                                              background: "var(--panel)",
-                                              fontSize: "12px",
-                                              cursor:
-                                                !selectedSiteId ||
-                                                triggeringScan
-                                                  ? "not-allowed"
-                                                  : "pointer",
-                                            }}
-                                          >
-                                            {triggeringScan
-                                              ? "Starting..."
-                                              : "Run scan"}
-                                          </button>
-                                        </div>
-                                      )}
-                                    {renderLinkRows(filteredResults, (row) => {
-                                      if (row.classification === "blocked")
-                                        return blockedTheme;
-                                      if (row.classification === "ok")
-                                        return okTheme;
-                                      if (row.classification === "no_response")
-                                        return noResponseTheme;
-                                      return brokenTheme;
-                                    })}
-                                  </>
-                                )}
-
-                                {activeTab === "ignored" && (
-                                  <>
-                                    {ignoredError && (
-                                      <div
-                                        style={{
-                                          padding: "10px 12px",
-                                          borderRadius: "10px",
-                                          border: "1px solid var(--border)",
-                                          color: "var(--warning)",
-                                        }}
-                                      >
-                                        {ignoredError}
-                                      </div>
-                                    )}
-                                    {ignoredLoading &&
-                                      Array.from({ length: 6 }).map(
-                                        (_, idx) => (
-                                          <div key={idx} className="skeleton" />
-                                        ),
-                                      )}
-                                    {!ignoredLoading &&
-                                      ignoredResults.length === 0 && (
-                                        <div
-                                          style={{
-                                            padding: "20px",
-                                            borderRadius: "12px",
-                                            border: "1px dashed var(--border)",
-                                            textAlign: "center",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          No ignored links yet.
-                                        </div>
-                                      )}
-                                    {ignoredResults.map((row) => {
-                                      const isOpen =
-                                        !!ignoredOccurrences[row.id];
-                                      return (
-                                        <div
-                                          key={row.id}
-                                          className="result-row ignored-row"
-                                          style={{
-                                            borderRadius: "10px",
-                                            border: "1px solid var(--border)",
-                                            background: "var(--panel-elev)",
-                                            display: "flex",
-                                            flexDirection: "column",
-                                          }}
-                                        >
+                                      {!resultsLoading &&
+                                        filteredResults.length === 0 &&
+                                        results.length === 0 && (
                                           <div
                                             style={{
-                                              padding: "8px 10px",
-                                              display: "flex",
-                                              gap: "8px",
-                                              alignItems: "flex-start",
+                                              padding: "20px",
+                                              borderRadius: "12px",
+                                              border:
+                                                "1px dashed var(--border)",
+                                              textAlign: "center",
+                                              color: "var(--muted)",
                                             }}
                                           >
+                                            <div
+                                              style={{ marginBottom: "8px" }}
+                                            >
+                                              No results yet. Run a scan to
+                                              populate this list (usually a
+                                              minute or two).
+                                            </div>
                                             <button
-                                              onClick={() =>
-                                                selectedRunId &&
-                                                toggleIgnoredOccurrences(
-                                                  row.id,
-                                                  selectedRunId,
-                                                )
+                                              onClick={handleRunScan}
+                                              disabled={
+                                                !selectedSiteId ||
+                                                triggeringScan
                                               }
                                               style={{
-                                                background: "transparent",
-                                                border: "none",
-                                                cursor: "pointer",
-                                                fontSize: "16px",
-                                              }}
-                                            >
-                                              {isOpen ? "▼" : "▶"}
-                                            </button>
-                                            <div
-                                              style={{ flex: 1, minWidth: 0 }}
-                                            >
-                                              <div
-                                                style={{
-                                                  display: "flex",
-                                                  gap: "8px",
-                                                  alignItems: "center",
-                                                  flexWrap: "wrap",
-                                                  marginBottom: "6px",
-                                                }}
-                                              >
-                                                <span
-                                                  style={{
-                                                    fontSize: "11px",
-                                                    padding: "2px 6px",
-                                                    borderRadius: "999px",
-                                                    background:
-                                                      "var(--chip-bg)",
-                                                    color: "var(--chip-text)",
-                                                  }}
-                                                >
-                                                  {row.rule_type
-                                                    ? "Ignored by rule"
-                                                    : row.error_message?.startsWith(
-                                                          "crawl_skipped:",
-                                                        )
-                                                      ? "Intentionally skipped"
-                                                      : "Ignored"}
-                                                </span>
-                                                {row.rule_type &&
-                                                  row.rule_pattern && (
-                                                    <span
-                                                      style={{
-                                                        fontSize: "11px",
-                                                        padding: "2px 6px",
-                                                        borderRadius: "999px",
-                                                        background:
-                                                          "var(--panel)",
-                                                        color: "var(--muted)",
-                                                        border:
-                                                          "1px solid var(--border)",
-                                                      }}
-                                                    >
-                                                      {row.rule_type}:{" "}
-                                                      {row.rule_pattern}
-                                                    </span>
-                                                  )}
-                                                <span
-                                                  style={{
-                                                    fontSize: "11px",
-                                                    color: "var(--muted)",
-                                                  }}
-                                                >
-                                                  {row.status_code ??
-                                                    "No HTTP response"}
-                                                </span>
-                                                <span
-                                                  style={{
-                                                    fontSize: "11px",
-                                                    color: "var(--muted)",
-                                                  }}
-                                                >
-                                                  {row.occurrence_count}x
-                                                </span>
-                                              </div>
-                                              <div
-                                                style={{
-                                                  fontSize: "12px",
-                                                  color: "var(--text)",
-                                                  overflowWrap: "anywhere",
-                                                  wordBreak: "break-word",
-                                                  whiteSpace: "normal",
-                                                }}
-                                                title={row.link_url}
-                                              >
-                                                {row.link_url}
-                                              </div>
-                                            </div>
-                                          </div>
-                                          {isOpen && (
-                                            <div
-                                              className="expand-panel"
-                                              style={{
-                                                padding: "10px 12px",
-                                                margin: "0 12px 12px 34px",
+                                                padding: "6px 10px",
+                                                borderRadius: "999px",
                                                 border:
                                                   "1px solid var(--border)",
-                                                borderRadius: "10px",
                                                 background: "var(--panel)",
-                                                boxShadow: "var(--soft-shadow)",
+                                                fontSize: "12px",
+                                                cursor:
+                                                  !selectedSiteId ||
+                                                  triggeringScan
+                                                    ? "not-allowed"
+                                                    : "pointer",
                                               }}
                                             >
-                                              {ignoredOccLoading[row.id] && (
-                                                <div
-                                                  style={{
-                                                    fontSize: "12px",
-                                                    color: "var(--muted)",
-                                                  }}
-                                                >
-                                                  Loading…
-                                                </div>
-                                              )}
-                                              {ignoredOccError[row.id] && (
-                                                <div
-                                                  style={{
-                                                    fontSize: "12px",
-                                                    color: "var(--warning)",
-                                                  }}
-                                                >
-                                                  {ignoredOccError[row.id]}
-                                                </div>
-                                              )}
-                                              {(
-                                                ignoredOccurrences[row.id] ?? []
-                                              ).map((occ) => (
-                                                <div
-                                                  key={occ.id}
-                                                  style={{
-                                                    fontSize: "12px",
-                                                    color: "var(--muted)",
-                                                    overflowWrap: "anywhere",
-                                                  }}
-                                                >
-                                                  {occ.source_page}
-                                                </div>
-                                              ))}
-                                            </div>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </div>
+                                              {triggeringScan
+                                                ? "Starting..."
+                                                : "Run scan"}
+                                            </button>
+                                          </div>
+                                        )}
+                                      {renderLinkRows(
+                                        filteredResults,
+                                        (row) => {
+                                          if (row.classification === "blocked")
+                                            return blockedTheme;
+                                          if (row.classification === "ok")
+                                            return okTheme;
+                                          if (
+                                            row.classification === "no_response"
+                                          )
+                                            return noResponseTheme;
+                                          return brokenTheme;
+                                        },
+                                      )}
+                                    </>
+                                  )}
 
-                        {!isSelectedRunInProgress &&
-                          resultsView === "results" && (
-                            <div
-                              style={{
-                                marginTop: "12px",
-                                display: "flex",
-                                gap: "12px",
-                                flexWrap: "wrap",
-                                justifyContent: "center",
-                              }}
-                            >
-                              {activeTab === "all" &&
-                                (brokenHasMore ||
-                                  blockedHasMore ||
-                                  okHasMore ||
-                                  noResponseHasMore) && (
+                                  {activeTab === "ignored" && (
+                                    <>
+                                      {ignoredError && (
+                                        <div
+                                          style={{
+                                            padding: "10px 12px",
+                                            borderRadius: "10px",
+                                            border: "1px solid var(--border)",
+                                            color: "var(--warning)",
+                                          }}
+                                        >
+                                          {ignoredError}
+                                        </div>
+                                      )}
+                                      {ignoredLoading &&
+                                        Array.from({ length: 6 }).map(
+                                          (_, idx) => (
+                                            <div
+                                              key={idx}
+                                              className="skeleton"
+                                            />
+                                          ),
+                                        )}
+                                      {!ignoredLoading &&
+                                        ignoredResults.length === 0 && (
+                                          <div
+                                            style={{
+                                              padding: "20px",
+                                              borderRadius: "12px",
+                                              border:
+                                                "1px dashed var(--border)",
+                                              textAlign: "center",
+                                              color: "var(--muted)",
+                                            }}
+                                          >
+                                            No ignored links yet.
+                                          </div>
+                                        )}
+                                      {ignoredResults.map((row) => {
+                                        const isOpen =
+                                          !!ignoredOccurrences[row.id];
+                                        return (
+                                          <div
+                                            key={row.id}
+                                            className="result-row ignored-row"
+                                            style={{
+                                              borderRadius: "10px",
+                                              border: "1px solid var(--border)",
+                                              background: "var(--panel-elev)",
+                                              display: "flex",
+                                              flexDirection: "column",
+                                            }}
+                                          >
+                                            <div
+                                              style={{
+                                                padding: "8px 10px",
+                                                display: "flex",
+                                                gap: "8px",
+                                                alignItems: "flex-start",
+                                              }}
+                                            >
+                                              <button
+                                                onClick={() =>
+                                                  selectedRunId &&
+                                                  toggleIgnoredOccurrences(
+                                                    row.id,
+                                                    selectedRunId,
+                                                  )
+                                                }
+                                                style={{
+                                                  background: "transparent",
+                                                  border: "none",
+                                                  cursor: "pointer",
+                                                  fontSize: "16px",
+                                                }}
+                                              >
+                                                {isOpen ? "▼" : "▶"}
+                                              </button>
+                                              <div
+                                                style={{ flex: 1, minWidth: 0 }}
+                                              >
+                                                <div
+                                                  style={{
+                                                    display: "flex",
+                                                    gap: "8px",
+                                                    alignItems: "center",
+                                                    flexWrap: "wrap",
+                                                    marginBottom: "6px",
+                                                  }}
+                                                >
+                                                  <span
+                                                    style={{
+                                                      fontSize: "11px",
+                                                      padding: "2px 6px",
+                                                      borderRadius: "999px",
+                                                      background:
+                                                        "var(--chip-bg)",
+                                                      color: "var(--chip-text)",
+                                                    }}
+                                                  >
+                                                    {row.rule_type
+                                                      ? "Ignored by rule"
+                                                      : row.error_message?.startsWith(
+                                                            "crawl_skipped:",
+                                                          )
+                                                        ? "Intentionally skipped"
+                                                        : "Ignored"}
+                                                  </span>
+                                                  {row.rule_type &&
+                                                    row.rule_pattern && (
+                                                      <span
+                                                        style={{
+                                                          fontSize: "11px",
+                                                          padding: "2px 6px",
+                                                          borderRadius: "999px",
+                                                          background:
+                                                            "var(--panel)",
+                                                          color: "var(--muted)",
+                                                          border:
+                                                            "1px solid var(--border)",
+                                                        }}
+                                                      >
+                                                        {row.rule_type}:{" "}
+                                                        {row.rule_pattern}
+                                                      </span>
+                                                    )}
+                                                  <span
+                                                    style={{
+                                                      fontSize: "11px",
+                                                      color: "var(--muted)",
+                                                    }}
+                                                  >
+                                                    {row.status_code ??
+                                                      "No HTTP response"}
+                                                  </span>
+                                                  <span
+                                                    style={{
+                                                      fontSize: "11px",
+                                                      color: "var(--muted)",
+                                                    }}
+                                                  >
+                                                    {row.occurrence_count}x
+                                                  </span>
+                                                </div>
+                                                <div
+                                                  style={{
+                                                    fontSize: "12px",
+                                                    color: "var(--text)",
+                                                    overflowWrap: "anywhere",
+                                                    wordBreak: "break-word",
+                                                    whiteSpace: "normal",
+                                                  }}
+                                                  title={row.link_url}
+                                                >
+                                                  {row.link_url}
+                                                </div>
+                                              </div>
+                                              <div
+                                                className="result-cell row-actions"
+                                                data-no-drawer
+                                              >
+                                                <div
+                                                  style={{
+                                                    position: "relative",
+                                                    display: "inline-flex",
+                                                  }}
+                                                  data-action-menu
+                                                >
+                                                  {renderWorkspaceIgnoredLinkActionMenu(
+                                                    row,
+                                                    `workspace-ignored-link:${row.id}`,
+                                                  )}
+                                                </div>
+                                              </div>
+                                            </div>
+                                            {isOpen && (
+                                              <div
+                                                className="expand-panel"
+                                                style={{
+                                                  padding: "10px 12px",
+                                                  margin: "0 12px 12px 34px",
+                                                  border:
+                                                    "1px solid var(--border)",
+                                                  borderRadius: "10px",
+                                                  background: "var(--panel)",
+                                                  boxShadow:
+                                                    "var(--soft-shadow)",
+                                                }}
+                                              >
+                                                {ignoredOccLoading[row.id] && (
+                                                  <div
+                                                    style={{
+                                                      fontSize: "12px",
+                                                      color: "var(--muted)",
+                                                    }}
+                                                  >
+                                                    Loading…
+                                                  </div>
+                                                )}
+                                                {ignoredOccError[row.id] && (
+                                                  <div
+                                                    style={{
+                                                      fontSize: "12px",
+                                                      color: "var(--warning)",
+                                                    }}
+                                                  >
+                                                    {ignoredOccError[row.id]}
+                                                  </div>
+                                                )}
+                                                {(
+                                                  ignoredOccurrences[row.id] ??
+                                                  []
+                                                ).map((occ) => (
+                                                  <div
+                                                    key={occ.id}
+                                                    style={{
+                                                      fontSize: "12px",
+                                                      color: "var(--muted)",
+                                                      overflowWrap: "anywhere",
+                                                    }}
+                                                  >
+                                                    {occ.source_page}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {!isSelectedRunInProgress &&
+                            resultsView === "results" && (
+                              <div
+                                style={{
+                                  marginTop: "12px",
+                                  display: "flex",
+                                  gap: "12px",
+                                  flexWrap: "wrap",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                {activeTab === "all" &&
+                                  (brokenHasMore ||
+                                    blockedHasMore ||
+                                    okHasMore ||
+                                    noResponseHasMore) && (
+                                    <button
+                                      onClick={() =>
+                                        selectedRunId &&
+                                        loadMoreAllResults(selectedRunId)
+                                      }
+                                      disabled={resultsLoading}
+                                      style={{
+                                        padding: "10px 18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--success)",
+                                        background: "var(--success)",
+                                        color: "white",
+                                        cursor: resultsLoading
+                                          ? "default"
+                                          : "pointer",
+                                        opacity: resultsLoading ? 0.6 : 1,
+                                        fontSize: "12px",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {resultsLoading
+                                        ? "Loading..."
+                                        : "Load More Results"}
+                                    </button>
+                                  )}
+                                {activeTab === "broken" && brokenHasMore && (
                                   <button
                                     onClick={() =>
                                       selectedRunId &&
-                                      loadMoreAllResults(selectedRunId)
+                                      loadMoreBrokenResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--danger)",
+                                      background: "var(--danger)",
+                                      color: "white",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                                {activeTab === "blocked" && blockedHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreBlockedResults(selectedRunId)
+                                    }
+                                    disabled={resultsLoading}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--warning)",
+                                      background: "var(--warning)",
+                                      color: "white",
+                                      cursor: resultsLoading
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: resultsLoading ? 0.6 : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {resultsLoading
+                                      ? "Loading..."
+                                      : "Load More Results"}
+                                  </button>
+                                )}
+                                {activeTab === "ok" && okHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedRunId &&
+                                      loadMoreOkResults(selectedRunId)
                                     }
                                     disabled={resultsLoading}
                                     style={{
@@ -19641,582 +23249,514 @@ const App: React.FC = () => {
                                       : "Load More Results"}
                                   </button>
                                 )}
-                              {activeTab === "broken" && brokenHasMore && (
-                                <button
-                                  onClick={() =>
-                                    selectedRunId &&
-                                    loadMoreBrokenResults(selectedRunId)
-                                  }
-                                  disabled={resultsLoading}
-                                  style={{
-                                    padding: "10px 18px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--danger)",
-                                    background: "var(--danger)",
-                                    color: "white",
-                                    cursor: resultsLoading
-                                      ? "default"
-                                      : "pointer",
-                                    opacity: resultsLoading ? 0.6 : 1,
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  {resultsLoading
-                                    ? "Loading..."
-                                    : "Load More Results"}
-                                </button>
-                              )}
-                              {activeTab === "blocked" && blockedHasMore && (
-                                <button
-                                  onClick={() =>
-                                    selectedRunId &&
-                                    loadMoreBlockedResults(selectedRunId)
-                                  }
-                                  disabled={resultsLoading}
-                                  style={{
-                                    padding: "10px 18px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--warning)",
-                                    background: "var(--warning)",
-                                    color: "white",
-                                    cursor: resultsLoading
-                                      ? "default"
-                                      : "pointer",
-                                    opacity: resultsLoading ? 0.6 : 1,
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  {resultsLoading
-                                    ? "Loading..."
-                                    : "Load More Results"}
-                                </button>
-                              )}
-                              {activeTab === "ok" && okHasMore && (
-                                <button
-                                  onClick={() =>
-                                    selectedRunId &&
-                                    loadMoreOkResults(selectedRunId)
-                                  }
-                                  disabled={resultsLoading}
-                                  style={{
-                                    padding: "10px 18px",
-                                    borderRadius: "999px",
-                                    border: "1px solid var(--success)",
-                                    background: "var(--success)",
-                                    color: "white",
-                                    cursor: resultsLoading
-                                      ? "default"
-                                      : "pointer",
-                                    opacity: resultsLoading ? 0.6 : 1,
-                                    fontSize: "12px",
-                                    fontWeight: 600,
-                                  }}
-                                >
-                                  {resultsLoading
-                                    ? "Loading..."
-                                    : "Load More Results"}
-                                </button>
-                              )}
-                              {activeTab === "no_response" &&
-                                noResponseHasMore && (
+                                {activeTab === "no_response" &&
+                                  noResponseHasMore && (
+                                    <button
+                                      onClick={() =>
+                                        selectedRunId &&
+                                        loadMoreNoResponseResults(selectedRunId)
+                                      }
+                                      disabled={resultsLoading}
+                                      style={{
+                                        padding: "10px 18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--border)",
+                                        background: "var(--border)",
+                                        color: "var(--text)",
+                                        cursor: resultsLoading
+                                          ? "default"
+                                          : "pointer",
+                                        opacity: resultsLoading ? 0.6 : 1,
+                                        fontSize: "12px",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      {resultsLoading
+                                        ? "Loading..."
+                                        : "Load More Results"}
+                                    </button>
+                                  )}
+                                {activeTab === "ignored" && ignoredHasMore && (
                                   <button
                                     onClick={() =>
                                       selectedRunId &&
-                                      loadMoreNoResponseResults(selectedRunId)
+                                      loadMoreIgnoredResults(selectedRunId)
                                     }
-                                    disabled={resultsLoading}
+                                    disabled={ignoredLoading}
                                     style={{
                                       padding: "10px 18px",
                                       borderRadius: "999px",
                                       border: "1px solid var(--border)",
-                                      background: "var(--border)",
+                                      background: "var(--panel)",
                                       color: "var(--text)",
-                                      cursor: resultsLoading
+                                      cursor: ignoredLoading
                                         ? "default"
                                         : "pointer",
-                                      opacity: resultsLoading ? 0.6 : 1,
+                                      opacity: ignoredLoading ? 0.6 : 1,
                                       fontSize: "12px",
                                       fontWeight: 600,
                                     }}
                                   >
-                                    {resultsLoading
+                                    {ignoredLoading
                                       ? "Loading..."
                                       : "Load More Results"}
                                   </button>
                                 )}
-                              {activeTab === "ignored" && ignoredHasMore && (
+                              </div>
+                            )}
+                          {!isSelectedRunInProgress &&
+                            resultsView === "changes" && (
+                              <div
+                                style={{
+                                  marginTop: "12px",
+                                  display: "flex",
+                                  gap: "12px",
+                                  flexWrap: "wrap",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                {!unchangedOnly && diffQuery.hasNextPage && (
+                                  <button
+                                    onClick={() => diffQuery.fetchNextPage()}
+                                    disabled={diffQuery.isFetchingNextPage}
+                                    style={{
+                                      padding: "10px 18px",
+                                      borderRadius: "999px",
+                                      border: "1px solid var(--accent)",
+                                      background: "var(--accent)",
+                                      color: "white",
+                                      cursor: diffQuery.isFetchingNextPage
+                                        ? "default"
+                                        : "pointer",
+                                      opacity: diffQuery.isFetchingNextPage
+                                        ? 0.6
+                                        : 1,
+                                      fontSize: "12px",
+                                      fontWeight: 600,
+                                    }}
+                                  >
+                                    {diffQuery.isFetchingNextPage
+                                      ? "Loading..."
+                                      : "Load more changes"}
+                                  </button>
+                                )}
+                                {includeUnchanged && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      gap: "8px",
+                                      alignItems: "center",
+                                      flexWrap: "wrap",
+                                    }}
+                                  >
+                                    <button
+                                      onClick={() =>
+                                        setUnchangedOffset((prev) =>
+                                          Math.max(0, prev - unchangedLimit),
+                                        )
+                                      }
+                                      disabled={!canPrevUnchanged}
+                                      style={{
+                                        padding: "10px 18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--border)",
+                                        background: "var(--panel)",
+                                        color: "var(--text)",
+                                        cursor: canPrevUnchanged
+                                          ? "pointer"
+                                          : "not-allowed",
+                                        opacity: canPrevUnchanged ? 1 : 0.6,
+                                        fontSize: "12px",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Prev outstanding
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        setUnchangedOffset(
+                                          (prev) => prev + unchangedLimit,
+                                        )
+                                      }
+                                      disabled={!canNextUnchanged}
+                                      style={{
+                                        padding: "10px 18px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--border)",
+                                        background: "var(--panel)",
+                                        color: "var(--text)",
+                                        cursor: canNextUnchanged
+                                          ? "pointer"
+                                          : "not-allowed",
+                                        opacity: canNextUnchanged ? 1 : 0.6,
+                                        fontSize: "12px",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      Next outstanding
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          {!isSelectedRunInProgress &&
+                            resultsView === "fix_queue" && (
+                              <div
+                                style={{
+                                  marginTop: "12px",
+                                  display: "flex",
+                                  gap: "12px",
+                                  flexWrap: "wrap",
+                                  justifyContent: "center",
+                                }}
+                              >
                                 <button
                                   onClick={() =>
-                                    selectedRunId &&
-                                    loadMoreIgnoredResults(selectedRunId)
+                                    setFixQueueOffset((prev) =>
+                                      Math.max(0, prev - fixQueueLimit),
+                                    )
                                   }
-                                  disabled={ignoredLoading}
+                                  disabled={!fixQueueHasPrev}
                                   style={{
                                     padding: "10px 18px",
                                     borderRadius: "999px",
                                     border: "1px solid var(--border)",
                                     background: "var(--panel)",
                                     color: "var(--text)",
-                                    cursor: ignoredLoading
-                                      ? "default"
-                                      : "pointer",
-                                    opacity: ignoredLoading ? 0.6 : 1,
+                                    cursor: fixQueueHasPrev
+                                      ? "pointer"
+                                      : "not-allowed",
+                                    opacity: fixQueueHasPrev ? 1 : 0.6,
                                     fontSize: "12px",
                                     fontWeight: 600,
                                   }}
                                 >
-                                  {ignoredLoading
-                                    ? "Loading..."
-                                    : "Load More Results"}
+                                  Prev page
                                 </button>
-                              )}
-                            </div>
-                          )}
-                        {!isSelectedRunInProgress &&
-                          resultsView === "changes" && (
-                            <div
-                              style={{
-                                marginTop: "12px",
-                                display: "flex",
-                                gap: "12px",
-                                flexWrap: "wrap",
-                                justifyContent: "center",
-                              }}
-                            >
-                              {!unchangedOnly && diffQuery.hasNextPage && (
                                 <button
-                                  onClick={() => diffQuery.fetchNextPage()}
-                                  disabled={diffQuery.isFetchingNextPage}
+                                  onClick={() =>
+                                    setFixQueueOffset(
+                                      (prev) => prev + fixQueueLimit,
+                                    )
+                                  }
+                                  disabled={!fixQueueHasNext}
                                   style={{
                                     padding: "10px 18px",
                                     borderRadius: "999px",
-                                    border: "1px solid var(--accent)",
-                                    background: "var(--accent)",
-                                    color: "white",
-                                    cursor: diffQuery.isFetchingNextPage
-                                      ? "default"
-                                      : "pointer",
-                                    opacity: diffQuery.isFetchingNextPage
-                                      ? 0.6
-                                      : 1,
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                    cursor: fixQueueHasNext
+                                      ? "pointer"
+                                      : "not-allowed",
+                                    opacity: fixQueueHasNext ? 1 : 0.6,
                                     fontSize: "12px",
                                     fontWeight: 600,
                                   }}
                                 >
-                                  {diffQuery.isFetchingNextPage
-                                    ? "Loading..."
-                                    : "Load more changes"}
+                                  Next page
                                 </button>
-                              )}
-                              {includeUnchanged && (
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    gap: "8px",
-                                    alignItems: "center",
-                                    flexWrap: "wrap",
-                                  }}
-                                >
-                                  <button
-                                    onClick={() =>
-                                      setUnchangedOffset((prev) =>
-                                        Math.max(0, prev - unchangedLimit),
-                                      )
-                                    }
-                                    disabled={!canPrevUnchanged}
-                                    style={{
-                                      padding: "10px 18px",
-                                      borderRadius: "999px",
-                                      border: "1px solid var(--border)",
-                                      background: "var(--panel)",
-                                      color: "var(--text)",
-                                      cursor: canPrevUnchanged
-                                        ? "pointer"
-                                        : "not-allowed",
-                                      opacity: canPrevUnchanged ? 1 : 0.6,
-                                      fontSize: "12px",
-                                      fontWeight: 600,
-                                    }}
-                                  >
-                                    Prev outstanding
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      setUnchangedOffset(
-                                        (prev) => prev + unchangedLimit,
-                                      )
-                                    }
-                                    disabled={!canNextUnchanged}
-                                    style={{
-                                      padding: "10px 18px",
-                                      borderRadius: "999px",
-                                      border: "1px solid var(--border)",
-                                      background: "var(--panel)",
-                                      color: "var(--text)",
-                                      cursor: canNextUnchanged
-                                        ? "pointer"
-                                        : "not-allowed",
-                                      opacity: canNextUnchanged ? 1 : 0.6,
-                                      fontSize: "12px",
-                                      fontWeight: 600,
-                                    }}
-                                  >
-                                    Next outstanding
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        {!isSelectedRunInProgress &&
-                          resultsView === "fix_queue" && (
-                            <div
-                              style={{
-                                marginTop: "12px",
-                                display: "flex",
-                                gap: "12px",
-                                flexWrap: "wrap",
-                                justifyContent: "center",
-                              }}
-                            >
-                              <button
-                                onClick={() =>
-                                  setFixQueueOffset((prev) =>
-                                    Math.max(0, prev - fixQueueLimit),
-                                  )
-                                }
-                                disabled={!fixQueueHasPrev}
-                                style={{
-                                  padding: "10px 18px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  cursor: fixQueueHasPrev
-                                    ? "pointer"
-                                    : "not-allowed",
-                                  opacity: fixQueueHasPrev ? 1 : 0.6,
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                Prev page
-                              </button>
-                              <button
-                                onClick={() =>
-                                  setFixQueueOffset(
-                                    (prev) => prev + fixQueueLimit,
-                                  )
-                                }
-                                disabled={!fixQueueHasNext}
-                                style={{
-                                  padding: "10px 18px",
-                                  borderRadius: "999px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  cursor: fixQueueHasNext
-                                    ? "pointer"
-                                    : "not-allowed",
-                                  opacity: fixQueueHasNext ? 1 : 0.6,
-                                  fontSize: "12px",
-                                  fontWeight: 600,
-                                }}
-                              >
-                                Next page
-                              </button>
-                            </div>
-                          )}
-                        <div className="results-footer-space" aria-hidden />
-                      </div>
-
-                      {detailsOpen && selectedLink && (
-                        <aside
-                          className={`details-drawer ${isNarrow ? "overlay" : ""}`}
-                          ref={detailsDrawerRef}
-                          aria-label="Link details drawer"
-                        >
-                          <div className="drawer-header">
-                            <div
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "space-between",
-                                gap: "12px",
-                              }}
-                            >
-                              <div
-                                className="drawer-title"
-                                title={selectedLink.link_url}
-                              >
-                                {selectedLink.link_url}
-                              </div>
-                              <button
-                                ref={detailsCloseRef}
-                                onClick={() => {
-                                  setDetailsOpen(false);
-                                  setDetailsLinkId(null);
-                                }}
-                                className="icon-button"
-                                style={{
-                                  borderColor: "var(--border)",
-                                  color: "var(--text)",
-                                }}
-                                aria-label="Close details"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                            <div className="drawer-actions">
-                              <button
-                                onClick={() =>
-                                  window.open(
-                                    selectedLink.link_url,
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  )
-                                }
-                                className="report-button"
-                              >
-                                Open link
-                              </button>
-                              <button
-                                onClick={() =>
-                                  copyToClipboard(
-                                    selectedLink.link_url,
-                                    `drawer:${selectedLink.id}`,
-                                  )
-                                }
-                                className="report-button"
-                              >
-                                Copy URL
-                              </button>
-                              <button
-                                onClick={() => handleRecheckLink(selectedLink)}
-                                className="report-button"
-                                disabled={
-                                  selectedLink.ignored ||
-                                  recheckLoadingId === selectedLink.id
-                                }
-                              >
-                                {recheckLoadingId === selectedLink.id
-                                  ? "Rechecking..."
-                                  : "Recheck now"}
-                              </button>
-                              <button
-                                onClick={() =>
-                                  handleIgnoreLinkWithUndo(selectedLink)
-                                }
-                                className="report-button"
-                                disabled={selectedLink.ignored}
-                              >
-                                Ignore link
-                              </button>
-                            </div>
-                            <div className="drawer-chip-row">
-                              <span
-                                className="status-chip"
-                                style={{
-                                  background:
-                                    selectedLink.status_code == null
-                                      ? "var(--border)"
-                                      : selectedLink.status_code >= 500
-                                        ? "var(--danger)"
-                                        : selectedLink.status_code === 404 ||
-                                            selectedLink.status_code === 410
-                                          ? "var(--danger)"
-                                          : selectedLink.status_code === 401 ||
-                                              selectedLink.status_code ===
-                                                403 ||
-                                              selectedLink.status_code === 429
-                                            ? "var(--warning)"
-                                            : "var(--success)",
-                                  color:
-                                    selectedLink.status_code == null
-                                      ? "var(--muted)"
-                                      : "white",
-                                }}
-                              >
-                                {selectedLink.status_code ?? "No response"}
-                              </span>
-                              <span className="status-chip subtle">
-                                {formatClassification(
-                                  selectedLink.classification,
-                                )}
-                              </span>
-                              {selectedLink.ignored && (
-                                <span className="status-chip subtle">
-                                  Ignored
-                                </span>
-                              )}
-                            </div>
-                            {selectedLink.error_message && (
-                              <div
-                                style={{
-                                  fontSize: "12px",
-                                  color: "var(--warning)",
-                                }}
-                              >
-                                {selectedLink.error_message}
                               </div>
                             )}
-                          </div>
-                          <div className="drawer-body">
-                            <div className="drawer-section">
-                              <h4>Why this happened</h4>
-                              {getWhyDetails(selectedLink).body.map((line) => (
+                          <div className="results-footer-space" aria-hidden />
+                        </div>
+
+                        {detailsOpen && selectedLink && (
+                          <aside
+                            className={`details-drawer ${isNarrow ? "overlay" : ""}`}
+                            ref={detailsDrawerRef}
+                            aria-label="Link details drawer"
+                          >
+                            <div className="drawer-header">
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: "12px",
+                                }}
+                              >
                                 <div
-                                  key={line}
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
+                                  className="drawer-title"
+                                  title={selectedLink.link_url}
                                 >
-                                  {line}
+                                  {selectedLink.link_url}
                                 </div>
-                              ))}
-                            </div>
-                            <div className="drawer-section">
-                              <h4>Recommended actions</h4>
+                                <button
+                                  ref={detailsCloseRef}
+                                  onClick={() => {
+                                    setDetailsOpen(false);
+                                    setDetailsLinkId(null);
+                                  }}
+                                  className="icon-button"
+                                  style={{
+                                    borderColor: "var(--border)",
+                                    color: "var(--text)",
+                                  }}
+                                  aria-label="Close details"
+                                >
+                                  ✕
+                                </button>
+                              </div>
                               <div className="drawer-actions">
                                 <button
+                                  onClick={() =>
+                                    window.open(
+                                      selectedLink.link_url,
+                                      "_blank",
+                                      "noopener,noreferrer",
+                                    )
+                                  }
                                   className="report-button"
+                                >
+                                  Open link
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    copyToClipboard(
+                                      selectedLink.link_url,
+                                      `drawer:${selectedLink.id}`,
+                                    )
+                                  }
+                                  className="report-button"
+                                >
+                                  Copy URL
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleRecheckLink(selectedLink)
+                                  }
+                                  className="report-button"
+                                  disabled={
+                                    selectedLink.ignored ||
+                                    recheckLoadingId === selectedLink.id
+                                  }
+                                >
+                                  {recheckLoadingId === selectedLink.id
+                                    ? "Rechecking..."
+                                    : "Recheck now"}
+                                </button>
+                                <button
                                   onClick={() =>
                                     handleIgnoreLinkWithUndo(selectedLink)
                                   }
-                                  disabled={selectedLink.ignored}
-                                >
-                                  Ignore exact URL
-                                </button>
-                                <button
                                   className="report-button"
-                                  onClick={() => {
-                                    const host = safeHost(
-                                      selectedLink.link_url,
-                                    );
-                                    if (host === "unknown") {
-                                      pushToast(
-                                        "Invalid URL for domain rule",
-                                        "warning",
-                                      );
-                                      return;
-                                    }
-                                    void createQuickIgnoreRule("domain", host);
-                                  }}
                                   disabled={selectedLink.ignored}
                                 >
-                                  Ignore domain
-                                </button>
-                                <button
-                                  className="report-button"
-                                  onClick={() => {
-                                    try {
-                                      const url = new URL(
-                                        selectedLink.link_url,
-                                      );
-                                      const prefix = url.pathname || "/";
-                                      void createQuickIgnoreRule(
-                                        "path_prefix",
-                                        prefix,
-                                      );
-                                    } catch {
-                                      pushToast(
-                                        "Invalid URL for path rule",
-                                        "warning",
-                                      );
-                                    }
-                                  }}
-                                  disabled={selectedLink.ignored}
-                                >
-                                  Ignore path pattern
+                                  Ignore link
                                 </button>
                               </div>
-                            </div>
-                            <div className="drawer-section">
-                              <h4>Occurrences</h4>
-                              <div
-                                style={{
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                {selectedOccurrencesTotal} total
+                              <div className="drawer-chip-row">
+                                <span
+                                  className="status-chip"
+                                  style={{
+                                    background:
+                                      selectedLink.status_code == null
+                                        ? "var(--border)"
+                                        : selectedLink.status_code >= 500
+                                          ? "var(--danger)"
+                                          : selectedLink.status_code === 404 ||
+                                              selectedLink.status_code === 410
+                                            ? "var(--danger)"
+                                            : selectedLink.status_code ===
+                                                  401 ||
+                                                selectedLink.status_code ===
+                                                  403 ||
+                                                selectedLink.status_code === 429
+                                              ? "var(--warning)"
+                                              : "var(--success)",
+                                    color:
+                                      selectedLink.status_code == null
+                                        ? "var(--muted)"
+                                        : "white",
+                                  }}
+                                >
+                                  {selectedLink.status_code ?? "No response"}
+                                </span>
+                                <span className="status-chip subtle">
+                                  {formatClassification(
+                                    selectedLink.classification,
+                                  )}
+                                </span>
+                                {selectedLink.ignored && (
+                                  <span className="status-chip subtle">
+                                    Ignored
+                                  </span>
+                                )}
                               </div>
-                              {selectedOccurrencesError && (
+                              {selectedLink.error_message && (
                                 <div
                                   style={{
                                     fontSize: "12px",
                                     color: "var(--warning)",
                                   }}
                                 >
-                                  {selectedOccurrencesError}
+                                  {selectedLink.error_message}
                                 </div>
                               )}
-                              {!selectedOccurrencesLoading &&
-                                selectedOccurrences.length === 0 && (
+                            </div>
+                            <div className="drawer-body">
+                              <div className="drawer-section">
+                                <h4>Why this happened</h4>
+                                {getWhyDetails(selectedLink).body.map(
+                                  (line) => (
+                                    <div
+                                      key={line}
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      {line}
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                              <div className="drawer-section">
+                                <h4>Recommended actions</h4>
+                                <div className="drawer-actions">
+                                  <button
+                                    className="report-button"
+                                    onClick={() =>
+                                      handleIgnoreLinkWithUndo(selectedLink)
+                                    }
+                                    disabled={selectedLink.ignored}
+                                  >
+                                    Ignore exact URL
+                                  </button>
+                                  <button
+                                    className="report-button"
+                                    onClick={() => {
+                                      const host = safeHost(
+                                        selectedLink.link_url,
+                                      );
+                                      if (host === "unknown") {
+                                        pushToast(
+                                          "Invalid URL for domain rule",
+                                          "warning",
+                                        );
+                                        return;
+                                      }
+                                      void createQuickIgnoreRule(
+                                        "domain",
+                                        host,
+                                      );
+                                    }}
+                                    disabled={selectedLink.ignored}
+                                  >
+                                    Ignore domain
+                                  </button>
+                                  <button
+                                    className="report-button"
+                                    onClick={() => {
+                                      try {
+                                        const url = new URL(
+                                          selectedLink.link_url,
+                                        );
+                                        const prefix = url.pathname || "/";
+                                        void createQuickIgnoreRule(
+                                          "path_prefix",
+                                          prefix,
+                                        );
+                                      } catch {
+                                        pushToast(
+                                          "Invalid URL for path rule",
+                                          "warning",
+                                        );
+                                      }
+                                    }}
+                                    disabled={selectedLink.ignored}
+                                  >
+                                    Ignore path pattern
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="drawer-section">
+                                <h4>Occurrences</h4>
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--muted)",
+                                  }}
+                                >
+                                  {selectedOccurrencesTotal} total
+                                </div>
+                                {selectedOccurrencesError && (
                                   <div
                                     style={{
                                       fontSize: "12px",
-                                      color: "var(--muted)",
+                                      color: "var(--warning)",
                                     }}
                                   >
-                                    No source pages recorded yet.
+                                    {selectedOccurrencesError}
                                   </div>
                                 )}
-                              <div className="drawer-list">
-                                {showOccurrencesSkeleton &&
-                                  Array.from({ length: 3 }).map((_, idx) => (
+                                {!selectedOccurrencesLoading &&
+                                  selectedOccurrences.length === 0 && (
                                     <div
-                                      key={`occ-skeleton-${idx}`}
-                                      className="skeleton skeleton--occ"
-                                    />
-                                  ))}
-                                {selectedOccurrences.map((occ) => (
-                                  <div key={occ.id} className="drawer-row">
-                                    <a
-                                      href={occ.source_page}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      title={occ.source_page}
+                                      style={{
+                                        fontSize: "12px",
+                                        color: "var(--muted)",
+                                      }}
                                     >
-                                      {occ.source_page}
-                                    </a>
+                                      No source pages recorded yet.
+                                    </div>
+                                  )}
+                                <div className="drawer-list">
+                                  {showOccurrencesSkeleton &&
+                                    Array.from({ length: 3 }).map((_, idx) => (
+                                      <div
+                                        key={`occ-skeleton-${idx}`}
+                                        className="skeleton skeleton--occ"
+                                      />
+                                    ))}
+                                  {selectedOccurrences.map((occ) => (
+                                    <div key={occ.id} className="drawer-row">
+                                      <a
+                                        href={occ.source_page}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        title={occ.source_page}
+                                      >
+                                        {occ.source_page}
+                                      </a>
+                                      <button
+                                        onClick={() =>
+                                          copyToClipboard(
+                                            occ.source_page,
+                                            `occ:${occ.id}`,
+                                          )
+                                        }
+                                        className="report-button"
+                                      >
+                                        Copy
+                                      </button>
+                                    </div>
+                                  ))}
+                                  {selectedOccurrencesHasMore && (
                                     <button
                                       onClick={() =>
-                                        copyToClipboard(
-                                          occ.source_page,
-                                          `occ:${occ.id}`,
+                                        selectedLink &&
+                                        handleLoadMoreOccurrences(
+                                          selectedLink.id,
                                         )
                                       }
+                                      disabled={selectedOccurrencesLoading}
                                       className="report-button"
                                     >
-                                      Copy
+                                      {selectedOccurrencesLoading
+                                        ? "Loading..."
+                                        : "Load more occurrences"}
                                     </button>
-                                  </div>
-                                ))}
-                                {selectedOccurrencesHasMore && (
-                                  <button
-                                    onClick={() =>
-                                      selectedLink &&
-                                      handleLoadMoreOccurrences(selectedLink.id)
-                                    }
-                                    disabled={selectedOccurrencesLoading}
-                                    className="report-button"
-                                  >
-                                    {selectedOccurrencesLoading
-                                      ? "Loading..."
-                                      : "Load more occurrences"}
-                                  </button>
-                                )}
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        </aside>
-                      )}
+                          </aside>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
               </main>
             </div>
 
@@ -20234,896 +23774,6 @@ const App: React.FC = () => {
                   setDetailsLinkId(null);
                 }}
               />
-            )}
-
-            {onboardingOpen && (
-              <div className="modal-backdrop">
-                <div
-                  className="modal"
-                  role="dialog"
-                  aria-modal="true"
-                  onClick={(event) => event.stopPropagation()}
-                  style={{ maxWidth: "560px" }}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      gap: "12px",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600 }}>
-                        First-run onboarding
-                      </div>
-                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        Step {onboardingStepIndex + 1} of{" "}
-                        {onboardingSteps.length}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => {
-                        completeOnboarding();
-                        pushToast("Onboarding skipped", "info");
-                      }}
-                      className="report-button"
-                    >
-                      Skip
-                    </button>
-                  </div>
-
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "6px",
-                      flexWrap: "wrap",
-                      marginTop: "12px",
-                    }}
-                  >
-                    {onboardingSteps.map((step, idx) => (
-                      <div
-                        key={step}
-                        style={{
-                          padding: "4px 8px",
-                          borderRadius: "999px",
-                          border: "1px solid var(--border)",
-                          background:
-                            idx === onboardingStepIndex
-                              ? "var(--panel-elev)"
-                              : "transparent",
-                          fontSize: "11px",
-                          color:
-                            idx === onboardingStepIndex
-                              ? "var(--text)"
-                              : "var(--muted)",
-                        }}
-                      >
-                        {step}
-                      </div>
-                    ))}
-                  </div>
-
-                  <div style={{ marginTop: "16px" }}>
-                    {onboardingStep === 0 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>
-                            Add your first site
-                          </div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Add a website and give it customer-friendly names
-                            from the start.
-                          </div>
-                        </div>
-                        <div className="app-form-grid">
-                          <label
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Website URL
-                            <input
-                              value={onboardingSiteUrl}
-                              onChange={(event) =>
-                                setOnboardingSiteUrl(event.target.value)
-                              }
-                              placeholder="https://example.com"
-                              autoFocus
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  event.preventDefault();
-                                  void handleOnboardingCreateSite();
-                                }
-                              }}
-                              style={{
-                                marginTop: "6px",
-                                width: "100%",
-                                padding: "8px 10px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                boxSizing: "border-box",
-                              }}
-                            />
-                          </label>
-                          <div
-                            className="app-form-grid app-form-grid--two"
-                            style={{ alignItems: "start" }}
-                          >
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Site display name
-                              <input
-                                value={onboardingSiteDisplayName}
-                                onChange={(event) => {
-                                  setOnboardingSiteDisplayNameTouched(true);
-                                  setOnboardingSiteDisplayName(
-                                    event.target.value,
-                                  );
-                                }}
-                                placeholder="Suggested from your domain"
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    void handleOnboardingCreateSite();
-                                  }
-                                }}
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "8px 10px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  boxSizing: "border-box",
-                                }}
-                              />
-                            </label>
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Client name (optional)
-                              <input
-                                value={onboardingClientName}
-                                onChange={(event) =>
-                                  setOnboardingClientName(event.target.value)
-                                }
-                                placeholder="Optional client label"
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    void handleOnboardingCreateSite();
-                                  }
-                                }}
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "8px 10px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  boxSizing: "border-box",
-                                }}
-                              />
-                            </label>
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Report display name (optional)
-                              <input
-                                value={onboardingReportDisplayName}
-                                onChange={(event) => {
-                                  setOnboardingReportDisplayNameTouched(true);
-                                  setOnboardingReportDisplayName(
-                                    event.target.value,
-                                  );
-                                }}
-                                placeholder="Optional report title"
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    void handleOnboardingCreateSite();
-                                  }
-                                }}
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "8px 10px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                  boxSizing: "border-box",
-                                }}
-                              />
-                            </label>
-                          </div>
-                        </div>
-                        {onboardingError && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                            }}
-                          >
-                            {onboardingError}
-                          </div>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <button
-                            onClick={() => void handleOnboardingCreateSite()}
-                            disabled={
-                              onboardingWorking || !onboardingSiteUrl.trim()
-                            }
-                            style={{
-                              padding: "8px 12px",
-                              borderRadius: "10px",
-                              border: "none",
-                              background: onboardingWorking
-                                ? "var(--panel-elev)"
-                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                              color: "white",
-                              fontSize: "12px",
-                              fontWeight: 600,
-                              cursor:
-                                onboardingWorking || !onboardingSiteUrl.trim()
-                                  ? "not-allowed"
-                                  : "pointer",
-                            }}
-                          >
-                            {onboardingWorking ? "Adding..." : "Add site"}
-                          </button>
-                          <button
-                            onClick={() => void handleOnboardingSampleSite()}
-                            disabled={onboardingWorking}
-                            style={{
-                              padding: "8px 12px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              fontSize: "12px",
-                              fontWeight: 600,
-                              cursor: onboardingWorking
-                                ? "not-allowed"
-                                : "pointer",
-                            }}
-                          >
-                            Try sample site
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {onboardingStep === 1 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>
-                            Run your first scan
-                          </div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Start a scan and watch progress in real time.
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => void handleOnboardingRunScan()}
-                          disabled={!selectedSiteId || triggeringScan}
-                          style={{
-                            padding: "8px 12px",
-                            borderRadius: "10px",
-                            border: "none",
-                            background:
-                              !selectedSiteId || triggeringScan
-                                ? "var(--panel-elev)"
-                                : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                            color: "white",
-                            fontSize: "12px",
-                            fontWeight: 600,
-                            cursor:
-                              !selectedSiteId || triggeringScan
-                                ? "not-allowed"
-                                : "pointer",
-                          }}
-                        >
-                          {triggeringScan ? "Starting..." : "Start scan"}
-                        </button>
-                        {selectedRun && (
-                          <div
-                            style={{
-                              padding: "12px",
-                              borderRadius: "12px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                            }}
-                          >
-                            <ScanProgressBar
-                              status={selectedRun.status}
-                              totalLinks={selectedRun.total_links}
-                              checkedLinks={selectedRun.checked_links}
-                              brokenLinks={phase0BrokenCount}
-                              blockedLinks={phase0BlockedCount}
-                              noResponseLinks={phase0NoResponseCount}
-                              lastUpdateAt={lastProgressAt ?? null}
-                            />
-                            <div
-                              style={{
-                                marginTop: "8px",
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Status: {selectedRun.status.replace("_", " ")}
-                            </div>
-                            {selectedRun.status === "failed" &&
-                              selectedRun.error_message && (
-                                <div
-                                  style={{
-                                    marginTop: "6px",
-                                    fontSize: "12px",
-                                    color: "var(--warning)",
-                                  }}
-                                >
-                                  {selectedRun.error_message}
-                                </div>
-                              )}
-                          </div>
-                        )}
-                        {selectedRun?.status === "completed" && (
-                          <button
-                            onClick={() => setOnboardingStep(2)}
-                            className="report-button"
-                          >
-                            Continue
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    {onboardingStep === 2 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>Review results</div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            See a quick summary and jump into fixes or changes.
-                          </div>
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            flexWrap: "wrap",
-                            gap: "8px",
-                          }}
-                        >
-                          <span className="summary-chip">
-                            Broken {phase0BrokenCount}
-                          </span>
-                          <span className="summary-chip">
-                            Blocked {phase0BlockedCount}
-                          </span>
-                          <span className="summary-chip">
-                            No response {phase0NoResponseCount}
-                          </span>
-                          <span className="summary-chip">
-                            OK{" "}
-                            {currentPhase0Diagnostics?.ok ??
-                              visibleResults.filter(
-                                (row) => row.classification === "ok",
-                              ).length}
-                          </span>
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <button
-                            onClick={() => {
-                              openFixQueue();
-                            }}
-                            className="report-button"
-                          >
-                            Open Fix Queue
-                          </button>
-                          <button
-                            onClick={() => {
-                              setScanWorkspaceOpen(true);
-                              setResultsView("changes");
-                            }}
-                            className="report-button"
-                          >
-                            View Changes
-                          </button>
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: "8px",
-                          }}
-                        >
-                          <button
-                            onClick={() => setOnboardingStep(1)}
-                            className="report-button"
-                          >
-                            Back
-                          </button>
-                          <button
-                            onClick={() => setOnboardingStep(3)}
-                            className="report-button"
-                          >
-                            Next
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {onboardingStep === 3 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>Set a schedule</div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Optional. Automate scans to keep checks consistent.
-                          </div>
-                        </div>
-                        <label
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: "10px",
-                            fontSize: "12px",
-                          }}
-                        >
-                          <span>Auto-scan enabled</span>
-                          <input
-                            type="checkbox"
-                            checked={
-                              scheduleFrequency === "manual"
-                                ? false
-                                : scheduleEnabled
-                            }
-                            onChange={(event) =>
-                              setScheduleEnabled(event.target.checked)
-                            }
-                            disabled={scheduleFrequency === "manual"}
-                          />
-                        </label>
-                        <div
-                          style={{
-                            display: "grid",
-                            gridTemplateColumns: "1fr",
-                            gap: "8px",
-                          }}
-                        >
-                          <label
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Frequency
-                            <select
-                              value={scheduleFrequency}
-                              onChange={(event) => {
-                                const nextFrequency = event.target.value as
-                                  | "manual"
-                                  | "daily"
-                                  | "weekly"
-                                  | "monthly";
-                                setScheduleFrequency(nextFrequency);
-                                if (nextFrequency === "manual") {
-                                  setScheduleEnabled(false);
-                                }
-                              }}
-                              style={{
-                                marginTop: "6px",
-                                width: "100%",
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                              }}
-                            >
-                              <option value="manual">Manual</option>
-                              <option value="daily">Daily</option>
-                              <option value="weekly">Weekly</option>
-                              <option value="monthly">Monthly</option>
-                            </select>
-                          </label>
-                          {scheduleFrequency === "weekly" && (
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Day of week (UTC)
-                              <select
-                                value={scheduleDayOfWeek}
-                                onChange={(event) =>
-                                  setScheduleDayOfWeek(
-                                    Number(event.target.value),
-                                  )
-                                }
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "6px 8px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                }}
-                              >
-                                <option value={0}>Sunday</option>
-                                <option value={1}>Monday</option>
-                                <option value={2}>Tuesday</option>
-                                <option value={3}>Wednesday</option>
-                                <option value={4}>Thursday</option>
-                                <option value={5}>Friday</option>
-                                <option value={6}>Saturday</option>
-                              </select>
-                            </label>
-                          )}
-                          {scheduleFrequency === "monthly" && (
-                            <label
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Day of month (UTC)
-                              <input
-                                type="number"
-                                min={1}
-                                max={31}
-                                value={scheduleDayOfMonth}
-                                onChange={(event) =>
-                                  setScheduleDayOfMonth(
-                                    Math.min(
-                                      31,
-                                      Math.max(
-                                        1,
-                                        Number(event.target.value) || 1,
-                                      ),
-                                    ),
-                                  )
-                                }
-                                style={{
-                                  marginTop: "6px",
-                                  width: "100%",
-                                  padding: "6px 8px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  color: "var(--text)",
-                                }}
-                              />
-                            </label>
-                          )}
-                          <label
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Time (UTC)
-                            <input
-                              type="time"
-                              value={scheduleTimeUtc}
-                              onChange={(event) =>
-                                setScheduleTimeUtc(event.target.value)
-                              }
-                              style={{
-                                marginTop: "6px",
-                                width: "100%",
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                              }}
-                            />
-                          </label>
-                        </div>
-                        <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Time (UTC):{" "}
-                          {formatScheduleUtcLabel(
-                            scheduleFrequency,
-                            scheduleTimeUtc,
-                            scheduleDayOfWeek,
-                            scheduleDayOfMonth,
-                          )}
-                        </div>
-                        {showLocalTimeZone && (
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Your time:{" "}
-                            {formatScheduleLocalLabel(
-                              scheduleFrequency,
-                              scheduleTimeUtc,
-                              scheduleDayOfWeek,
-                              scheduleDayOfMonth,
-                            )}{" "}
-                            ({localTimeZone})
-                          </div>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <button
-                            onClick={() => void handleSaveSchedule()}
-                            disabled={scheduleSaving}
-                            className="report-button"
-                          >
-                            {scheduleSaving ? "Saving..." : "Save schedule"}
-                          </button>
-                          <button
-                            onClick={() => setOnboardingStep(4)}
-                            className="report-button"
-                          >
-                            Skip for now
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {onboardingStep === 4 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>Enable alerts</div>
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Optional. Get notified when new issues appear.
-                          </div>
-                        </div>
-                        <label
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: "10px",
-                            fontSize: "12px",
-                          }}
-                        >
-                          <span>Email alerts</span>
-                          <input
-                            type="checkbox"
-                            checked={notifyEnabled}
-                            onChange={(event) =>
-                              setNotifyEnabled(event.target.checked)
-                            }
-                          />
-                        </label>
-                        <label
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Email (optional)
-                          <input
-                            value={notifyEmail}
-                            onChange={(event) =>
-                              setNotifyEmail(event.target.value)
-                            }
-                            placeholder="you@company.com"
-                            style={{
-                              marginTop: "6px",
-                              width: "100%",
-                              padding: "8px 10px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              boxSizing: "border-box",
-                            }}
-                          />
-                        </label>
-                        <label
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Notify me
-                          <select
-                            value={notifyOn}
-                            onChange={(event) =>
-                              setNotifyOn(event.target.value as NotifyOnOption)
-                            }
-                            style={{
-                              marginTop: "6px",
-                              width: "100%",
-                              padding: "6px 8px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <option value="new_issues_only">
-                              Only when NEW issues
-                            </option>
-                            <option value="issues_exist">
-                              When issues exist
-                            </option>
-                            <option value="always">Always</option>
-                            <option value="never">Never</option>
-                          </select>
-                        </label>
-                        <label
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: "10px",
-                            fontSize: "12px",
-                          }}
-                        >
-                          <span>Weekly summary</span>
-                          <input
-                            type="checkbox"
-                            checked={summaryEnabled}
-                            onChange={(event) =>
-                              setSummaryEnabled(event.target.checked)
-                            }
-                          />
-                        </label>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <button
-                            onClick={() => void handleSaveNotifications()}
-                            disabled={
-                              notifySaving ||
-                              notifyLoading ||
-                              (notifyEnabled &&
-                                notifyOn !== "never" &&
-                                !notifyEmail.trim())
-                            }
-                            className="report-button"
-                          >
-                            {notifySaving ? "Saving..." : "Save alerts"}
-                          </button>
-                          <button
-                            onClick={() => void handleSendTestEmail()}
-                            disabled={
-                              notifyTestSending ||
-                              !notifyEmail.trim() ||
-                              !notifyEnabled ||
-                              notifyOn === "never" ||
-                              notifyLoading
-                            }
-                            className="report-button"
-                          >
-                            {notifyTestSending
-                              ? "Sending..."
-                              : "Send test alert"}
-                          </button>
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: "8px",
-                          }}
-                        >
-                          <button
-                            onClick={() => setOnboardingStep(3)}
-                            className="report-button"
-                          >
-                            Back
-                          </button>
-                          <button
-                            onClick={() => setOnboardingStep(5)}
-                            className="report-button"
-                          >
-                            Finish
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {onboardingStep >= onboardingSteps.length && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "12px",
-                          textAlign: "center",
-                        }}
-                      >
-                        <div style={{ fontWeight: 600, fontSize: "16px" }}>
-                          You're set
-                        </div>
-                        <div
-                          style={{ fontSize: "12px", color: "var(--muted)" }}
-                        >
-                          Your first scan is ready. Explore the dashboard or
-                          keep tuning schedules and alerts anytime.
-                        </div>
-                        <button
-                          onClick={() => {
-                            completeOnboarding();
-                          }}
-                          style={{
-                            padding: "8px 12px",
-                            borderRadius: "10px",
-                            border: "none",
-                            background:
-                              "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                            color: "white",
-                            fontSize: "12px",
-                            fontWeight: 600,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Go to dashboard
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
             )}
 
             {noteModalOpen && (
@@ -21545,101 +24195,178 @@ const App: React.FC = () => {
                       gap: "8px",
                     }}
                   >
-                    {visibleHistoryItems.map((run) => (
-                      <div
-                        key={run.id}
-                        style={{
-                          border: "1px solid var(--border)",
-                          borderRadius: "10px",
-                          padding: "8px",
-                          background: "var(--panel-elev)",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "6px",
-                        }}
-                      >
+                    {visibleHistoryItems.map((run) => {
+                      const rowScoreText = formatRunMetricValue(
+                        run,
+                        run.overall_score ?? run.score ?? null,
+                        { asPercent: true },
+                      );
+                      const linksCheckedText = `${run.checked_links}/${run.total_links}`;
+                      const blockedText = formatRunMetricValue(
+                        run,
+                        run.blocked_links,
+                      );
+                      const noResponseText = formatRunMetricValue(
+                        run,
+                        run.no_response_links,
+                      );
+                      return (
                         <div
+                          key={run.id}
                           style={{
+                            border: "1px solid var(--border)",
+                            borderRadius: "10px",
+                            padding: "8px",
+                            background: "var(--panel-elev)",
                             display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            gap: "8px",
+                            flexDirection: "column",
+                            gap: "6px",
                           }}
                         >
-                          <span
-                            style={{ fontSize: "11px", color: "var(--muted)" }}
-                          >
-                            {formatRelative(run.started_at)}
-                          </span>
-                          <span
-                            style={{ fontSize: "11px", color: "var(--text)" }}
-                          >
-                            {run.status}
-                          </span>
-                        </div>
-                        <div
-                          style={{ fontSize: "11px", color: "var(--muted)" }}
-                        >
-                          Broken {run.broken_links} • Checked{" "}
-                          {run.checked_links}/{run.total_links}
-                        </div>
-                        <div style={{ display: "flex", gap: "8px" }}>
-                          <button
-                            onClick={() => setSelectedRunId(run.id)}
+                          <div
                             style={{
-                              padding: "4px 6px",
-                              borderRadius: "6px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              fontSize: "11px",
-                              cursor: "pointer",
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              gap: "8px",
                             }}
                           >
-                            View
-                          </button>
-                          {run.status === "completed" && (
-                            <button
-                              onClick={() => {
-                                openReport(run.id);
-                                setHistoryOpen(false);
-                              }}
+                            <span
                               style={{
-                                padding: "4px 6px",
-                                borderRadius: "6px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
                                 fontSize: "11px",
-                                cursor: "pointer",
+                                color: "var(--muted)",
                               }}
                             >
-                              View report
-                            </button>
-                          )}
-                          {selectedRunId &&
-                            run.id !== selectedRunId &&
-                            run.status === "completed" && (
+                              {formatRelative(run.started_at)}
+                            </span>
+                            <span
+                              style={{ fontSize: "11px", color: "var(--text)" }}
+                            >
+                              {formatRunStatusLabel(run.status)}
+                            </span>
+                          </div>
+                          <div className="dashboard-history-row__stats">
+                            {renderRunMetricPill("Health score", rowScoreText)}
+                            {renderRunMetricPill(
+                              "Links checked",
+                              linksCheckedText,
+                            )}
+                            {renderRunMetricPill("Blocked", blockedText)}
+                            {renderRunMetricPill("No response", noResponseText)}
+                          </div>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                position: "relative",
+                                display: "inline-flex",
+                              }}
+                              data-action-menu
+                            >
                               <button
                                 onClick={() => {
-                                  setCompareRunId(run.id);
-                                  setScanWorkspaceOpen(true);
-                                  setResultsView("changes");
+                                  const menuId = `history-actions:${run.id}`;
+                                  setActionMenuOpenId(
+                                    actionMenuOpenId === menuId ? null : menuId,
+                                  );
                                 }}
                                 style={{
                                   padding: "4px 6px",
-                                  borderRadius: "6px",
+                                  borderRadius: "999px",
                                   border: "1px solid var(--border)",
                                   background: "var(--panel)",
                                   fontSize: "11px",
                                   cursor: "pointer",
                                 }}
+                                className={
+                                  actionMenuOpenId ===
+                                  `history-actions:${run.id}`
+                                    ? "secondary-button"
+                                    : "ghost-button"
+                                }
+                                title="Run actions"
                               >
-                                Compare
+                                More
                               </button>
-                            )}
+                              {actionMenuOpenId ===
+                                `history-actions:${run.id}` && (
+                                <div
+                                  className="action-menu"
+                                  style={{
+                                    position: "absolute",
+                                    right: 0,
+                                    top: "calc(100% + 6px)",
+                                    minWidth: "195px",
+                                    zIndex: 40,
+                                  }}
+                                >
+                                  <button
+                                    onClick={() => {
+                                      setSelectedRunId(run.id);
+                                      setActionMenuOpenId(null);
+                                    }}
+                                  >
+                                    View
+                                  </button>
+                                  <button
+                                    disabled={run.status !== "completed"}
+                                    onClick={() => {
+                                      if (run.status === "completed") {
+                                        openReport(run.id);
+                                        setHistoryOpen(false);
+                                      }
+                                      setActionMenuOpenId(null);
+                                    }}
+                                  >
+                                    View report
+                                  </button>
+                                  <button
+                                    disabled={run.status !== "completed"}
+                                    onClick={() => {
+                                      if (run.status === "completed") {
+                                        window.open(
+                                          buildReportPdfLink(run.id),
+                                          "_blank",
+                                          "noopener,noreferrer",
+                                        );
+                                      }
+                                      setActionMenuOpenId(null);
+                                    }}
+                                  >
+                                    Export PDF
+                                  </button>
+                                  <button
+                                    disabled={
+                                      run.status !== "completed" ||
+                                      runActionBusyId === run.id
+                                    }
+                                    onClick={() => {
+                                      if (run.status === "completed") {
+                                        void handleCreateRunShareLink(run.id);
+                                      }
+                                      setActionMenuOpenId(null);
+                                    }}
+                                  >
+                                    {run.status === "completed"
+                                      ? runActionBusyId === run.id
+                                        ? "Preparing share link..."
+                                        : "Create share link"
+                                      : "Create share link"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                    {history.length > 5 && (
+                      );
+                    })}
+                    {history.length > DASHBOARD_HISTORY_INITIAL_ROWS && (
                       <button
                         onClick={() => setHistoryExpanded((prev) => !prev)}
                         className="ghost-button"
@@ -21652,7 +24379,7 @@ const App: React.FC = () => {
                       >
                         {historyExpanded
                           ? "Show less"
-                          : `Show more (${history.length - 5} more)`}
+                          : `Show more (${history.length - DASHBOARD_HISTORY_INITIAL_ROWS} more)`}
                       </button>
                     )}
                   </div>
