@@ -81,7 +81,9 @@ type SiteSettingsSection =
   | "monitoring"
   | "alerts"
   | "ignore_rules"
+  | "advanced"
   | "danger";
+type SiteAvatarStatus = "pending" | "cached" | "missing" | "failed" | "removed";
 
 interface Site {
   id: string;
@@ -106,6 +108,13 @@ interface Site {
   report_display_name: string | null;
   internal_notes: string | null;
   developer_tabs_enabled: boolean;
+  avatar_status: SiteAvatarStatus;
+  avatar_source_url: string | null;
+  avatar_content_type: string | null;
+  avatar_size_bytes: number | null;
+  avatar_fetched_at: string | null;
+  avatar_checked_at: string | null;
+  avatar_error: string | null;
 }
 
 type UptimeMonitorStatus = "up" | "down" | "degraded" | "unknown";
@@ -143,7 +152,12 @@ interface UptimeStatusResponse {
 interface AuthUser {
   id: string;
   email: string;
+  displayName?: string | null;
   name?: string;
+}
+
+interface AccountProfileResponse {
+  user: AuthUser;
 }
 
 type AppNotificationSeverity = "info" | "success" | "warning" | "critical";
@@ -1011,8 +1025,8 @@ const SITE_SETTINGS_SECTIONS: Array<{
   },
   {
     key: "alerts",
-    label: "Alerts",
-    description: "Email delivery preferences and test sends",
+    label: "Alerts & Reports",
+    description: "Email alerts, summaries, and report delivery",
   },
   {
     key: "ignore_rules",
@@ -1020,11 +1034,131 @@ const SITE_SETTINGS_SECTIONS: Array<{
     description: "Exclude known-safe links and patterns",
   },
   {
+    key: "advanced",
+    label: "Advanced",
+    description: "Developer diagnostics and debugging panels",
+  },
+  {
     key: "danger",
     label: "Danger zone",
     description: "Delete this site from the workspace",
   },
 ];
+const SITE_SETTINGS_TAB_SLUG_BY_SECTION: Record<SiteSettingsSection, string> = {
+  general: "general",
+  monitoring: "monitoring",
+  alerts: "alerts",
+  ignore_rules: "ignore-rules",
+  advanced: "advanced",
+  danger: "danger",
+};
+const SITE_SETTINGS_SECTION_BY_TAB_SLUG: Record<string, SiteSettingsSection> =
+  Object.fromEntries(
+    Object.entries(SITE_SETTINGS_TAB_SLUG_BY_SECTION).map(([section, slug]) => [
+      slug,
+      section,
+    ]),
+  ) as Record<string, SiteSettingsSection>;
+
+const FRIENDLY_IGNORE_RULE_TYPES: Array<{
+  value: Extract<IgnoreRule["rule_type"], "exact" | "domain" | "path_prefix">;
+  label: string;
+  summary: string;
+  example: string;
+}> = [
+  {
+    value: "exact",
+    label: "Ignore exact URL",
+    summary: "Skip one specific link.",
+    example: "https://example.com/old-page",
+  },
+  {
+    value: "domain",
+    label: "Ignore a whole domain",
+    summary: "Skip links on one host.",
+    example: "example.com",
+  },
+  {
+    value: "path_prefix",
+    label: "Ignore a path pattern",
+    summary: "Skip links whose path starts with this pattern.",
+    example: "/admin/*",
+  },
+];
+
+function getFriendlyIgnoreRuleType(
+  ruleType: IgnoreRule["rule_type"],
+): (typeof FRIENDLY_IGNORE_RULE_TYPES)[number] | null {
+  return (
+    FRIENDLY_IGNORE_RULE_TYPES.find((option) => option.value === ruleType) ??
+    null
+  );
+}
+
+function getIgnoreRuleTypeLabel(ruleType: IgnoreRule["rule_type"]) {
+  return (
+    getFriendlyIgnoreRuleType(ruleType)?.label ?? ruleType.replace(/_/g, " ")
+  );
+}
+
+function describeIgnoreRule(rule: IgnoreRule) {
+  if (rule.rule_type === "exact") return `Ignore exactly ${rule.pattern}`;
+  if (rule.rule_type === "domain") return `Ignore links on ${rule.pattern}`;
+  if (rule.rule_type === "path_prefix") {
+    return `Ignore paths starting with ${rule.pattern}`;
+  }
+  if (rule.rule_type === "contains") {
+    return `Ignore URLs containing ${rule.pattern}`;
+  }
+  if (rule.rule_type === "regex") return `Ignore URLs matching ${rule.pattern}`;
+  if (rule.rule_type === "status_code") {
+    return `Ignore links with status ${rule.pattern}`;
+  }
+  if (rule.rule_type === "classification") {
+    return `Ignore links classified as ${rule.pattern}`;
+  }
+  return `Ignore ${rule.pattern}`;
+}
+
+function getIgnoreRulePlaceholder(ruleType: IgnoreRule["rule_type"]) {
+  return (
+    getFriendlyIgnoreRuleType(ruleType)?.example ??
+    "Enter the URL, domain, or path to skip"
+  );
+}
+
+function getBroadIgnoreRuleWarning(
+  ruleType: IgnoreRule["rule_type"],
+  pattern: string,
+) {
+  const normalized = pattern.trim().toLowerCase();
+  if (!normalized) return null;
+  const broadPatterns = new Set(["*", "/*", "/", ".*", "**", "/**"]);
+  if (broadPatterns.has(normalized)) {
+    return "This rule is very broad and can hide real issues.";
+  }
+  if (ruleType === "domain" && (normalized === "*." || normalized === "*")) {
+    return "This domain rule is too broad and can hide real issues.";
+  }
+  if (ruleType === "path_prefix" && normalized.endsWith("*")) {
+    const prefix = normalized.replace(/\*+$/, "");
+    if (prefix === "" || prefix === "/") {
+      return "This path rule is very broad and can hide real issues.";
+    }
+  }
+  return null;
+}
+
+function normalizeFriendlyIgnoreRulePattern(
+  ruleType: IgnoreRule["rule_type"],
+  pattern: string,
+) {
+  const trimmed = pattern.trim();
+  if (ruleType === "path_prefix" && trimmed.endsWith("*")) {
+    return trimmed.replace(/\*+$/, "");
+  }
+  return trimmed;
+}
 const EMPTY_REPORT_SECTION: ReportLinkSectionState = {
   links: [],
   offset: 0,
@@ -2155,11 +2289,49 @@ function getLandingDashboardSelectSiteIntent(search = "") {
   }
 }
 
+function parseSiteSettingsLocation() {
+  if (typeof window === "undefined") {
+    return {
+      isSiteSettingsPath: false,
+      isInvalidTab: false,
+      siteId: null,
+      section: "general" as SiteSettingsSection,
+    };
+  }
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
+  const siteSettingsMatch = path.match(/^\/sites\/([^/]+)\/settings$/);
+  const isLegacySettingsPath =
+    path === "/dashboard/settings" || path.startsWith("/dashboard/settings/");
+  const rawTab = new URLSearchParams(window.location.search).get("tab");
+  const section =
+    rawTab && SITE_SETTINGS_SECTION_BY_TAB_SLUG[rawTab]
+      ? SITE_SETTINGS_SECTION_BY_TAB_SLUG[rawTab]
+      : "general";
+
+  return {
+    isSiteSettingsPath: Boolean(siteSettingsMatch) || isLegacySettingsPath,
+    isInvalidTab: Boolean(rawTab && !SITE_SETTINGS_SECTION_BY_TAB_SLUG[rawTab]),
+    siteId: siteSettingsMatch ? decodeURIComponent(siteSettingsMatch[1]) : null,
+    section,
+  };
+}
+
+function buildSiteSettingsPath(siteId: string, section: SiteSettingsSection) {
+  return `/sites/${encodeURIComponent(siteId)}/settings?tab=${
+    SITE_SETTINGS_TAB_SLUG_BY_SECTION[section]
+  }`;
+}
+
 function getAppSectionFromLocation(): AppSection {
   if (typeof window === "undefined") return "dashboard";
   const path = normalizeDashboardCompatPath(
     window.location.pathname.replace(/\/+$/, "") || "/",
   );
+  if (parseSiteSettingsLocation().isSiteSettingsPath) {
+    return "site_settings";
+  }
   if (
     path === "/dashboard/settings" ||
     path.startsWith("/dashboard/settings/")
@@ -2184,6 +2356,7 @@ function getRouteFromLocation(): AppRoute {
   if (path === "/login") return "login";
   if (path === "/onboarding") return "onboarding";
   if (path === "/sites/new") return "new_site";
+  if (parseSiteSettingsLocation().isSiteSettingsPath) return "app";
   if (path === "/report") return "report";
   if (path.startsWith(`${SHARED_REPORT_ROUTE_PREFIX}/`)) return "shared_report";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
@@ -3000,6 +3173,10 @@ const App: React.FC = () => {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authWorking, setAuthWorking] = useState(false);
+  const [profileDisplayNameDraft, setProfileDisplayNameDraft] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSavedAt, setProfileSavedAt] = useState<string | null>(null);
 
   const apiFetch = useCallback(
     async (input: RequestInfo | URL, init: RequestInit = {}) => {
@@ -3012,6 +3189,69 @@ const App: React.FC = () => {
     [setAuthUser],
   );
 
+  function getUserDisplayName(user: AuthUser | null) {
+    const candidate = user?.displayName ?? user?.name ?? null;
+    return candidate?.trim() ? candidate.trim() : null;
+  }
+
+  function getUserAvatarInitials(user: AuthUser | null) {
+    const displayName = getUserDisplayName(user);
+    const source = displayName ?? user?.email ?? "";
+    if (!source.trim()) return "?";
+    if (displayName) {
+      const initials = displayName
+        .split(/\s+/)
+        .map((part) => part[0]?.toUpperCase())
+        .filter(Boolean)
+        .slice(0, 2)
+        .join("");
+      if (initials) return initials;
+    }
+    return source.trim()[0]?.toUpperCase() ?? "?";
+  }
+
+  function getSiteAvatarUrl(site: Site) {
+    if (site.avatar_status !== "cached") return null;
+    return `${API_BASE}/sites/${encodeURIComponent(site.id)}/avatar?v=${encodeURIComponent(
+      site.avatar_fetched_at ?? site.avatar_checked_at ?? site.id,
+    )}`;
+  }
+
+  function getSiteFallbackInitial(site: Site | null) {
+    const label = site ? (getSiteDisplayName(site) ?? site.url) : "";
+    const source = label.trim() || "Site";
+    return source[0]?.toUpperCase() ?? "S";
+  }
+
+  function renderSiteAvatar(
+    site: Site | null,
+    options?: { size?: "sm" | "md" | "lg"; label?: string },
+  ) {
+    const size = options?.size ?? "md";
+    const avatarUrl = site ? getSiteAvatarUrl(site) : null;
+    const label =
+      options?.label ??
+      (site ? `${getSiteDisplayName(site) ?? site.url} site avatar` : "Site");
+    return (
+      <span className={`site-avatar site-avatar--${size}`} title={label}>
+        <span className="site-avatar__fallback">
+          {site ? getSiteFallbackInitial(site) : "S"}
+        </span>
+        {avatarUrl ? (
+          <img
+            src={avatarUrl}
+            alt=""
+            className="site-avatar__image"
+            loading="lazy"
+            onError={(event) => {
+              event.currentTarget.style.display = "none";
+            }}
+          />
+        ) : null}
+      </span>
+    );
+  }
+
   const selectedSiteIdRef = useRef<string | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
@@ -3023,7 +3263,7 @@ const App: React.FC = () => {
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
   const [siteSettingsSection, setSiteSettingsSection] =
-    useState<SiteSettingsSection>("general");
+    useState<SiteSettingsSection>(() => parseSiteSettingsLocation().section);
   const [siteDisplayNameDraft, setSiteDisplayNameDraft] = useState("");
   const [siteClientNameDraft, setSiteClientNameDraft] = useState("");
   const [siteReportDisplayNameDraft, setSiteReportDisplayNameDraft] =
@@ -3032,6 +3272,8 @@ const App: React.FC = () => {
   const [siteDeveloperTabsDraft, setSiteDeveloperTabsDraft] = useState(false);
   const [siteDetailsSaving, setSiteDetailsSaving] = useState(false);
   const [siteDetailsError, setSiteDetailsError] = useState<string | null>(null);
+  const [siteAvatarWorking, setSiteAvatarWorking] = useState(false);
+  const [siteAvatarError, setSiteAvatarError] = useState<string | null>(null);
   const [onboardingRequired, setOnboardingRequired] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [setupSiteId, setSetupSiteId] = useState<string | null>(null);
@@ -3121,6 +3363,9 @@ const App: React.FC = () => {
   const [reportIssues, setReportIssues] = useState<ReportIssuesState>(
     EMPTY_REPORT_ISSUES_STATE,
   );
+  const [expandedReportIssueKey, setExpandedReportIssueKey] = useState<
+    string | null
+  >(null);
   const [reportIssueFilter, setReportIssueFilter] =
     useState<ReportIssueFilter>("all");
   const [reportFilteredIssueStates, setReportFilteredIssueStates] = useState<
@@ -3344,6 +3589,7 @@ const App: React.FC = () => {
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
   const [newRuleScope, setNewRuleScope] = useState<"site" | "global">("site");
+  const [newRuleError, setNewRuleError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [dashboardHistoryExpanded, setDashboardHistoryExpanded] =
     useState(false);
@@ -3530,6 +3776,7 @@ const App: React.FC = () => {
         .startsWith(SHARED_REPORT_ROUTE_PREFIX);
       setRoute(nextRoute);
       setAppSection(getAppSectionFromLocation());
+      setSiteSettingsSection(parseSiteSettingsLocation().section);
       setLearnSlug(getLearnSlugFromLocation());
       setReportScanRunId(nextReportId);
       setSharedReportToken(nextSharedToken);
@@ -6029,25 +6276,51 @@ const App: React.FC = () => {
     clearStorageItem(sitePickerSessionKey);
   }, [sitePickerSessionKey]);
 
+  const isEmptyEvidenceValue = (value: unknown) => {
+    if (value == null) return true;
+    if (typeof value === "string") return value.trim().length === 0;
+    if (Array.isArray(value)) return value.length === 0;
+    if (typeof value === "object") return Object.keys(value).length === 0;
+    return false;
+  };
+
   const formatEvidenceValue = (value: unknown): string => {
     if (typeof value === "string") return value;
     if (typeof value === "number" || typeof value === "boolean") {
       return String(value);
     }
-    if (value == null) return "null";
-    if (Array.isArray(value)) {
-      const rendered = value
-        .slice(0, 4)
-        .map((entry) => formatEvidenceValue(entry))
-        .join(", ");
-      return value.length > 4 ? `${rendered}, ...` : rendered;
+    if (Array.isArray(value) || typeof value === "object") {
+      return JSON.stringify(value, null, 2);
     }
-    if (typeof value === "object") return JSON.stringify(value);
     return String(value);
   };
 
-  const formatEvidenceLabel = (key: string) =>
-    key.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  const formatEvidenceLabel = (key: string) => {
+    const normalized = key.replace(/[_-]/g, " ");
+    const acronymLabels: Record<string, string> = {
+      csp: "CSP",
+      hsts: "HSTS",
+      html: "HTML",
+      http: "HTTP",
+      https: "HTTPS",
+      url: "URL",
+      urls: "URLs",
+      ssl: "SSL",
+      seo: "SEO",
+      xml: "XML",
+    };
+
+    return normalized
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => acronymLabels[part.toLowerCase()] ?? part)
+      .join(" ")
+      .replace(/\b\w/g, (char) => char.toUpperCase())
+      .replace(/\b(Csp|Hsts|Html|Http|Https|Url|Urls|Ssl|Seo|Xml)\b/g, (word) =>
+        word.toUpperCase(),
+      );
+  };
 
   const getIssueSummaryText = (
     issue: { description: string; presentation?: IssuePresentation | null },
@@ -6063,23 +6336,166 @@ const App: React.FC = () => {
     presentation?: IssuePresentation | null;
   }) => issue.presentation?.userTitle ?? issue.title;
 
-  const renderIssueGuidanceDetails = (
+  const renderIssueTechnicalEvidence = (issue: {
+    description: string;
+    evidence_json: Record<string, unknown>;
+    presentation?: IssuePresentation | null;
+  }) => {
+    const evidenceEntries = Object.entries(issue.evidence_json ?? {}).filter(
+      ([, value]) => !isEmptyEvidenceValue(value),
+    );
+
+    return (
+      <details className="report-issue-evidence">
+        <summary>Show technical evidence</summary>
+        <div className="report-issue-evidence__intro">
+          Values recorded during this scan. These are useful when a developer or
+          hosting provider needs the exact signal behind the finding.
+        </div>
+        <div className="report-issue-guidance__section">
+          <div className="report-label">Technical detail</div>
+          <p>{issue.presentation?.technicalDetail ?? issue.description}</p>
+        </div>
+        <div className="report-issue-guidance__section">
+          <div className="report-label">Stored summary</div>
+          <p>{issue.description}</p>
+        </div>
+        <div className="report-issue-guidance__section">
+          <div className="report-label">Technical evidence</div>
+          {evidenceEntries.length === 0 ? (
+            <p>No additional technical evidence was stored for this issue.</p>
+          ) : (
+            <div className="report-evidence-list">
+              {evidenceEntries.map(([key, value]) => {
+                const renderedValue = formatEvidenceValue(value);
+                const isLongValue = renderedValue.length > 140;
+                return (
+                  <div key={key} className="report-evidence-item">
+                    <div className="report-evidence-item__header">
+                      <strong>{formatEvidenceLabel(key)}</strong>
+                      {isLongValue && !isReadOnlyReport ? (
+                        <button
+                          type="button"
+                          className="report-url-action"
+                          onClick={() =>
+                            void copyToClipboard(
+                              renderedValue,
+                              undefined,
+                              "Copied technical evidence",
+                            )
+                          }
+                        >
+                          Copy
+                        </button>
+                      ) : null}
+                    </div>
+                    <code
+                      className={
+                        isLongValue
+                          ? "report-evidence-value report-evidence-value--long"
+                          : "report-evidence-value"
+                      }
+                    >
+                      {renderedValue}
+                    </code>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </details>
+    );
+  };
+
+  const renderIssueGuidancePanel = (
     issue: {
+      id: string;
+      title: string;
+      category: IssueCategory;
+      severity: IssueSeverity;
+      status: IssueStatus;
+      affected_url: string;
+      source_url: string | null;
       description: string;
       evidence_json: Record<string, unknown>;
+      change_status: IssueChangeStatus | null;
+      last_seen_at: string;
+      resolved_at?: string | null;
       presentation?: IssuePresentation | null;
     },
-    contextLabel = "View guidance",
+    issueKey: string,
   ) => {
     const presentation = issue.presentation;
     if (!presentation) return null;
-    const evidenceEntries = Object.entries(issue.evidence_json ?? {});
 
     return (
-      <details className="report-issue-guidance">
-        <summary>{contextLabel}</summary>
+      <div className="report-issue-guidance-panel">
+        <div className="report-issue-guidance-panel__header">
+          <div>
+            <div className="report-issue-guidance-panel__title">
+              {getIssueDisplayTitle(issue)}
+            </div>
+            <div className="report-issue-guidance-panel__badges">
+              <span
+                className={`report-badge report-badge--severity severity-${issue.severity}`}
+              >
+                {formatIssueSeverity(issue.severity)}
+              </span>
+              <span className="report-issue-category">
+                {formatIssueCategoryLabel(issue.category)}
+              </span>
+              <span className="report-badge report-badge--status">
+                {issue.status}
+              </span>
+              {issue.change_status ? (
+                <span
+                  className={`report-badge report-badge--change change-${issue.change_status}`}
+                >
+                  {formatIssueChangeStatus(issue.change_status)}
+                </span>
+              ) : null}
+            </div>
+          </div>
+          <div className="report-issue-guidance-panel__actions">
+            {renderIssueLearnLink(issue)}
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() =>
+                setExpandedReportIssueKey((current) =>
+                  current === issueKey ? null : current,
+                )
+              }
+            >
+              Collapse
+            </button>
+          </div>
+        </div>
+        <div className="report-issue-guidance-panel__urls">
+          <div>
+            <div className="report-label">Affected URL</div>
+            {renderReportUrlCell(issue.affected_url, {
+              copyLabel: "Copied affected URL",
+              showActions: false,
+            })}
+          </div>
+          <div>
+            <div className="report-label">Source URL</div>
+            {renderReportUrlCell(issue.source_url, {
+              copyLabel: "Copied source URL",
+              emptyLabel: "Not recorded",
+              showActions: false,
+            })}
+          </div>
+          <div>
+            <div className="report-label">
+              {issue.resolved_at ? "Resolved" : "Last seen"}
+            </div>
+            <p>{formatDate(issue.resolved_at ?? issue.last_seen_at)}</p>
+          </div>
+        </div>
         <div className="report-issue-guidance__body">
-          {renderIssueLearnLink(issue)}
           <div className="report-issue-guidance__section">
             <div className="report-label">What it means</div>
             <p>{presentation.whatItMeans}</p>
@@ -6092,35 +6508,28 @@ const App: React.FC = () => {
             <div className="report-label">What to do next</div>
             <p>{presentation.suggestedFix}</p>
           </div>
-          <details className="report-issue-tech">
-            <summary>Technical detail</summary>
-            <div className="report-issue-guidance__section">
-              <p>{presentation.technicalDetail}</p>
-            </div>
-            <div className="report-issue-guidance__section">
-              <div className="report-label">Stored summary</div>
-              <p>{issue.description}</p>
-            </div>
-            <div className="report-issue-guidance__section">
-              <div className="report-label">Raw evidence</div>
-              {evidenceEntries.length === 0 ? (
-                <p>No raw evidence was stored for this issue.</p>
-              ) : (
-                <div className="report-evidence-list">
-                  {evidenceEntries.map(([key, value]) => (
-                    <div key={key} className="report-evidence-item">
-                      <strong>{formatEvidenceLabel(key)}</strong>
-                      <span>{formatEvidenceValue(value)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </details>
+          {reportDeveloperTabsEnabled
+            ? renderIssueTechnicalEvidence(issue)
+            : null}
         </div>
-      </details>
+      </div>
     );
   };
+
+  const renderIssueGuidanceToggle = (issueKey: string) => (
+    <button
+      type="button"
+      className="report-guidance-trigger"
+      aria-expanded={expandedReportIssueKey === issueKey}
+      onClick={() =>
+        setExpandedReportIssueKey((current) =>
+          current === issueKey ? null : issueKey,
+        )
+      }
+    >
+      {expandedReportIssueKey === issueKey ? "Hide guidance" : "View guidance"}
+    </button>
+  );
 
   const renderIssueLearnLink = (issue: {
     presentation?: IssuePresentation | null;
@@ -6132,8 +6541,12 @@ const App: React.FC = () => {
     const href = buildLearnArticlePath(slug);
     if (isReadOnlyReport) {
       return (
-        <a className="report-learn-link" href={href}>
-          Read guide
+        <a
+          className="report-learn-link"
+          href={href}
+          aria-label="Read guide for this issue"
+        >
+          Read guide →
         </a>
       );
     }
@@ -6142,12 +6555,13 @@ const App: React.FC = () => {
         type="button"
         className="report-learn-link"
         title={article.summary}
+        aria-label="Read guide for this issue"
         onClick={(event) => {
           event.preventDefault();
           openLearnArticle(slug);
         }}
       >
-        Read guide
+        Read guide →
       </button>
     );
   };
@@ -7429,6 +7843,7 @@ const App: React.FC = () => {
             onClick={() => {
               setReportIssueFilter(filter.key);
               setReportVisibleIssueCount(REPORT_INITIAL_VISIBLE_ROWS);
+              setExpandedReportIssueKey(null);
             }}
           >
             {filter.label}
@@ -7481,76 +7896,92 @@ const App: React.FC = () => {
                 </td>
               </tr>
             ) : (
-              visibleIssueRows.map((issue) => (
-                <tr key={issue.id}>
-                  <td>
-                    <span
-                      className={`report-badge report-badge--severity severity-${issue.severity}`}
-                    >
-                      {formatIssueSeverity(issue.severity)}
-                    </span>
-                  </td>
-                  <td>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: "6px",
-                        alignItems: "center",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <span>{getIssueDisplayTitle(issue)}</span>
-                      <span className="report-issue-category">
-                        {formatIssueCategoryLabel(issue.category)}
-                      </span>
-                    </div>
-                    <div
-                      className="report-issue-support"
-                      title={
-                        issue.presentation?.shortSummary ?? issue.description
-                      }
-                    >
-                      {getIssueSummaryText(issue)}
-                    </div>
-                    {renderIssueGuidanceDetails(issue)}
-                  </td>
-                  <td>
-                    {renderReportUrlCell(issue.affected_url, {
-                      copyLabel: "Copied affected URL",
-                      showActions: false,
-                    })}
-                  </td>
-                  <td>
-                    {renderReportUrlCell(issue.source_url, {
-                      copyLabel: "Copied source URL",
-                      showActions: false,
-                    })}
-                  </td>
-                  <td>
-                    <div className="report-issue-badges">
-                      <span className="report-badge report-badge--status">
-                        {issue.status}
-                      </span>
-                      {issue.change_status && (
+              visibleIssueRows.map((issue) => {
+                const issueKey = `issue:${issue.id}`;
+                const isExpanded = expandedReportIssueKey === issueKey;
+                return (
+                  <React.Fragment key={issueKey}>
+                    <tr>
+                      <td>
                         <span
-                          className={`report-badge report-badge--change change-${issue.change_status}`}
+                          className={`report-badge report-badge--severity severity-${issue.severity}`}
                         >
-                          {formatIssueChangeStatus(issue.change_status)}
+                          {formatIssueSeverity(issue.severity)}
                         </span>
+                      </td>
+                      <td>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "6px",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <span>{getIssueDisplayTitle(issue)}</span>
+                          <span className="report-issue-category">
+                            {formatIssueCategoryLabel(issue.category)}
+                          </span>
+                        </div>
+                        <div
+                          className="report-issue-support"
+                          title={
+                            issue.presentation?.shortSummary ??
+                            issue.description
+                          }
+                        >
+                          {getIssueSummaryText(issue)}
+                        </div>
+                        {issue.presentation
+                          ? renderIssueGuidanceToggle(issueKey)
+                          : null}
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.affected_url, {
+                          copyLabel: "Copied affected URL",
+                          showActions: false,
+                        })}
+                      </td>
+                      <td>
+                        {renderReportUrlCell(issue.source_url, {
+                          copyLabel: "Copied source URL",
+                          showActions: false,
+                        })}
+                      </td>
+                      <td>
+                        <div className="report-issue-badges">
+                          <span className="report-badge report-badge--status">
+                            {issue.status}
+                          </span>
+                          {issue.change_status && (
+                            <span
+                              className={`report-badge report-badge--change change-${issue.change_status}`}
+                            >
+                              {formatIssueChangeStatus(issue.change_status)}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td>{formatDate(issue.last_seen_at)}</td>
+                      {!isReadOnlyReport && (
+                        <td>
+                          {renderReportIssueActionMenu(
+                            issue,
+                            `report-issue:${issue.id}`,
+                          )}
+                        </td>
                       )}
-                    </div>
-                  </td>
-                  <td>{formatDate(issue.last_seen_at)}</td>
-                  {!isReadOnlyReport && (
-                    <td>
-                      {renderReportIssueActionMenu(
-                        issue,
-                        `report-issue:${issue.id}`,
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))
+                    </tr>
+                    {isExpanded ? (
+                      <tr className="report-issue-guidance-row">
+                        <td colSpan={isReadOnlyReport ? 6 : 7}>
+                          {renderIssueGuidancePanel(issue, issueKey)}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </React.Fragment>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -7610,68 +8041,83 @@ const App: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  reportIssues.resolvedIssues.map((issue) => (
-                    <tr key={`resolved:${issue.id}`}>
-                      <td>
-                        <span
-                          className={`report-badge report-badge--severity severity-${issue.severity}`}
-                        >
-                          {formatIssueSeverity(issue.severity)}
-                        </span>
-                      </td>
-                      <td>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "6px",
-                            alignItems: "center",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <span>{getIssueDisplayTitle(issue)}</span>
-                          <span className="report-issue-category">
-                            {formatIssueCategoryLabel(issue.category)}
-                          </span>
-                        </div>
-                        <div
-                          className="report-issue-support"
-                          title={
-                            issue.presentation?.shortSummary ??
-                            issue.description
-                          }
-                        >
-                          {getIssueSummaryText(issue)}
-                        </div>
-                        {renderIssueGuidanceDetails(issue)}
-                      </td>
-                      <td>
-                        {renderReportUrlCell(issue.affected_url, {
-                          copyLabel: "Copied affected URL",
-                          showActions: false,
-                        })}
-                      </td>
-                      <td>
-                        {renderReportUrlCell(issue.source_url, {
-                          copyLabel: "Copied source URL",
-                          showActions: false,
-                        })}
-                      </td>
-                      <td>
-                        <span className="report-badge report-badge--change change-resolved">
-                          {formatIssueChangeStatus(issue.change_status)}
-                        </span>
-                      </td>
-                      <td>{formatDate(issue.resolved_at)}</td>
-                      {!isReadOnlyReport && (
-                        <td>
-                          {renderReportIssueActionMenu(
-                            issue,
-                            `report-resolved-issue:${issue.id}`,
+                  reportIssues.resolvedIssues.map((issue) => {
+                    const issueKey = `resolved:${issue.id}`;
+                    const isExpanded = expandedReportIssueKey === issueKey;
+                    return (
+                      <React.Fragment key={issueKey}>
+                        <tr>
+                          <td>
+                            <span
+                              className={`report-badge report-badge--severity severity-${issue.severity}`}
+                            >
+                              {formatIssueSeverity(issue.severity)}
+                            </span>
+                          </td>
+                          <td>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "6px",
+                                alignItems: "center",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <span>{getIssueDisplayTitle(issue)}</span>
+                              <span className="report-issue-category">
+                                {formatIssueCategoryLabel(issue.category)}
+                              </span>
+                            </div>
+                            <div
+                              className="report-issue-support"
+                              title={
+                                issue.presentation?.shortSummary ??
+                                issue.description
+                              }
+                            >
+                              {getIssueSummaryText(issue)}
+                            </div>
+                            {issue.presentation
+                              ? renderIssueGuidanceToggle(issueKey)
+                              : null}
+                          </td>
+                          <td>
+                            {renderReportUrlCell(issue.affected_url, {
+                              copyLabel: "Copied affected URL",
+                              showActions: false,
+                            })}
+                          </td>
+                          <td>
+                            {renderReportUrlCell(issue.source_url, {
+                              copyLabel: "Copied source URL",
+                              showActions: false,
+                            })}
+                          </td>
+                          <td>
+                            <span className="report-badge report-badge--change change-resolved">
+                              {formatIssueChangeStatus(issue.change_status)}
+                            </span>
+                          </td>
+                          <td>{formatDate(issue.resolved_at)}</td>
+                          {!isReadOnlyReport && (
+                            <td>
+                              {renderReportIssueActionMenu(
+                                issue,
+                                `report-resolved-issue:${issue.id}`,
+                              )}
+                            </td>
                           )}
-                        </td>
-                      )}
-                    </tr>
-                  ))
+                        </tr>
+                        {isExpanded ? (
+                          <tr className="report-issue-guidance-row">
+                            <td colSpan={isReadOnlyReport ? 6 : 7}>
+                              {renderIssueGuidancePanel(issue, issueKey)}
+                            </td>
+                          </tr>
+                        ) : null}
+                      </React.Fragment>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -7697,67 +8143,74 @@ const App: React.FC = () => {
           </div>
         </div>
         <div className="report-priority-list">
-          {topPriorityIssues.map((issue) => (
-            <div key={`priority:${issue.id}`} className="report-priority-item">
-              <div className="report-priority-item__top">
-                <div className="report-priority-item__title">
-                  {getIssueDisplayTitle(issue)}
-                </div>
-                <div className="report-issue-badges">
-                  <span
-                    className={`report-badge report-badge--severity severity-${issue.severity}`}
-                  >
-                    {formatIssueSeverity(issue.severity)}
-                  </span>
-                  {issue.change_status && (
+          {topPriorityIssues.map((issue) => {
+            const issueKey = `priority:${issue.id}`;
+            const isExpanded = expandedReportIssueKey === issueKey;
+            return (
+              <div key={issueKey} className="report-priority-item">
+                <div className="report-priority-item__top">
+                  <div className="report-priority-item__title">
+                    {getIssueDisplayTitle(issue)}
+                  </div>
+                  <div className="report-issue-badges">
                     <span
-                      className={`report-badge report-badge--change change-${issue.change_status}`}
+                      className={`report-badge report-badge--severity severity-${issue.severity}`}
                     >
-                      {formatIssueChangeStatus(issue.change_status)}
+                      {formatIssueSeverity(issue.severity)}
                     </span>
-                  )}
+                    {issue.change_status && (
+                      <span
+                        className={`report-badge report-badge--change change-${issue.change_status}`}
+                      >
+                        {formatIssueChangeStatus(issue.change_status)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="report-priority-item__actions">
+                    {renderReportTopPriorityIssueActionMenu(
+                      issue,
+                      `report-priority-issue:${issue.id}`,
+                    )}
+                  </div>
                 </div>
-                <div className="report-priority-item__actions">
-                  {renderReportTopPriorityIssueActionMenu(
-                    issue,
-                    `report-priority-issue:${issue.id}`,
-                  )}
+                <div className="report-priority-item__meta">
+                  <span className="report-issue-category">
+                    {formatIssueCategoryLabel(issue.category)}
+                  </span>
+                  <span>{formatDate(issue.last_seen_at)}</span>
                 </div>
-              </div>
-              <div className="report-priority-item__meta">
-                <span className="report-issue-category">
-                  {formatIssueCategoryLabel(issue.category)}
-                </span>
-                <span>{formatDate(issue.last_seen_at)}</span>
-              </div>
-              <div className="report-priority-item__desc">
-                {getIssueSummaryText(issue, 120)}
-              </div>
-              <div className="report-priority-item__next-step">
-                <div className="report-label">What to do next</div>
-                <div>
-                  {issue.presentation?.suggestedFix ?? issue.description}
+                <div className="report-priority-item__desc">
+                  {getIssueSummaryText(issue, 120)}
                 </div>
-              </div>
-              <div className="report-priority-item__urls">
-                <div>
-                  <div className="report-label">Affected URL</div>
-                  {renderReportUrlCell(issue.affected_url, {
-                    copyLabel: "Copied affected URL",
-                    showActions: false,
-                  })}
+                <div className="report-priority-item__next-step">
+                  <div className="report-label">What to do next</div>
+                  <div>
+                    {issue.presentation?.suggestedFix ?? issue.description}
+                  </div>
                 </div>
-                <div>
-                  <div className="report-label">Source URL</div>
-                  {renderReportUrlCell(issue.source_url, {
-                    copyLabel: "Copied source URL",
-                    showActions: false,
-                  })}
+                <div className="report-priority-item__urls">
+                  <div>
+                    <div className="report-label">Affected URL</div>
+                    {renderReportUrlCell(issue.affected_url, {
+                      copyLabel: "Copied affected URL",
+                      showActions: false,
+                    })}
+                  </div>
+                  <div>
+                    <div className="report-label">Source URL</div>
+                    {renderReportUrlCell(issue.source_url, {
+                      copyLabel: "Copied source URL",
+                      showActions: false,
+                    })}
+                  </div>
                 </div>
+                {issue.presentation
+                  ? renderIssueGuidanceToggle(issueKey)
+                  : null}
+                {isExpanded ? renderIssueGuidancePanel(issue, issueKey) : null}
               </div>
-              {renderIssueGuidanceDetails(issue, "Open guidance")}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     );
@@ -8052,6 +8505,12 @@ const App: React.FC = () => {
   useEffect(() => {
     void loadMe();
   }, []);
+
+  useEffect(() => {
+    setProfileDisplayNameDraft(getUserDisplayName(authUser) ?? "");
+    setProfileError(null);
+    setProfileSavedAt(null);
+  }, [authUser?.id, authUser?.displayName, authUser?.name]);
 
   useEffect(() => {
     if (authUser) {
@@ -8598,6 +9057,10 @@ const App: React.FC = () => {
     setNotifications([]);
     setUnreadNotificationCount(0);
     setNotificationMenuOpen(false);
+    setProfileDisplayNameDraft("");
+    setProfileSaving(false);
+    setProfileError(null);
+    setProfileSavedAt(null);
     setAccountNotificationPreferences(DEFAULT_USER_NOTIFICATION_PREFERENCES);
     setAccountNotificationPreferencesLoading(false);
     setAccountNotificationPreferencesSaving(false);
@@ -8672,15 +9135,38 @@ const App: React.FC = () => {
     }
   }
 
-  async function updateAccountNotificationPreference(
-    field: UserNotificationPreferenceField,
-    value: boolean,
+  async function handleSaveProfile() {
+    if (!authUser) return;
+    setProfileSaving(true);
+    setProfileError(null);
+    setProfileSavedAt(null);
+    try {
+      const res = await apiFetch(`${API_BASE}/account/profile`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          displayName: profileDisplayNameDraft.trim() || null,
+        }),
+      });
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as AccountProfileResponse;
+      setAuthUser(data.user);
+      setProfileDisplayNameDraft(getUserDisplayName(data.user) ?? "");
+      setProfileSavedAt(new Date().toISOString());
+    } catch (err: unknown) {
+      console.warn("Failed to save profile", err);
+      setProfileError("Could not save profile. Please try again.");
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function updateAccountNotificationPreferencesPatch(
+    patch: Partial<Record<UserNotificationPreferenceField, boolean>>,
+    options?: { rethrow?: boolean },
   ) {
     const previous = accountNotificationPreferences;
-    setAccountNotificationPreferences((current) => ({
-      ...current,
-      [field]: value,
-    }));
+    setAccountNotificationPreferences((current) => ({ ...current, ...patch }));
     setAccountNotificationPreferencesSaving(true);
     setAccountNotificationPreferencesSavedAt(null);
     setAccountNotificationPreferencesError(null);
@@ -8690,22 +9176,32 @@ const App: React.FC = () => {
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ [field]: value }),
+          body: JSON.stringify(patch),
         },
       );
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as UserNotificationPreferencesResponse;
       setAccountNotificationPreferences(data.preferences);
       setAccountNotificationPreferencesSavedAt(new Date().toISOString());
+      return data.preferences;
     } catch (err: unknown) {
       console.warn("Failed to update notification preferences", err);
       setAccountNotificationPreferences(previous);
       setAccountNotificationPreferencesError(
         "Could not save notification preferences.",
       );
+      if (options?.rethrow) throw err;
+      return null;
     } finally {
       setAccountNotificationPreferencesSaving(false);
     }
+  }
+
+  async function updateAccountNotificationPreference(
+    field: UserNotificationPreferenceField,
+    value: boolean,
+  ) {
+    await updateAccountNotificationPreferencesPatch({ [field]: value });
   }
 
   async function loadMe() {
@@ -9607,6 +10103,39 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
+    if (route !== "app" || appSection !== "site_settings") return;
+    const parsed = parseSiteSettingsLocation();
+    if (!parsed.isSiteSettingsPath) return;
+
+    setSiteSettingsSection(parsed.section);
+
+    if (parsed.isInvalidTab) {
+      openSiteSettings(parsed.section, parsed.siteId ?? selectedSiteId, {
+        replace: true,
+      });
+      return;
+    }
+
+    if (!parsed.siteId) {
+      if (selectedSiteId) {
+        openSiteSettings(parsed.section, selectedSiteId, { replace: true });
+      }
+      return;
+    }
+
+    if (parsed.siteId === selectedSiteId) return;
+    if (sitesLoadState === "idle" || sitesLoadState === "loading") return;
+
+    const targetSite = sites.find((site) => site.id === parsed.siteId);
+    if (targetSite) {
+      void handleSelectSite(targetSite);
+      return;
+    }
+
+    navigateTo("/dashboard/select-site");
+  }, [appSection, route, selectedSiteId, sites, sitesLoadState]);
+
+  useEffect(() => {
     if (!selectedSite) {
       setSiteDisplayNameDraft("");
       setSiteClientNameDraft("");
@@ -9614,9 +10143,9 @@ const App: React.FC = () => {
       setSiteInternalNotesDraft("");
       setSiteDeveloperTabsDraft(false);
       setSiteDetailsError(null);
+      setSiteAvatarError(null);
       return;
     }
-    setSiteSettingsSection("general");
     setSiteDisplayNameDraft(
       selectedSite.site_display_name ?? selectedSiteName ?? "",
     );
@@ -9625,6 +10154,7 @@ const App: React.FC = () => {
     setSiteInternalNotesDraft(selectedSite.internal_notes ?? "");
     setSiteDeveloperTabsDraft(selectedSite.developer_tabs_enabled === true);
     setSiteDetailsError(null);
+    setSiteAvatarError(null);
   }, [selectedSite, selectedSiteName]);
 
   useEffect(() => {
@@ -9908,6 +10438,13 @@ const App: React.FC = () => {
     setStartUrl(site.url);
 
     await loadHistory(site.id, { preserveSelection: false });
+  }
+
+  async function handleSelectSiteFromNavigation(site: Site) {
+    await handleSelectSite(site);
+    if (appSection === "site_settings") {
+      openSiteSettings(siteSettingsSection, site.id);
+    }
   }
 
   async function handleSelectRunForWorkspace(run: ScanRunSummary) {
@@ -10302,6 +10839,21 @@ const App: React.FC = () => {
         );
       }
 
+      await updateAccountNotificationPreferencesPatch(
+        {
+          inAppEnabled: accountNotificationPreferences.inAppEnabled,
+          scanCompletedEnabled:
+            accountNotificationPreferences.scanCompletedEnabled,
+          scanFailedEnabled: accountNotificationPreferences.scanFailedEnabled,
+          highPriorityIssuesEnabled:
+            accountNotificationPreferences.highPriorityIssuesEnabled,
+          uptimeDownEnabled: accountNotificationPreferences.uptimeDownEnabled,
+          uptimeRecoveredEnabled:
+            accountNotificationPreferences.uptimeRecoveredEnabled,
+        },
+        { rethrow: true },
+      );
+
       setScheduleEnabled(scheduleData.scheduleEnabled);
       setScheduleFrequency(scheduleData.scheduleFrequency);
       setScheduleTimeUtc(normalizeTimeInput(scheduleData.scheduleTimeUtc));
@@ -10448,6 +11000,90 @@ const App: React.FC = () => {
     } catch (err: unknown) {
       setSiteDetailsError(
         getErrorMessage(err, "Failed to update site details"),
+      );
+    } finally {
+      setSiteDetailsSaving(false);
+    }
+  }
+
+  async function handleRefreshSiteAvatar() {
+    if (!selectedSiteId) return;
+    setSiteAvatarWorking(true);
+    setSiteAvatarError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/avatar/refresh`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as { site: Site };
+      applyUpdatedSite(data.site);
+      pushToast(
+        data.site.avatar_status === "cached"
+          ? "Site avatar refreshed"
+          : "No favicon found; fallback icon will be used",
+        data.site.avatar_status === "cached" ? "success" : "info",
+      );
+    } catch (err: unknown) {
+      console.warn("Failed to refresh site avatar", err);
+      setSiteAvatarError("Could not refresh site avatar. Please try again.");
+    } finally {
+      setSiteAvatarWorking(false);
+    }
+  }
+
+  async function handleRemoveSiteAvatar() {
+    if (!selectedSiteId) return;
+    setSiteAvatarWorking(true);
+    setSiteAvatarError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/avatar`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as { site: Site };
+      applyUpdatedSite(data.site);
+      pushToast("Site avatar removed", "success");
+    } catch (err: unknown) {
+      console.warn("Failed to remove site avatar", err);
+      setSiteAvatarError("Could not remove site avatar. Please try again.");
+    } finally {
+      setSiteAvatarWorking(false);
+    }
+  }
+
+  async function handleSaveDeveloperTabs() {
+    if (!selectedSiteId) return;
+    setSiteDetailsSaving(true);
+    setSiteDetailsError(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            developerTabsEnabled: siteDeveloperTabsDraft,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(
+          message || `Advanced settings update failed: ${res.status}`,
+        );
+      }
+
+      const data = (await res.json()) as { site: Site };
+      applyUpdatedSite(data.site);
+      setSiteDeveloperTabsDraft(data.site.developer_tabs_enabled === true);
+      pushToast("Advanced settings updated", "success");
+    } catch (err: unknown) {
+      setSiteDetailsError(
+        getErrorMessage(err, "Failed to update advanced settings"),
       );
     } finally {
       setSiteDetailsSaving(false);
@@ -10642,7 +11278,7 @@ const App: React.FC = () => {
             enabled: notifyEnabled,
             email: notifyEmail.trim() || null,
             notifyOn,
-            includeCsv: notifyIncludeCsv,
+            includeCsv: false,
             summaryEnabled,
           }),
         },
@@ -10986,18 +11622,10 @@ const App: React.FC = () => {
     return buildAppUrl("/report", params);
   }
 
-  function buildReportPdfUrl(scanRunId: string) {
-    return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/report.pdf`;
-  }
-
   function buildSharedReportUrl(shareToken: string) {
     return buildAppUrl(
       `${SHARED_REPORT_ROUTE_PREFIX}/${encodeURIComponent(shareToken)}`,
     );
-  }
-
-  function buildSharedReportPdfUrl(shareToken: string) {
-    return `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}/report.pdf`;
   }
 
   function normalizeReportShare(response: ReportShareResponse["share"] | null) {
@@ -11008,37 +11636,8 @@ const App: React.FC = () => {
     };
   }
 
-  async function handleRunPdfExport(scanRunId: string) {
-    const pdfUrl = buildReportPdfUrl(scanRunId);
-    try {
-      const res = await apiFetch(pdfUrl, { method: "HEAD" });
-      if (
-        res.ok ||
-        res.status === 405 ||
-        res.status === 302 ||
-        res.status === 304
-      ) {
-        window.open(pdfUrl, "_blank", "noopener,noreferrer");
-        return;
-      }
-      throw new Error(`PDF endpoint returned ${res.status}`);
-    } catch {
-      pushToast(
-        "PDF export endpoint unavailable. Opened the report print view.",
-        "warning",
-      );
-      window.open(
-        buildReportUrl(scanRunId, { print: true }),
-        "_blank",
-        "noopener,noreferrer",
-      );
-    }
-  }
-
-  function getReportShareUrl(shareToken: string, shareUrl?: string) {
-    return shareUrl?.includes("/shared-results/")
-      ? buildSharedReportUrl(shareToken)
-      : (shareUrl ?? buildSharedReportUrl(shareToken));
+  function getReportShareUrl(shareToken: string) {
+    return buildSharedReportUrl(shareToken);
   }
 
   async function handleCreateRunShareLink(scanRunId: string) {
@@ -11069,7 +11668,7 @@ const App: React.FC = () => {
         throw new Error("Share link is missing in response");
       }
       await copyToClipboard(
-        getReportShareUrl(data.share.shareToken, normalizedShare.shareUrl),
+        getReportShareUrl(data.share.shareToken),
         undefined,
         "Share link copied",
       );
@@ -11098,6 +11697,7 @@ const App: React.FC = () => {
       .startsWith("/shared-reports");
     setRoute(nextRoute);
     setAppSection(getAppSectionFromLocation());
+    setSiteSettingsSection(parseSiteSettingsLocation().section);
     setLearnSlug(getLearnSlugFromLocation());
     setReportScanRunId(nextReportId);
     setSharedReportToken(nextSharedToken);
@@ -11115,7 +11715,45 @@ const App: React.FC = () => {
     navigateTo(buildLearnArticlePath(slug));
   }
 
+  function openSiteSettings(
+    section: SiteSettingsSection = "general",
+    siteId: string | null | undefined = selectedSiteId,
+    options?: { replace?: boolean },
+  ) {
+    const targetPath = siteId
+      ? buildSiteSettingsPath(siteId, section)
+      : `/dashboard/settings?tab=${SITE_SETTINGS_TAB_SLUG_BY_SECTION[section]}`;
+    const [pathname, search = ""] = targetPath.split("?");
+    const url = new URL(window.location.href);
+    url.pathname = pathname;
+    url.search = search ? `?${search}` : "";
+    url.hash = "";
+    if (options?.replace) {
+      window.history.replaceState({}, "", url.toString());
+    } else {
+      window.history.pushState({}, "", url.toString());
+    }
+    setRoute("app");
+    setAppSection("site_settings");
+    setSiteSettingsSection(section);
+    setLearnSlug(null);
+    setScanWorkspaceOpen(false);
+    setViewMode("dashboard");
+    setReportScanRunId(null);
+    setReportRunData(null);
+    setReportSummaryRows([]);
+    setReportSummaryTotals(EMPTY_REPORT_SUMMARY_COUNTS);
+    setReportIgnoredTotal(null);
+    setReportLastLoadedAt(null);
+    resetReportSections();
+    setReportError(null);
+  }
+
   function openAppSection(section: AppSection) {
+    if (section === "site_settings") {
+      openSiteSettings(siteSettingsSection);
+      return;
+    }
     if (
       section === "dashboard" &&
       ((route === "app" && appSection !== "dashboard") ||
@@ -11129,6 +11767,7 @@ const App: React.FC = () => {
     window.history.pushState({}, "", url);
     setRoute("app");
     setAppSection(section);
+    setSiteSettingsSection(parseSiteSettingsLocation().section);
     setLearnSlug(null);
     if (section !== "reports") {
       setScanWorkspaceOpen(false);
@@ -11628,7 +12267,21 @@ const App: React.FC = () => {
   async function handleCreateIgnoreRule() {
     if (!selectedSiteId) return;
     const pattern = newRulePattern.trim();
-    if (!pattern) return;
+    const normalizedPattern = normalizeFriendlyIgnoreRulePattern(
+      newRuleType,
+      pattern,
+    );
+    const broadWarning = getBroadIgnoreRuleWarning(newRuleType, pattern);
+    if (!pattern) {
+      setNewRuleError("Enter a URL, domain, or path pattern to ignore.");
+      return;
+    }
+    if (broadWarning) {
+      setNewRuleError(broadWarning);
+      return;
+    }
+    setNewRuleError(null);
+    setIgnoreRulesError(null);
     try {
       const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
@@ -11637,7 +12290,7 @@ const App: React.FC = () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             ruleType: newRuleType,
-            pattern,
+            pattern: normalizedPattern,
             scope: newRuleScope,
           }),
         },
@@ -11645,39 +12298,19 @@ const App: React.FC = () => {
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         const message = extractErrorMessageFromBody(text);
-        throw new Error(message || `Create failed: ${res.status}`);
+        throw new Error(
+          message || "Could not add this ignore rule. Check the pattern.",
+        );
       }
       setNewRulePattern("");
+      setNewRuleError(null);
       await loadIgnoreRules(selectedSiteId);
       if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
       pushToast("Ignore rule created", "success");
     } catch (err: unknown) {
-      pushToast(
-        getErrorMessage(err, "Failed to create ignore rule"),
-        "warning",
-      );
-    }
-  }
-
-  async function handleSharedReportPdfExport(shareToken: string) {
-    const pdfUrl = buildSharedReportPdfUrl(shareToken);
-    try {
-      const res = await apiFetch(pdfUrl, { method: "HEAD" });
-      if (
-        res.ok ||
-        res.status === 405 ||
-        res.status === 302 ||
-        res.status === 304
-      ) {
-        window.open(pdfUrl, "_blank", "noopener,noreferrer");
-        return;
-      }
-      throw new Error(`Shared PDF endpoint returned ${res.status}`);
-    } catch {
-      pushToast(
-        "Shared PDF download is unavailable for this token.",
-        "warning",
-      );
+      const message = getErrorMessage(err, "Failed to create ignore rule");
+      setNewRuleError(message);
+      pushToast(message, "warning");
     }
   }
 
@@ -12104,6 +12737,52 @@ const App: React.FC = () => {
     </div>
   );
 
+  function toggleOnboardingNotificationPreference(
+    field: UserNotificationPreferenceField,
+  ) {
+    setAccountNotificationPreferences((current) => ({
+      ...current,
+      [field]: !current[field],
+    }));
+    setAccountNotificationPreferencesSavedAt(null);
+    setAccountNotificationPreferencesError(null);
+  }
+
+  function renderOnboardingNotificationToggle(
+    field: UserNotificationPreferenceField,
+    title: string,
+    help: string,
+    options?: { master?: boolean },
+  ) {
+    const checked = accountNotificationPreferences[field];
+    const disabled =
+      accountNotificationPreferencesLoading ||
+      (!options?.master && !accountNotificationPreferences.inAppEnabled);
+    return (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        className={`onboarding-toggle-card ${
+          checked ? "is-active" : ""
+        } ${disabled ? "is-disabled" : ""}`}
+        disabled={disabled}
+        onClick={() => toggleOnboardingNotificationPreference(field)}
+      >
+        <span className="onboarding-toggle-card__copy">
+          <span className="onboarding-toggle-card__topline">
+            <span className="onboarding-toggle-card__title">{title}</span>
+            <span className="onboarding-toggle-card__state">
+              {checked ? "On" : "Off"}
+            </span>
+          </span>
+          <span className="onboarding-toggle-card__help">{help}</span>
+        </span>
+        <span className="onboarding-switch" />
+      </button>
+    );
+  }
+
   function renderAccountNotificationPreferenceToggle(
     field: UserNotificationPreferenceField,
     title: string,
@@ -12133,6 +12812,55 @@ const App: React.FC = () => {
           <span className="account-notification-toggle__help">{help}</span>
         </span>
         <span className="account-notification-toggle__switch" />
+      </button>
+    );
+  }
+
+  function renderSettingsToggleRow(options: {
+    title: string;
+    description: string;
+    checked: boolean;
+    onToggle?: (next: boolean) => void;
+    disabled?: boolean;
+    comingSoon?: boolean;
+    statusLabel?: string;
+  }) {
+    const isDisabled = options.disabled === true || options.comingSoon === true;
+    const statusLabel =
+      options.statusLabel ??
+      (options.comingSoon
+        ? "Coming soon"
+        : options.checked
+          ? "Enabled"
+          : "Off");
+
+    return (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={options.checked}
+        disabled={isDisabled}
+        className={`settings-toggle-row ${
+          options.checked ? "is-active" : "is-off"
+        } ${isDisabled ? "is-disabled" : ""} ${
+          options.comingSoon ? "is-coming-soon" : ""
+        }`}
+        onClick={() => {
+          if (!isDisabled) options.onToggle?.(!options.checked);
+        }}
+      >
+        <span className="settings-toggle-row__copy">
+          <span className="settings-toggle-row__title">{options.title}</span>
+          <span className="settings-toggle-row__description">
+            {options.description}
+          </span>
+        </span>
+        <span className="settings-toggle-row__control">
+          <span className="settings-toggle-status">{statusLabel}</span>
+          <span className="settings-toggle-switch" aria-hidden="true">
+            <span className="settings-toggle-switch__knob" />
+          </span>
+        </span>
       </button>
     );
   }
@@ -14512,6 +15240,11 @@ const App: React.FC = () => {
         .onboarding-choice-grid--scan-types {
           grid-template-columns: repeat(4, minmax(0, 1fr));
         }
+        .onboarding-notification-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 10px;
+        }
         .onboarding-choice {
           text-align: left;
           border-radius: 14px;
@@ -14556,6 +15289,10 @@ const App: React.FC = () => {
         .onboarding-toggle-card.is-active {
           border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
           background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+        }
+        .onboarding-toggle-card.is-disabled {
+          opacity: 0.58;
+          cursor: not-allowed;
         }
         .onboarding-toggle-card__copy {
           display: grid;
@@ -15194,6 +15931,68 @@ const App: React.FC = () => {
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 16px;
         }
+        .site-avatar {
+          position: relative;
+          flex: 0 0 auto;
+          width: 40px;
+          height: 40px;
+          border-radius: 10px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--accent) 11%, var(--panel));
+          overflow: hidden;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--text);
+          font-weight: 900;
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, white 5%, transparent);
+        }
+        .site-avatar--sm {
+          width: 32px;
+          height: 32px;
+          border-radius: 8px;
+          font-size: 13px;
+        }
+        .site-avatar--md {
+          width: 44px;
+          height: 44px;
+          border-radius: 10px;
+          font-size: 15px;
+        }
+        .site-avatar--lg {
+          width: 58px;
+          height: 58px;
+          border-radius: 12px;
+          font-size: 18px;
+        }
+        .site-avatar__fallback {
+          position: absolute;
+          inset: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .site-avatar__image {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          background: var(--panel);
+        }
+        .dashboard-site-identity,
+        .dashboard-history-row__identity {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          gap: 12px;
+          align-items: center;
+          min-width: 0;
+        }
+        .dashboard-history-row__identity {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 9px;
+          align-items: start;
+        }
         .app-settings-card {
           padding: 18px;
           border-radius: 18px;
@@ -15207,6 +16006,36 @@ const App: React.FC = () => {
           display: grid;
           gap: 16px;
         }
+        .site-avatar-settings {
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          gap: 14px;
+          align-items: center;
+          padding: 14px;
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          background: color-mix(in srgb, var(--panel-elev) 72%, transparent);
+        }
+        .site-avatar-settings__copy {
+          display: grid;
+          gap: 4px;
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .site-avatar-settings__copy strong {
+          color: var(--text);
+          font-size: 13px;
+        }
+        .site-avatar-settings__error {
+          color: var(--warning);
+        }
+        .site-avatar-settings__actions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+        }
         .app-settings-nav {
           display: flex;
           gap: 10px;
@@ -15214,8 +16043,8 @@ const App: React.FC = () => {
         }
         .app-settings-nav__button {
           min-height: 40px;
-          padding: 10px 14px;
-          border-radius: 999px;
+          padding: 11px 14px;
+          border-radius: 12px;
           border: 1px solid var(--border);
           background: var(--panel);
           color: var(--text);
@@ -15224,6 +16053,7 @@ const App: React.FC = () => {
           gap: 8px;
           cursor: pointer;
           font: inherit;
+          flex: 1 1 160px;
           transition:
             border-color 150ms ease,
             background 150ms ease,
@@ -15231,7 +16061,10 @@ const App: React.FC = () => {
         }
         .app-settings-nav__button.active {
           background: color-mix(in srgb, var(--accent) 16%, var(--panel));
-          border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+          border-color: color-mix(in srgb, var(--accent) 68%, var(--border));
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent),
+            0 10px 24px color-mix(in srgb, var(--accent) 14%, transparent);
         }
         .app-settings-nav__button:hover {
           transform: translateY(-1px);
@@ -15337,6 +16170,180 @@ const App: React.FC = () => {
           color: var(--muted);
           line-height: 1.55;
         }
+        .app-settings-help {
+          display: grid;
+          gap: 6px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 78%, transparent);
+          color: var(--muted);
+          font-size: 13px;
+          line-height: 1.55;
+        }
+        .app-settings-warning {
+          padding: 10px 12px;
+          border-radius: 10px;
+          border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+          background: color-mix(in srgb, var(--warning) 10%, var(--panel));
+          color: var(--warning);
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .settings-toggle-row {
+          width: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 18px;
+          padding: 15px;
+          border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+          border-radius: 16px;
+          background:
+            linear-gradient(
+              135deg,
+              color-mix(in srgb, var(--panel-elev) 86%, transparent),
+              color-mix(in srgb, var(--panel) 96%, transparent)
+            );
+          color: var(--text);
+          cursor: pointer;
+          font: inherit;
+          text-align: left;
+          transition:
+            border-color 160ms ease,
+            background 160ms ease,
+            box-shadow 160ms ease,
+            transform 160ms ease;
+        }
+        .settings-toggle-row:hover:not(:disabled) {
+          transform: translateY(-1px);
+          border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+          box-shadow: var(--soft-shadow);
+        }
+        .settings-toggle-row:focus-visible {
+          outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent);
+          outline-offset: 3px;
+        }
+        .settings-toggle-row.is-active {
+          border-color: color-mix(in srgb, var(--success) 46%, var(--border));
+          background:
+            linear-gradient(
+              135deg,
+              color-mix(in srgb, var(--success) 10%, var(--panel)),
+              color-mix(in srgb, var(--panel-elev) 92%, transparent)
+            );
+          box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, var(--success) 14%, transparent),
+            0 14px 34px color-mix(in srgb, var(--success) 12%, transparent);
+        }
+        .settings-toggle-row.is-off {
+          border-color: color-mix(in srgb, var(--danger) 22%, var(--border));
+        }
+        .settings-toggle-row.is-disabled {
+          cursor: not-allowed;
+          opacity: 0.72;
+        }
+        .settings-toggle-row.is-coming-soon {
+          border-style: dashed;
+          background: color-mix(in srgb, var(--panel-elev) 68%, transparent);
+        }
+        .settings-toggle-row__copy {
+          display: grid;
+          gap: 5px;
+          min-width: 0;
+        }
+        .settings-toggle-row__title {
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.35;
+        }
+        .settings-toggle-row__description {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.55;
+        }
+        .settings-toggle-row__control {
+          display: inline-flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-shrink: 0;
+        }
+        .settings-toggle-status {
+          min-width: 74px;
+          padding: 5px 8px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border));
+          background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+          color: color-mix(in srgb, var(--danger) 92%, var(--text));
+          font-size: 11px;
+          font-weight: 800;
+          text-align: center;
+          line-height: 1;
+        }
+        .settings-toggle-row.is-active .settings-toggle-status {
+          border-color: color-mix(in srgb, var(--success) 44%, var(--border));
+          background: color-mix(in srgb, var(--success) 14%, var(--panel));
+          color: color-mix(in srgb, var(--success) 88%, var(--text));
+        }
+        .settings-toggle-row.is-coming-soon .settings-toggle-status {
+          border-color: color-mix(in srgb, var(--border) 90%, transparent);
+          background: color-mix(in srgb, var(--panel) 82%, transparent);
+          color: var(--muted);
+        }
+        .settings-toggle-switch {
+          position: relative;
+          width: 58px;
+          height: 32px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+          background:
+            radial-gradient(
+              circle at 24% 50%,
+              color-mix(in srgb, var(--danger) 22%, transparent),
+              transparent 62%
+            ),
+            color-mix(in srgb, var(--danger) 30%, var(--panel));
+          box-shadow:
+            inset 0 1px 4px rgba(0, 0, 0, 0.24),
+            0 0 0 1px color-mix(in srgb, var(--danger) 8%, transparent);
+        }
+        .settings-toggle-switch__knob {
+          position: absolute;
+          top: 3px;
+          left: 3px;
+          width: 24px;
+          height: 24px;
+          border-radius: 999px;
+          background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(226, 232, 240, 0.9));
+          box-shadow:
+            0 4px 10px rgba(0, 0, 0, 0.24),
+            inset 0 1px 0 rgba(255, 255, 255, 0.72);
+          transition:
+            left 170ms ease,
+            transform 170ms ease;
+        }
+        .settings-toggle-row.is-active .settings-toggle-switch {
+          border-color: color-mix(in srgb, var(--success) 48%, var(--border));
+          background:
+            radial-gradient(
+              circle at 72% 50%,
+              color-mix(in srgb, white 30%, transparent),
+              transparent 58%
+            ),
+            color-mix(in srgb, var(--success) 62%, #064e3b);
+          box-shadow:
+            inset 0 1px 5px rgba(0, 0, 0, 0.22),
+            0 0 20px color-mix(in srgb, var(--success) 28%, transparent);
+        }
+        .settings-toggle-row.is-active .settings-toggle-switch__knob {
+          left: 29px;
+        }
+        .settings-toggle-row.is-disabled .settings-toggle-switch {
+          filter: saturate(0.72);
+          box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.18);
+        }
         .app-settings-danger {
           background: color-mix(in srgb, var(--panel) 96%, rgba(127, 29, 29, 0.05));
         }
@@ -15368,6 +16375,108 @@ const App: React.FC = () => {
           background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
           display: grid;
           gap: 10px;
+        }
+        .app-ignore-rule-type-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 10px;
+        }
+        .app-ignore-rule-type {
+          display: grid;
+          gap: 6px;
+          text-align: left;
+          padding: 14px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel-elev) 76%, transparent);
+          color: var(--text);
+          cursor: pointer;
+          font: inherit;
+        }
+        .app-ignore-rule-type.active {
+          border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+          background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+          box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+        }
+        .app-ignore-rule-type span {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .app-ignore-rule-type code {
+          width: fit-content;
+          max-width: 100%;
+          padding: 4px 7px;
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--panel) 76%, transparent);
+          color: var(--text);
+          font-size: 11px;
+          overflow-wrap: anywhere;
+        }
+        .app-ignore-rule-list {
+          display: grid;
+          gap: 12px;
+        }
+        .app-ignore-rule-card {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 14px;
+          padding: 14px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: color-mix(in srgb, var(--panel) 94%, rgba(255, 255, 255, 0.02));
+        }
+        .app-ignore-rule-card__body {
+          display: grid;
+          gap: 8px;
+          min-width: 0;
+        }
+        .app-ignore-rule-card__title {
+          font-size: 13px;
+          font-weight: 800;
+          line-height: 1.35;
+        }
+        .app-ignore-rule-card__meta {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .app-ignore-rule-card__meta span {
+          padding: 4px 7px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+          color: var(--muted);
+          font-size: 11px;
+        }
+        .app-ignore-rule-card__pattern {
+          color: var(--text);
+          font-size: 12px;
+          overflow-wrap: anywhere;
+          white-space: normal;
+        }
+        .app-ignore-rule-card__actions {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          flex-shrink: 0;
+        }
+        @media (max-width: 640px) {
+          .settings-toggle-row {
+            display: grid;
+            gap: 12px;
+          }
+          .settings-toggle-row__control {
+            justify-content: space-between;
+            width: 100%;
+          }
+          .app-ignore-rule-card {
+            display: grid;
+          }
+          .app-ignore-rule-card__actions {
+            justify-content: flex-start;
+          }
         }
         .results-layout {
           display: grid;
@@ -16372,16 +17481,14 @@ const App: React.FC = () => {
           color: white;
         }
         .account-settings-header {
-          display: flex;
-          justify-content: space-between;
-          gap: 14px;
+          display: grid;
+          grid-template-columns: minmax(260px, 1fr) minmax(240px, auto) auto;
+          gap: 16px;
           align-items: center;
-          flex-wrap: wrap;
         }
         .account-settings-header__main {
           display: grid;
           grid-template-columns: minmax(0, 1fr);
-          gap: 12px;
           min-width: 0;
         }
         .account-settings-grid {
@@ -16434,6 +17541,18 @@ const App: React.FC = () => {
           display: flex;
           gap: 11px;
           align-items: center;
+          min-width: 0;
+          max-width: 100%;
+          padding: 10px 12px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+          background:
+            linear-gradient(
+              135deg,
+              color-mix(in srgb, var(--panel-elev) 88%, transparent),
+              color-mix(in srgb, var(--panel) 94%, transparent)
+            );
+          box-shadow: var(--soft-shadow);
         }
         .account-settings-user__avatar {
           width: 32px;
@@ -16466,9 +17585,10 @@ const App: React.FC = () => {
         }
         .account-settings-user__email {
           color: var(--text);
-          font-size: 14px;
+          font-size: 13px;
           font-weight: 700;
           overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .account-settings-card__title {
           font-family: var(--font-display);
@@ -16494,6 +17614,20 @@ const App: React.FC = () => {
           color: var(--text);
           font-size: 14px;
           font-weight: 600;
+        }
+        .account-profile-field {
+          display: block;
+          margin-top: 4px;
+        }
+        .account-profile-actions {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+        .account-profile-status {
+          color: var(--muted);
+          font-size: 12px;
         }
         .account-settings-card__top {
           display: flex;
@@ -16629,11 +17763,34 @@ const App: React.FC = () => {
           border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
         }
         @media (max-width: 820px) {
+          .account-settings-header {
+            grid-template-columns: 1fr;
+            align-items: stretch;
+          }
+          .account-settings-user {
+            border-radius: 16px;
+          }
           .account-settings-grid {
             grid-template-columns: 1fr;
           }
           .account-notification-controls {
             grid-template-columns: 1fr;
+          }
+          .site-avatar-settings {
+            grid-template-columns: auto minmax(0, 1fr);
+          }
+          .site-avatar-settings__actions {
+            grid-column: 1 / -1;
+            justify-content: flex-start;
+          }
+        }
+        @media (max-width: 520px) {
+          .account-settings-header > .secondary-button {
+            width: 100%;
+            justify-content: center;
+          }
+          .account-settings-user {
+            align-items: flex-start;
           }
         }
         .theme-menu button {
@@ -17403,20 +18560,87 @@ const App: React.FC = () => {
           font-size: 13px;
           line-height: 1.6;
         }
-        .report-issue-guidance {
-          margin-top: 10px;
-        }
-        .report-issue-guidance summary,
-        .report-issue-tech summary {
+        .report-guidance-trigger {
+          margin-top: 8px;
+          border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--panel-elev) 72%, transparent);
+          color: var(--text);
           cursor: pointer;
           font-size: 12px;
           font-weight: 700;
+          padding: 5px 10px;
+        }
+        .report-guidance-trigger:hover,
+        .report-guidance-trigger[aria-expanded="true"] {
+          border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+          color: var(--accent);
+        }
+        .report-issue-guidance-row > td {
+          background: color-mix(in srgb, var(--panel) 72%, transparent);
+          padding: 0 12px 14px;
+        }
+        .report-issue-guidance-panel {
+          display: grid;
+          gap: 16px;
+          margin: 6px 0 2px;
+          padding: 16px;
+          border-radius: 16px;
+          border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+          background:
+            linear-gradient(
+              135deg,
+              color-mix(in srgb, var(--panel-elev) 94%, transparent),
+              color-mix(in srgb, var(--panel) 86%, transparent)
+            );
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+        }
+        .report-issue-guidance-panel__header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 14px;
+        }
+        .report-issue-guidance-panel__title {
           color: var(--text);
+          font-family: var(--font-display);
+          font-size: 17px;
+          font-weight: 700;
+          line-height: 1.35;
+          margin-bottom: 8px;
+        }
+        .report-issue-guidance-panel__badges {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+        }
+        .report-issue-guidance-panel__actions {
+          display: inline-flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 8px;
+          flex-wrap: wrap;
+          flex-shrink: 0;
+        }
+        .report-issue-guidance-panel__urls {
+          display: grid;
+          grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(140px, 0.35fr);
+          gap: 12px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 66%, transparent);
+        }
+        .report-issue-guidance-panel__urls p {
+          margin: 0;
+          color: var(--text-muted);
+          font-size: 12px;
+          line-height: 1.45;
         }
         .report-issue-guidance__body {
           display: grid;
-          gap: 10px;
-          margin-top: 10px;
+          gap: 12px;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .report-issue-guidance__section {
           display: grid;
@@ -17427,10 +18651,26 @@ const App: React.FC = () => {
           color: var(--text-muted);
           line-height: 1.6;
         }
-        .report-issue-tech {
+        .report-issue-evidence {
+          grid-column: 1 / -1;
           display: grid;
           gap: 8px;
-          padding-top: 2px;
+          padding: 12px;
+          border-radius: 12px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel) 68%, transparent);
+        }
+        .report-issue-evidence summary {
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 800;
+          color: var(--text);
+        }
+        .report-issue-evidence__intro {
+          margin: 8px 0 2px;
+          color: var(--text-muted);
+          font-size: 12px;
+          line-height: 1.55;
         }
         .report-evidence-list {
           display: grid;
@@ -17444,14 +18684,32 @@ const App: React.FC = () => {
           border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
           background: color-mix(in srgb, var(--panel-elev) 84%, transparent);
         }
+        .report-evidence-item__header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
         .report-evidence-item strong {
           font-size: 11px;
           color: var(--text);
         }
-        .report-evidence-item span {
+        .report-evidence-value {
+          display: block;
           font-size: 12px;
           color: var(--text-muted);
-          overflow-wrap: anywhere;
+          line-height: 1.5;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        .report-evidence-value--long {
+          max-height: 150px;
+          overflow: auto;
+          padding: 10px;
+          border-radius: 10px;
+          border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+          background: color-mix(in srgb, #020617 58%, transparent);
+          color: color-mix(in srgb, var(--text) 88%, var(--text-muted));
         }
         .report-issue-category {
           font-size: 11px;
@@ -17592,23 +18850,26 @@ const App: React.FC = () => {
           gap: 10px 12px;
         }
         .report-learn-link {
-          width: fit-content;
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          padding: 5px 9px;
-          border-radius: 999px;
-          border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+          min-height: 36px;
+          padding: 7px 12px;
+          border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+          border-radius: 9px;
           background: color-mix(in srgb, var(--accent) 10%, transparent);
           color: var(--text);
-          font-size: 11px;
+          font-size: 12px;
           font-weight: 800;
           text-decoration: none;
           cursor: pointer;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
         }
         .report-learn-link:hover {
-          background: color-mix(in srgb, var(--accent) 18%, transparent);
+          border-color: color-mix(in srgb, var(--accent) 68%, var(--border));
+          background: color-mix(in srgb, var(--accent) 16%, transparent);
           color: var(--text);
+          transform: translateY(-1px);
         }
         .report-learn-link:focus-visible {
           outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
@@ -17627,6 +18888,7 @@ const App: React.FC = () => {
           [data-action-menu],
           .report-share-panel,
           .report-developer-diagnostics,
+          .report-issue-evidence,
           .toast-stack,
           .report-learn-link,
           .icon-button {
@@ -17863,6 +19125,13 @@ const App: React.FC = () => {
           .bottom-grid {
             grid-template-columns: 1fr;
           }
+          .report-issue-guidance__body,
+          .report-issue-guidance-panel__urls {
+            grid-template-columns: 1fr;
+          }
+          .report-issue-guidance-panel__header {
+            display: grid;
+          }
         }
         @media print {
           .report-overview-grid {
@@ -18091,28 +19360,38 @@ const App: React.FC = () => {
                               padding: "16px",
                             }}
                           >
-                            <div>
-                              <div
-                                style={{
-                                  fontWeight: 600,
-                                  fontSize: "17px",
-                                  marginBottom: "6px",
-                                  overflowWrap: "anywhere",
-                                }}
-                              >
-                                {siteName}
-                              </div>
-                              {site.client_name ? (
+                            <div
+                              style={{
+                                display: "grid",
+                                gridTemplateColumns: "44px minmax(0, 1fr)",
+                                gap: "10px",
+                                alignItems: "start",
+                              }}
+                            >
+                              {renderSiteAvatar(site, { size: "md" })}
+                              <div style={{ minWidth: 0 }}>
                                 <div
                                   style={{
-                                    color: "var(--text-muted)",
-                                    fontSize: "12px",
-                                    marginBottom: "8px",
+                                    fontWeight: 600,
+                                    fontSize: "17px",
+                                    marginBottom: "6px",
+                                    overflowWrap: "anywhere",
                                   }}
                                 >
-                                  {site.client_name}
+                                  {siteName}
                                 </div>
-                              ) : null}
+                                {site.client_name ? (
+                                  <div
+                                    style={{
+                                      color: "var(--text-muted)",
+                                      fontSize: "12px",
+                                      marginBottom: "8px",
+                                    }}
+                                  >
+                                    {site.client_name}
+                                  </div>
+                                ) : null}
+                              </div>
                             </div>
                             <div
                               style={{ fontSize: "13px", color: "var(--text)" }}
@@ -18570,6 +19849,52 @@ const App: React.FC = () => {
                             </div>
                           )}
                         </section>
+                        <section className="onboarding-settings-section">
+                          <div className="onboarding-settings-section__header">
+                            <h3>In-app notifications</h3>
+                            <p>
+                              Choose which account-level bell notifications are
+                              created in your workspace.
+                            </p>
+                          </div>
+                          <div className="onboarding-notification-grid">
+                            {renderOnboardingNotificationToggle(
+                              "inAppEnabled",
+                              "In-app notifications",
+                              "Create bell notifications for this account.",
+                              { master: true },
+                            )}
+                            {renderOnboardingNotificationToggle(
+                              "scanCompletedEnabled",
+                              "Scan completed",
+                              "Notify when a scan finishes successfully.",
+                            )}
+                            {renderOnboardingNotificationToggle(
+                              "scanFailedEnabled",
+                              "Scan failed",
+                              "Notify when a scan cannot complete.",
+                            )}
+                            {renderOnboardingNotificationToggle(
+                              "highPriorityIssuesEnabled",
+                              "High-priority issues",
+                              "Notify when new critical or high issues appear.",
+                            )}
+                            {renderOnboardingNotificationToggle(
+                              "uptimeDownEnabled",
+                              "Availability down",
+                              "Notify when availability monitoring detects downtime.",
+                            )}
+                            {renderOnboardingNotificationToggle(
+                              "uptimeRecoveredEnabled",
+                              "Availability recovered",
+                              "Notify when a monitored site recovers.",
+                            )}
+                          </div>
+                          <div className="onboarding-inline-note">
+                            Email alerts stay in Site Settings and monitoring
+                            setup.
+                          </div>
+                        </section>
                         {onboardingError && (
                           <div className="onboarding-error">
                             {onboardingError}
@@ -18954,8 +20279,9 @@ const App: React.FC = () => {
                       <div>
                         <div className="report-table-title">Share report</div>
                         <div className="report-score-subtitle">
-                          Generate a read-only link for client review. Revoke it
-                          here when access should end.
+                          Create a revocable live web report for client review.
+                          For a static PDF, use Print / save PDF and send the
+                          file manually.
                         </div>
                       </div>
                       <label className="field-label">
@@ -18988,19 +20314,6 @@ const App: React.FC = () => {
                           disabled={!reportShare?.shareUrl}
                         >
                           Copy share link
-                        </button>
-                        <button
-                          className="secondary-button"
-                          onClick={() => {
-                            if (reportShare?.shareToken) {
-                              void handleSharedReportPdfExport(
-                                reportShare.shareToken,
-                              );
-                            }
-                          }}
-                          disabled={!reportShare?.shareToken}
-                        >
-                          Download shared PDF
                         </button>
                         <button
                           className="secondary-button"
@@ -19772,7 +21085,8 @@ const App: React.FC = () => {
                       const nextSite = sites.find(
                         (site) => site.id === event.target.value,
                       );
-                      if (nextSite) void handleSelectSite(nextSite);
+                      if (nextSite)
+                        void handleSelectSiteFromNavigation(nextSite);
                     }}
                     className="app-input"
                     style={{ minHeight: "44px" }}
@@ -19949,7 +21263,9 @@ const App: React.FC = () => {
                             }}
                           >
                             <button
-                              onClick={() => void handleSelectSite(site)}
+                              onClick={() =>
+                                void handleSelectSiteFromNavigation(site)
+                              }
                               style={{
                                 textAlign: "left",
                                 border: "none",
@@ -19957,20 +21273,50 @@ const App: React.FC = () => {
                                 color: "var(--text)",
                                 cursor: "pointer",
                                 padding: 0,
+                                display: "grid",
+                                gridTemplateColumns: "32px minmax(0, 1fr)",
+                                gap: "8px",
+                                alignItems: "start",
                               }}
                             >
-                              <div
-                                style={{
-                                  fontSize: "13px",
-                                  fontWeight: 600,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                }}
-                              >
-                                {getSiteDisplayName(site) ?? site.url}
-                              </div>
-                              {getSiteDisplayName(site) && (
+                              {renderSiteAvatar(site, { size: "sm" })}
+                              <div style={{ minWidth: 0 }}>
+                                <div
+                                  style={{
+                                    fontSize: "13px",
+                                    fontWeight: 600,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {getSiteDisplayName(site) ?? site.url}
+                                </div>
+                                {getSiteDisplayName(site) && (
+                                  <div
+                                    style={{
+                                      fontSize: "11px",
+                                      color: "var(--muted)",
+                                      marginTop: "2px",
+                                      overflow: "hidden",
+                                      textOverflow: "ellipsis",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {site.url}
+                                  </div>
+                                )}
+                                {site.url === SAMPLE_SITE_URL && (
+                                  <div
+                                    style={{
+                                      fontSize: "10px",
+                                      color: "var(--muted)",
+                                      marginTop: "2px",
+                                    }}
+                                  >
+                                    Sample site
+                                  </div>
+                                )}
                                 <div
                                   style={{
                                     fontSize: "11px",
@@ -19978,28 +21324,8 @@ const App: React.FC = () => {
                                     marginTop: "2px",
                                   }}
                                 >
-                                  {site.url}
+                                  created {formatDate(site.created_at)}
                                 </div>
-                              )}
-                              {site.url === SAMPLE_SITE_URL && (
-                                <div
-                                  style={{
-                                    fontSize: "10px",
-                                    color: "var(--muted)",
-                                    marginTop: "2px",
-                                  }}
-                                >
-                                  Sample site
-                                </div>
-                              )}
-                              <div
-                                style={{
-                                  fontSize: "11px",
-                                  color: "var(--muted)",
-                                  marginTop: "2px",
-                                }}
-                              >
-                                created {formatDate(site.created_at)}
                               </div>
                             </button>
 
@@ -20124,7 +21450,7 @@ const App: React.FC = () => {
                         {ignoreRulesSummaryText}
                       </div>
                       <button
-                        onClick={() => openAppSection("site_settings")}
+                        onClick={() => openSiteSettings("monitoring")}
                         style={{
                           padding: "6px 10px",
                           borderRadius: "10px",
@@ -20313,23 +21639,17 @@ const App: React.FC = () => {
                               account foundations.
                             </div>
                           </div>
-                          <div className="account-settings-user">
-                            <div className="account-settings-user__avatar">
-                              {(authUser?.name || authUser?.email || "?")
-                                .trim()
-                                .split(/\\s+/)
-                                .map((part) => part[0]?.toUpperCase())
-                                .filter(Boolean)
-                                .slice(0, 2)
-                                .join("") || "?"}
+                        </div>
+                        <div className="account-settings-user">
+                          <div className="account-settings-user__avatar">
+                            {getUserAvatarInitials(authUser)}
+                          </div>
+                          <div className="account-settings-user__meta">
+                            <div className="account-settings-user__label">
+                              Signed in as
                             </div>
-                            <div className="account-settings-user__meta">
-                              <div className="account-settings-user__label">
-                                Signed in as
-                              </div>
-                              <div className="account-settings-user__email">
-                                {authUser?.email ?? "Not signed in"}
-                              </div>
+                            <div className="account-settings-user__email">
+                              {authUser?.email ?? "Not signed in"}
                             </div>
                           </div>
                         </div>
@@ -20349,22 +21669,51 @@ const App: React.FC = () => {
                             </div>
                             <div className="account-settings-card__meta">
                               <div className="account-settings-card__label">
+                                Display name
+                              </div>
+                              <label className="account-profile-field">
+                                <input
+                                  className="app-input"
+                                  value={profileDisplayNameDraft}
+                                  onChange={(event) => {
+                                    setProfileDisplayNameDraft(
+                                      event.target.value,
+                                    );
+                                    setProfileSavedAt(null);
+                                    setProfileError(null);
+                                  }}
+                                  placeholder="Add a display name"
+                                  maxLength={120}
+                                />
+                              </label>
+                            </div>
+                            <div className="account-settings-card__meta">
+                              <div className="account-settings-card__label">
                                 Email
                               </div>
                               <div className="account-settings-card__value">
                                 {authUser?.email ?? "Not available"}
                               </div>
                             </div>
-                            <div className="account-settings-card__meta">
-                              <div className="account-settings-card__label">
-                                Name
-                              </div>
-                              <div>
-                                {authUser?.name ?? "No display name set"}
-                              </div>
-                            </div>
-                            <div className="account-settings-card__meta">
-                              Profile editing coming later.
+                            <div className="account-profile-actions">
+                              <button
+                                type="button"
+                                className="primary-button"
+                                onClick={() => void handleSaveProfile()}
+                                disabled={
+                                  profileSaving ||
+                                  profileDisplayNameDraft.trim() ===
+                                    (getUserDisplayName(authUser) ?? "")
+                                }
+                              >
+                                {profileSaving ? "Saving..." : "Save profile"}
+                              </button>
+                              <span className="account-profile-status">
+                                {profileError ??
+                                  (profileSavedAt
+                                    ? "Saved"
+                                    : "Email is read-only")}
+                              </span>
                             </div>
                           </section>
 
@@ -20490,7 +21839,7 @@ const App: React.FC = () => {
                             </div>
                             <button
                               className="secondary-button"
-                              onClick={() => openAppSection("site_settings")}
+                              onClick={() => openSiteSettings("alerts")}
                               disabled={!selectedSiteId}
                             >
                               Open site settings
@@ -20571,24 +21920,27 @@ const App: React.FC = () => {
                       <div className="dashboard-health-layout">
                         <div className="dashboard-hero-panel">
                           <div className="dashboard-hero-panel__header">
-                            <div style={{ minWidth: 0 }}>
-                              <div className="dashboard-hero-panel__eyebrow">
-                                Site health overview
-                              </div>
-                              <div className="dashboard-hero-panel__headline">
-                                {selectedSiteName ??
-                                  (selectedSite?.url
-                                    ? safeHost(selectedSite.url)
-                                    : "No site selected")}
-                              </div>
-                              <div className="dashboard-hero-panel__copy">
-                                {selectedSite?.url ??
-                                  "Select a site to monitor"}{" "}
-                                {dashboardSummaryPending
-                                  ? "· Building issue summary"
-                                  : dashboardScores.overall.band
-                                    ? `· ${dashboardScores.overall.band}`
-                                    : ""}
+                            <div className="dashboard-site-identity">
+                              {renderSiteAvatar(selectedSite, { size: "lg" })}
+                              <div style={{ minWidth: 0 }}>
+                                <div className="dashboard-hero-panel__eyebrow">
+                                  Site health overview
+                                </div>
+                                <div className="dashboard-hero-panel__headline">
+                                  {selectedSiteName ??
+                                    (selectedSite?.url
+                                      ? safeHost(selectedSite.url)
+                                      : "No site selected")}
+                                </div>
+                                <div className="dashboard-hero-panel__copy">
+                                  {selectedSite?.url ??
+                                    "Select a site to monitor"}{" "}
+                                  {dashboardSummaryPending
+                                    ? "· Building issue summary"
+                                    : dashboardScores.overall.band
+                                      ? `· ${dashboardScores.overall.band}`
+                                      : ""}
+                                </div>
                               </div>
                             </div>
                             <div className="dashboard-hero-panel__actions">
@@ -20686,7 +22038,7 @@ const App: React.FC = () => {
                           </div>
                           <div className="dashboard-hero-panel__footer-actions">
                             <button
-                              onClick={() => openAppSection("site_settings")}
+                              onClick={() => openSiteSettings("general")}
                               className="secondary-button"
                             >
                               Manage settings
@@ -21087,22 +22439,20 @@ const App: React.FC = () => {
                         <MetricCard
                           label="Last scan"
                           value={
-                            dashboardLatestRun ? (
-                              <StatusBadge
-                                label={formatRunStatusLabel(
-                                  dashboardLatestRun.status,
-                                )}
-                                tone={getDashboardRunStatusTone(
-                                  dashboardLatestRun.status,
-                                )}
-                              />
-                            ) : (
-                              "None"
-                            )
+                            dashboardLatestRun
+                              ? formatRunStatusLabel(dashboardLatestRun.status)
+                              : "None"
                           }
                           detail={formatDate(
                             dashboardLatestRun?.finished_at ?? null,
                           )}
+                          tone={
+                            dashboardLatestRun
+                              ? getDashboardRunStatusTone(
+                                  dashboardLatestRun.status,
+                                )
+                              : "default"
+                          }
                         />
                         <MetricCard
                           label="Schedule and alerts"
@@ -21112,7 +22462,11 @@ const App: React.FC = () => {
                               ? "Alerts on"
                               : "Alerts off"
                           }
-                          detail={`${selectedSite?.schedule_frequency ?? "manual"} · next ${formatDate(selectedSite?.next_scheduled_at ?? null)}`}
+                          detail={
+                            selectedSite?.schedule_frequency === "manual"
+                              ? "Manual scan"
+                              : `${selectedSite?.schedule_frequency ?? "manual"} · next ${formatDate(selectedSite?.next_scheduled_at ?? null)}`
+                          }
                           tone={
                             dashboardSummary?.notificationSettings
                               ?.notifyEnabled
@@ -21279,10 +22633,17 @@ const App: React.FC = () => {
                           </div>
                           <div>
                             <button
-                              onClick={() => openAppSection("site_settings")}
+                              onClick={() => openSiteSettings("monitoring")}
                               className="secondary-button"
                             >
-                              Manage settings
+                              Manage schedule
+                            </button>
+                            <button
+                              onClick={() => openSiteSettings("alerts")}
+                              className="ghost-button"
+                              style={{ marginLeft: "8px" }}
+                            >
+                              Email alerts
                             </button>
                           </div>
                         </div>
@@ -21313,10 +22674,10 @@ const App: React.FC = () => {
                           </div>
                           <div>
                             <button
-                              onClick={() => openAppSection("site_settings")}
+                              onClick={() => openSiteSettings("monitoring")}
                               className="secondary-button"
                             >
-                              Manage settings
+                              Manage monitoring
                             </button>
                           </div>
                         </div>
@@ -21341,10 +22702,10 @@ const App: React.FC = () => {
                           </div>
                           <div>
                             <button
-                              onClick={() => openAppSection("site_settings")}
+                              onClick={() => openSiteSettings("ignore_rules")}
                               className="secondary-button"
                             >
-                              Manage settings
+                              Manage rules
                             </button>
                           </div>
                         </div>
@@ -21414,39 +22775,41 @@ const App: React.FC = () => {
 
                           return (
                             <div key={run.id} className="dashboard-history-row">
-                              <div>
-                                <div className="dashboard-history-row__title">
-                                  {formatDate(run.started_at)}
-                                  <span
-                                    style={{
-                                      color: "var(--muted)",
-                                      fontSize: "12px",
-                                      fontWeight: "400",
-                                      marginLeft: "8px",
-                                    }}
-                                  >
-                                    ({formatRelative(run.started_at)})
-                                  </span>
-                                </div>
-                                <div className="dashboard-history-row__meta">
-                                  <span className="dashboard-history-row__meta-status">
-                                    <StatusBadge
-                                      label={formatRunStatusLabel(run.status)}
-                                      tone={
-                                        run.status === "completed"
-                                          ? "success"
-                                          : run.status === "failed"
-                                            ? "danger"
-                                            : run.status === "cancelled"
-                                              ? "warning"
-                                              : "accent"
-                                      }
-                                    />
-                                    <span>
-                                      Checked {run.checked_links}/
-                                      {run.total_links}
+                              <div className="dashboard-history-row__identity">
+                                <div>
+                                  <div className="dashboard-history-row__title">
+                                    {formatDate(run.started_at)}
+                                    <span
+                                      style={{
+                                        color: "var(--muted)",
+                                        fontSize: "12px",
+                                        fontWeight: "400",
+                                        marginLeft: "8px",
+                                      }}
+                                    >
+                                      ({formatRelative(run.started_at)})
                                     </span>
-                                  </span>
+                                  </div>
+                                  <div className="dashboard-history-row__meta">
+                                    <span className="dashboard-history-row__meta-status">
+                                      <StatusBadge
+                                        label={formatRunStatusLabel(run.status)}
+                                        tone={
+                                          run.status === "completed"
+                                            ? "success"
+                                            : run.status === "failed"
+                                              ? "danger"
+                                              : run.status === "cancelled"
+                                                ? "warning"
+                                                : "accent"
+                                        }
+                                      />
+                                      <span>
+                                        Checked {run.checked_links}/
+                                        {run.total_links}
+                                      </span>
+                                    </span>
+                                  </div>
                                 </div>
                               </div>
                               <div className="dashboard-history-row__stats">
@@ -21485,17 +22848,6 @@ const App: React.FC = () => {
                                   onClick={() => openReport(run.id)}
                                 >
                                   View report
-                                </button>
-                                <button
-                                  className="ghost-button"
-                                  disabled={run.status !== "completed"}
-                                  onClick={() => {
-                                    if (run.status === "completed") {
-                                      void handleRunPdfExport(run.id);
-                                    }
-                                  }}
-                                >
-                                  Export PDF
                                 </button>
                                 <button
                                   className="secondary-button"
@@ -21579,30 +22931,35 @@ const App: React.FC = () => {
                             <div
                               style={{
                                 display: "grid",
-                                gap: "4px",
+                                gridTemplateColumns: "44px minmax(0, 1fr)",
+                                gap: "10px",
+                                alignItems: "center",
                               }}
                             >
-                              <div
-                                style={{
-                                  fontSize: "18px",
-                                  fontWeight: 700,
-                                }}
-                              >
-                                {selectedSiteName ??
-                                  selectedSiteHost ??
-                                  selectedSite.url}
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: "13px",
-                                  color: "var(--muted)",
-                                  overflowWrap: "anywhere",
-                                }}
-                              >
-                                {selectedSite.client_name?.trim()
-                                  ? `${selectedSite.client_name} · `
-                                  : ""}
-                                {selectedSiteHost ?? selectedSite.url}
+                              {renderSiteAvatar(selectedSite, { size: "md" })}
+                              <div>
+                                <div
+                                  style={{
+                                    fontSize: "18px",
+                                    fontWeight: 700,
+                                  }}
+                                >
+                                  {selectedSiteName ??
+                                    selectedSiteHost ??
+                                    selectedSite.url}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: "13px",
+                                    color: "var(--muted)",
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {selectedSite.client_name?.trim()
+                                    ? `${selectedSite.client_name} · `
+                                    : ""}
+                                  {selectedSiteHost ?? selectedSite.url}
+                                </div>
                               </div>
                             </div>
                             <div className="app-settings-status-row">
@@ -21677,7 +23034,7 @@ const App: React.FC = () => {
                                     : ""
                                 }`}
                                 onClick={() =>
-                                  setSiteSettingsSection(section.key)
+                                  openSiteSettings(section.key, selectedSite.id)
                                 }
                               >
                                 <div className="app-settings-nav__meta">
@@ -21725,6 +23082,64 @@ const App: React.FC = () => {
                                         <span>
                                           {formatDate(selectedSite.created_at)}
                                         </span>
+                                      </div>
+                                    </div>
+                                    <div className="site-avatar-settings">
+                                      {renderSiteAvatar(selectedSite, {
+                                        size: "lg",
+                                      })}
+                                      <div className="site-avatar-settings__copy">
+                                        <strong>Site avatar</strong>
+                                        <span>
+                                          Favicons are used only to identify the
+                                          monitored site in your authenticated
+                                          workspace. Scanlark does not imply
+                                          affiliation and does not use scraped
+                                          logos in marketing.
+                                        </span>
+                                        <span>
+                                          Status:{" "}
+                                          {selectedSite.avatar_status ===
+                                          "cached"
+                                            ? "Favicon cached"
+                                            : selectedSite.avatar_status ===
+                                                "removed"
+                                              ? "Removed"
+                                              : "Fallback icon in use"}
+                                        </span>
+                                        {siteAvatarError && (
+                                          <span className="site-avatar-settings__error">
+                                            {siteAvatarError}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="site-avatar-settings__actions">
+                                        <button
+                                          type="button"
+                                          className="secondary-button"
+                                          onClick={() =>
+                                            void handleRefreshSiteAvatar()
+                                          }
+                                          disabled={siteAvatarWorking}
+                                        >
+                                          {siteAvatarWorking
+                                            ? "Refreshing..."
+                                            : "Refresh avatar"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="ghost-button"
+                                          onClick={() =>
+                                            void handleRemoveSiteAvatar()
+                                          }
+                                          disabled={
+                                            siteAvatarWorking ||
+                                            selectedSite.avatar_status ===
+                                              "removed"
+                                          }
+                                        >
+                                          Remove
+                                        </button>
                                       </div>
                                     </div>
                                     <div className="app-form-grid app-form-grid--two">
@@ -21784,46 +23199,6 @@ const App: React.FC = () => {
                                         className="app-input"
                                         rows={5}
                                         style={{ resize: "vertical" }}
-                                      />
-                                    </label>
-                                    <label
-                                      style={{
-                                        display: "flex",
-                                        alignItems: "flex-start",
-                                        justifyContent: "space-between",
-                                        gap: "14px",
-                                        padding: "14px",
-                                        border: "1px solid var(--border)",
-                                        borderRadius: "14px",
-                                        background: "var(--panel-elev)",
-                                      }}
-                                    >
-                                      <span
-                                        style={{
-                                          display: "grid",
-                                          gap: "4px",
-                                          fontSize: "13px",
-                                        }}
-                                      >
-                                        <strong>Developer Tabs</strong>
-                                        <span
-                                          style={{
-                                            color: "var(--muted)",
-                                            lineHeight: 1.5,
-                                          }}
-                                        >
-                                          Show advanced diagnostics and
-                                          debugging panels for this site.
-                                        </span>
-                                      </span>
-                                      <input
-                                        type="checkbox"
-                                        checked={siteDeveloperTabsDraft}
-                                        onChange={(event) =>
-                                          setSiteDeveloperTabsDraft(
-                                            event.target.checked,
-                                          )
-                                        }
                                       />
                                     </label>
                                     {siteDetailsError && (
@@ -21902,31 +23277,24 @@ const App: React.FC = () => {
                                       </div>
                                     </div>
                                     <div className="app-form-grid">
-                                      <label
-                                        style={{
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "space-between",
-                                          gap: "10px",
-                                          fontSize: "13px",
-                                        }}
-                                      >
-                                        <span>Auto-scan enabled</span>
-                                        <input
-                                          type="checkbox"
-                                          checked={
-                                            scheduleFrequency === "manual"
-                                              ? false
-                                              : scheduleEnabled
-                                          }
-                                          onChange={(e) =>
-                                            setScheduleEnabled(e.target.checked)
-                                          }
-                                          disabled={
-                                            scheduleFrequency === "manual"
-                                          }
-                                        />
-                                      </label>
+                                      {renderSettingsToggleRow({
+                                        title: "Auto-scan enabled",
+                                        description:
+                                          "Automatically run scans on a recurring schedule for this site.",
+                                        checked:
+                                          scheduleFrequency === "manual"
+                                            ? false
+                                            : scheduleEnabled,
+                                        disabled:
+                                          scheduleFrequency === "manual",
+                                        statusLabel:
+                                          scheduleFrequency === "manual"
+                                            ? "Off"
+                                            : scheduleEnabled
+                                              ? "Enabled"
+                                              : "Off",
+                                        onToggle: setScheduleEnabled,
+                                      })}
                                       <div className="app-form-grid app-form-grid--two">
                                         <label className="field-label">
                                           Frequency
@@ -22095,7 +23463,7 @@ const App: React.FC = () => {
                                         >
                                           {scheduleSaving
                                             ? "Saving..."
-                                            : "Save schedule"}
+                                            : "Save monitoring"}
                                         </button>
                                       </div>
                                     </div>
@@ -22113,27 +23481,14 @@ const App: React.FC = () => {
                                       </div>
                                     </div>
                                     <div className="app-form-grid">
-                                      <label
-                                        style={{
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "space-between",
-                                          gap: "10px",
-                                          fontSize: "13px",
-                                        }}
-                                      >
-                                        <span>Availability monitoring</span>
-                                        <input
-                                          type="checkbox"
-                                          checked={uptimeEnabled}
-                                          disabled={
-                                            uptimeLoading || uptimeSaving
-                                          }
-                                          onChange={(e) =>
-                                            setUptimeEnabled(e.target.checked)
-                                          }
-                                        />
-                                      </label>
+                                      {renderSettingsToggleRow({
+                                        title: "Availability monitoring",
+                                        description:
+                                          "Keep passive uptime checks active between full scans.",
+                                        checked: uptimeEnabled,
+                                        disabled: uptimeLoading || uptimeSaving,
+                                        onToggle: setUptimeEnabled,
+                                      })}
                                       <div className="app-form-grid app-form-grid--two">
                                         <label className="field-label">
                                           Check URL
@@ -22269,42 +23624,31 @@ const App: React.FC = () => {
                               <>
                                 <div className="app-settings-panel__header">
                                   <div className="app-settings-panel__eyebrow">
-                                    Alerts
+                                    Alerts & Reports
                                   </div>
                                   <div className="app-settings-panel__title">
-                                    Email delivery and notification rules
+                                    Email alerts and report delivery
                                   </div>
                                   <div className="app-settings-panel__subtitle">
-                                    Decide when Scanlark should email you about
-                                    new issues and keep test sends in one
-                                    dedicated place.
+                                    Decide when Scanlark should email you and
+                                    which report delivery options are available
+                                    for this site.
                                   </div>
                                 </div>
 
                                 <div className="app-settings-card">
                                   <div className="app-form-grid">
-                                    <label
-                                      style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "space-between",
-                                        gap: "10px",
-                                        fontSize: "13px",
-                                      }}
-                                    >
-                                      <span>Email alerts</span>
-                                      <input
-                                        type="checkbox"
-                                        checked={notifyEnabled}
-                                        disabled={notifyLoading}
-                                        onChange={(e) =>
-                                          setNotifyEnabled(e.target.checked)
-                                        }
-                                      />
-                                    </label>
+                                    {renderSettingsToggleRow({
+                                      title: "Email alerts",
+                                      description:
+                                        "Send email alerts when matching scan conditions are detected.",
+                                      checked: notifyEnabled,
+                                      disabled: notifyLoading,
+                                      onToggle: setNotifyEnabled,
+                                    })}
                                     <div className="app-form-grid app-form-grid--two">
                                       <label className="field-label">
-                                        Email address
+                                        Alert recipient email
                                         <input
                                           type="email"
                                           value={notifyEmail}
@@ -22317,7 +23661,7 @@ const App: React.FC = () => {
                                         />
                                       </label>
                                       <label className="field-label">
-                                        Notify on
+                                        Notify when
                                         <select
                                           value={notifyOn}
                                           onChange={(e) =>
@@ -22339,42 +23683,28 @@ const App: React.FC = () => {
                                         </select>
                                       </label>
                                     </div>
-                                    <label
-                                      style={{
-                                        display: "flex",
-                                        gap: "8px",
-                                        alignItems: "center",
-                                        fontSize: "13px",
-                                      }}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={notifyIncludeCsv}
-                                        onChange={(e) =>
-                                          setNotifyIncludeCsv(e.target.checked)
-                                        }
-                                        disabled={notifyLoading}
-                                      />
-                                      Include CSV attachment (coming soon)
-                                    </label>
-                                    <label
-                                      style={{
-                                        display: "flex",
-                                        gap: "8px",
-                                        alignItems: "center",
-                                        fontSize: "13px",
-                                      }}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={summaryEnabled}
-                                        onChange={(e) =>
-                                          setSummaryEnabled(e.target.checked)
-                                        }
-                                        disabled={notifyLoading}
-                                      />
-                                      Weekly summary
-                                    </label>
+                                    {renderSettingsToggleRow({
+                                      title: "Include CSV report attachment",
+                                      description:
+                                        "Attach a CSV report to alert emails.",
+                                      checked: false,
+                                      comingSoon: true,
+                                    })}
+                                    {renderSettingsToggleRow({
+                                      title: "Include PDF report attachment",
+                                      description:
+                                        "Attach a PDF report to alert emails.",
+                                      checked: false,
+                                      comingSoon: true,
+                                    })}
+                                    {renderSettingsToggleRow({
+                                      title: "Weekly summary",
+                                      description:
+                                        "Send a weekly scheduled scan summary when weekly scans run.",
+                                      checked: summaryEnabled,
+                                      disabled: notifyLoading,
+                                      onToggle: setSummaryEnabled,
+                                    })}
                                     {notifyLoading && (
                                       <div
                                         style={{
@@ -22459,10 +23789,43 @@ const App: React.FC = () => {
                                 </div>
 
                                 <div className="app-settings-card">
-                                  <div
-                                    className="app-form-grid app-form-grid--two"
-                                    style={{ alignItems: "end" }}
-                                  >
+                                  <div className="app-settings-help">
+                                    <div>
+                                      Use ignore rules for links you expect
+                                      Scanlark to skip.
+                                    </div>
+                                    <div>
+                                      Ignored links are excluded from active
+                                      findings.
+                                    </div>
+                                    <div>
+                                      Very broad rules can hide real issues.
+                                    </div>
+                                  </div>
+                                  <div className="app-ignore-rule-type-grid">
+                                    {FRIENDLY_IGNORE_RULE_TYPES.map(
+                                      (option) => (
+                                        <button
+                                          key={option.value}
+                                          type="button"
+                                          className={`app-ignore-rule-type ${
+                                            newRuleType === option.value
+                                              ? "active"
+                                              : ""
+                                          }`}
+                                          onClick={() => {
+                                            setNewRuleType(option.value);
+                                            setNewRuleError(null);
+                                          }}
+                                        >
+                                          <strong>{option.label}</strong>
+                                          <span>{option.summary}</span>
+                                          <code>{option.example}</code>
+                                        </button>
+                                      ),
+                                    )}
+                                  </div>
+                                  <div className="app-form-grid app-form-grid--two">
                                     <label className="field-label">
                                       Scope
                                       <select
@@ -22478,94 +23841,99 @@ const App: React.FC = () => {
                                         <option value="global">Global</option>
                                       </select>
                                     </label>
-                                    <label className="field-label">
-                                      Rule type
-                                      <select
-                                        value={newRuleType}
-                                        onChange={(e) =>
-                                          setNewRuleType(
-                                            e.target
-                                              .value as IgnoreRule["rule_type"],
-                                          )
-                                        }
-                                        className="app-input"
-                                      >
-                                        <option value="domain">domain</option>
-                                        <option value="path_prefix">
-                                          path_prefix
-                                        </option>
-                                        <option value="regex">regex</option>
-                                        <option value="status_code">
-                                          status_code
-                                        </option>
-                                      </select>
-                                    </label>
+                                    <div className="app-settings-summary-item">
+                                      <strong>Selected rule</strong>
+                                      <span>
+                                        {getIgnoreRuleTypeLabel(newRuleType)}
+                                      </span>
+                                    </div>
                                   </div>
                                   <label className="field-label">
                                     Pattern
                                     <input
                                       value={newRulePattern}
-                                      onChange={(e) =>
-                                        setNewRulePattern(e.target.value)
-                                      }
-                                      placeholder="Pattern (e.g. walkers.co.uk, /login, 404)"
+                                      onChange={(e) => {
+                                        setNewRulePattern(e.target.value);
+                                        setNewRuleError(null);
+                                      }}
+                                      placeholder={getIgnoreRulePlaceholder(
+                                        newRuleType,
+                                      )}
                                       className="app-input"
                                     />
                                   </label>
+                                  {newRulePattern.trim() &&
+                                    getBroadIgnoreRuleWarning(
+                                      newRuleType,
+                                      newRulePattern,
+                                    ) && (
+                                      <div className="app-settings-warning">
+                                        {getBroadIgnoreRuleWarning(
+                                          newRuleType,
+                                          newRulePattern,
+                                        )}
+                                      </div>
+                                    )}
+                                  {newRuleError && (
+                                    <div className="app-settings-warning">
+                                      {newRuleError}
+                                    </div>
+                                  )}
                                   <button
                                     onClick={handleCreateIgnoreRule}
                                     disabled={
-                                      !selectedSiteId || !newRulePattern.trim()
+                                      !selectedSiteId ||
+                                      !newRulePattern.trim() ||
+                                      Boolean(
+                                        getBroadIgnoreRuleWarning(
+                                          newRuleType,
+                                          newRulePattern,
+                                        ),
+                                      )
                                     }
                                     className="primary-button"
                                   >
-                                    Add rule
+                                    Add ignore rule
                                   </button>
                                   {ignoreRulesError && (
-                                    <div
-                                      style={{
-                                        fontSize: "12px",
-                                        color: "var(--warning)",
-                                      }}
-                                    >
+                                    <div className="app-settings-warning">
                                       {ignoreRulesError}
                                     </div>
                                   )}
                                   {!ignoreRulesLoading &&
                                     ignoreRules.length > 0 && (
-                                      <div className="app-site-list">
+                                      <div className="app-ignore-rule-list">
                                         {ignoreRules.map((rule) => (
                                           <div
                                             key={rule.id}
-                                            className="app-site-row"
+                                            className="app-ignore-rule-card"
                                           >
-                                            <div>
-                                              <div
-                                                style={{
-                                                  fontSize: "13px",
-                                                  fontWeight: 700,
-                                                }}
-                                              >
-                                                {rule.rule_type}{" "}
-                                                {rule.site_id ? "" : "· global"}
+                                            <div className="app-ignore-rule-card__body">
+                                              <div className="app-ignore-rule-card__title">
+                                                {describeIgnoreRule(rule)}
                                               </div>
-                                              <div
-                                                style={{
-                                                  fontSize: "12px",
-                                                  color: "var(--muted)",
-                                                  overflowWrap: "anywhere",
-                                                }}
-                                              >
+                                              <div className="app-ignore-rule-card__meta">
+                                                <span>
+                                                  {getIgnoreRuleTypeLabel(
+                                                    rule.rule_type,
+                                                  )}
+                                                </span>
+                                                <span>
+                                                  {rule.site_id
+                                                    ? "This site"
+                                                    : "Global"}
+                                                </span>
+                                                <span>
+                                                  {rule.is_enabled
+                                                    ? "Enabled"
+                                                    : "Disabled"}
+                                                </span>
+                                              </div>
+                                              <code className="app-ignore-rule-card__pattern">
                                                 {rule.pattern}
-                                              </div>
+                                              </code>
                                             </div>
-                                            <div
-                                              style={{
-                                                display: "flex",
-                                                gap: "8px",
-                                                flexWrap: "wrap",
-                                              }}
-                                            >
+                                            <div className="app-ignore-rule-card__actions">
                                               <button
                                                 onClick={() =>
                                                   handleToggleIgnoreRule(rule)
@@ -22573,8 +23941,8 @@ const App: React.FC = () => {
                                                 className="secondary-button"
                                               >
                                                 {rule.is_enabled
-                                                  ? "Enabled"
-                                                  : "Disabled"}
+                                                  ? "Disable"
+                                                  : "Enable"}
                                               </button>
                                               <button
                                                 onClick={() =>
@@ -22610,6 +23978,61 @@ const App: React.FC = () => {
                                         No ignore rules yet.
                                       </div>
                                     )}
+                                </div>
+                              </>
+                            )}
+
+                            {siteSettingsSection === "advanced" && (
+                              <>
+                                <div className="app-settings-panel__header">
+                                  <div className="app-settings-panel__eyebrow">
+                                    Advanced
+                                  </div>
+                                  <div className="app-settings-panel__title">
+                                    Developer diagnostics
+                                  </div>
+                                  <div className="app-settings-panel__subtitle">
+                                    Keep debugging controls separate from
+                                    everyday site settings.
+                                  </div>
+                                </div>
+
+                                <div className="app-settings-card">
+                                  {renderSettingsToggleRow({
+                                    title: "Developer Tabs",
+                                    description:
+                                      "Show advanced diagnostics and debugging panels in authenticated reports.",
+                                    checked: siteDeveloperTabsDraft,
+                                    onToggle: setSiteDeveloperTabsDraft,
+                                  })}
+                                  <div className="app-settings-help">
+                                    <div>
+                                      This controls Developer Diagnostics
+                                      visibility in authenticated reports.
+                                    </div>
+                                    <div>
+                                      Shared reports and PDFs do not show
+                                      Developer Diagnostics by default.
+                                    </div>
+                                  </div>
+                                  {siteDetailsError && (
+                                    <div className="app-settings-warning">
+                                      {siteDetailsError}
+                                    </div>
+                                  )}
+                                  <div>
+                                    <button
+                                      onClick={() =>
+                                        void handleSaveDeveloperTabs()
+                                      }
+                                      disabled={siteDetailsSaving}
+                                      className="primary-button"
+                                    >
+                                      {siteDetailsSaving
+                                        ? "Saving..."
+                                        : "Save advanced"}
+                                    </button>
+                                  </div>
                                 </div>
                               </>
                             )}
@@ -25598,17 +27021,6 @@ const App: React.FC = () => {
                                     }}
                                   >
                                     View report
-                                  </button>
-                                  <button
-                                    disabled={run.status !== "completed"}
-                                    onClick={() => {
-                                      if (run.status === "completed") {
-                                        void handleRunPdfExport(run.id);
-                                      }
-                                      setActionMenuOpenId(null);
-                                    }}
-                                  >
-                                    Export PDF
                                   </button>
                                   <button
                                     disabled={
