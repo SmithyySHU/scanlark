@@ -288,6 +288,30 @@ export type {
 } from "./appNotifications";
 
 export {
+  claimDueUptimeMonitors,
+  getOrCreateUptimeMonitorForSite,
+  getOrCreateUptimeMonitorForSiteForUser,
+  getUptimeIncidentById,
+  getUptimeMonitorSettingsForUser,
+  getUptimeStatusForSiteForUser,
+  recordUptimeCheck,
+  updateUptimeMonitorSettingsForUser,
+} from "./uptimeMonitors";
+export type {
+  ClaimedUptimeMonitor,
+  RecordedUptimeCheck,
+  UptimeCheckInput,
+  UptimeCheckRow,
+  UptimeCheckStatus,
+  UptimeIncidentNotificationContext,
+  UptimeIncidentRow,
+  UptimeIncidentStatus,
+  UptimeSettingsRow,
+  UptimeStatus,
+  UptimeStatusSummary,
+} from "./uptimeMonitors";
+
+export {
   computeSeverityScore,
   createEmptySeverityCounts,
   getScanCategoryScores,

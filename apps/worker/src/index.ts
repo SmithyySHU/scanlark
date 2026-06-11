@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import * as os from "node:os";
 import {
   cancelScanJob,
+  claimDueUptimeMonitors,
   claimNextScanJob,
   completeScanJob,
   createScanRun,
@@ -13,10 +14,14 @@ import {
   getScanRunById,
   getSiteById,
   recoverStaleQueuedScanJobs,
+  recordUptimeCheck,
   requeueExpiredScanJobs,
   setScanRunStatus,
   setScanJobRunId,
+  type UptimeCheckInput,
+  type UptimeSettingsRow,
 } from "@scanlark/db";
+import { checkUptime } from "../../../packages/crawler/src/checkUptime";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
@@ -28,8 +33,17 @@ const CLAIM_LEASE_SECONDS = 120;
 const LEASE_HEARTBEAT_MS = 30000;
 const REAPER_TICK_MS = 120000;
 const STALE_QUEUED_JOB_MINUTES = 15;
+const UPTIME_TICK_MS = parsePositiveIntEnv("UPTIME_TICK_MS", 60000);
+const UPTIME_BATCH_SIZE = parsePositiveIntEnv("UPTIME_BATCH_SIZE", 25);
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+
+function parsePositiveIntEnv(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -265,6 +279,82 @@ async function runSchedulerLoop() {
   }
 }
 
+function getErrorMessage(err: unknown, fallback: string) {
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
+function buildFailedUptimeCheck(
+  monitor: UptimeSettingsRow,
+  err: unknown,
+): UptimeCheckInput {
+  const message = getErrorMessage(err, "uptime_check_failed");
+  return {
+    checkedUrl: monitor.check_url,
+    status: "down",
+    statusCode: null,
+    responseTimeMs: null,
+    redirectCount: 0,
+    errorCode: "worker_exception",
+    errorMessage: message.slice(0, 500),
+  };
+}
+
+async function processUptimeMonitor(monitor: UptimeSettingsRow) {
+  console.log(
+    `[uptime ${workerId}] checking settings=${monitor.id} site=${monitor.site_id} url=${monitor.check_url}`,
+  );
+
+  try {
+    const result = await checkUptime(monitor.check_url);
+    const recorded = await recordUptimeCheck(monitor.id, result);
+    console.log(
+      `[uptime ${workerId}] recorded settings=${monitor.id} site=${monitor.site_id} check=${recorded.check.id} status=${recorded.check.status} statusCode=${recorded.check.status_code ?? "none"} responseMs=${recorded.check.response_time_ms ?? "none"} next=${monitor.next_check_at?.toISOString() ?? "none"}`,
+    );
+  } catch (err) {
+    console.warn(
+      `[uptime ${workerId}] check failed settings=${monitor.id} site=${monitor.site_id}`,
+      err,
+    );
+    try {
+      const recorded = await recordUptimeCheck(
+        monitor.id,
+        buildFailedUptimeCheck(monitor, err),
+      );
+      console.log(
+        `[uptime ${workerId}] recorded failure settings=${monitor.id} site=${monitor.site_id} check=${recorded.check.id}`,
+      );
+    } catch (recordErr) {
+      console.error(
+        `[uptime ${workerId}] failed to record uptime failure settings=${monitor.id} site=${monitor.site_id}`,
+        recordErr,
+      );
+    }
+  }
+}
+
+async function uptimeTick() {
+  const monitors = await claimDueUptimeMonitors(UPTIME_BATCH_SIZE);
+  console.log(`[uptime ${workerId}] due=${monitors.length}`);
+
+  for (const monitor of monitors) {
+    await processUptimeMonitor(monitor);
+  }
+}
+
+async function runUptimeLoop() {
+  console.log(
+    `[uptime ${workerId}] started tickMs=${UPTIME_TICK_MS} batch=${UPTIME_BATCH_SIZE}`,
+  );
+  while (true) {
+    try {
+      await uptimeTick();
+    } catch (err) {
+      console.error(`[uptime ${workerId}] tick error`, err);
+    }
+    await sleep(UPTIME_TICK_MS);
+  }
+}
+
 runLoop().catch((err) => {
   console.error(`[worker ${workerId}] fatal`, err);
   process.exit(1);
@@ -276,4 +366,8 @@ reapLoop().catch((err) => {
 
 runSchedulerLoop().catch((err) => {
   console.error(`[scheduler ${workerId}] fatal`, err);
+});
+
+runUptimeLoop().catch((err) => {
+  console.error(`[uptime ${workerId}] fatal`, err);
 });

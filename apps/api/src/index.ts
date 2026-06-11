@@ -63,6 +63,7 @@ import {
   getSiteById,
   getSiteNotificationSettingsForUser,
   getScanTechnicalDiagnosticsForUser,
+  getUptimeStatusForSiteForUser,
   listSitesForUser,
   getSiteScheduleForUser,
   getTimeoutCountForRun,
@@ -102,6 +103,7 @@ import {
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
   updateSiteMetadataForUser,
+  updateUptimeMonitorSettingsForUser,
   USER_NOTIFICATION_PREFERENCE_FIELDS,
   validateSafeRegexPattern,
   type UserNotificationPreferences,
@@ -659,28 +661,6 @@ type UptimeStatusResponse = {
     checked_at: string;
   }>;
 };
-
-type UptimeModule = {
-  getUptimeStatusForSiteForUser: (
-    userId: string,
-    siteId: string,
-    recentLimit?: number,
-  ) => Promise<UptimeStatusResponse>;
-  updateUptimeMonitorSettingsForUser: (
-    userId: string,
-    siteId: string,
-    fields: {
-      enabled?: boolean;
-      checkUrl?: string;
-      failureThreshold?: number;
-    },
-  ) => Promise<unknown>;
-};
-
-async function loadUptimeModule(): Promise<UptimeModule> {
-  const modulePath = "../../../packages/db/src/uptimeMonitors.js";
-  return (await import(modulePath)) as UptimeModule;
-}
 
 function sendApiError(
   res: Response,
@@ -1492,11 +1472,10 @@ app.get("/sites/:siteId/uptime", async (req, res) => {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
   try {
-    const uptimeModule = await loadUptimeModule();
-    const uptime = await uptimeModule.getUptimeStatusForSiteForUser(
+    const uptime = (await getUptimeStatusForSiteForUser(
       userId,
       siteId,
-    );
+    )) as unknown as UptimeStatusResponse;
     res.json(uptime);
   } catch (err: unknown) {
     if (err instanceof Error && err.message === "site_not_found") {
@@ -1569,16 +1548,15 @@ app.put("/sites/:siteId/uptime", async (req, res) => {
   }
 
   try {
-    const uptimeModule = await loadUptimeModule();
-    await uptimeModule.updateUptimeMonitorSettingsForUser(userId, siteId, {
+    await updateUptimeMonitorSettingsForUser(userId, siteId, {
       enabled,
       checkUrl,
       failureThreshold,
     });
-    const uptime = await uptimeModule.getUptimeStatusForSiteForUser(
+    const uptime = (await getUptimeStatusForSiteForUser(
       userId,
       siteId,
-    );
+    )) as unknown as UptimeStatusResponse;
     res.json(uptime);
   } catch (err: unknown) {
     if (err instanceof Error && err.message === "site_not_found") {
