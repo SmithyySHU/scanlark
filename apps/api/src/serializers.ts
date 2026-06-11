@@ -17,6 +17,13 @@ export type SerializedScanRun = {
   trigger_type: "manual" | "scheduled";
   issue_generation_status: "pending" | "completed" | "failed";
   issue_generation_error: string | null;
+  score?: number | null;
+  overall_score?: number | null;
+  open_issues?: number | null;
+  new_issues?: number | null;
+  resolved_issues?: number | null;
+  blocked_links?: number | null;
+  no_response_links?: number | null;
 };
 
 export function serializeScanRun(run: ScanRunInput): SerializedScanRun {
@@ -44,5 +51,14 @@ export function serializeScanRun(run: ScanRunInput): SerializedScanRun {
     trigger_type: run.trigger_type,
     issue_generation_status: run.issue_generation_status,
     issue_generation_error: run.issue_generation_error ?? null,
+    score: run.score ?? null,
+    overall_score: run.overall_score ?? null,
+    open_issues: run.open_issues == null ? null : Number(run.open_issues),
+    new_issues: run.new_issues == null ? null : Number(run.new_issues),
+    resolved_issues:
+      run.resolved_issues == null ? null : Number(run.resolved_issues),
+    blocked_links: run.blocked_links == null ? null : Number(run.blocked_links),
+    no_response_links:
+      run.no_response_links == null ? null : Number(run.no_response_links),
   };
 }

@@ -22,6 +22,7 @@ import {
   createSiteForUser,
   createOrRotateReportShareForRunForUser,
   createIgnoreRule,
+  createScanAppNotificationsForRun,
   deleteIgnoreRule,
   deleteSiteForUser,
   disableReportShareForRunForUser,
@@ -35,6 +36,8 @@ import {
   getJobForScanRun,
   getLatestCompletedScanForSiteForUser,
   getLatestScanForSiteForUser,
+  getUnreadAppNotificationCount,
+  getUserNotificationPreferences,
   getOccurrencesForScanLinkForUser,
   getRecentScanRunsForSiteForUser,
   getRecentScansForSiteForUser,
@@ -76,9 +79,12 @@ import {
   listIgnoredLinksForRunForUser,
   listIgnoredOccurrences,
   listIgnoredOccurrencesForUser,
+  listRecentAppNotificationsForUser,
   listIssuesForScanRun,
   listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  markAllAppNotificationsReadForUser,
+  markAppNotificationReadForUser,
   recordReportShareView,
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
@@ -90,10 +96,13 @@ import {
   upsertLinkNoteForSiteForUser,
   updateSiteNotificationSettingsForUser,
   updateSiteScheduleForUser,
+  updateUserNotificationPreferences,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
   updateSiteMetadataForUser,
+  USER_NOTIFICATION_PREFERENCE_FIELDS,
   validateSafeRegexPattern,
+  type UserNotificationPreferences,
 } from "@scanlark/db";
 import validateLink from "../../../packages/crawler/src/validateLink";
 import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
@@ -913,6 +922,206 @@ async function handleSendTestAlert(
 app.post("/sites/:siteId/notifications/test", handleSendTestAlert);
 app.post("/sites/:siteId/alerts/test", handleSendTestAlert);
 
+function serializeUserNotificationPreferences(
+  preferences: UserNotificationPreferences,
+) {
+  return {
+    inAppEnabled: preferences.in_app_enabled,
+    scanCompletedEnabled: preferences.scan_completed_enabled,
+    scanFailedEnabled: preferences.scan_failed_enabled,
+    highPriorityIssuesEnabled: preferences.high_priority_issues_enabled,
+    uptimeDownEnabled: preferences.uptime_down_enabled,
+    uptimeRecoveredEnabled: preferences.uptime_recovered_enabled,
+    systemNoticesEnabled: preferences.system_notices_enabled,
+    createdAt:
+      preferences.created_at instanceof Date
+        ? preferences.created_at.toISOString()
+        : preferences.created_at,
+    updatedAt:
+      preferences.updated_at instanceof Date
+        ? preferences.updated_at.toISOString()
+        : preferences.updated_at,
+  };
+}
+
+const USER_NOTIFICATION_PREFERENCE_API_FIELDS = {
+  inAppEnabled: "in_app_enabled",
+  scanCompletedEnabled: "scan_completed_enabled",
+  scanFailedEnabled: "scan_failed_enabled",
+  highPriorityIssuesEnabled: "high_priority_issues_enabled",
+  uptimeDownEnabled: "uptime_down_enabled",
+  uptimeRecoveredEnabled: "uptime_recovered_enabled",
+  systemNoticesEnabled: "system_notices_enabled",
+} as const satisfies Record<
+  string,
+  (typeof USER_NOTIFICATION_PREFERENCE_FIELDS)[number]
+>;
+
+app.get("/account/notification-preferences", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const preferences = await getUserNotificationPreferences(userId);
+    res.json({
+      preferences: serializeUserNotificationPreferences(preferences),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /account/notification-preferences", err);
+    sendInternalError(res, "Failed to fetch notification preferences", err);
+  }
+});
+
+app.patch("/account/notification-preferences", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_body",
+      "Request body must be an object",
+    );
+  }
+
+  const patch: Partial<
+    Record<(typeof USER_NOTIFICATION_PREFERENCE_FIELDS)[number], boolean>
+  > = {};
+  for (const [key, value] of Object.entries(body)) {
+    const dbField =
+      USER_NOTIFICATION_PREFERENCE_API_FIELDS[
+        key as keyof typeof USER_NOTIFICATION_PREFERENCE_API_FIELDS
+      ];
+    if (!dbField) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_field",
+        `Unknown notification preference field: ${key}`,
+      );
+    }
+    if (typeof value !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_field_value",
+        `${key} must be a boolean`,
+      );
+    }
+    patch[dbField] = value;
+  }
+
+  try {
+    const preferences = await updateUserNotificationPreferences(userId, patch);
+    res.json({
+      preferences: serializeUserNotificationPreferences(preferences),
+    });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /account/notification-preferences", err);
+    sendInternalError(res, "Failed to update notification preferences", err);
+  }
+});
+
+function serializeAppNotification(
+  notification: Awaited<
+    ReturnType<typeof listRecentAppNotificationsForUser>
+  >[number],
+) {
+  return {
+    ...notification,
+    read_at:
+      notification.read_at instanceof Date
+        ? notification.read_at.toISOString()
+        : notification.read_at,
+    created_at:
+      notification.created_at instanceof Date
+        ? notification.created_at.toISOString()
+        : notification.created_at,
+  };
+}
+
+app.get("/notifications", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  const rawLimit =
+    typeof req.query.limit === "string" ? Number(req.query.limit) : 20;
+  const limit = Number.isFinite(rawLimit) ? rawLimit : 20;
+  const status = req.query.status === "all" ? "all" : "unread";
+  try {
+    const notifications = await listRecentAppNotificationsForUser(
+      userId,
+      limit,
+      status,
+    );
+    res.json({
+      notifications: notifications.map(serializeAppNotification),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /notifications", err);
+    sendInternalError(res, "Failed to fetch notifications", err);
+  }
+});
+
+app.get("/notifications/unread-count", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const unreadCount = await getUnreadAppNotificationCount(userId);
+    res.json({ unreadCount });
+  } catch (err: unknown) {
+    console.error("Error in GET /notifications/unread-count", err);
+    sendInternalError(res, "Failed to fetch unread notifications", err);
+  }
+});
+
+app.patch("/notifications/:notificationId/read", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const result = await markAppNotificationReadForUser(
+      userId,
+      req.params.notificationId,
+    );
+    if (!result) return sendNotFound(res);
+    res.json({
+      notification: serializeAppNotification(result.notification),
+      unreadCount: result.unreadCount,
+    });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /notifications/:notificationId/read", err);
+    sendInternalError(res, "Failed to mark notification read", err);
+  }
+});
+
+app.post("/notifications/mark-all-read", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const { updatedCount, readAt, unreadCount } =
+      await markAllAppNotificationsReadForUser(userId);
+    res.json({
+      updatedCount,
+      unreadCount,
+      readAt: readAt instanceof Date ? readAt.toISOString() : readAt,
+    });
+  } catch (err: unknown) {
+    console.error("Error in POST /notifications/mark-all-read", err);
+    sendInternalError(res, "Failed to mark notifications read", err);
+  }
+});
+
 app.get("/sites/:siteId/uptime", async (req, res) => {
   const siteId = req.params.siteId;
   const userId = req.user?.id;
@@ -1047,6 +1256,7 @@ app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
       run = result.run;
     }
 
+    await createScanAppNotificationsForRun(userId, scanRunId);
     await notifyIfNeeded(userId, scanRunId);
     res.json({ ok: true, status: run.status });
   } catch (err: unknown) {
@@ -1617,7 +1827,7 @@ app.get("/sites/:siteId/dashboard-summary", async (req, res) => {
 
     const [latestRun, history, notificationSettings] = await Promise.all([
       getLatestScanForSiteForUser(userId, siteId),
-      getRecentScanRunsForSiteForUser(userId, siteId, 8),
+      getRecentScansForSiteForUser(userId, siteId, 8),
       getSiteNotificationSettingsForUser(userId, siteId),
     ]);
 

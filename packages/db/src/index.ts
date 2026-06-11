@@ -258,6 +258,27 @@ export type {
 } from "./notifications";
 
 export {
+  createAppNotification,
+  createScanAppNotificationsForRun,
+  getUnreadAppNotificationCount,
+  getUserNotificationPreferences,
+  listRecentAppNotificationsForUser,
+  markAllAppNotificationsReadForUser,
+  markAppNotificationReadForUser,
+  shouldCreateAppNotification,
+  updateUserNotificationPreferences,
+  USER_NOTIFICATION_PREFERENCE_FIELDS,
+} from "./appNotifications";
+export type {
+  AppNotification,
+  AppNotificationKind,
+  AppNotificationSeverity,
+  UpdateUserNotificationPreferencesInput,
+  UserNotificationPreferenceField,
+  UserNotificationPreferences,
+} from "./appNotifications";
+
+export {
   computeSeverityScore,
   createEmptySeverityCounts,
   getScanCategoryScores,

@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import type { AppNotification } from "./appNotifications";
 
 export const SCAN_EVENT_CHANNEL = "scan_events";
 
@@ -39,7 +40,24 @@ export type ScheduleEventPayload = {
   last_scheduled_at: string | null;
 };
 
-export type ScanEvent = ScanEventPayload | ScheduleEventPayload;
+export type NotificationCreatedEventPayload = {
+  type: "notification_created";
+  user_id: string;
+  notification: AppNotification;
+  unread_count: number;
+};
+
+export type NotificationCountUpdatedEventPayload = {
+  type: "notification_count_updated";
+  user_id: string;
+  unread_count: number;
+};
+
+export type ScanEvent =
+  | ScanEventPayload
+  | ScheduleEventPayload
+  | NotificationCreatedEventPayload
+  | NotificationCountUpdatedEventPayload;
 
 export async function emitScanEvent(event: ScanEvent): Promise<void> {
   const client = await ensureConnected();

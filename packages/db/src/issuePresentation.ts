@@ -7,7 +7,7 @@ export interface IssuePresentation {
   whyItMatters: string;
   suggestedFix: string;
   technicalDetail: string;
-  learnSlug: null;
+  learnSlug: string | null;
 }
 
 type IssuePresentationSource = Pick<
@@ -29,6 +29,56 @@ type Template = {
   whyItMatters: string | ((issue: IssuePresentationSource) => string);
   suggestedFix: string | ((issue: IssuePresentationSource) => string);
   technicalDetail: string | ((issue: IssuePresentationSource) => string);
+};
+
+const learnSlugByIssueType: Partial<Record<ScanIssueType, string>> = {
+  broken_link: "broken-links",
+  blocked_link: "broken-links",
+  no_response: "broken-links",
+  ignored_safety_skip: "broken-links",
+  missing_title: "page-titles-and-meta-descriptions",
+  empty_title: "page-titles-and-meta-descriptions",
+  duplicate_title: "page-titles-and-meta-descriptions",
+  missing_meta_description: "page-titles-and-meta-descriptions",
+  empty_meta_description: "page-titles-and-meta-descriptions",
+  noindex_detected: "page-titles-and-meta-descriptions",
+  canonical_multiple: "page-titles-and-meta-descriptions",
+  missing_h1: "headings-and-page-structure",
+  multiple_h1: "headings-and-page-structure",
+  robots_missing: "robots-txt",
+  robots_unreachable: "robots-txt",
+  robots_blocks_all: "robots-txt",
+  robots_no_sitemap_reference: "robots-txt",
+  sitemap_missing: "xml-sitemaps",
+  sitemap_unreachable: "xml-sitemaps",
+  sitemap_invalid: "xml-sitemaps",
+  sitemap_empty: "xml-sitemaps",
+  sitemap_url_broken: "xml-sitemaps",
+  https_unavailable: "https-and-redirects",
+  http_not_redirecting_to_https: "https-and-redirects",
+  mixed_content_script: "https-and-redirects",
+  mixed_content_stylesheet: "https-and-redirects",
+  mixed_content_image: "https-and-redirects",
+  mixed_content_iframe: "https-and-redirects",
+  ssl_certificate_expired: "ssl-certificates",
+  ssl_certificate_expiring_soon: "ssl-certificates",
+  ssl_certificate_hostname_mismatch: "ssl-certificates",
+  ssl_certificate_invalid: "ssl-certificates",
+  hsts_missing: "security-headers",
+  csp_missing: "security-headers",
+  frame_ancestors_missing: "security-headers",
+  x_frame_options_missing: "security-headers",
+  x_content_type_options_missing: "security-headers",
+  referrer_policy_missing: "security-headers",
+  permissions_policy_missing: "security-headers",
+  set_cookie_missing_secure: "security-headers",
+  set_cookie_missing_httponly: "security-headers",
+  set_cookie_missing_samesite: "security-headers",
+  homepage_response_slow: "homepage-speed-basics",
+  homepage_html_too_large: "homepage-speed-basics",
+  homepage_asset_count_high: "homepage-speed-basics",
+  homepage_image_count_high: "homepage-speed-basics",
+  homepage_script_count_high: "homepage-speed-basics",
 };
 
 function asString(value: unknown): string | null {
@@ -887,6 +937,7 @@ export function formatIssuePresentation(
   issue: IssuePresentationSource,
 ): IssuePresentation {
   const template = templates[issue.issue_type];
+  const learnSlug = learnSlugByIssueType[issue.issue_type] ?? null;
   if (!template) {
     return {
       userTitle: issue.title,
@@ -897,7 +948,7 @@ export function formatIssuePresentation(
       suggestedFix:
         "Review the affected URL, confirm the intended behavior, and update the page or configuration if needed.",
       technicalDetail: buildTechnicalDetail(issue, []),
-      learnSlug: null,
+      learnSlug,
     };
   }
   return {
@@ -907,6 +958,6 @@ export function formatIssuePresentation(
     whyItMatters: resolveTemplateValue(template.whyItMatters, issue),
     suggestedFix: resolveTemplateValue(template.suggestedFix, issue),
     technicalDetail: resolveTemplateValue(template.technicalDetail, issue),
-    learnSlug: null,
+    learnSlug,
   };
 }

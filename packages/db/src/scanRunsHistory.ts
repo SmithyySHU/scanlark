@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import type { LinkClassification } from "./scanRuns";
+import { getRecentScansForSiteForUser } from "./scans";
 
 export interface ScanRunHistoryRow {
   id: string;
@@ -16,6 +17,13 @@ export interface ScanRunHistoryRow {
   trigger_type: "manual" | "scheduled";
   issue_generation_status: "pending" | "completed" | "failed";
   issue_generation_error: string | null;
+  score?: number | null;
+  overall_score?: number | null;
+  open_issues?: number;
+  new_issues?: number;
+  resolved_issues?: number;
+  blocked_links?: number;
+  no_response_links?: number;
 }
 
 export interface ScanLinkMinimalRow {
@@ -64,33 +72,8 @@ export async function getRecentScanRunsForSiteForUser(
   siteId: string,
   limit: number,
 ): Promise<ScanRunHistoryRow[]> {
-  const client = await ensureConnected();
-  const res = await client.query<ScanRunHistoryRow>(
-    `
-      SELECT
-        r.id,
-        r.site_id,
-        r.status,
-        r.started_at,
-        r.finished_at,
-        r.error_message,
-        r.updated_at,
-        r.start_url,
-        r.total_links,
-        r.checked_links,
-        r.broken_links,
-        r.trigger_type,
-        r.issue_generation_status,
-        r.issue_generation_error
-      FROM scan_runs r
-      JOIN sites s ON s.id = r.site_id
-      WHERE r.site_id = $1 AND s.user_id = $2
-      ORDER BY r.started_at DESC
-      LIMIT $3
-    `,
-    [siteId, userId, limit],
-  );
-  return res.rows;
+  const runs = await getRecentScansForSiteForUser(userId, siteId, limit);
+  return runs;
 }
 
 export async function getScanLinksForRunMinimal(
