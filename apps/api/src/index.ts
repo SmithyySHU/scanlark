@@ -4618,5 +4618,5 @@ void initEventRelay().catch((err) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`API listening on http://localhost:3001`);
+  console.log(`API listening on http://localhost:${PORT}`);
 });

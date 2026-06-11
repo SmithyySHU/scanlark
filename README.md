@@ -1,163 +1,196 @@
 # Scanlark
 
-Automated broken-link monitoring for websites.
+Scanlark is a pre-alpha website monitoring app for client-friendly link, issue,
+report, schedule, notification, and availability workflows.
 
-Scanlark is a work-in-progress SaaS-style app that scans websites to detect broken/blocked links (internal + external), stores results, and presents them in a dashboard. The goal is **reliable monitoring** and a clean workflow—not a full SEO suite.
+It is intentionally focused on passive checks: crawl public website pages,
+identify broken or blocked links, generate practical issue summaries, monitor
+scheduled scans and uptime checks, and present the results in a dashboard and
+shareable reports.
 
----
+## Current MVP Features
 
-## Why this exists
+- Landing page, login/register flow, onboarding, and new-site setup.
+- Authenticated dashboard with site picker, scan history, reports, settings, and
+  account pages.
+- Manual scans and scheduled scan queueing.
+- Passive crawler for public website pages, links, robots/sitemaps, HTTPS/TLS,
+  security headers, mixed content, basic SEO metadata, and basic homepage
+  performance signals.
+- Issue generation, issue change detection, category scores, and client-friendly
+  wording.
+- Report history, full report view, print/save-PDF styling, CSV/JSON exports,
+  and shareable public report links.
+- Site settings for names/client labels, schedules, uptime monitoring, alerts,
+  ignore rules, advanced diagnostics, and deletion.
+- Account profile and notification preferences.
+- In-app notifications, SSE updates, email outbox, and optional SMTP delivery.
+- Scanlark Learn article content.
 
-Broken links hurt user experience, trust, and SEO. Many site owners only notice once users complain.
+## App Routes
 
-Scanlark aims to make link monitoring a background task that runs automatically and surfaces clear, actionable results.
+Frontend routes are parsed in `apps/web/src/app.tsx`; there is no separate
+router package.
 
----
+- `/` and `/landing`: marketing landing page.
+- `/login`: login and registration.
+- `/onboarding`: first-site onboarding flow.
+- `/sites/new`: add another site.
+- `/dashboard`: main dashboard for the selected site.
+- `/dashboard/select-site`: site picker.
+- `/dashboard/reports`: report history and report workspace.
+- `/sites/:siteId/settings?tab=...`: canonical site settings route.
+- `/dashboard/settings?tab=...`: legacy/site-selection-compatible settings route.
+- `/dashboard/account`: account profile and notification preferences.
+- `/report?scanRunId=...`: authenticated report view.
+- `/report?scanRunId=...&print=1`: report view prepared for browser print/PDF.
+- `/shared-reports/:token`: public shared report view.
+- `/learn` and `/learn/:slug`: Scanlark Learn index and article pages.
 
-## What it does today
+Compatibility redirects/normalization exist for `/app...` and
+`/shared-results/:token`.
 
-### ✅ Scanning + classification
-
-- Crawls a site from a start URL
-- Extracts and normalises links
-- Validates links with timeouts + custom User-Agent
-- Classifies results into:
-  - `ok`
-  - `broken` (e.g. 404)
-  - `blocked` (e.g. 403 / forbidden)
-  - timeout / fetch-failed scenarios (recorded as “failed to fetch” / “no response”)
-
-### ✅ Storage (PostgreSQL)
-
-- Core tables:
-  - `sites`
-  - `scan_runs`
-- **Deduplicated link results**:
-  - `scan_links` (unique link per scan run + aggregated status + occurrence count)
-  - `scan_link_occurrences` (where each link appeared / “found on these pages” drill-down)
-- Ignore rules support (exclude specific URLs/patterns from results)
-
-### ✅ API + dashboard
-
-- API endpoints for:
-  - listing scan runs
-  - fetching results with pagination + totals
-  - filtering by classification/status
-- schedule controls to auto-scan sites (daily/weekly, UTC)
-- email notifications with deltas (optional, SMTP-backed)
-- Web dashboard (WIP but usable):
-  - browse sites + scan runs
-  - view broken/blocked results
-  - expandable drill-down to see occurrences
-  - responsive layout + dark/light theme toggle
-
-### ✅ Developer workflow
-
-- Monorepo with npm workspaces
-- Local runs:
-  - run a scan
-  - view results via API/UI
-
----
-
-## Project structure
+## Monorepo Structure
 
 ```txt
 apps/
-  api/        # REST API + event endpoints
-  worker/     # queue worker + scheduler tick
-  web/        # Dashboard UI
+  api/        Express API, auth/session middleware, notifications, SSE, shares
+  web/        React/Vite single page app
+  worker/     scan job worker, scheduler/reaper loops, uptime loop
 packages/
-  crawler/    # crawling + validation + classification
-  db/         # SQL migrations + query layer
+  crawler/    crawling, link validation, site checks, uptime HTTP checks
+  db/         SQL migrations, query helpers, event emission
+docs/         developer docs, checklists, feature notes
 ```
 
----
+See [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md) for a feature-by-feature map.
 
-## Local development
+## Local Setup
 
-### 1) Requirements
+Requirements:
 
-- Node.js (see `.nvmrc` if present)
-- PostgreSQL
-- `DATABASE_URL` set (API + scripts use it)
-- Auth (beta gate):
-  - `DEV_BYPASS_AUTH=true` auto-auths the demo user in dev
-  - `AUTH_COOKIE_NAME`, `SESSION_SECRET` (required when bypass is off), `WEB_ORIGIN`, `API_ORIGIN`
-  - TODO: replace with a hosted auth provider before public release
-- Worker notify:
-  - `API_INTERNAL_TOKEN` must match between API and worker so scheduled scans can trigger notifications
-- Email (optional):
-  - `EMAIL_ENABLED=true`
-  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
-  - `EMAIL_FROM` (optional)
-  - `EMAIL_TEST_TO` (optional override for test emails)
+- Node.js 18+.
+- PostgreSQL.
+- A root `.env` file based on `.env.example`.
 
-### Realtime updates (SSE)
-
-The dashboard subscribes to `/events/stream` for scan + schedule updates. To test
-scheduled scan UI updates locally:
-
-- Open the dashboard and enable a schedule for a site 1–2 minutes ahead.
-- Keep the page open; you should see the scan move to in-progress and complete
-  without a refresh.
-- If you switch tabs, the UI syncs once when you return.
-
-### 2) Install
+Install dependencies:
 
 ```bash
 npm ci
 ```
 
-### 3) Run migrations
+Create a database, then set `DATABASE_URL` in `.env`.
+
+Apply migrations in filename order:
 
 ```bash
-# Example (adjust to your repo’s migration command if different)
-psql "$DATABASE_URL" -f packages/db/migrations/001_init.sql
-psql "$DATABASE_URL" -f packages/db/migrations/002_add_scan_links.sql
-psql "$DATABASE_URL" -f packages/db/migrations/003_add_ignore_rules.sql
-psql "$DATABASE_URL" -f packages/db/migrations/004_add_users_auth_and_ownership.sql
-psql "$DATABASE_URL" -f packages/db/migrations/005_fix_users_updated_at.sql
-psql "$DATABASE_URL" -f packages/db/migrations/006_add_ignore_rules_user_id.sql
+for f in packages/db/migrations/*.sql; do
+  psql "$DATABASE_URL" -f "$f"
+done
 ```
 
-Apply every migration file explicitly by filename in order. Do not assume the
-numeric prefix is unique: this repo currently contains both
-`015_add_performance_basic_site_check.sql` and
-`015_schedule_reliability_improvements.sql`, and both must be applied.
+There are duplicate numeric prefixes (`015_*`, `023_*`), so apply by sorted
+filename, not by assuming numeric uniqueness.
 
-### 4) Start the apps
+## Environment Variables
+
+Required for normal local development:
+
+- `DATABASE_URL`: PostgreSQL connection string.
+- `SESSION_SECRET`: 32+ characters when `DEV_BYPASS_AUTH` is not `true`.
+- `WEB_ORIGIN`: web app origin, usually `http://localhost:5173`.
+- `API_ORIGIN`: API origin, usually `http://localhost:3001`.
+- `API_INTERNAL_TOKEN`: shared API/worker token for scheduled scan notifications.
+
+Common development variables:
+
+- `DEV_BYPASS_AUTH=true`: auto-authenticate as `DEMO_USER_EMAIL`.
+- `DEMO_USER_EMAIL`: demo user identity used by auth bypass.
+- `APP_URL` or `APP_BASE_URL`: public web base URL used in email links.
+- `REPORT_SHARE_TOKEN_SECRET`: required in production-like mode for stable share
+  link signing.
+- `WORKER_API_BASE`: API base used by the worker, default
+  `http://localhost:3001`.
+- `UPTIME_TICK_MS` and `UPTIME_BATCH_SIZE`: uptime worker loop tuning.
+
+Email/SMTP:
+
+- `EMAIL_ENABLED=true` sends SMTP email; otherwise sends are only written to
+  `email_outbox` and logged.
+- `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`.
+- `EMAIL_TEST_TO`: optional override for test alert delivery.
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for more detail.
+
+## Running Locally
+
+Use separate terminals:
 
 ```bash
-# Example (adjust to your scripts if different)
-npm -w apps/api run dev
-npm -w apps/web run dev
-npm -w apps/worker run dev
+npm run dev:api
+npm run dev:web
+npm run dev:worker
 ```
 
----
+Optional helpers:
 
-## CI
+```bash
+npm run dev:db
+npm run scan:once -- <siteId> <startUrl>
+npm run demo:latest-scan
+npm run demo:site-history -- <siteId>
+npm run -w @scanlark/db demo:schedule
+```
 
-GitHub Actions runs on pushes + PRs:
+The API listens on `PORT` or `3001`. The web dev server is Vite, normally
+`http://localhost:5173`.
 
-- install (`npm ci`)
-- typecheck / lint / build across workspaces
-- formatting check (Prettier) to fail PRs with unformatted code
+## Checks
 
-Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the build still completes successfully.
+Run before merging alpha changes:
 
----
+```bash
+npm run typecheck
+npm run -w @scanlark/db typecheck
+npm run -w @scanlark/crawler typecheck
+npm run -w @scanlark/api typecheck
+npm run -w @scanlark/worker typecheck
+npm run -w @scanlark/web typecheck
+npm run -w @scanlark/web build
+npm run format:check
+git diff --check
+```
 
-## Roadmap (near-term)
+The web build currently emits a Vite chunk-size warning for the large single
+page app bundle; the build still succeeds.
 
-- Better scan progress reporting (UI progress indicator + streaming updates)
-- More filters (status-code groups, timeouts, ignored)
-- Export (CSV), copy actions, bulk ignore, retry scan
-- Scheduling / recurring scans + notifications (email)
+## Common Troubleshooting
 
----
+- Missing table/column errors: run every migration in sorted filename order.
+- API starts but auth fails: check `SESSION_SECRET`, `DEV_BYPASS_AUTH`, and
+  `DEMO_USER_EMAIL`.
+- Scheduled scans do not run: start `npm run dev:worker` and confirm
+  `API_INTERNAL_TOKEN` matches between API and worker.
+- Dashboard does not live-update: confirm the API event relay started and
+  `/events/stream` is reachable for the authenticated user.
+- Emails are logged but not delivered: set `EMAIL_ENABLED=true` and valid SMTP
+  variables; inspect `email_outbox`.
+- Uptime is stale: confirm the worker uptime loop is running and that
+  `site_uptime_settings.enabled=true` with `next_check_at <= now()` or null.
+- Shared links fail in production-like mode: set `REPORT_SHARE_TOKEN_SECRET`.
 
-## Notes
+## Alpha Readiness Notes
 
-This repository is under active development and will change as the MVP gets hardened.
+Scanlark is functionally broad enough for a controlled alpha, but should be
+treated as pre-alpha until the checklist in
+[docs/ALPHA_READINESS.md](docs/ALPHA_READINESS.md) is run against a fresh
+database and a deployed environment.
+
+Known limits:
+
+- No managed production auth provider yet; local bypass is dev-only.
+- No automated test suite beyond TypeScript/build/format checks.
+- The frontend is a large single file, so feature discovery depends on the
+  codebase map.
+- Public crawling intentionally rejects localhost/private IPs and performs
+  passive checks only.

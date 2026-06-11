@@ -1,30 +1,53 @@
-# Dev Notes
+# Developer Guide
 
-Practical setup and API notes for local Scanlark development.
+This is the practical local development guide. For feature ownership, see
+[CODEBASE_MAP.md](CODEBASE_MAP.md). For deployment, worker, SMTP, uptime,
+notifications, share links, and known limitations, see
+[OPERATIONS.md](OPERATIONS.md). For release validation, see
+[ALPHA_READINESS.md](ALPHA_READINESS.md).
 
-## Prereqs
+## Prerequisites
 
-- Node 18+
-- PostgreSQL with `DATABASE_URL` set
-- SMTP env vars only when testing live email delivery: `EMAIL_ENABLED=true`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
-- `API_INTERNAL_TOKEN` shared by API and worker when testing scheduled scan completion callbacks
+- Node.js 18+.
+- PostgreSQL.
+- Root `.env` based on `.env.example`.
+- `DATABASE_URL` set.
+- `API_INTERNAL_TOKEN` set for API/worker notification callbacks.
+
+For local auth, either set `DEV_BYPASS_AUTH=true` and `DEMO_USER_EMAIL`, or set
+a 32+ character `SESSION_SECRET` and use the normal auth flow.
 
 ## Install
 
 ```bash
-npm install
+npm ci
 ```
+
+## Migrations
+
+Apply all SQL files in sorted filename order:
+
+```bash
+for f in packages/db/migrations/*.sql; do
+  psql "$DATABASE_URL" -f "$f"
+done
+```
+
+Do not assume the numeric prefix is unique. The repo currently has duplicate
+`015_*` and `023_*` prefixes, and every file matters.
 
 ## Run Services
 
+Use separate terminals:
+
 ```bash
-# API (http://localhost:3001)
+# API, default http://localhost:3001
 npm run dev:api
 
-# Web app (Vite dev server)
+# Web, default Vite dev URL http://localhost:5173
 npm run dev:web
 
-# Scheduled scan worker
+# Worker: scan jobs, scheduler, reaper, uptime checks
 npm run dev:worker
 ```
 
@@ -34,55 +57,88 @@ Optional helpers:
 # DB connection smoke test
 npm run dev:db
 
-# One-off manual crawler run, persisted to an existing site
+# One-off crawler run, persisted to an existing site
 npm run scan:once -- <siteId> <startUrl>
+
+# Print latest scan data
+npm run demo:latest-scan
+
+# Print site history
+npm run demo:site-history -- <siteId>
+
+# Schedule demo helper
+npm run -w @scanlark/db demo:schedule
 ```
 
-Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the build still completes successfully.
+## Current Behavior
 
-## Migrations
+- The web app is a React/Vite SPA with custom route parsing in
+  `apps/web/src/app.tsx`.
+- The API is an Express app; most routes currently live in
+  `apps/api/src/index.ts`.
+- The worker runs scan-job, reaper, scheduler, and uptime loops.
+- Manual scans are created through the API and queued as scan jobs.
+- Scheduled scans are enqueued by the worker when `next_scheduled_at` is due.
+- Uptime checks are claimed by the worker from `site_uptime_settings` and
+  recorded in `uptime_checks`.
+- Email attempts always write to `email_outbox`; SMTP sends only happen when
+  `EMAIL_ENABLED=true`.
+- Shared reports are public token routes backed by `report_shares`.
+- Browser print is the PDF/save-as-PDF flow.
 
-The SQL migrations in `packages/db/migrations/` are required project schema history and should be tracked. Apply them in filename order for a new database:
+## Key Local Endpoints
+
+Base API URL defaults to `http://localhost:3001`.
+
+- `GET /health`
+- `GET /me`
+- `GET /sites`
+- `POST /sites`
+- `GET /sites/:siteId/dashboard-summary`
+- `POST /sites/:siteId/scans`
+- `GET /sites/:siteId/scans`
+- `GET/PUT /sites/:siteId/schedule`
+- `GET/PATCH /sites/:siteId/notification-settings`
+- `GET/PUT /sites/:siteId/uptime`
+- `GET/POST /sites/:siteId/ignore-rules`
+- `GET /scan-runs/:scanRunId`
+- `GET /scan-runs/:scanRunId/report`
+- `GET /scan-runs/:scanRunId/issues`
+- `GET /scan-runs/:scanRunId/links`
+- `GET /scan-runs/:scanRunId/ignored`
+- `GET/POST/DELETE /scan-runs/:scanRunId/share`
+- `GET /public/reports/:token/report`
+- `GET /events/stream`
+
+## Checks
+
+Run the full alpha gate before handing off work:
 
 ```bash
-for f in packages/db/migrations/*.sql; do
-  psql "$DATABASE_URL" -f "$f"
-done
+npm run typecheck
+npm run -w @scanlark/db typecheck
+npm run -w @scanlark/crawler typecheck
+npm run -w @scanlark/api typecheck
+npm run -w @scanlark/worker typecheck
+npm run -w @scanlark/web typecheck
+npm run -w @scanlark/web build
+npm run format:check
+git diff --check
 ```
 
-Important recent migrations:
-
-- `015_schedule_reliability_improvements.sql`: manual/daily/weekly/monthly scheduling fields.
-- `016_email_alerts_scheduled_summaries.sql`: scheduled trigger type, summaries, and notification event uniqueness.
-- `017_issue_change_detection.sql`: issue state tracking and `change_status`.
-- `018_scan_run_issue_generation_status.sql`: issue generation status for reports.
-
-## Current Behaviour
-
-- Scans can be manual or scheduled. Scheduled scans are queued by the worker and use `trigger_type = scheduled`.
-- The crawler performs passive checks only: link fetches, sitemap/robots discovery, HTTPS/TLS/security-header checks, and basic static homepage performance signals.
-- Crawl fetches reject localhost, loopback/private addresses, unsupported protocols, and disallowed ports.
-- Reports include link results, technical diagnostics, issue summaries, issue generation status, and report scoring.
-- Issue change detection marks current issues as `new` or `existing` and keeps resolved issue state for report history.
-- Email writes every attempted send to `email_outbox`; live SMTP delivery only happens when `EMAIL_ENABLED=true`.
-
-## Key Endpoints
-
-Base URL: `http://localhost:3001`
-
-- Start manual scan: `POST /sites/:siteId/scans` body `{ "startUrl": "https://example.com" }`
-- Scan progress: `GET /scan-runs/:scanRunId` or SSE `GET /scan-runs/:scanRunId/events`
-- Links list: `GET /scan-runs/:scanRunId/links?classification=broken&limit=50&offset=0`
-- Links summary: `GET /scan-runs/:scanRunId/links/summary`
-- Link occurrences: `GET /scan-links/:scanLinkId/occurrences?limit=50&offset=0`
-- Diff: `GET /sites/:siteId/scan-runs/:scanRunId/diff?baseline=prev&issuesOnly=true&limit=200&offset=0`
-- Diff CSV: `GET /sites/:siteId/scan-runs/:scanRunId/diff.csv?baseline=prev&issuesOnly=true`
-- Ignore rules: `GET /sites/:siteId/ignore-rules`
-- Notification settings: `GET /sites/:siteId/notification-settings`
+The web build currently emits a chunk-size warning because most UI is in one
+large SPA bundle; this is not a build failure.
 
 ## Troubleshooting
 
-- Missing tables or columns usually means migrations were not applied in order.
-- No live email with outbox rows usually means `EMAIL_ENABLED` is not `true` or SMTP env vars are incomplete.
-- Scheduled scans require the worker, API, database, and matching `API_INTERNAL_TOKEN`.
-- If a report shows pending or failed issue generation, check `issue_generation_status` and API/worker logs for that scan run.
+- Missing tables/columns: migrations are incomplete or out of order.
+- Auth fails locally: check `DEV_BYPASS_AUTH`, `DEMO_USER_EMAIL`, and
+  `SESSION_SECRET`.
+- API logs wrong origin in email links: set `APP_URL` or `APP_BASE_URL`.
+- Scheduled scans do not run: start the worker and check `API_INTERNAL_TOKEN`.
+- Uptime does not update: start the worker and inspect `site_uptime_settings`.
+- In-app notifications do not live-update: check API event relay logs and
+  `/events/stream`.
+- Email does not send: check `EMAIL_ENABLED`, SMTP settings, and
+  `email_outbox`.
+- Share links fail outside development/test: set `REPORT_SHARE_TOKEN_SECRET`.

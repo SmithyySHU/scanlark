@@ -33,11 +33,9 @@ function getSiteHost(value: string) {
   }
 }
 
-function buildAppLink(siteId: string, runId: string) {
+function buildAppLink(runId: string) {
   const base = APP_URL.replace(/\/+$/, "");
-  return `${base}/?siteId=${encodeURIComponent(
-    siteId,
-  )}&runId=${encodeURIComponent(runId)}`;
+  return `${base}/report?scanRunId=${encodeURIComponent(runId)}`;
 }
 
 function formatCounts(counts: Record<string, number>) {
@@ -88,7 +86,7 @@ function buildIssueEmail(params: {
   digest: IssueNotificationDigest;
 }) {
   const siteHost = getSiteHost(params.siteUrl);
-  const appLink = buildAppLink(params.siteId, params.scanRunId);
+  const appLink = buildAppLink(params.scanRunId);
   const finishedAt = params.finishedAt ?? new Date();
   const { severityCounts, categoryCounts, summaryLine } =
     buildIssueSummaryLines(params.digest);
@@ -147,7 +145,7 @@ function buildFailureEmail(params: {
   errorMessage: string | null;
 }) {
   const siteHost = getSiteHost(params.siteUrl);
-  const appLink = buildAppLink(params.siteId, params.scanRunId);
+  const appLink = buildAppLink(params.scanRunId);
   const subject = `Scanlark: scheduled scan failed for ${siteHost}`;
   const errorMessage = params.errorMessage ?? "Unknown error";
   const finishedLine = params.finishedAt

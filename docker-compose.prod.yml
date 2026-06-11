@@ -1,0 +1,145 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - scanlark_private
+
+  migrate:
+    image: postgres:16-alpine
+    profiles:
+      - tools
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    volumes:
+      - ./packages/db/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c 'set -eu;
+      for f in /migrations/*.sql; do
+        echo "Applying $$f";
+        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f";
+      done'
+    networks:
+      - scanlark_private
+
+  backup:
+    image: postgres:16-alpine
+    profiles:
+      - tools
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    volumes:
+      - backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      sh -c 'set -eu;
+      stamp="$$(date -u +%Y%m%dT%H%M%SZ)";
+      pg_dump "$$DATABASE_URL" -Fc -f "/backups/scanlark-$$stamp.dump";
+      ls -lh "/backups/scanlark-$$stamp.dump"'
+    networks:
+      - scanlark_private
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    restart: unless-stopped
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    environment:
+      PORT: 3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "--import", "tsx", "apps/api/src/index.ts"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - scanlark_private
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    restart: unless-stopped
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: ["node", "--import", "tsx", "apps/worker/src/index.ts"]
+    networks:
+      - scanlark_private
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-/api}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - scanlark_private
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    env_file:
+      - ${SCANLARK_ENV_FILE:-.env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_healthy
+    networks:
+      - scanlark_private
+
+networks:
+  scanlark_private:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+  backups:

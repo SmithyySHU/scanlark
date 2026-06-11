@@ -898,7 +898,7 @@ type SsePayload =
   | NotificationCreatedEventPayload
   | NotificationCountUpdatedEventPayload;
 
-const API_BASE = "http://localhost:3001";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const MAX_HISTORY_RESULTS = 100;

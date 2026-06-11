@@ -1,0 +1,21 @@
+{
+  email {$CADDY_ACME_EMAIL:admin@scanlark.example.com}
+}
+
+{$SCANLARK_DOMAIN:scanlark.example.com} {
+  encode zstd gzip
+
+  handle_path /api/events/stream {
+    reverse_proxy api:3001 {
+      flush_interval -1
+    }
+  }
+
+  handle_path /api/* {
+    reverse_proxy api:3001
+  }
+
+  handle {
+    reverse_proxy web:80
+  }
+}
