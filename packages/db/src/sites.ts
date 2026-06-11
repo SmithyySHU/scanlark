@@ -26,7 +26,34 @@ export interface DbSiteRow {
   report_display_name: string | null;
   internal_notes: string | null;
   developer_tabs_enabled: boolean;
+  avatar_status: "pending" | "cached" | "missing" | "failed" | "removed";
+  avatar_source_url: string | null;
+  avatar_content_type: string | null;
+  avatar_size_bytes: number | null;
+  avatar_fetched_at: Date | null;
+  avatar_checked_at: Date | null;
+  avatar_error: string | null;
 }
+
+export type SiteAvatarStatus = DbSiteRow["avatar_status"];
+
+export type SiteAvatarAsset = {
+  site_id: string;
+  status: SiteAvatarStatus;
+  source_url: string | null;
+  content_type: string | null;
+  content: Buffer | null;
+  size_bytes: number | null;
+  fetched_at: Date | null;
+  checked_at: Date | null;
+  error: string | null;
+};
+
+export type CacheSiteAvatarInput = {
+  sourceUrl: string;
+  contentType: string;
+  content: Buffer;
+};
 
 export type SiteMetadataFields = {
   siteDisplayName: string | null;
@@ -69,7 +96,14 @@ const SITE_SELECT_COLUMNS = `
   client_name,
   report_display_name,
   internal_notes,
-  developer_tabs_enabled
+  developer_tabs_enabled,
+  avatar_status,
+  avatar_source_url,
+  avatar_content_type,
+  avatar_size_bytes,
+  avatar_fetched_at,
+  avatar_checked_at,
+  avatar_error
 `;
 
 function normalizeSiteMetadataValue(value: string | null | undefined) {
@@ -270,6 +304,112 @@ export async function updateSiteMetadataForUser(
   );
 
   return result.rows[0] ?? null;
+}
+
+export async function cacheSiteAvatarForUser(
+  userId: string,
+  siteId: string,
+  input: CacheSiteAvatarInput,
+): Promise<DbSiteRow | null> {
+  const db = await ensureConnected();
+  const result = await db.query<DbSiteRow>(
+    `
+    UPDATE sites
+    SET avatar_status = 'cached',
+        avatar_source_url = $3,
+        avatar_content_type = $4,
+        avatar_content = $5,
+        avatar_size_bytes = $6,
+        avatar_fetched_at = NOW(),
+        avatar_checked_at = NOW(),
+        avatar_error = NULL
+    WHERE id = $1 AND user_id = $2
+    RETURNING ${SITE_SELECT_COLUMNS}
+    `,
+    [
+      siteId,
+      userId,
+      input.sourceUrl,
+      input.contentType,
+      input.content,
+      input.content.byteLength,
+    ],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function markSiteAvatarUnavailableForUser(
+  userId: string,
+  siteId: string,
+  status: Exclude<SiteAvatarStatus, "cached" | "pending">,
+  error: string | null,
+): Promise<DbSiteRow | null> {
+  const db = await ensureConnected();
+  const result = await db.query<DbSiteRow>(
+    `
+    UPDATE sites
+    SET avatar_status = $3,
+        avatar_source_url = NULL,
+        avatar_content_type = NULL,
+        avatar_content = NULL,
+        avatar_size_bytes = NULL,
+        avatar_fetched_at = NULL,
+        avatar_checked_at = NOW(),
+        avatar_error = $4
+    WHERE id = $1 AND user_id = $2
+    RETURNING ${SITE_SELECT_COLUMNS}
+    `,
+    [siteId, userId, status, error],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getSiteAvatarForUser(
+  userId: string,
+  siteId: string,
+): Promise<SiteAvatarAsset | null> {
+  const db = await ensureConnected();
+  const result = await db.query<{
+    id: string;
+    avatar_status: SiteAvatarStatus;
+    avatar_source_url: string | null;
+    avatar_content_type: string | null;
+    avatar_content: Buffer | null;
+    avatar_size_bytes: number | null;
+    avatar_fetched_at: Date | null;
+    avatar_checked_at: Date | null;
+    avatar_error: string | null;
+  }>(
+    `
+    SELECT
+      id,
+      avatar_status,
+      avatar_source_url,
+      avatar_content_type,
+      avatar_content,
+      avatar_size_bytes,
+      avatar_fetched_at,
+      avatar_checked_at,
+      avatar_error
+    FROM sites
+    WHERE id = $1 AND user_id = $2
+    LIMIT 1
+    `,
+    [siteId, userId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    site_id: row.id,
+    status: row.avatar_status,
+    source_url: row.avatar_source_url,
+    content_type: row.avatar_content_type,
+    content: row.avatar_content,
+    size_bytes: row.avatar_size_bytes,
+    fetched_at: row.avatar_fetched_at,
+    checked_at: row.avatar_checked_at,
+    error: row.avatar_error,
+  };
 }
 
 // Delete a site and all its scan data.

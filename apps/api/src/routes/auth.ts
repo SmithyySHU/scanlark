@@ -8,6 +8,15 @@ function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
 
+function serializeAuthUser(user: Awaited<ReturnType<typeof createUser>>) {
+  return {
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+    name: user.displayName,
+  };
+}
+
 // TODO: Replace memory store with Redis in production.
 const authLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
@@ -43,7 +52,7 @@ export function mountAuthRoutes(app: express.Application) {
       try {
         const user = await createUser(email, password);
         await setSession(req, user.id);
-        return res.status(201).json({ id: user.id, email: user.email });
+        return res.status(201).json(serializeAuthUser(user));
       } catch (err: unknown) {
         if (err instanceof Error && err.message === "email_exists") {
           return res.status(409).json({
@@ -83,7 +92,7 @@ export function mountAuthRoutes(app: express.Application) {
         });
       }
       await setSession(req, user.id);
-      return res.json({ id: user.id, email: user.email });
+      return res.json(serializeAuthUser(user));
     } catch (err) {
       console.error("Login failed", err);
       return res.status(500).json({ error: "login_failed" });

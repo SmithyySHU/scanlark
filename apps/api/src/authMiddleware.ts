@@ -11,6 +11,7 @@ import { getSessionUserId } from "./auth";
 type AuthUser = {
   id: string;
   email: string;
+  displayName?: string | null;
   name?: string;
 };
 
@@ -30,7 +31,8 @@ async function ensureDemoUser(): Promise<AuthUser> {
         return {
           id: existing.id,
           email: existing.email,
-          name: "Demo User",
+          displayName: existing.displayName ?? "Demo User",
+          name: existing.displayName ?? "Demo User",
         };
       }
       const password = crypto.randomBytes(24).toString("base64url");
@@ -39,7 +41,8 @@ async function ensureDemoUser(): Promise<AuthUser> {
       return {
         id: created.id,
         email: created.email,
-        name: "Demo User",
+        displayName: created.displayName ?? "Demo User",
+        name: created.displayName ?? "Demo User",
       };
     })();
   }
@@ -106,7 +109,12 @@ export async function authMiddleware(
     if (!user) {
       return res.status(401).json({ error: "unauthorized" });
     }
-    req.user = { id: user.id, email: user.email };
+    req.user = {
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      name: user.displayName ?? undefined,
+    };
     return next();
   } catch (err) {
     console.error("Auth lookup failed", err);

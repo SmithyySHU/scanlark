@@ -5,6 +5,7 @@ type UserRow = {
   id: string;
   email: string;
   password_hash: string;
+  display_name: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -12,6 +13,7 @@ type UserRow = {
 export type AuthUser = {
   id: string;
   email: string;
+  displayName: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -20,9 +22,16 @@ function mapUser(row: UserRow): AuthUser {
   return {
     id: row.id,
     email: row.email,
+    displayName: row.display_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeDisplayName(value: string | null | undefined) {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export async function createUser(
@@ -38,7 +47,7 @@ export async function createUser(
       `
         INSERT INTO users (email, password_hash)
         VALUES ($1, $2)
-        RETURNING id, email, password_hash, created_at, updated_at
+        RETURNING id, email, password_hash, display_name, created_at, updated_at
       `,
       [email.toLowerCase().trim(), passwordHash],
     );
@@ -60,7 +69,7 @@ export async function getUserByEmail(email: string): Promise<AuthUser | null> {
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -76,7 +85,7 @@ export async function getUserById(userId: string): Promise<AuthUser | null> {
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -95,7 +104,7 @@ export async function verifyUser(
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -111,5 +120,26 @@ export async function verifyUser(
     return null;
   }
   if (!ok) return null;
+  return mapUser(row);
+}
+
+export async function updateUserProfile(
+  userId: string,
+  fields: { displayName?: string | null },
+): Promise<AuthUser | null> {
+  const client = await ensureConnected();
+  const displayName = normalizeDisplayName(fields.displayName);
+  const res = await client.query<UserRow>(
+    `
+      UPDATE users
+      SET display_name = $2,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, email, password_hash, display_name, created_at, updated_at
+    `,
+    [userId, displayName],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
   return mapUser(row);
 }

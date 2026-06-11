@@ -7,10 +7,19 @@ export {
   getSiteByIdForUser,
   getSitesForUser,
   listSitesForUser,
+  cacheSiteAvatarForUser,
   backfillSitesUserId,
+  getSiteAvatarForUser,
+  markSiteAvatarUnavailableForUser,
   updateSiteMetadataForUser,
 } from "./sites";
-export type { DbSiteRow, SiteMetadataFields } from "./sites";
+export type {
+  CacheSiteAvatarInput,
+  DbSiteRow,
+  SiteAvatarAsset,
+  SiteAvatarStatus,
+  SiteMetadataFields,
+} from "./sites";
 
 export {
   computeNextScheduledAt,
@@ -293,7 +302,13 @@ export type {
   SeverityCounts,
 } from "./scanCategoryScores";
 
-export { createUser, getUserByEmail, getUserById, verifyUser } from "./auth";
+export {
+  createUser,
+  getUserByEmail,
+  getUserById,
+  updateUserProfile,
+  verifyUser,
+} from "./auth";
 export type { AuthUser } from "./auth";
 
 export { SCAN_EVENT_CHANNEL } from "./events";

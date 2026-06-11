@@ -17,6 +17,7 @@ import type {
 } from "@scanlark/db";
 import {
   applyIgnoreRulesForScanRun,
+  cacheSiteAvatarForUser,
   cancelScanJob,
   cancelScanRun,
   createSiteForUser,
@@ -57,6 +58,7 @@ import {
   getScanDiff,
   getScanRunByIdForUser,
   getScanRunById,
+  getSiteAvatarForUser,
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
@@ -83,6 +85,7 @@ import {
   listLinkNotesForSiteForUser,
   markAllAppNotificationsReadForUser,
   markAppNotificationReadForUser,
+  markSiteAvatarUnavailableForUser,
   recordReportShareView,
   replaceIssuesForScanRun,
   setIgnoreRuleEnabled,
@@ -94,6 +97,7 @@ import {
   upsertLinkNoteForSiteForUser,
   updateSiteNotificationSettingsForUser,
   updateSiteScheduleForUser,
+  updateUserProfile,
   updateUserNotificationPreferences,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
@@ -103,7 +107,13 @@ import {
   type UserNotificationPreferences,
 } from "@scanlark/db";
 import validateLink from "../../../packages/crawler/src/validateLink";
+import { validateCrawlTarget } from "../../../packages/crawler/src/fetchUrl";
 import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
+import {
+  MAX_REDIRECTS,
+  REQUEST_TIMEOUT_MS,
+  SCANLARK_USER_AGENT,
+} from "../../../packages/crawler/src/limits";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
@@ -356,6 +366,262 @@ function validateIgnoreRulePattern(
 
 function getErrorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
+}
+
+const MAX_SITE_AVATAR_BYTES = 256 * 1024;
+const MAX_AVATAR_HTML_BYTES = 200 * 1024;
+const AVATAR_IMAGE_CONTENT_TYPES = new Set([
+  "image/x-icon",
+  "image/vnd.microsoft.icon",
+  "image/png",
+  "image/jpeg",
+  "image/svg+xml",
+  "image/webp",
+  "image/gif",
+]);
+
+type AvatarFetchResult =
+  | {
+      ok: true;
+      finalUrl: string;
+      contentType: string;
+      content: Buffer;
+    }
+  | { ok: false; error: string };
+
+function normalizeContentType(value: string | null) {
+  return value?.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+async function readResponseBufferWithLimit(
+  res: globalThis.Response,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  if (!res.body) {
+    const buffer = Buffer.from(await res.arrayBuffer());
+    return buffer.byteLength <= maxBytes ? buffer : null;
+  }
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function fetchAvatarCandidate(
+  rawUrl: string,
+): Promise<AvatarFetchResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    let currentUrl = (await validateCrawlTarget(rawUrl)).toString();
+    for (let i = 0; i <= MAX_REDIRECTS; i++) {
+      const res = await fetch(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "user-agent": SCANLARK_USER_AGENT,
+          accept: "image/*,*/*;q=0.8",
+        },
+      });
+
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        if (!location) return { ok: false, error: "redirect_without_location" };
+        if (i === MAX_REDIRECTS)
+          return { ok: false, error: "too_many_redirects" };
+        currentUrl = (
+          await validateCrawlTarget(new URL(location, currentUrl).toString())
+        ).toString();
+        continue;
+      }
+
+      if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+
+      const contentType = normalizeContentType(res.headers.get("content-type"));
+      if (!AVATAR_IMAGE_CONTENT_TYPES.has(contentType)) {
+        return { ok: false, error: "unsupported_content_type" };
+      }
+
+      const contentLength = Number(res.headers.get("content-length"));
+      if (
+        Number.isFinite(contentLength) &&
+        contentLength > MAX_SITE_AVATAR_BYTES
+      ) {
+        return { ok: false, error: "response_too_large" };
+      }
+
+      const content = await readResponseBufferWithLimit(
+        res,
+        MAX_SITE_AVATAR_BYTES,
+      );
+      if (!content || content.byteLength === 0) {
+        return {
+          ok: false,
+          error: content ? "empty_response" : "response_too_large",
+        };
+      }
+
+      return { ok: true, finalUrl: currentUrl, contentType, content };
+    }
+    return { ok: false, error: "too_many_redirects" };
+  } catch (err: unknown) {
+    return { ok: false, error: getErrorMessage(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function decodeHtmlAttribute(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function extractHtmlAttributes(tag: string) {
+  const attrs: Record<string, string> = {};
+  const attrPattern =
+    /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("[^"]*"|'[^']*'|[^\s"'=<>`]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrPattern.exec(tag)) !== null) {
+    const raw = match[2];
+    const value =
+      raw.startsWith('"') || raw.startsWith("'") ? raw.slice(1, -1) : raw;
+    attrs[match[1].toLowerCase()] = decodeHtmlAttribute(value);
+  }
+  return attrs;
+}
+
+function discoverIconCandidatesFromHtml(html: string, baseUrl: string) {
+  const iconCandidates: string[] = [];
+  const appleCandidates: string[] = [];
+  const linkPattern = /<link\b[^>]*>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = linkPattern.exec(html)) !== null) {
+    const attrs = extractHtmlAttributes(match[0]);
+    const relTokens = (attrs.rel ?? "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (!attrs.href || relTokens.length === 0) continue;
+    const isApple = relTokens.includes("apple-touch-icon");
+    const isIcon = relTokens.includes("icon") && !isApple;
+    if (!isIcon && !isApple) continue;
+    try {
+      const resolved = new URL(attrs.href, baseUrl).toString();
+      if (isApple) appleCandidates.push(resolved);
+      else iconCandidates.push(resolved);
+    } catch {}
+  }
+  return [...iconCandidates, ...appleCandidates];
+}
+
+async function fetchHomepageHtmlForAvatar(siteUrl: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    let currentUrl = (await validateCrawlTarget(siteUrl)).toString();
+    for (let i = 0; i <= MAX_REDIRECTS; i++) {
+      const res = await fetch(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+        headers: {
+          "user-agent": SCANLARK_USER_AGENT,
+          accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+        },
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        if (!location || i === MAX_REDIRECTS) return null;
+        currentUrl = (
+          await validateCrawlTarget(new URL(location, currentUrl).toString())
+        ).toString();
+        continue;
+      }
+      if (!res.ok) return null;
+      const contentType = normalizeContentType(res.headers.get("content-type"));
+      if (contentType && !contentType.includes("html")) return null;
+      const buffer = await readResponseBufferWithLimit(
+        res,
+        MAX_AVATAR_HTML_BYTES,
+      );
+      if (!buffer) return null;
+      return { html: buffer.toString("utf8"), finalUrl: currentUrl };
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function refreshSiteAvatar(userId: string, siteId: string) {
+  const site = await getSiteByIdForUser(userId, siteId);
+  if (!site) return null;
+
+  const candidates: string[] = [];
+  try {
+    const origin = new URL(site.url).origin;
+    candidates.push(new URL("/favicon.ico", origin).toString());
+  } catch {
+    const updated = await markSiteAvatarUnavailableForUser(
+      userId,
+      siteId,
+      "failed",
+      "invalid_site_url",
+    );
+    return updated;
+  }
+
+  const homepage = await fetchHomepageHtmlForAvatar(site.url);
+  if (homepage) {
+    candidates.push(
+      ...discoverIconCandidatesFromHtml(homepage.html, homepage.finalUrl),
+    );
+  }
+
+  const uniqueCandidates = Array.from(new Set(candidates));
+  let lastError: string | null = null;
+  for (const candidate of uniqueCandidates) {
+    const result = await fetchAvatarCandidate(candidate);
+    if (result.ok) {
+      return cacheSiteAvatarForUser(userId, siteId, {
+        sourceUrl: result.finalUrl,
+        contentType: result.contentType,
+        content: result.content,
+      });
+    }
+    lastError = result.error;
+  }
+
+  return markSiteAvatarUnavailableForUser(
+    userId,
+    siteId,
+    "missing",
+    lastError ?? "no_favicon_found",
+  );
+}
+
+function startSiteAvatarRefresh(userId: string, siteId: string) {
+  void refreshSiteAvatar(userId, siteId).catch((err) => {
+    console.warn("Failed to refresh site avatar", { siteId, err });
+  });
 }
 
 type ApiErrorPayload = {
@@ -630,11 +896,95 @@ app.get("/me", (req, res) => {
   if (!req.user) {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
+  const displayName = req.user.displayName ?? req.user.name ?? null;
   return res.json({
     id: req.user.id,
     email: req.user.email,
-    name: req.user.name,
+    displayName,
+    name: displayName,
   });
+});
+
+app.get("/account/profile", (req, res) => {
+  if (!req.user) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  const displayName = req.user.displayName ?? req.user.name ?? null;
+  return res.json({
+    user: {
+      id: req.user.id,
+      email: req.user.email,
+      displayName,
+      name: displayName,
+    },
+  });
+});
+
+app.patch("/account/profile", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_body",
+      "Request body must be an object",
+    );
+  }
+  const keys = Object.keys(body);
+  if (keys.some((key) => key !== "displayName")) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_field",
+      "Only displayName can be updated",
+    );
+  }
+  const displayName = (body as { displayName?: unknown }).displayName;
+  if (
+    displayName !== undefined &&
+    displayName !== null &&
+    typeof displayName !== "string"
+  ) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_display_name",
+      "displayName must be a string or null",
+    );
+  }
+  if (typeof displayName === "string" && displayName.trim().length > 120) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_display_name",
+      "displayName must be 120 characters or fewer",
+    );
+  }
+
+  try {
+    const user = await updateUserProfile(userId, {
+      displayName:
+        typeof displayName === "string" || displayName === null
+          ? displayName
+          : null,
+    });
+    if (!user) return sendNotFound(res);
+    return res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        name: user.displayName,
+      },
+    });
+  } catch (err: unknown) {
+    console.error("Error in PATCH /account/profile", err);
+    return sendInternalError(res, "Failed to update profile", err);
+  }
 });
 
 app.get("/sites", async (req, res) => {
@@ -2558,10 +2908,69 @@ app.post("/sites", async (req, res) => {
           : false,
     });
 
+    startSiteAvatarRefresh(userId, site.id);
+
     res.status(201).json({ site });
   } catch (err: unknown) {
     console.error("Error creating site", err);
     return sendInternalError(res, "Failed to create site", err);
+  }
+});
+
+app.get("/sites/:siteId/avatar", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const avatar = await getSiteAvatarForUser(userId, req.params.siteId);
+    if (!avatar) return sendNotFound(res);
+    if (avatar.status !== "cached" || !avatar.content || !avatar.content_type) {
+      return sendNotFound(res);
+    }
+    res.setHeader("Content-Type", avatar.content_type);
+    res.setHeader("Content-Length", String(avatar.content.byteLength));
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.send(avatar.content);
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/avatar", err);
+    return sendInternalError(res, "Failed to fetch site avatar", err);
+  }
+});
+
+app.post("/sites/:siteId/avatar/refresh", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const site = await refreshSiteAvatar(userId, req.params.siteId);
+    if (!site) return sendNotFound(res);
+    return res.json({ site });
+  } catch (err: unknown) {
+    console.error("Error in POST /sites/:siteId/avatar/refresh", err);
+    return sendInternalError(res, "Failed to refresh site avatar", err);
+  }
+});
+
+app.delete("/sites/:siteId/avatar", async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const site = await markSiteAvatarUnavailableForUser(
+      userId,
+      req.params.siteId,
+      "removed",
+      null,
+    );
+    if (!site) return sendNotFound(res);
+    return res.json({ site });
+  } catch (err: unknown) {
+    console.error("Error in DELETE /sites/:siteId/avatar", err);
+    return sendInternalError(res, "Failed to remove site avatar", err);
   }
 });
 
