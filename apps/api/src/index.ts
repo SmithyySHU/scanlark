@@ -47,7 +47,6 @@ import {
   getSharedReportAccessByToken,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
-  getScanCategoryScores,
   getScanCategoryScoresForUser,
   getScanLinksForRun,
   getScanLinksForExportFilteredForUser,
@@ -61,7 +60,6 @@ import {
   getSiteByIdForUser,
   getSiteById,
   getSiteNotificationSettingsForUser,
-  getScanTechnicalDiagnostics,
   getScanTechnicalDiagnosticsForUser,
   listSitesForUser,
   getSiteScheduleForUser,
@@ -484,6 +482,21 @@ function serializePublicReportSite(
         client_name: site.client_name ?? null,
         report_display_name: site.report_display_name ?? null,
         url: site.url,
+      }
+    : null;
+}
+
+function serializeAuthenticatedReportSite(
+  site: Awaited<ReturnType<typeof getSiteByIdForUser>>,
+) {
+  return site
+    ? {
+        id: site.id,
+        site_display_name: site.site_display_name ?? null,
+        client_name: site.client_name ?? null,
+        report_display_name: site.report_display_name ?? null,
+        url: site.url,
+        developer_tabs_enabled: site.developer_tabs_enabled,
       }
     : null;
 }
@@ -2077,9 +2090,11 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
       "blocked",
       20,
     );
+    const site = await getSiteByIdForUser(userId, run.site_id);
 
     return res.json({
       scanRun: serializeScanRun(run),
+      site: serializeAuthenticatedReportSite(site),
       summary: { byClassification, byStatusCode },
       topBroken: topBroken.map(serializeTopRow),
       topBlocked: topBlocked.map(serializeTopRow),
@@ -2286,30 +2301,8 @@ app.get("/public/reports/:token/issues", async (req, res) => {
 });
 
 app.get("/public/reports/:token/technical-diagnostics", async (req, res) => {
-  const token = req.params.token;
-  try {
-    const access = await requireSharedReportAccess(req, res, token);
-    if (!access) return;
-    const [diagnostics, categoryScores] = await Promise.all([
-      getScanTechnicalDiagnostics(access.run.id),
-      getScanCategoryScores(access.run.id),
-    ]);
-    return res.json({
-      ...diagnostics,
-      categoryScores,
-      loadedAt: new Date().toISOString(),
-    });
-  } catch (err: unknown) {
-    console.error(
-      "Error in GET /public/reports/:token/technical-diagnostics",
-      err,
-    );
-    return sendInternalError(
-      res,
-      "Failed to fetch shared report diagnostics",
-      err,
-    );
-  }
+  applyPublicReportHeaders(res);
+  return sendNotFound(res);
 });
 
 app.get("/public/reports/:token/links", async (req, res) => {
@@ -2523,6 +2516,7 @@ app.post("/sites", async (req, res) => {
       clientName?: string | null;
       reportDisplayName?: string | null;
       internalNotes?: string | null;
+      developerTabsEnabled?: boolean;
     };
     const url = body.url;
 
@@ -2558,6 +2552,10 @@ app.post("/sites", async (req, res) => {
       clientName,
       reportDisplayName,
       internalNotes,
+      developerTabsEnabled:
+        typeof body.developerTabsEnabled === "boolean"
+          ? body.developerTabsEnabled
+          : false,
     });
 
     res.status(201).json({ site });
@@ -2580,6 +2578,7 @@ app.patch("/sites/:siteId", async (req, res) => {
       clientName?: string | null;
       reportDisplayName?: string | null;
       internalNotes?: string | null;
+      developerTabsEnabled?: boolean;
     };
 
     const siteDisplayName = parseOptionalSiteMetadataField(
@@ -2617,6 +2616,17 @@ app.patch("/sites/:siteId", async (req, res) => {
     }
     if (body.internalNotes !== undefined) {
       fields.internalNotes = internalNotes;
+    }
+    if (body.developerTabsEnabled !== undefined) {
+      if (typeof body.developerTabsEnabled !== "boolean") {
+        return sendApiError(
+          res,
+          400,
+          "invalid_site_metadata",
+          "developerTabsEnabled must be boolean when provided",
+        );
+      }
+      fields.developerTabsEnabled = body.developerTabsEnabled;
     }
 
     if (Object.keys(fields).length === 0) {

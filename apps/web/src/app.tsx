@@ -62,11 +62,19 @@ type AppRoute =
   | "login"
   | "onboarding"
   | "new_site"
+  | "select_site"
   | "app"
   | "report"
   | "shared_report"
   | "learn";
 type AppSection = "dashboard" | "reports" | "site_settings" | "account";
+type SitesLoadState =
+  | "idle"
+  | "loading"
+  | "loaded_empty"
+  | "loaded_one"
+  | "loaded_many"
+  | "error";
 type LearnCategoryFilter = LearnArticleCategory | "all";
 type SiteSettingsSection =
   | "general"
@@ -97,6 +105,7 @@ interface Site {
   client_name: string | null;
   report_display_name: string | null;
   internal_notes: string | null;
+  developer_tabs_enabled: boolean;
 }
 
 type UptimeMonitorStatus = "up" | "down" | "degraded" | "unknown";
@@ -239,6 +248,20 @@ interface ScanHistoryResponse {
   siteId: string;
   count: number;
   scans: ScanRunSummary[];
+}
+
+interface SitePickerSession {
+  hasActiveSiteSelection: boolean;
+  lastDashboardSelectionAt: number;
+  selectedSiteId?: string | null;
+}
+
+interface SitePickerCardSnapshot {
+  healthScore: number | null;
+  openIssues: number | null;
+  lastScanStatus: string | null;
+  lastScanDate: string | null;
+  availabilityStatus: string | null;
 }
 
 interface ScanResultRow {
@@ -719,10 +742,12 @@ interface ReportShareResponse {
 interface ReportOverviewResponse {
   scanRun: ScanRunSummary;
   site: {
+    id?: string;
     site_display_name: string | null;
     client_name: string | null;
     report_display_name: string | null;
     url: string;
+    developer_tabs_enabled?: boolean;
   } | null;
   summary: {
     byClassification: Record<string, number>;
@@ -870,6 +895,7 @@ const REPORT_VISIBLE_ROWS_INCREMENT = 10;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
+const DASHBOARD_COMPLETION_PANEL_AUTO_DISMISS_MS = 10 * 60 * 1000;
 const NOTIFICATION_REFRESH_INTERVAL_MS = 30000;
 const DEFAULT_USER_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
   inAppEnabled: true,
@@ -888,6 +914,13 @@ const SAMPLE_SITE_NAME = "Sample site";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_SETUP_STORAGE_PREFIX = "site_setup:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
+const SITE_PICKER_SESSION_PREFIX = "dashboard_site_selection_session:";
+const DASHBOARD_COMPLETION_DISMISS_STORAGE_PREFIX =
+  "dashboard_completion_dismissed:";
+const SITE_PICKER_SESSION_TTL_MS = 45 * 60 * 1000;
+const LANDING_DASHBOARD_SELECT_QUERY_PARAM = "selectSite";
+const SHARED_REPORT_ROUTE_PREFIX = "/shared-reports";
+const LEGACY_SHARED_RESULTS_ROUTE_PREFIX = "/shared-results";
 const COMMON_HOST_SUFFIX_WORDS = [
   "agency",
   "bakery",
@@ -1824,6 +1857,24 @@ function runStatusTone(status: string | null | undefined) {
   return "neutral";
 }
 
+function getDashboardRunStatusTone(
+  status: string | null | undefined,
+): "default" | "success" | "warning" | "danger" {
+  const normalized = status?.trim().toLowerCase();
+  if (!normalized) return "default";
+  if (normalized === "completed") return "success";
+  if (
+    normalized === "queued" ||
+    normalized === "pending" ||
+    normalized === "in_progress" ||
+    normalized === "running" ||
+    normalized === "cancelled"
+  )
+    return "warning";
+  if (normalized === "failed") return "danger";
+  return "default";
+}
+
 const RUN_STATUS_LABELS: Record<string, string> = {
   completed: "Completed",
   in_progress: "Running",
@@ -1940,6 +1991,13 @@ function getStorageKey(prefix: string, userId: string) {
   return `${prefix}${userId}`;
 }
 
+function clearStorageItem(key: string | null) {
+  if (!key || typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(key);
+  } catch {}
+}
+
 function loadStorageMap(key: string) {
   if (typeof window === "undefined") return {};
   try {
@@ -1958,6 +2016,93 @@ function saveStorageMap(key: string, value: Record<string, string>) {
   } catch {}
 }
 
+function readSessionNumberMap(
+  storageKey: string | null,
+): Record<string, number> {
+  if (!storageKey || typeof window === "undefined") return {};
+  try {
+    const raw = window.sessionStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] => typeof entry[1] === "number",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionNumberMap(
+  storageKey: string | null,
+  value: Record<string, number>,
+) {
+  if (!storageKey || typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(storageKey, JSON.stringify(value));
+  } catch {}
+}
+
+function readSitePickerSession(
+  storageKey: string | null,
+): SitePickerSession | null {
+  if (!storageKey || typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SitePickerSession>;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof parsed.lastDashboardSelectionAt !== "number" ||
+      typeof parsed.hasActiveSiteSelection !== "boolean"
+    ) {
+      clearStorageItem(storageKey);
+      return null;
+    }
+
+    if (
+      Date.now() - parsed.lastDashboardSelectionAt >
+      SITE_PICKER_SESSION_TTL_MS
+    ) {
+      clearStorageItem(storageKey);
+      return null;
+    }
+
+    return {
+      hasActiveSiteSelection: parsed.hasActiveSiteSelection,
+      lastDashboardSelectionAt: parsed.lastDashboardSelectionAt,
+      selectedSiteId:
+        typeof parsed.selectedSiteId === "string" &&
+        parsed.selectedSiteId.trim()
+          ? parsed.selectedSiteId
+          : null,
+    };
+  } catch {
+    clearStorageItem(storageKey);
+    return null;
+  }
+}
+
+function writeSitePickerSession(
+  storageKey: string | null,
+  session: SitePickerSession,
+) {
+  if (!storageKey || typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        hasActiveSiteSelection: session.hasActiveSiteSelection,
+        lastDashboardSelectionAt: session.lastDashboardSelectionAt,
+        selectedSiteId: session.selectedSiteId ?? null,
+      }),
+    );
+  } catch {}
+}
+
 function getReportScanRunIdFromLocation() {
   if (typeof window === "undefined") return null;
   const url = new URL(window.location.href);
@@ -1968,8 +2113,23 @@ function getReportScanRunIdFromLocation() {
   return null;
 }
 
+function getReportAutoPrintFromLocation() {
+  if (typeof window === "undefined") return false;
+  try {
+    const printParam = new URLSearchParams(window.location.search).get("print");
+    return printParam === "1" || printParam?.toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+
 function normalizeDashboardCompatPath(pathname: string) {
   const path = pathname.replace(/\/+$/, "") || "/";
+  if (path.startsWith(`${LEGACY_SHARED_RESULTS_ROUTE_PREFIX}/`)) {
+    return `${SHARED_REPORT_ROUTE_PREFIX}${path.slice(
+      LEGACY_SHARED_RESULTS_ROUTE_PREFIX.length,
+    )}`;
+  }
   if (path === "/app") return "/dashboard";
   if (path.startsWith("/app/")) return `/dashboard${path.slice(4)}`;
   return path;
@@ -1980,9 +2140,19 @@ function getSharedReportTokenFromLocation() {
   const path = normalizeDashboardCompatPath(
     window.location.pathname.replace(/\/+$/, "") || "/",
   );
-  if (!path.startsWith("/shared-reports/")) return null;
-  const rawToken = path.slice("/shared-reports/".length);
+  if (!path.startsWith(`${SHARED_REPORT_ROUTE_PREFIX}/`)) return null;
+  const rawToken = path.slice(`${SHARED_REPORT_ROUTE_PREFIX}/`.length);
   return rawToken ? decodeURIComponent(rawToken) : null;
+}
+
+function getLandingDashboardSelectSiteIntent(search = "") {
+  if (typeof window === "undefined") return false;
+  try {
+    const searchParams = new URLSearchParams(search || window.location.search);
+    return searchParams.get(LANDING_DASHBOARD_SELECT_QUERY_PARAM) === "1";
+  } catch {
+    return false;
+  }
 }
 
 function getAppSectionFromLocation(): AppSection {
@@ -2015,8 +2185,9 @@ function getRouteFromLocation(): AppRoute {
   if (path === "/onboarding") return "onboarding";
   if (path === "/sites/new") return "new_site";
   if (path === "/report") return "report";
-  if (path.startsWith("/shared-reports/")) return "shared_report";
+  if (path.startsWith(`${SHARED_REPORT_ROUTE_PREFIX}/`)) return "shared_report";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
+  if (path === "/dashboard/select-site") return "select_site";
   if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
   return "app";
 }
@@ -2452,6 +2623,8 @@ function matchesLearnArticleQuery(article: LearnArticle, query: string) {
     article.summary,
     article.whatItMeans,
     article.whyItMatters,
+    article.whatScanlarkChecks,
+    article.whatYouMaySeeInReport,
     article.howToFix,
     article.technicalDetail,
     getLearnCategoryLabel(article.category),
@@ -2475,7 +2648,7 @@ type LearnExperienceProps = {
   onOpenArticle: (slug: string) => void;
   onBackToIndex: () => void;
   onBackToLanding: () => void;
-  onOpenApp: () => void;
+  onOpenDashboard: () => void;
   onOpenLogin: () => void;
   onClearFilters: () => void;
 };
@@ -2493,10 +2666,21 @@ function LearnExperience({
   onOpenArticle,
   onBackToIndex,
   onBackToLanding,
-  onOpenApp,
+  onOpenDashboard,
   onOpenLogin,
   onClearFilters,
 }: LearnExperienceProps) {
+  const safeBackLabel = isAuthenticated ? "Back to dashboard" : "Back home";
+  const howToFixLines = currentArticle?.howToFix
+    ?.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const hasChecklist = Boolean(
+    howToFixLines &&
+    howToFixLines.some((line) => /^[-*]\s+|^\d+\.|^•/.test(line)),
+  );
+  const fallbackText =
+    "Not available yet. Review the related issue details in your report and follow the recommended action.";
   const relatedArticles = currentArticle
     ? currentArticle.relatedArticleSlugs
         .map((slug) => LEARN_ARTICLES_BY_SLUG[slug])
@@ -2522,20 +2706,32 @@ function LearnExperience({
           </div>
           <div className="learn-hero__actions">
             {currentArticle ? (
-              <button className="secondary-button" onClick={onBackToIndex}>
-                Back to Learn
-              </button>
+              <>
+                <button
+                  className="secondary-button"
+                  onClick={isAuthenticated ? onOpenDashboard : onBackToLanding}
+                >
+                  {safeBackLabel}
+                </button>
+                <button className="ghost-button" onClick={onBackToIndex}>
+                  Back to Learn
+                </button>
+              </>
             ) : (
-              <button className="secondary-button" onClick={onBackToLanding}>
-                Back to landing
-              </button>
+              <>
+                <button
+                  className="secondary-button"
+                  onClick={isAuthenticated ? onOpenDashboard : onBackToLanding}
+                >
+                  {safeBackLabel}
+                </button>
+                {!isAuthenticated ? (
+                  <button className="primary-button" onClick={onOpenLogin}>
+                    Log in
+                  </button>
+                ) : null}
+              </>
             )}
-            <button
-              className="primary-button"
-              onClick={isAuthenticated ? onOpenApp : onOpenLogin}
-            >
-              {isAuthenticated ? "Open dashboard" : "Sign in"}
-            </button>
           </div>
         </section>
 
@@ -2564,12 +2760,30 @@ function LearnExperience({
                   <p>{currentArticle.whyItMatters}</p>
                 </div>
                 <div className="learn-detail__section">
-                  <h2>What to do next</h2>
-                  <p>{currentArticle.howToFix}</p>
+                  <h2>What Scanlark checks</h2>
+                  <p>{currentArticle.whatScanlarkChecks || fallbackText}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>What you may see in your report</h2>
+                  <p>{currentArticle.whatYouMaySeeInReport || fallbackText}</p>
+                </div>
+                <div className="learn-detail__section">
+                  <h2>How to fix</h2>
+                  {hasChecklist ? (
+                    <ul>
+                      {howToFixLines!.map((line) => (
+                        <li key={line}>
+                          {line.replace(/^[-*]\s+|^\d+\.|^•\s*/, "")}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>{currentArticle.howToFix || fallbackText}</p>
+                  )}
                 </div>
                 <details className="learn-detail__technical">
                   <summary>Technical detail</summary>
-                  <p>{currentArticle.technicalDetail}</p>
+                  <p>{currentArticle.technicalDetail || fallbackText}</p>
                 </details>
               </article>
 
@@ -2622,8 +2836,11 @@ function LearnExperience({
               <button className="primary-button" onClick={onBackToIndex}>
                 Browse Learn articles
               </button>
-              <button className="secondary-button" onClick={onBackToLanding}>
-                Back to landing
+              <button
+                className="secondary-button"
+                onClick={isAuthenticated ? onOpenDashboard : onBackToLanding}
+              >
+                {safeBackLabel}
               </button>
             </div>
           </section>
@@ -2749,6 +2966,7 @@ const App: React.FC = () => {
   const sseRetryTimerRef = useRef<number | null>(null);
   const sseFallbackTimerRef = useRef<number | null>(null);
   const sseBackoffRef = useRef(1000);
+  const bypassDashboardPickerRef = useRef(false);
   const runStatusRef = useRef<Map<string, ScanStatus>>(new Map());
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
@@ -2758,6 +2976,8 @@ const App: React.FC = () => {
   const detailsDrawerRef = useRef<HTMLDivElement | null>(null);
   const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const notificationMenuButtonRef = useRef<HTMLDivElement | null>(null);
+  const notificationMenuPopupRef = useRef<HTMLDivElement | null>(null);
   const progressDismissRef = useRef<number | null>(null);
   const dashboardCompletionPollTimerRef = useRef<number | null>(null);
   const dashboardCompletionPollKeyRef = useRef<string | null>(null);
@@ -2799,6 +3019,7 @@ const App: React.FC = () => {
   const [sites, setSites] = useState<Site[]>([]);
   const [sitesLoading, setSitesLoading] = useState(false);
   const [sitesError, setSitesError] = useState<string | null>(null);
+  const [sitesLoadState, setSitesLoadState] = useState<SitesLoadState>("idle");
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [siteNameById, setSiteNameById] = useState<Record<string, string>>({});
   const [siteSettingsSection, setSiteSettingsSection] =
@@ -2808,6 +3029,7 @@ const App: React.FC = () => {
   const [siteReportDisplayNameDraft, setSiteReportDisplayNameDraft] =
     useState("");
   const [siteInternalNotesDraft, setSiteInternalNotesDraft] = useState("");
+  const [siteDeveloperTabsDraft, setSiteDeveloperTabsDraft] = useState(false);
   const [siteDetailsSaving, setSiteDetailsSaving] = useState(false);
   const [siteDetailsError, setSiteDetailsError] = useState<string | null>(null);
   const [onboardingRequired, setOnboardingRequired] = useState(false);
@@ -2842,6 +3064,10 @@ const App: React.FC = () => {
   >(null);
   const [dashboardRecentlyFinishedRunId, setDashboardRecentlyFinishedRunId] =
     useState<string | null>(null);
+  const [
+    dashboardDismissedCompletionPanels,
+    setDashboardDismissedCompletionPanels,
+  ] = useState<Record<string, number>>({});
   const [results, setResults] = useState<ScanLink[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
@@ -2864,7 +3090,7 @@ const App: React.FC = () => {
         ? false
         : window.location.pathname
             .replace(/\/+$/, "")
-            .startsWith("/shared-reports"),
+            .startsWith(SHARED_REPORT_ROUTE_PREFIX),
     ),
   );
   const [reportScanRunId, setReportScanRunId] = useState<string | null>(() =>
@@ -3128,6 +3354,7 @@ const App: React.FC = () => {
   const [diffIssuesOnly, setDiffIssuesOnly] = useState(true);
   const [includeUnchanged, setIncludeUnchanged] = useState(false);
   const [unchangedOnly, setUnchangedOnly] = useState(false);
+  const reportPrintHandledRunRef = useRef<string | null>(null);
   const [unchangedOffset, setUnchangedOffset] = useState(0);
   const [unchangedLimit] = useState(50);
   const [diffOkTotal, setDiffOkTotal] = useState(0);
@@ -3165,6 +3392,20 @@ const App: React.FC = () => {
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const hasSites = sites.length > 0;
+  const sitesLoadError = sitesLoadState === "error";
+  const isSiteStatePending = ["idle", "loading"].includes(sitesLoadState);
+  const hasSiteSelectionResolved = Boolean(
+    selectedSiteId && sites.some((site) => site.id === selectedSiteId),
+  );
+  const selectedSiteStatus: "resolved" | "missing" | "invalid" = selectedSiteId
+    ? hasSiteSelectionResolved
+      ? "resolved"
+      : "invalid"
+    : "missing";
+  const canEvaluateSiteState =
+    !authLoading && !sitesLoading && !isSiteStatePending && !sitesLoadError;
+  const hasLoadedNoSites = sitesLoadState === "loaded_empty";
+  const hasLoadedOneSite = sitesLoadState === "loaded_one";
   const localTimeZone = useMemo(() => getLocalTimeZone(), []);
   const onboardingStorageKey = authUser
     ? getStorageKey(ONBOARDING_STORAGE_PREFIX, authUser.id)
@@ -3175,7 +3416,16 @@ const App: React.FC = () => {
   const siteNamesStorageKey = authUser
     ? getStorageKey(SITE_NAME_STORAGE_PREFIX, authUser.id)
     : null;
+  const sitePickerSessionKey = authUser
+    ? getStorageKey(SITE_PICKER_SESSION_PREFIX, authUser.id)
+    : null;
+  const dashboardCompletionDismissStorageKey = authUser
+    ? getStorageKey(DASHBOARD_COMPLETION_DISMISS_STORAGE_PREFIX, authUser.id)
+    : null;
   const showLocalTimeZone = localTimeZone && localTimeZone !== "UTC";
+  const [sitePickerSummaries, setSitePickerSummaries] = useState<
+    Record<string, SitePickerCardSnapshot>
+  >({});
   const canAddSite = true;
   const limitReason: string | null = null;
 
@@ -3192,6 +3442,58 @@ const App: React.FC = () => {
   }, [activeRunId]);
 
   useEffect(() => {
+    setDashboardDismissedCompletionPanels(
+      readSessionNumberMap(dashboardCompletionDismissStorageKey),
+    );
+  }, [dashboardCompletionDismissStorageKey]);
+
+  const getDashboardCompletionDismissKey = useCallback(
+    (
+      siteId: string | null | undefined,
+      scanRunId: string | null | undefined,
+    ) => (siteId && scanRunId ? `${siteId}:${scanRunId}` : null),
+    [],
+  );
+
+  const dismissDashboardCompletionPanel = useCallback(
+    (
+      siteId: string | null | undefined,
+      scanRunId: string | null | undefined,
+    ) => {
+      const dismissKey = getDashboardCompletionDismissKey(siteId, scanRunId);
+      if (!dismissKey) return;
+      setDashboardRecentlyFinishedRunId((current) =>
+        current === scanRunId ? null : current,
+      );
+      setDashboardDismissedCompletionPanels((current) => {
+        if (current[dismissKey]) return current;
+        const next = { ...current, [dismissKey]: Date.now() };
+        writeSessionNumberMap(dashboardCompletionDismissStorageKey, next);
+        return next;
+      });
+    },
+    [dashboardCompletionDismissStorageKey, getDashboardCompletionDismissKey],
+  );
+
+  const clearDashboardCompletionDismissal = useCallback(
+    (
+      siteId: string | null | undefined,
+      scanRunId: string | null | undefined,
+    ) => {
+      const dismissKey = getDashboardCompletionDismissKey(siteId, scanRunId);
+      if (!dismissKey) return;
+      setDashboardDismissedCompletionPanels((current) => {
+        if (!current[dismissKey]) return current;
+        const next = { ...current };
+        delete next[dismissKey];
+        writeSessionNumberMap(dashboardCompletionDismissStorageKey, next);
+        return next;
+      });
+    },
+    [dashboardCompletionDismissStorageKey, getDashboardCompletionDismissKey],
+  );
+
+  useEffect(() => {
     if (!siteNamesStorageKey) {
       setSiteNameById({});
       return;
@@ -3201,6 +3503,13 @@ const App: React.FC = () => {
   }, [siteNamesStorageKey]);
 
   useEffect(() => {
+    const currentPathname = window.location.pathname.replace(/\/+$/, "") || "/";
+    const normalizedPath = normalizeDashboardCompatPath(currentPathname);
+    const { search, hash } = window.location;
+    if (normalizedPath !== currentPathname) {
+      window.history.replaceState({}, "", `${normalizedPath}${search}${hash}`);
+    }
+
     const handlePopState = () => {
       const currentPathname =
         window.location.pathname.replace(/\/+$/, "") || "/";
@@ -3218,7 +3527,7 @@ const App: React.FC = () => {
       const nextSharedToken = getSharedReportTokenFromLocation();
       const isSharedReportPath = window.location.pathname
         .replace(/\/+$/, "")
-        .startsWith("/shared-reports");
+        .startsWith(SHARED_REPORT_ROUTE_PREFIX);
       setRoute(nextRoute);
       setAppSection(getAppSectionFromLocation());
       setLearnSlug(getLearnSlugFromLocation());
@@ -3289,14 +3598,32 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!notificationMenuOpen) return;
+    const isInsideNotificationMenu = (event: Event) => {
+      const isInside = (node: Node | null) => {
+        return (
+          Boolean(notificationMenuButtonRef.current?.contains(node)) ||
+          Boolean(notificationMenuPopupRef.current?.contains(node))
+        );
+      };
+      const target = event.target;
+      if (target instanceof Node && isInside(target)) return true;
+      const path =
+        typeof event.composedPath === "function" ? event.composedPath() : null;
+      if (!path) return false;
+      return path.some((node) => node instanceof Node && isInside(node));
+    };
     const handleClick = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest("[data-notification-menu]")) return;
+      if (isInsideNotificationMenu(event)) return;
       setNotificationMenuOpen(false);
+      setNotificationMenuPosition(null);
     };
     const closeMenu = () => {
       setNotificationMenuOpen(false);
       setNotificationMenuPosition(null);
+    };
+    const handleScroll = (event: Event) => {
+      if (isInsideNotificationMenu(event)) return;
+      closeMenu();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeMenu();
@@ -3304,12 +3631,12 @@ const App: React.FC = () => {
     document.addEventListener("mousedown", handleClick);
     document.addEventListener("keydown", handleKeyDown);
     window.addEventListener("resize", closeMenu);
-    window.addEventListener("scroll", closeMenu, true);
+    window.addEventListener("scroll", handleScroll, true);
     return () => {
       document.removeEventListener("mousedown", handleClick);
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("resize", closeMenu);
-      window.removeEventListener("scroll", closeMenu, true);
+      window.removeEventListener("scroll", handleScroll, true);
     };
   }, [notificationMenuOpen]);
 
@@ -3398,7 +3725,7 @@ const App: React.FC = () => {
       const reportBase = shareToken
         ? `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}`
         : `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`;
-      const [overviewRes, ignoredRes, diagnosticsRes] = await Promise.all([
+      const [overviewRes, ignoredRes] = await Promise.all([
         apiFetch(shareToken ? `${reportBase}/report` : `${reportBase}/report`, {
           cache: "no-store",
         }),
@@ -3409,12 +3736,6 @@ const App: React.FC = () => {
           {
             cache: "no-store",
           },
-        ),
-        apiFetch(
-          shareToken
-            ? `${reportBase}/technical-diagnostics`
-            : `${reportBase}/technical-diagnostics`,
-          { cache: "no-store" },
         ),
       ]);
 
@@ -3437,18 +3758,28 @@ const App: React.FC = () => {
       if (!ignoredRes.ok) {
         throw new Error(`Failed to load ignored links: ${ignoredRes.status}`);
       }
-      if (!diagnosticsRes.ok) {
-        throw new Error(
-          `Failed to load developer diagnostics: ${diagnosticsRes.status}`,
-        );
-      }
 
       const overviewData = (await overviewRes.json()) as ReportOverviewResponse;
       const run = overviewData.scanRun;
       const summaryRows = overviewData.summary.rows ?? [];
       const ignoredData = (await ignoredRes.json()) as IgnoredLinksResponse;
-      const diagnosticsData =
-        (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
+      const shouldLoadDeveloperDiagnostics =
+        !shareToken && overviewData.site?.developer_tabs_enabled === true;
+      let diagnosticsData: ScanTechnicalDiagnosticsResponse | null = null;
+
+      if (shouldLoadDeveloperDiagnostics) {
+        const diagnosticsRes = await apiFetch(
+          `${reportBase}/technical-diagnostics`,
+          { cache: "no-store" },
+        );
+        if (!diagnosticsRes.ok) {
+          throw new Error(
+            `Failed to load developer diagnostics: ${diagnosticsRes.status}`,
+          );
+        }
+        diagnosticsData =
+          (await diagnosticsRes.json()) as ScanTechnicalDiagnosticsResponse;
+      }
 
       setReportRunData(run);
       setReportSiteSnapshot(overviewData.site ?? null);
@@ -3461,25 +3792,29 @@ const App: React.FC = () => {
       );
       setReportIgnoredTotal(ignoredData.totalMatching ?? 0);
       setReportLastLoadedAt(Date.now());
-      setReportTechnicalDiagnostics({
-        scanRunId: run.id,
-        ok: null,
-        broken: null,
-        blocked: null,
-        noResponse: null,
-        ignoredSkipped: null,
-        categoryScores: diagnosticsData.categoryScores ?? null,
-        seoBasic: diagnosticsData.seoBasic,
-        robots: diagnosticsData.robots,
-        sitemap: diagnosticsData.sitemap,
-        sslHttps: diagnosticsData.sslHttps,
-        securityHeader: diagnosticsData.securityHeader,
-        performanceBasic: diagnosticsData.performanceBasic,
-        error: null,
-        loadedAt: diagnosticsData.loadedAt
-          ? new Date(diagnosticsData.loadedAt).getTime()
-          : Date.now(),
-      });
+      setReportTechnicalDiagnostics(
+        diagnosticsData
+          ? {
+              scanRunId: run.id,
+              ok: null,
+              broken: null,
+              blocked: null,
+              noResponse: null,
+              ignoredSkipped: null,
+              categoryScores: diagnosticsData.categoryScores ?? null,
+              seoBasic: diagnosticsData.seoBasic,
+              robots: diagnosticsData.robots,
+              sitemap: diagnosticsData.sitemap,
+              sslHttps: diagnosticsData.sslHttps,
+              securityHeader: diagnosticsData.securityHeader,
+              performanceBasic: diagnosticsData.performanceBasic,
+              error: null,
+              loadedAt: diagnosticsData.loadedAt
+                ? new Date(diagnosticsData.loadedAt).getTime()
+                : Date.now(),
+            }
+          : null,
+      );
 
       return run;
     },
@@ -3506,8 +3841,9 @@ const App: React.FC = () => {
           );
         }
         const data = (await res.json()) as ReportShareResponse;
-        setReportShare(data.share ?? null);
-        return data.share ?? null;
+        const normalizedShare = normalizeReportShare(data.share ?? null);
+        setReportShare(normalizedShare);
+        return normalizedShare;
       } catch (err: unknown) {
         setReportShare(null);
         setReportShareError(getErrorMessage(err, "Failed to load share link"));
@@ -3978,6 +4314,36 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (viewMode !== "report") return;
+    if (reportRunData?.status !== "completed") return;
+
+    const shouldPrint = getReportAutoPrintFromLocation();
+
+    if (!shouldPrint) {
+      reportPrintHandledRunRef.current = null;
+      return;
+    }
+
+    if (reportPrintHandledRunRef.current === reportRunData.id) return;
+
+    const timer = window.setTimeout(() => {
+      window.print();
+      reportPrintHandledRunRef.current = reportRunData.id;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("print");
+      window.history.replaceState({}, "", url.toString());
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [reportRunData?.id, reportRunData?.status, viewMode]);
+
+  useEffect(() => {
+    if (viewMode !== "report") {
+      reportPrintHandledRunRef.current = null;
+      return;
+    }
+
     const activeReportId =
       reportScanRunId ?? (sharedReportToken ? "shared" : null);
     if (!activeReportId) {
@@ -4314,13 +4680,18 @@ const App: React.FC = () => {
     };
   }, [selectedRun?.id, selectedRun?.status]);
 
+  const activeLinkNotesSiteId =
+    viewMode === "report" && route !== "shared_report"
+      ? (reportRunData?.site_id ?? selectedSiteId)
+      : selectedSiteId;
+
   const linkNotesQuery = useQuery<LinkNotesResponse, Error>({
-    queryKey: ["linkNotes", selectedSiteId],
-    enabled: !!selectedSiteId,
+    queryKey: ["linkNotes", activeLinkNotesSiteId],
+    enabled: !!activeLinkNotesSiteId && route !== "shared_report",
     queryFn: async () => {
       const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(
-          selectedSiteId ?? "",
+          activeLinkNotesSiteId ?? "",
         )}/link-notes?status=all`,
         { cache: "no-store" },
       );
@@ -4806,6 +5177,9 @@ const App: React.FC = () => {
 
   const reportView = viewMode === "report";
   const reportRun = reportRunData;
+  const reportDeveloperTabsEnabled =
+    route !== "shared_report" &&
+    reportSiteSnapshot?.developer_tabs_enabled === true;
   const reportSummaryFromRows =
     summarizeReportClassifications(reportSummaryRows);
   const reportSummary: ReportSummaryCounts = {
@@ -4975,10 +5349,11 @@ const App: React.FC = () => {
     [reportIssues.issues],
   );
   const reportTechnicalDiagnosticsNeedsAttention =
-    !!reportRun?.issue_generation_error ||
-    reportRun?.issue_generation_status === "failed" ||
-    reportRun?.status === "failed" ||
-    (reportRun?.status === "completed" && !reportTechnicalDiagnostics);
+    reportDeveloperTabsEnabled &&
+    (!!reportRun?.issue_generation_error ||
+      reportRun?.issue_generation_status === "failed" ||
+      reportRun?.status === "failed" ||
+      (reportRun?.status === "completed" && !reportTechnicalDiagnostics));
   const selectedLink = useMemo(
     () => results.find((row) => row.id === detailsLinkId) ?? null,
     [detailsLinkId, results],
@@ -5347,6 +5722,13 @@ const App: React.FC = () => {
         }
       : null,
   ].filter((item): item is { label: string; detail: string } => item != null);
+  const dashboardCompletionDismissKey = getDashboardCompletionDismissKey(
+    selectedSiteId,
+    dashboardLatestRun?.id,
+  );
+  const dashboardCompletionDismissed =
+    !!dashboardCompletionDismissKey &&
+    dashboardDismissedCompletionPanels[dashboardCompletionDismissKey] != null;
 
   useEffect(() => {
     if (!selectedSiteId) {
@@ -5364,27 +5746,63 @@ const App: React.FC = () => {
       if (dashboardRecentlyFinishedRunId === dashboardLatestRun.id) {
         setDashboardRecentlyFinishedRunId(null);
       }
+      clearDashboardCompletionDismissal(selectedSiteId, dashboardLatestRun.id);
       return;
     }
     if (
       dashboardTerminalLike &&
       dashboardObservedScanRunId === dashboardLatestRun.id &&
-      dashboardRecentlyFinishedRunId !== dashboardLatestRun.id
+      dashboardRecentlyFinishedRunId !== dashboardLatestRun.id &&
+      !dashboardCompletionDismissed
     ) {
       setDashboardRecentlyFinishedRunId(dashboardLatestRun.id);
     }
   }, [
+    clearDashboardCompletionDismissal,
     dashboardActiveLike,
+    dashboardCompletionDismissed,
     dashboardLatestRun,
     dashboardObservedScanRunId,
     dashboardRecentlyFinishedRunId,
     dashboardTerminalLike,
+    selectedSiteId,
   ]);
 
   const shouldShowDashboardTerminalPanel =
     !!dashboardLatestRun &&
     dashboardTerminalLike &&
-    dashboardRecentlyFinishedRunId === dashboardLatestRun.id;
+    dashboardRecentlyFinishedRunId === dashboardLatestRun.id &&
+    !dashboardCompletionDismissed;
+
+  useEffect(() => {
+    if (
+      !shouldShowDashboardTerminalPanel ||
+      (route === "app" && appSection === "dashboard")
+    ) {
+      return;
+    }
+    dismissDashboardCompletionPanel(selectedSiteId, dashboardLatestRun?.id);
+  }, [
+    appSection,
+    dashboardLatestRun?.id,
+    dismissDashboardCompletionPanel,
+    route,
+    selectedSiteId,
+    shouldShowDashboardTerminalPanel,
+  ]);
+
+  useEffect(() => {
+    if (!shouldShowDashboardTerminalPanel || !dashboardLatestRun) return;
+    const timer = window.setTimeout(() => {
+      dismissDashboardCompletionPanel(selectedSiteId, dashboardLatestRun.id);
+    }, DASHBOARD_COMPLETION_PANEL_AUTO_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    dashboardLatestRun,
+    dismissDashboardCompletionPanel,
+    selectedSiteId,
+    shouldShowDashboardTerminalPanel,
+  ]);
 
   useEffect(() => {
     const stopDashboardCompletionPoll = () => {
@@ -5524,6 +5942,7 @@ const App: React.FC = () => {
   const isLoginRoute = route === "login";
   const isOnboardingRoute = route === "onboarding";
   const isNewSiteRoute = route === "new_site";
+  const isSiteSelectionRoute = route === "select_site";
   const isSiteSetupRoute = isOnboardingRoute || isNewSiteRoute;
   const showOnboardingExistingUserOptions =
     isOnboardingRoute && hasSites && !onboardingRequired;
@@ -5539,8 +5958,12 @@ const App: React.FC = () => {
   const isReportRoute = route === "report";
   const isSharedReportRoute = route === "shared_report";
   const isReadOnlyReport = isSharedReportRoute;
+  const hasLandingDashboardSelectIntent = getLandingDashboardSelectSiteIntent(
+    window.location.search,
+  );
   const protectedRouteRequiresAuth =
     route === "app" ||
+    route === "select_site" ||
     route === "report" ||
     route === "onboarding" ||
     route === "new_site";
@@ -5581,6 +6004,30 @@ const App: React.FC = () => {
     if (description.length <= 84) return description;
     return `${description.slice(0, 84).trimEnd()}…`;
   };
+
+  const getSitePickerSession = useCallback(() => {
+    return readSitePickerSession(sitePickerSessionKey);
+  }, [sitePickerSessionKey]);
+
+  const rememberSitePickerSelection = useCallback(
+    (siteId: string | null) => {
+      if (!siteId) {
+        clearStorageItem(sitePickerSessionKey);
+        return;
+      }
+
+      writeSitePickerSession(sitePickerSessionKey, {
+        hasActiveSiteSelection: true,
+        lastDashboardSelectionAt: Date.now(),
+        selectedSiteId: siteId,
+      });
+    },
+    [sitePickerSessionKey],
+  );
+
+  const clearSitePickerSelection = useCallback(() => {
+    clearStorageItem(sitePickerSessionKey);
+  }, [sitePickerSessionKey]);
 
   const formatEvidenceValue = (value: unknown): string => {
     if (typeof value === "string") return value;
@@ -6353,7 +6800,7 @@ const App: React.FC = () => {
         {options?.allowIgnore !== false && (
           <button
             onClick={() => {
-              void handleIgnoreLinkByUrl(row.link_url, reportScanRunId);
+              void handleIgnoreReportScanLink(row);
               setActionMenuOpenId(null);
             }}
             disabled={row.ignored}
@@ -7615,8 +8062,148 @@ const App: React.FC = () => {
   }, [authLoading, authUser]);
 
   useEffect(() => {
+    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (sitesLoadError) return;
+    if (
+      route !== "app" ||
+      appSection !== "dashboard" ||
+      !hasLandingDashboardSelectIntent
+    ) {
+      return;
+    }
+    if (bypassDashboardPickerRef.current) {
+      bypassDashboardPickerRef.current = false;
+      return;
+    }
+
+    if (hasLoadedNoSites) {
+      navigateTo("/onboarding");
+      return;
+    }
+
+    if (hasLoadedOneSite) {
+      const site = sites[0];
+      if (selectedSiteStatus === "resolved" && selectedSiteId === site.id) {
+        navigateTo("/dashboard");
+        return;
+      }
+      void (async () => {
+        await handleSelectSite(site);
+        navigateTo("/dashboard");
+      })();
+      return;
+    }
+
+    navigateTo("/dashboard/select-site");
+  }, [
+    appSection,
+    authLoading,
+    authUser,
+    canEvaluateSiteState,
+    hasLandingDashboardSelectIntent,
+    hasLoadedNoSites,
+    hasLoadedOneSite,
+    selectedSiteStatus,
+    handleSelectSite,
+    route,
+    selectedSiteId,
+    sites,
+    sitesLoadError,
+  ]);
+
+  useEffect(() => {
+    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (sitesLoadError) return;
+    if (
+      route !== "app" ||
+      (appSection !== "dashboard" && appSection !== "reports")
+    ) {
+      return;
+    }
+    if (hasLandingDashboardSelectIntent && appSection === "dashboard") {
+      return;
+    }
+    if (hasSiteSelectionResolved) return;
+
+    if (hasLoadedNoSites) {
+      navigateTo("/onboarding");
+      return;
+    }
+
+    const destination =
+      appSection === "reports" ? "/dashboard/reports" : "/dashboard";
+
+    if (hasLoadedOneSite) {
+      const site = sites[0];
+      void (async () => {
+        await handleSelectSite(site);
+        navigateTo(destination);
+      })();
+      return;
+    }
+
+    navigateTo("/dashboard/select-site");
+  }, [
+    appSection,
+    authLoading,
+    authUser,
+    hasLandingDashboardSelectIntent,
+    hasLoadedNoSites,
+    hasLoadedOneSite,
+    hasSiteSelectionResolved,
+    handleSelectSite,
+    route,
+    selectedSiteId,
+    selectedSiteStatus,
+    sites,
+    sitesLoadError,
+    canEvaluateSiteState,
+  ]);
+
+  useEffect(() => {
+    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (sitesLoadError) return;
+    if (!isSiteSelectionRoute) return;
+
+    if (hasLoadedNoSites) {
+      navigateTo("/onboarding");
+      return;
+    }
+
+    if (hasLoadedOneSite) {
+      const site = sites[0];
+      if (selectedSiteStatus === "resolved" && selectedSiteId === site.id) {
+        navigateTo("/dashboard");
+        return;
+      }
+      void (async () => {
+        await handleSelectSite(site);
+        navigateTo("/dashboard");
+      })();
+    }
+  }, [
+    authLoading,
+    authUser,
+    canEvaluateSiteState,
+    hasLoadedNoSites,
+    hasLoadedOneSite,
+    selectedSiteStatus,
+    isSiteSelectionRoute,
+    handleSelectSite,
+    selectedSiteId,
+    sites,
+    sitesLoadError,
+  ]);
+
+  useEffect(() => {
+    if (!selectedSiteId) return;
+    rememberSitePickerSelection(selectedSiteId);
+  }, [selectedSiteId, rememberSitePickerSelection]);
+
+  useEffect(() => {
     if (!authUser || !onboardingStorageKey) return;
-    if (authLoading || sitesLoading) return;
+    if (authLoading || canEvaluateSiteState) return;
+    if (sitesLoadError) return;
     if (
       route === "report" ||
       route === "shared_report" ||
@@ -7630,11 +8217,12 @@ const App: React.FC = () => {
       typeof window === "undefined"
         ? null
         : window.localStorage.getItem(onboardingStorageKey);
-    const needsFirstRun = sites.length === 0 || onboardingRequired;
-    if (sites.length === 0 && !stored) {
+    if (hasLoadedNoSites && !stored) {
       setOnboardingRequired(true);
+    } else if (!hasLoadedNoSites && onboardingRequired) {
+      setOnboardingRequired(false);
     }
-    if (needsFirstRun && !stored && route !== "onboarding") {
+    if (hasLoadedNoSites && !stored && route !== "onboarding") {
       navigateTo("/onboarding");
     }
   }, [
@@ -7643,9 +8231,11 @@ const App: React.FC = () => {
     appSection,
     onboardingRequired,
     onboardingStorageKey,
+    canEvaluateSiteState,
+    hasLoadedNoSites,
+    sitesLoadError,
     route,
-    sites.length,
-    sitesLoading,
+    sitesLoadState,
   ]);
 
   useEffect(() => {
@@ -7677,16 +8267,17 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (route !== "onboarding" && route !== "new_site") return;
-    if (authLoading || sitesLoading || historyLoading) return;
+    if (authLoading || canEvaluateSiteState || sitesLoadError || historyLoading)
+      return;
     if (route === "new_site" && !setupTargetSite) {
       setOnboardingStep(0);
       return;
     }
-    if (route === "onboarding" && sites.length > 0 && !onboardingRequired) {
+    if (route === "onboarding" && !hasLoadedNoSites && !onboardingRequired) {
       setOnboardingStep(0);
       return;
     }
-    if (sites.length === 0) {
+    if (hasLoadedNoSites) {
       setOnboardingStep(0);
       return;
     }
@@ -7706,8 +8297,9 @@ const App: React.FC = () => {
     route,
     setupTargetRun,
     setupTargetSite,
-    sites.length,
-    sitesLoading,
+    canEvaluateSiteState,
+    hasLoadedNoSites,
+    sitesLoadError,
   ]);
 
   useEffect(() => {
@@ -7971,6 +8563,7 @@ const App: React.FC = () => {
 
   function resetSessionState() {
     setSites([]);
+    setSitesLoadState("idle");
     setSelectedSiteId(null);
     selectedSiteIdRef.current = null;
     setHistory([]);
@@ -8010,6 +8603,7 @@ const App: React.FC = () => {
     setAccountNotificationPreferencesSaving(false);
     setAccountNotificationPreferencesSavedAt(null);
     setAccountNotificationPreferencesError(null);
+    clearStorageItem(sitePickerSessionKey);
   }
 
   async function loadUnreadNotificationCount() {
@@ -8312,14 +8906,12 @@ const App: React.FC = () => {
     setOnboardingError(null);
     setOnboardingScanRequested(false);
     setOnboardingStep(step);
-    if (sites.length === 0) {
-      setOnboardingRequired(true);
-    }
     navigateTo("/onboarding");
   }
 
   async function loadSites() {
     setSitesLoading(true);
+    setSitesLoadState("loading");
     setSitesError(null);
     try {
       const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
@@ -8328,25 +8920,78 @@ const App: React.FC = () => {
 
       const normalizedSites = normalizeSitesNotifyOn(data.sites);
       setSites(normalizedSites);
+      setSitesLoadState(
+        normalizedSites.length === 0
+          ? "loaded_empty"
+          : normalizedSites.length === 1
+            ? "loaded_one"
+            : "loaded_many",
+      );
+
+      const existingSession = getSitePickerSession();
+      const hasCurrentSelection = !!selectedSiteIdRef.current;
+      const selectionMatch =
+        existingSession?.hasActiveSiteSelection &&
+        existingSession.selectedSiteId &&
+        normalizedSites.some(
+          (site) => site.id === existingSession.selectedSiteId,
+        )
+          ? existingSession.selectedSiteId
+          : null;
+      const preferredSiteId =
+        (hasCurrentSelection &&
+        normalizedSites.some((site) => site.id === selectedSiteIdRef.current)
+          ? selectedSiteIdRef.current
+          : selectionMatch) ??
+        (normalizedSites.length === 1 ? normalizedSites[0].id : null);
 
       if (normalizedSites.length > 0) {
-        const first = normalizedSites[0];
-        setSelectedSiteId(first.id);
-        selectedSiteIdRef.current = first.id;
+        if (!preferredSiteId) {
+          setSelectedSiteId(null);
+          selectedSiteIdRef.current = null;
+          setHistory([]);
+          setResults([]);
+          resetOccurrencesState();
+          setSelectedRunId(null);
+          selectedRunIdRef.current = null;
+          setStartUrl("");
+          setActiveRunId(null);
+          activeRunIdRef.current = null;
+        } else {
+          const selected = normalizedSites.find(
+            (site) => site.id === preferredSiteId,
+          );
+          if (!selected) {
+            setSelectedSiteId(null);
+            selectedSiteIdRef.current = null;
+            setHistory([]);
+            setResults([]);
+            resetOccurrencesState();
+            setSelectedRunId(null);
+            selectedRunIdRef.current = null;
+            setStartUrl("");
+            setActiveRunId(null);
+            activeRunIdRef.current = null;
+          } else {
+            setSelectedSiteId(selected.id);
+            selectedSiteIdRef.current = selected.id;
 
-        setStartUrl(first.url);
+            rememberSitePickerSelection(selected.id);
+            setStartUrl(selected.url);
 
-        setActiveRunId(null);
-        activeRunIdRef.current = null;
+            setActiveRunId(null);
+            activeRunIdRef.current = null;
 
-        setSelectedRunId(null);
-        selectedRunIdRef.current = null;
+            setSelectedRunId(null);
+            selectedRunIdRef.current = null;
 
-        setResults([]);
-        resetOccurrencesState();
-        setHistory([]);
+            setResults([]);
+            resetOccurrencesState();
+            setHistory([]);
 
-        await loadHistory(first.id, { preserveSelection: false });
+            await loadHistory(selected.id, { preserveSelection: false });
+          }
+        }
       } else {
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
@@ -8364,6 +9009,7 @@ const App: React.FC = () => {
       }
     } catch (err: unknown) {
       setSitesError(getErrorMessage(err, "Failed to load sites"));
+      setSitesLoadState("error");
     } finally {
       setSitesLoading(false);
     }
@@ -8389,6 +9035,7 @@ const App: React.FC = () => {
       if (data.sites.length === 0) {
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
+        clearSitePickerSelection();
         setStartUrl("");
         setHistory([]);
         setSelectedRunId(null);
@@ -8401,11 +9048,41 @@ const App: React.FC = () => {
       }
 
       if (!currentId) {
-        const first = data.sites[0];
-        setSelectedSiteId(first.id);
-        selectedSiteIdRef.current = first.id;
-        setStartUrl(first.url);
-        await loadHistory(first.id, { preserveSelection: false });
+        const session = getSitePickerSession();
+        const matchingSessionId =
+          session?.hasActiveSiteSelection &&
+          session.selectedSiteId &&
+          data.sites.some((site) => site.id === session.selectedSiteId)
+            ? session.selectedSiteId
+            : null;
+
+        const nextSelection =
+          matchingSessionId ??
+          (data.sites.length === 1 ? normalizedSites[0]?.id : null);
+
+        if (!nextSelection) {
+          setSelectedSiteId(null);
+          selectedSiteIdRef.current = null;
+          setStartUrl("");
+          setResults([]);
+          setSelectedRunId(null);
+          selectedRunIdRef.current = null;
+          setActiveRunId(null);
+          activeRunIdRef.current = null;
+          resetOccurrencesState();
+          setHistory([]);
+          return;
+        }
+
+        const next =
+          data.sites.find((site) => site.id === nextSelection) ?? null;
+        if (next) {
+          setSelectedSiteId(next.id);
+          selectedSiteIdRef.current = next.id;
+          rememberSitePickerSelection(next.id);
+          setStartUrl(next.url);
+          await loadHistory(next.id, { preserveSelection: false });
+        }
       }
     } catch {}
   }
@@ -8849,11 +9526,93 @@ const App: React.FC = () => {
   }, [selectedSiteId]);
 
   useEffect(() => {
+    if (!isSiteSelectionRoute) {
+      setSitePickerSummaries({});
+      return;
+    }
+
+    if (!authUser || authLoading || sites.length === 0) {
+      setSitePickerSummaries({});
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const snapshotBySite: Record<string, SitePickerCardSnapshot> = {};
+
+      await Promise.all(
+        sites.map(async (site) => {
+          try {
+            const summary = await queryClient.fetchQuery({
+              queryKey: ["dashboardSummary", site.id],
+              queryFn: () => fetchDashboardSummary(site.id),
+              staleTime: 0,
+            });
+            const latestRun = summary.latestRun;
+            const availability = latestRun
+              ? getRunMetricAvailability(latestRun)
+              : null;
+
+            snapshotBySite[site.id] = {
+              healthScore:
+                latestRun?.score == null
+                  ? null
+                  : Math.round(latestRun.score ?? 0),
+              openIssues:
+                summary.latestIssueSummary?.total == null
+                  ? null
+                  : summary.latestIssueSummary.total,
+              lastScanStatus: latestRun
+                ? formatRunStatusLabel(latestRun.status)
+                : null,
+              lastScanDate: latestRun
+                ? (latestRun.finished_at ?? latestRun.started_at)
+                : null,
+              availabilityStatus:
+                availability === "ready"
+                  ? "Available"
+                  : availability === "pending"
+                    ? "Pending"
+                    : availability === "not_available"
+                      ? "Unavailable"
+                      : null,
+            };
+          } catch {
+            snapshotBySite[site.id] = {
+              healthScore: null,
+              openIssues: null,
+              lastScanStatus: null,
+              lastScanDate: null,
+              availabilityStatus: null,
+            };
+          }
+        }),
+      );
+
+      if (!cancelled) {
+        setSitePickerSummaries(snapshotBySite);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    authLoading,
+    authUser,
+    fetchDashboardSummary,
+    isSiteSelectionRoute,
+    queryClient,
+    sites,
+  ]);
+
+  useEffect(() => {
     if (!selectedSite) {
       setSiteDisplayNameDraft("");
       setSiteClientNameDraft("");
       setSiteReportDisplayNameDraft("");
       setSiteInternalNotesDraft("");
+      setSiteDeveloperTabsDraft(false);
       setSiteDetailsError(null);
       return;
     }
@@ -8864,6 +9623,7 @@ const App: React.FC = () => {
     setSiteClientNameDraft(selectedSite.client_name ?? "");
     setSiteReportDisplayNameDraft(selectedSite.report_display_name ?? "");
     setSiteInternalNotesDraft(selectedSite.internal_notes ?? "");
+    setSiteDeveloperTabsDraft(selectedSite.developer_tabs_enabled === true);
     setSiteDetailsError(null);
   }, [selectedSite, selectedSiteName]);
 
@@ -9118,6 +9878,13 @@ const App: React.FC = () => {
   }
 
   async function handleSelectSite(site: Site) {
+    if (
+      selectedSiteId &&
+      selectedSiteId !== site.id &&
+      shouldShowDashboardTerminalPanel
+    ) {
+      dismissDashboardCompletionPanel(selectedSiteId, dashboardLatestRun?.id);
+    }
     if (site.id === selectedSiteId) return;
 
     setIsDrawerOpen(false);
@@ -9136,6 +9903,7 @@ const App: React.FC = () => {
 
     setSelectedSiteId(site.id);
     selectedSiteIdRef.current = site.id;
+    rememberSitePickerSelection(site.id);
 
     setStartUrl(site.url);
 
@@ -9657,19 +10425,20 @@ const App: React.FC = () => {
             clientName: siteClientNameDraft.trim() || null,
             reportDisplayName: siteReportDisplayNameDraft.trim() || null,
             internalNotes: siteInternalNotesDraft.trim() || null,
+            developerTabsEnabled: siteDeveloperTabsDraft,
           }),
         },
       );
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Site details update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Site details update failed: ${res.status}`);
       }
 
       const data = (await res.json()) as { site: Site };
       applyUpdatedSite(data.site);
+      setSiteDeveloperTabsDraft(data.site.developer_tabs_enabled === true);
       if (data.site.site_display_name) {
         clearPersistedSiteName(data.site.id);
       } else if (!siteDisplayNameDraft.trim()) {
@@ -10035,7 +10804,7 @@ const App: React.FC = () => {
   }
 
   async function handleSaveNote() {
-    if (!selectedSiteId || !noteTargetUrl) return;
+    if (!activeLinkNotesSiteId || !noteTargetUrl) return;
     if (!noteDraft.trim()) {
       setNoteError("Note cannot be empty.");
       return;
@@ -10044,7 +10813,7 @@ const App: React.FC = () => {
     setNoteError(null);
     try {
       const res = await apiFetch(
-        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        `${API_BASE}/sites/${encodeURIComponent(activeLinkNotesSiteId)}/link-notes`,
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
@@ -10057,17 +10826,18 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Save failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Save failed: ${res.status}`);
       }
       setNoteModalOpen(false);
       setNoteTargetUrl(null);
       setNoteDraft("");
       queryClient.invalidateQueries({
-        queryKey: ["linkNotes", selectedSiteId],
+        queryKey: ["linkNotes", activeLinkNotesSiteId],
       });
-      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      queryClient.invalidateQueries({
+        queryKey: ["fixQueue", activeLinkNotesSiteId],
+      });
       pushToast("Note saved", "success");
     } catch (err: unknown) {
       setNoteError(getErrorMessage(err, "Failed to save note"));
@@ -10077,12 +10847,12 @@ const App: React.FC = () => {
   }
 
   async function handleDeleteNote() {
-    if (!selectedSiteId || !noteTargetUrl) return;
+    if (!activeLinkNotesSiteId || !noteTargetUrl) return;
     setNoteDeleting(true);
     setNoteError(null);
     try {
       const res = await apiFetch(
-        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/link-notes`,
+        `${API_BASE}/sites/${encodeURIComponent(activeLinkNotesSiteId)}/link-notes`,
         {
           method: "DELETE",
           headers: { "content-type": "application/json" },
@@ -10091,17 +10861,18 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Delete failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Delete failed: ${res.status}`);
       }
       setNoteModalOpen(false);
       setNoteTargetUrl(null);
       setNoteDraft("");
       queryClient.invalidateQueries({
-        queryKey: ["linkNotes", selectedSiteId],
+        queryKey: ["linkNotes", activeLinkNotesSiteId],
       });
-      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
+      queryClient.invalidateQueries({
+        queryKey: ["fixQueue", activeLinkNotesSiteId],
+      });
       pushToast("Note deleted", "info");
     } catch (err: unknown) {
       setNoteError(getErrorMessage(err, "Failed to delete note"));
@@ -10120,20 +10891,55 @@ const App: React.FC = () => {
         )}/links/${encodeURIComponent(linkUrl)}/ignore`,
         {
           method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "site_rule_exact" }),
         },
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Ignore failed: ${res.status}`);
       }
       if (selectedRunId && selectedRunId === targetRunId) {
         await loadResults(selectedRunId);
         await loadIgnoredResults(selectedRunId);
       }
-      queryClient.invalidateQueries({ queryKey: ["fixQueue", selectedSiteId] });
-      pushToast("Ignored link", "info");
+      queryClient.invalidateQueries({
+        queryKey: ["fixQueue", reportRunData?.site_id ?? selectedSiteId],
+      });
+      if (reportScanRunId && reportScanRunId === targetRunId) {
+        await loadInitialReportSections(targetRunId, sharedReportToken);
+        await loadReportOverview(targetRunId, sharedReportToken);
+      }
+      pushToast("Ignore rule applied and report refreshed", "success");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
+    }
+  }
+
+  async function handleIgnoreReportScanLink(row: ScanLink) {
+    const targetRunId = reportScanRunId ?? row.scan_run_id;
+    if (!targetRunId) return;
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(targetRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "site_rule_exact" }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Ignore failed: ${res.status}`);
+      }
+      await loadInitialReportSections(targetRunId, sharedReportToken);
+      await loadReportOverview(targetRunId, sharedReportToken);
+      queryClient.invalidateQueries({
+        queryKey: ["fixQueue", reportRunData?.site_id ?? selectedSiteId],
+      });
+      pushToast("Ignore rule applied and report refreshed", "success");
     } catch (err: unknown) {
       pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
     }
@@ -10172,12 +10978,67 @@ const App: React.FC = () => {
     return "all";
   }
 
-  function buildReportLink(scanRunId: string) {
-    return buildAppUrl("/report", { scanRunId });
+  function buildReportUrl(scanRunId: string, options?: { print?: boolean }) {
+    const params: Record<string, string> = { scanRunId };
+    if (options?.print) {
+      params.print = "1";
+    }
+    return buildAppUrl("/report", params);
   }
 
-  function buildReportPdfLink(scanRunId: string) {
+  function buildReportPdfUrl(scanRunId: string) {
     return `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/report.pdf`;
+  }
+
+  function buildSharedReportUrl(shareToken: string) {
+    return buildAppUrl(
+      `${SHARED_REPORT_ROUTE_PREFIX}/${encodeURIComponent(shareToken)}`,
+    );
+  }
+
+  function buildSharedReportPdfUrl(shareToken: string) {
+    return `${API_BASE}/public/reports/${encodeURIComponent(shareToken)}/report.pdf`;
+  }
+
+  function normalizeReportShare(response: ReportShareResponse["share"] | null) {
+    if (!response) return null;
+    return {
+      ...response,
+      shareUrl: buildSharedReportUrl(response.shareToken),
+    };
+  }
+
+  async function handleRunPdfExport(scanRunId: string) {
+    const pdfUrl = buildReportPdfUrl(scanRunId);
+    try {
+      const res = await apiFetch(pdfUrl, { method: "HEAD" });
+      if (
+        res.ok ||
+        res.status === 405 ||
+        res.status === 302 ||
+        res.status === 304
+      ) {
+        window.open(pdfUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+      throw new Error(`PDF endpoint returned ${res.status}`);
+    } catch {
+      pushToast(
+        "PDF export endpoint unavailable. Opened the report print view.",
+        "warning",
+      );
+      window.open(
+        buildReportUrl(scanRunId, { print: true }),
+        "_blank",
+        "noopener,noreferrer",
+      );
+    }
+  }
+
+  function getReportShareUrl(shareToken: string, shareUrl?: string) {
+    return shareUrl?.includes("/shared-results/")
+      ? buildSharedReportUrl(shareToken)
+      : (shareUrl ?? buildSharedReportUrl(shareToken));
   }
 
   async function handleCreateRunShareLink(scanRunId: string) {
@@ -10203,8 +11064,12 @@ const App: React.FC = () => {
       if (!data.share?.shareUrl) {
         throw new Error("Share link is missing in response");
       }
+      const normalizedShare = normalizeReportShare(data.share);
+      if (!normalizedShare) {
+        throw new Error("Share link is missing in response");
+      }
       await copyToClipboard(
-        data.share.shareUrl,
+        getReportShareUrl(data.share.shareToken, normalizedShare.shareUrl),
         undefined,
         "Share link copied",
       );
@@ -10216,11 +11081,14 @@ const App: React.FC = () => {
     }
   }
 
-  function navigateTo(pathname: string) {
+  function navigateTo(
+    pathname: string,
+    searchParams?: Record<string, string | null | undefined>,
+  ) {
     const normalizedPath = normalizeDashboardCompatPath(
       pathname.replace(/\/+$/, "") || "/",
     );
-    const url = buildAppUrl(normalizedPath);
+    const url = buildAppUrl(normalizedPath, searchParams);
     window.history.pushState({}, "", url);
     const nextRoute = getRouteFromLocation();
     const nextReportId = getReportScanRunIdFromLocation();
@@ -10248,6 +11116,15 @@ const App: React.FC = () => {
   }
 
   function openAppSection(section: AppSection) {
+    if (
+      section === "dashboard" &&
+      ((route === "app" && appSection !== "dashboard") ||
+        route === "report" ||
+        route === "shared_report")
+    ) {
+      bypassDashboardPickerRef.current = true;
+    }
+
     const url = buildAppUrl(buildAppSectionPath(section));
     window.history.pushState({}, "", url);
     setRoute("app");
@@ -10268,7 +11145,7 @@ const App: React.FC = () => {
   }
 
   function openReport(scanRunId: string) {
-    const url = buildReportLink(scanRunId);
+    const url = buildReportUrl(scanRunId);
     window.history.pushState({}, "", url);
     setRoute("report");
     setAppSection("reports");
@@ -10285,7 +11162,22 @@ const App: React.FC = () => {
   }
 
   function backToDashboard() {
+    bypassDashboardPickerRef.current = true;
     openAppSection("dashboard");
+  }
+
+  async function openDashboardForSite(site: Site) {
+    if (site.id !== selectedSiteId) {
+      await handleSelectSite(site);
+    }
+    navigateToDashboard();
+  }
+
+  function navigateToDashboard(options: { skipPicker?: boolean } = {}) {
+    if (options.skipPicker) {
+      bypassDashboardPickerRef.current = true;
+    }
+    navigateTo("/dashboard");
   }
 
   function handlePrintReport() {
@@ -10325,7 +11217,7 @@ const App: React.FC = () => {
         created: boolean;
         share: ReportShareDetails;
       };
-      setReportShare(data.share);
+      setReportShare(normalizeReportShare(data.share));
       setReportSharePanelOpen(true);
       pushToast(
         data.created ? "Share link created" : "Share link already active",
@@ -10512,9 +11404,8 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Ignore failed: ${res.status}`);
       }
 
       if (selectedRunId) {
@@ -10560,9 +11451,8 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Ignore failed: ${res.status}`);
       }
       const data = (await res.json()) as {
         scanRunId: string;
@@ -10754,9 +11644,8 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Create failed: ${res.status}`);
       }
       setNewRulePattern("");
       await loadIgnoreRules(selectedSiteId);
@@ -10765,6 +11654,28 @@ const App: React.FC = () => {
     } catch (err: unknown) {
       pushToast(
         getErrorMessage(err, "Failed to create ignore rule"),
+        "warning",
+      );
+    }
+  }
+
+  async function handleSharedReportPdfExport(shareToken: string) {
+    const pdfUrl = buildSharedReportPdfUrl(shareToken);
+    try {
+      const res = await apiFetch(pdfUrl, { method: "HEAD" });
+      if (
+        res.ok ||
+        res.status === 405 ||
+        res.status === 302 ||
+        res.status === 304
+      ) {
+        window.open(pdfUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+      throw new Error(`Shared PDF endpoint returned ${res.status}`);
+    } catch {
+      pushToast(
+        "Shared PDF download is unavailable for this token.",
         "warning",
       );
     }
@@ -10780,7 +11691,11 @@ const App: React.FC = () => {
           body: JSON.stringify({ isEnabled: !rule.is_enabled }),
         },
       );
-      if (!res.ok) throw new Error(`Update failed: ${res.status}`);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Update failed: ${res.status}`);
+      }
       if (selectedSiteId) await loadIgnoreRules(selectedSiteId);
       if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
       pushToast(rule.is_enabled ? "Rule disabled" : "Rule enabled", "info");
@@ -10797,7 +11712,11 @@ const App: React.FC = () => {
           method: "DELETE",
         },
       );
-      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Delete failed: ${res.status}`);
+      }
       if (selectedSiteId) await loadIgnoreRules(selectedSiteId);
       if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
       pushToast("Rule deleted", "info");
@@ -10832,6 +11751,7 @@ const App: React.FC = () => {
       const scanRunId: string | undefined = data.scanRunId;
 
       if (scanRunId) {
+        clearDashboardCompletionDismissal(selectedSiteId, scanRunId);
         const optimistic: ScanRunSummary = {
           id: scanRunId,
           site_id: selectedSiteId,
@@ -11076,6 +11996,7 @@ const App: React.FC = () => {
 
     return createPortal(
       <div
+        ref={notificationMenuPopupRef}
         className="notification-menu"
         data-notification-menu
         style={{
@@ -11164,7 +12085,7 @@ const App: React.FC = () => {
   };
 
   const renderNotificationBell = () => (
-    <div data-notification-menu>
+    <div data-notification-menu ref={notificationMenuButtonRef}>
       <button
         type="button"
         className="notification-bell"
@@ -11330,9 +12251,8 @@ const App: React.FC = () => {
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(
-          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
-        );
+        const message = extractErrorMessageFromBody(text);
+        throw new Error(message || `Create failed: ${res.status}`);
       }
       await loadIgnoreRules(selectedSiteId);
       if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
@@ -13226,10 +14146,27 @@ const App: React.FC = () => {
         }
         .scan-hero-card__visual-copy {
           display: grid;
-          gap: 8px;
+          gap: 10px;
           width: 100%;
-          justify-items: center;
+        }
+        .scan-hero-card__header-row {
+          display: flex;
+          justify-content: center;
+          align-items: flex-start;
+          gap: 10px;
+          width: 100%;
+          position: relative;
           text-align: center;
+        }
+        .scan-hero-card__timestamp {
+          position: absolute;
+          right: 0;
+          top: 0;
+          margin-top: 2px;
+          text-align: right;
+          color: var(--text-muted);
+          font-size: 12px;
+          white-space: nowrap;
         }
         .scan-hero-card__eyebrow {
           font-size: 11px;
@@ -14073,11 +15010,37 @@ const App: React.FC = () => {
           );
           box-shadow: var(--shadow);
         }
+        .top-nav--select-site {
+          grid-template-columns: minmax(0, 1fr) auto;
+        }
         .app-brand-block {
           display: flex;
           align-items: center;
           gap: 18px;
           min-width: 0;
+        }
+        .select-site-topbar-brand {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          min-width: 0;
+        }
+        .select-site-topbar-copy {
+          padding: 7px 12px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+          background: color-mix(in srgb, var(--panel-elev) 78%, transparent);
+          color: var(--muted);
+          font-size: 12px;
+          font-weight: 700;
+          white-space: nowrap;
+        }
+        .select-site-topbar-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 10px;
+          flex-wrap: wrap;
         }
         .app-nav-tabs {
           display: flex;
@@ -15794,9 +16757,14 @@ const App: React.FC = () => {
             align-items: stretch;
           }
           .app-brand-block,
+          .select-site-topbar-brand,
           .app-site-switcher,
-          .app-toolbar {
+          .app-toolbar,
+          .select-site-topbar-actions {
             justify-content: flex-start;
+          }
+          .select-site-topbar-brand {
+            flex-wrap: wrap;
           }
           .app-site-switcher {
             grid-template-columns: 1fr;
@@ -15905,6 +16873,16 @@ const App: React.FC = () => {
           .scan-hero-card__ring-inner {
             width: 144px;
             height: 144px;
+          }
+          .scan-hero-card__header-row {
+            align-items: center;
+            justify-content: center;
+            padding-top: 18px;
+          }
+          .scan-hero-card__timestamp {
+            font-size: 11px;
+            white-space: normal;
+            text-align: right;
           }
         }
         .top-grid {
@@ -16916,7 +17894,7 @@ const App: React.FC = () => {
             onOpenArticle={openLearnArticle}
             onBackToIndex={() => navigateTo("/learn")}
             onBackToLanding={() => navigateTo("/landing")}
-            onOpenApp={() => navigateTo("/dashboard")}
+            onOpenDashboard={() => navigateTo("/dashboard")}
             onOpenLogin={() => openAuth("login")}
             onClearFilters={() => {
               setLearnSearchQuery("");
@@ -16971,11 +17949,208 @@ const App: React.FC = () => {
             isAuthenticated
             primaryLabel="Open dashboard"
             secondaryLabel="Account"
-            onOpenPrimary={() => navigateTo("/dashboard")}
+            onOpenPrimary={() =>
+              navigateTo("/dashboard", {
+                [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
+              })
+            }
             onOpenSecondary={() => navigateTo("/dashboard/account")}
             onOpenLearn={() => navigateTo("/learn")}
             onOpenAccount={() => navigateTo("/dashboard/account")}
           />
+        ) : isSiteSelectionRoute ? (
+          <>
+            <nav className="top-nav top-nav--select-site">
+              <div className="select-site-topbar-brand">
+                <div>
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: "18px",
+                      fontFamily: "var(--font-display)",
+                    }}
+                  >
+                    Scanlark
+                  </div>
+                  <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+                    Customer monitoring control centre
+                  </div>
+                </div>
+                <div className="select-site-topbar-copy">
+                  Choose a site to continue
+                </div>
+              </div>
+
+              <div className="select-site-topbar-actions">
+                <button onClick={openAddSiteModal} className="secondary-button">
+                  Add site
+                </button>
+                {authUser && renderNotificationBell()}
+                {authUser && (
+                  <div
+                    ref={userMenuRef}
+                    style={{
+                      position: "relative",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      {authUser.name ?? authUser.email}
+                    </div>
+                    <button
+                      onClick={() => setUserMenuOpen((prev) => !prev)}
+                      className="secondary-button"
+                    >
+                      Account
+                    </button>
+                    {userMenuOpen && renderAccountMenu()}
+                  </div>
+                )}
+              </div>
+            </nav>
+
+            <div className="onboarding-page">
+              <div
+                style={{
+                  width: "min(980px, 100%)",
+                  margin: "0 auto",
+                  padding: "36px 16px 48px",
+                  display: "grid",
+                  gap: "22px",
+                }}
+              >
+                <header>
+                  <h1
+                    style={{
+                      margin: "0 0 8px",
+                      fontFamily: "var(--font-display)",
+                      fontSize: "clamp(28px, 4vw, 38px)",
+                      lineHeight: 1.1,
+                    }}
+                  >
+                    Choose a website
+                  </h1>
+                  <p style={{ margin: 0, color: "var(--text-muted)" }}>
+                    Select the site you want to monitor.
+                  </p>
+                </header>
+
+                {sites.length === 0 ? (
+                  <div className="surface-card">
+                    <div style={{ padding: "24px", textAlign: "center" }}>
+                      <div
+                        style={{ marginBottom: "14px", color: "var(--text)" }}
+                      >
+                        No sites are set up yet.
+                      </div>
+                      <button
+                        className="primary-button"
+                        onClick={() => navigateTo("/sites/new")}
+                      >
+                        Add your first site
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns:
+                          "repeat(auto-fit, minmax(260px, 1fr))",
+                        gap: "14px",
+                      }}
+                    >
+                      {sites.map((site) => {
+                        const summary = sitePickerSummaries[site.id];
+                        const siteName = getSiteDisplayName(site) ?? site.url;
+                        const healthScore =
+                          summary?.healthScore == null
+                            ? "No scan yet"
+                            : `${summary.healthScore} / 100`;
+                        const openIssues =
+                          summary?.openIssues == null
+                            ? "No scan yet"
+                            : `${summary.openIssues} open`;
+                        const scanStatus =
+                          summary?.lastScanStatus ?? "No recent scan";
+                        const scanDate = summary?.lastScanDate
+                          ? formatDate(summary.lastScanDate)
+                          : "No recent scan";
+                        const availability =
+                          summary?.availabilityStatus ?? "Availability unknown";
+                        return (
+                          <div
+                            key={site.id}
+                            className="surface-card surface-card--history"
+                            style={{
+                              display: "grid",
+                              gap: "12px",
+                              padding: "16px",
+                            }}
+                          >
+                            <div>
+                              <div
+                                style={{
+                                  fontWeight: 600,
+                                  fontSize: "17px",
+                                  marginBottom: "6px",
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                {siteName}
+                              </div>
+                              {site.client_name ? (
+                                <div
+                                  style={{
+                                    color: "var(--text-muted)",
+                                    fontSize: "12px",
+                                    marginBottom: "8px",
+                                  }}
+                                >
+                                  {site.client_name}
+                                </div>
+                              ) : null}
+                            </div>
+                            <div
+                              style={{ fontSize: "13px", color: "var(--text)" }}
+                            >
+                              <div>Health score: {healthScore}</div>
+                              <div>Open issues: {openIssues}</div>
+                              <div>Latest scan: {scanStatus}</div>
+                              <div>Last scanned: {scanDate}</div>
+                              <div>Availability: {availability}</div>
+                            </div>
+                            <button
+                              className="primary-button"
+                              onClick={() => {
+                                void openDashboardForSite(site);
+                              }}
+                            >
+                              Open dashboard
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div
+                      style={{ display: "flex", justifyContent: "flex-start" }}
+                    >
+                      <button
+                        className="secondary-button"
+                        onClick={() => navigateTo("/sites/new")}
+                      >
+                        Add another site
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </>
         ) : isSiteSetupRoute ? (
           <div className="onboarding-page">
             <div className="onboarding-shell">
@@ -17638,7 +18813,7 @@ const App: React.FC = () => {
                         if (nextSite) {
                           void (async () => {
                             await handleSelectSite(nextSite);
-                            navigateTo("/dashboard");
+                            navigateToDashboard({ skipPicker: true });
                           })();
                         }
                       }}
@@ -17813,6 +18988,19 @@ const App: React.FC = () => {
                           disabled={!reportShare?.shareUrl}
                         >
                           Copy share link
+                        </button>
+                        <button
+                          className="secondary-button"
+                          onClick={() => {
+                            if (reportShare?.shareToken) {
+                              void handleSharedReportPdfExport(
+                                reportShare.shareToken,
+                              );
+                            }
+                          }}
+                          disabled={!reportShare?.shareToken}
+                        >
+                          Download shared PDF
                         </button>
                         <button
                           className="secondary-button"
@@ -18421,93 +19609,112 @@ const App: React.FC = () => {
                       />
                     )}
 
-                  <details
-                    className="report-card report-developer-diagnostics"
-                    open={reportTechnicalDiagnosticsNeedsAttention}
-                    style={{ display: "grid", gap: "10px" }}
-                  >
-                    <summary
-                      className="report-table-title"
-                      style={{ cursor: "pointer" }}
+                  {!reportDeveloperTabsEnabled &&
+                    (reportRun.issue_generation_status === "failed" ||
+                      !!reportRun.issue_generation_error) && (
+                      <div className="report-card">
+                        <div className="report-table-title">Report status</div>
+                        <div
+                          style={{ fontSize: "13px", color: "var(--muted)" }}
+                        >
+                          Issue summary generation failed for this scan. Enable
+                          Developer Tabs in Site Settings to inspect advanced
+                          diagnostics.
+                        </div>
+                      </div>
+                    )}
+
+                  {reportDeveloperTabsEnabled && (
+                    <details
+                      className="report-card report-developer-diagnostics"
+                      style={{ display: "grid", gap: "10px" }}
                     >
-                      Developer diagnostics
-                    </summary>
-                    <div style={{ fontSize: "13px", color: "var(--muted)" }}>
-                      Advanced scan details for debugging crawler behavior
-                      during beta.
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "12px",
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                      }}
-                    >
-                      <span>
-                        Status {formatRunStatusLabel(reportRun.status)}
-                      </span>
-                      <span>Site id {reportRun.site_id}</span>
-                      <span>
-                        Checked {reportRun.checked_links} /{" "}
-                        {reportRun.total_links}
-                      </span>
-                      <span>404/410 {reportStatusGroups.notFound}</span>
-                      <span>401/403/429 {reportStatusGroups.blocked}</span>
-                      <span>5xx {reportStatusGroups.serverError}</span>
-                      <span>No response {reportStatusGroups.noResponse}</span>
-                      <span>Other HTTP {reportStatusGroups.otherHttp}</span>
-                      <span>
-                        Issue generation{" "}
-                        {reportRun.issue_generation_status ?? "pending"}
-                      </span>
-                      {reportRun.issue_generation_error && (
-                        <span title={reportRun.issue_generation_error}>
-                          Issue generation error{" "}
-                          {reportRun.issue_generation_error}
+                      <summary
+                        className="report-table-title"
+                        style={{ cursor: "pointer" }}
+                      >
+                        Developer Diagnostics
+                        {reportTechnicalDiagnosticsNeedsAttention
+                          ? " needs review"
+                          : ""}
+                      </summary>
+                      <div style={{ fontSize: "13px", color: "var(--muted)" }}>
+                        Advanced scan details for debugging crawler behavior
+                        during beta.
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: "12px",
+                          fontSize: "12px",
+                          color: "var(--muted)",
+                        }}
+                      >
+                        <span>
+                          Status {formatRunStatusLabel(reportRun.status)}
                         </span>
-                      )}
-                      <span>
-                        {formatSeoDiagnostics(
-                          reportTechnicalDiagnostics?.seoBasic,
+                        <span>Site id {reportRun.site_id}</span>
+                        <span>
+                          Checked {reportRun.checked_links} /{" "}
+                          {reportRun.total_links}
+                        </span>
+                        <span>404/410 {reportStatusGroups.notFound}</span>
+                        <span>401/403/429 {reportStatusGroups.blocked}</span>
+                        <span>5xx {reportStatusGroups.serverError}</span>
+                        <span>No response {reportStatusGroups.noResponse}</span>
+                        <span>Other HTTP {reportStatusGroups.otherHttp}</span>
+                        <span>
+                          Issue generation{" "}
+                          {reportRun.issue_generation_status ?? "pending"}
+                        </span>
+                        {reportRun.issue_generation_error && (
+                          <span title={reportRun.issue_generation_error}>
+                            Issue generation error{" "}
+                            {reportRun.issue_generation_error}
+                          </span>
                         )}
-                      </span>
-                      <span>
-                        {formatRobotsDiagnostics(
-                          reportTechnicalDiagnostics?.robots,
-                        )}
-                      </span>
-                      <span>
-                        {formatSitemapDiagnostics(
-                          reportTechnicalDiagnostics?.sitemap,
-                        )}
-                      </span>
-                      <span>
-                        {formatSslDiagnostics(
-                          reportTechnicalDiagnostics?.sslHttps,
-                        )}
-                      </span>
-                      <span>
-                        {formatSecurityHeaderDiagnostics(
-                          reportTechnicalDiagnostics?.securityHeader,
-                        )}
-                      </span>
-                      <span>
-                        {formatPerformanceDiagnostics(
-                          reportTechnicalDiagnostics?.performanceBasic,
-                        )}
-                      </span>
-                      <span>
-                        Refreshed{" "}
-                        {reportLastLoadedAt
-                          ? formatDate(
-                              new Date(reportLastLoadedAt).toISOString(),
-                            )
-                          : "-"}
-                      </span>
-                    </div>
-                  </details>
+                        <span>
+                          {formatSeoDiagnostics(
+                            reportTechnicalDiagnostics?.seoBasic,
+                          )}
+                        </span>
+                        <span>
+                          {formatRobotsDiagnostics(
+                            reportTechnicalDiagnostics?.robots,
+                          )}
+                        </span>
+                        <span>
+                          {formatSitemapDiagnostics(
+                            reportTechnicalDiagnostics?.sitemap,
+                          )}
+                        </span>
+                        <span>
+                          {formatSslDiagnostics(
+                            reportTechnicalDiagnostics?.sslHttps,
+                          )}
+                        </span>
+                        <span>
+                          {formatSecurityHeaderDiagnostics(
+                            reportTechnicalDiagnostics?.securityHeader,
+                          )}
+                        </span>
+                        <span>
+                          {formatPerformanceDiagnostics(
+                            reportTechnicalDiagnostics?.performanceBasic,
+                          )}
+                        </span>
+                        <span>
+                          Refreshed{" "}
+                          {reportLastLoadedAt
+                            ? formatDate(
+                                new Date(reportLastLoadedAt).toISOString(),
+                              )
+                            : "-"}
+                        </span>
+                      </div>
+                    </details>
+                  )}
 
                   <div className="report-footer">
                     Last refreshed{" "}
@@ -19605,7 +20812,11 @@ const App: React.FC = () => {
                               : "Scan activity"
                           }
                           stage={dashboardStage}
-                          summary={`${dashboardLatestRun.checked_links} / ${dashboardLatestRun.total_links || "?"} links checked · Last update ${formatRelative(dashboardLatestRun.updated_at ?? dashboardLatestRun.started_at)}`}
+                          summary={`${dashboardLatestRun.checked_links} / ${dashboardLatestRun.total_links || "?"} links checked`}
+                          headerTimestamp={formatRelative(
+                            dashboardLatestRun.updated_at ??
+                              dashboardLatestRun.started_at,
+                          )}
                           counters={[
                             {
                               label: "Links checked",
@@ -19692,9 +20903,22 @@ const App: React.FC = () => {
                                   )
                             }
                             stage={dashboardStage}
+                            headerTimestamp={formatDate(
+                              dashboardLatestRun.finished_at ??
+                                dashboardLatestRun.started_at,
+                            )}
+                            hideSummary={
+                              dashboardLatestRun.status === "completed"
+                            }
+                            hideRingFallback={
+                              dashboardLatestRun.status === "completed"
+                            }
+                            hideStageChip={
+                              dashboardLatestRun.status === "completed"
+                            }
                             summary={
                               dashboardLatestRun.status === "completed"
-                                ? `${formatDate(dashboardLatestRun.finished_at ?? dashboardLatestRun.started_at)} · Your latest scan is complete.`
+                                ? ""
                                 : `${
                                     dashboardLatestRun.error_message ??
                                     "The scan stopped before completion. You can start a fresh run now."
@@ -19799,9 +21023,13 @@ const App: React.FC = () => {
                             primaryAction={
                               dashboardLatestRun.status === "completed" ? (
                                 <button
-                                  onClick={() =>
-                                    openReport(dashboardLatestRun.id)
-                                  }
+                                  onClick={() => {
+                                    dismissDashboardCompletionPanel(
+                                      selectedSiteId,
+                                      dashboardLatestRun.id,
+                                    );
+                                    openReport(dashboardLatestRun.id);
+                                  }}
                                   className="primary-button"
                                 >
                                   View report
@@ -19859,9 +21087,18 @@ const App: React.FC = () => {
                         <MetricCard
                           label="Last scan"
                           value={
-                            dashboardLatestRun
-                              ? formatRunStatusLabel(dashboardLatestRun.status)
-                              : "None"
+                            dashboardLatestRun ? (
+                              <StatusBadge
+                                label={formatRunStatusLabel(
+                                  dashboardLatestRun.status,
+                                )}
+                                tone={getDashboardRunStatusTone(
+                                  dashboardLatestRun.status,
+                                )}
+                              />
+                            ) : (
+                              "None"
+                            )
                           }
                           detail={formatDate(
                             dashboardLatestRun?.finished_at ?? null,
@@ -20254,11 +21491,7 @@ const App: React.FC = () => {
                                   disabled={run.status !== "completed"}
                                   onClick={() => {
                                     if (run.status === "completed") {
-                                      window.open(
-                                        buildReportPdfLink(run.id),
-                                        "_blank",
-                                        "noopener,noreferrer",
-                                      );
+                                      void handleRunPdfExport(run.id);
                                     }
                                   }}
                                 >
@@ -20551,6 +21784,46 @@ const App: React.FC = () => {
                                         className="app-input"
                                         rows={5}
                                         style={{ resize: "vertical" }}
+                                      />
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "flex-start",
+                                        justifyContent: "space-between",
+                                        gap: "14px",
+                                        padding: "14px",
+                                        border: "1px solid var(--border)",
+                                        borderRadius: "14px",
+                                        background: "var(--panel-elev)",
+                                      }}
+                                    >
+                                      <span
+                                        style={{
+                                          display: "grid",
+                                          gap: "4px",
+                                          fontSize: "13px",
+                                        }}
+                                      >
+                                        <strong>Developer Tabs</strong>
+                                        <span
+                                          style={{
+                                            color: "var(--muted)",
+                                            lineHeight: 1.5,
+                                          }}
+                                        >
+                                          Show advanced diagnostics and
+                                          debugging panels for this site.
+                                        </span>
+                                      </span>
+                                      <input
+                                        type="checkbox"
+                                        checked={siteDeveloperTabsDraft}
+                                        onChange={(event) =>
+                                          setSiteDeveloperTabsDraft(
+                                            event.target.checked,
+                                          )
+                                        }
                                       />
                                     </label>
                                     {siteDetailsError && (
@@ -24330,11 +25603,7 @@ const App: React.FC = () => {
                                     disabled={run.status !== "completed"}
                                     onClick={() => {
                                       if (run.status === "completed") {
-                                        window.open(
-                                          buildReportPdfLink(run.id),
-                                          "_blank",
-                                          "noopener,noreferrer",
-                                        );
+                                        void handleRunPdfExport(run.id);
                                       }
                                       setActionMenuOpenId(null);
                                     }}

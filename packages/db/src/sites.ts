@@ -25,6 +25,7 @@ export interface DbSiteRow {
   client_name: string | null;
   report_display_name: string | null;
   internal_notes: string | null;
+  developer_tabs_enabled: boolean;
 }
 
 export type SiteMetadataFields = {
@@ -32,6 +33,7 @@ export type SiteMetadataFields = {
   clientName: string | null;
   reportDisplayName: string | null;
   internalNotes: string | null;
+  developerTabsEnabled: boolean;
 };
 
 type NormalizedSiteMetadataFields = {
@@ -39,6 +41,7 @@ type NormalizedSiteMetadataFields = {
   clientName: string | null | undefined;
   reportDisplayName: string | null | undefined;
   internalNotes: string | null | undefined;
+  developerTabsEnabled: boolean | undefined;
 };
 
 const SITE_SELECT_COLUMNS = `
@@ -65,7 +68,8 @@ const SITE_SELECT_COLUMNS = `
   site_display_name,
   client_name,
   report_display_name,
-  internal_notes
+  internal_notes,
+  developer_tabs_enabled
 `;
 
 function normalizeSiteMetadataValue(value: string | null | undefined) {
@@ -83,6 +87,10 @@ function normalizeSiteMetadataFields(
     clientName: normalizeSiteMetadataValue(fields.clientName),
     reportDisplayName: normalizeSiteMetadataValue(fields.reportDisplayName),
     internalNotes: normalizeSiteMetadataValue(fields.internalNotes),
+    developerTabsEnabled:
+      typeof fields.developerTabsEnabled === "boolean"
+        ? fields.developerTabsEnabled
+        : undefined,
   };
 }
 
@@ -177,9 +185,10 @@ export async function createSite(
       site_display_name,
       client_name,
       report_display_name,
-      internal_notes
+      internal_notes,
+      developer_tabs_enabled
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [
@@ -190,6 +199,7 @@ export async function createSite(
       normalized.clientName ?? null,
       normalized.reportDisplayName ?? null,
       normalized.internalNotes ?? null,
+      normalized.developerTabsEnabled ?? false,
     ],
   );
 
@@ -230,6 +240,10 @@ export async function updateSiteMetadataForUser(
       normalized.internalNotes !== undefined
         ? normalized.internalNotes
         : existing.internal_notes,
+    developerTabsEnabled:
+      normalized.developerTabsEnabled !== undefined
+        ? normalized.developerTabsEnabled
+        : existing.developer_tabs_enabled,
   };
 
   const db = await ensureConnected();
@@ -239,7 +253,8 @@ export async function updateSiteMetadataForUser(
     SET site_display_name = $3,
         client_name = $4,
         report_display_name = $5,
-        internal_notes = $6
+        internal_notes = $6,
+        developer_tabs_enabled = $7
     WHERE id = $1 AND user_id = $2
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
@@ -250,6 +265,7 @@ export async function updateSiteMetadataForUser(
       next.clientName,
       next.reportDisplayName,
       next.internalNotes,
+      next.developerTabsEnabled,
     ],
   );
 

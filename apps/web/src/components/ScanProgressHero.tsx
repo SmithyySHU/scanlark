@@ -6,6 +6,10 @@ export const ScanProgressHero: React.FC<{
   title: string;
   stage: string;
   summary: string;
+  headerTimestamp?: string | null;
+  hideSummary?: boolean;
+  hideRingFallback?: boolean;
+  hideStageChip?: boolean;
   counters: Array<{ label: string; value: React.ReactNode }>;
   note?: string;
   statusTone?: "default" | "success" | "warning" | "danger" | "accent";
@@ -20,6 +24,10 @@ export const ScanProgressHero: React.FC<{
   title,
   stage,
   summary,
+  headerTimestamp,
+  hideSummary = false,
+  hideRingFallback = false,
+  hideStageChip = false,
   counters,
   note,
   statusTone = "accent",
@@ -104,23 +112,38 @@ export const ScanProgressHero: React.FC<{
                 <span>{stage}</span>
               </div>
             </div>
-            <div className="scan-hero-card__ring-fallback">
-              {indeterminate
-                ? "Discovering links"
-                : `${displayedProgress.toFixed(0)}% complete`}
-            </div>
+            {!hideRingFallback ? (
+              <div className="scan-hero-card__ring-fallback">
+                {indeterminate
+                  ? "Discovering links"
+                  : `${displayedProgress.toFixed(0)}% complete`}
+              </div>
+            ) : null}
           </div>
           <div className="scan-hero-card__visual-copy">
-            <div className="scan-hero-card__eyebrow">Scan status</div>
-            <div className="scan-hero-card__title">{title}</div>
-            <div className="scan-hero-card__stage-chip">{stage}</div>
+            <div className="scan-hero-card__header-row">
+              <div>
+                <div className="scan-hero-card__eyebrow">Scan status</div>
+                <div className="scan-hero-card__title">{title}</div>
+              </div>
+              {headerTimestamp ? (
+                <div className="scan-hero-card__timestamp">
+                  {headerTimestamp}
+                </div>
+              ) : null}
+            </div>
+            {!hideStageChip ? (
+              <div className="scan-hero-card__stage-chip">{stage}</div>
+            ) : null}
           </div>
         </div>
       </div>
       <div className="scan-hero-card__content">
-        <div>
-          <div className="scan-hero-card__summary">{summary}</div>
-        </div>
+        {!hideSummary && summary ? (
+          <div>
+            <div className="scan-hero-card__summary">{summary}</div>
+          </div>
+        ) : null}
         <div className="scan-hero-card__counter-grid">
           {counters.map((item) => (
             <div key={item.label} className="scan-hero-card__counter">
