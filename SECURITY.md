@@ -125,12 +125,14 @@ path that transfers application data.
 
 ---
 
-## Build-tool Vulnerability: esbuild Dev Server CORS
+## Build-tool Advisory: esbuild Binary Integrity
 
-Dependabot reports a vulnerability in **`esbuild` ≤ 0.24.2** related to its built-in dev server:
+Dependabot reports a high-severity advisory in `esbuild` build tooling related
+to binary integrity verification when an attacker can influence the npm registry
+used during package installation.
 
-- The dev server sets `Access-Control-Allow-Origin: *` on all responses.
-- This can, in some scenarios, let a malicious website read resources from a local `esbuild` dev server running on the developer’s machine.
+This affects the local build/development dependency tree through packages such
+as `vite`, `@vitejs/plugin-react`, `@vitejs/plugin-react-swc`, and `tsx`.
 
 ### How Scanlark uses esbuild
 
@@ -140,30 +142,35 @@ Dependabot reports a vulnerability in **`esbuild` ≤ 0.24.2** related to its bu
   - `@vitejs/plugin-react-swc`
   - `tsx`
 - **We do not use `esbuild`’s own `serve()` API** in production.
-- For development, we run the **Vite dev server**, not the esbuild dev server directly.
+- Production API and worker containers do not execute Vite dev server or tsx
+  runtime code.
 
-### Why Dependabot can’t auto-fix this
+### Why this is not fully auto-fixed
 
-`esbuild` is pulled in with different version constraints:
+The current advisory is tied to the frontend/test build toolchain. `npm audit`
+suggests a Vite major-version upgrade as the automatic fix path, which is a
+broader build-system change than this alpha hardening sprint should take without
+separate regression testing.
 
-- Some dependencies require `esbuild` around `0.21.x` (for example via Vite 5.x).
-- Others work with `0.27.x`.
-- The earliest fixed version is `0.25.0`.
-
-Because these ranges conflict, Dependabot cannot bump `esbuild` to a fixed version without breaking the current toolchain.
+The CI dependency audit therefore gates production/runtime dependencies with
+`npm audit --omit=dev --audit-level=high`, while this dev-tooling advisory
+remains tracked for the next build-tool upgrade sprint.
 
 ### Current stance
 
 For now:
 
-- This issue affects **local development environments only**, not production deployments of Scanlark.
+- This issue affects **local development and build environments only**, not the
+  runtime API, worker, or built frontend served in production.
 - We treat it as a **known limitation of the current dev toolchain**.
 
 > **Decision:**
 >
-> - We accept this risk for ongoing development.
-> - We will revisit the toolchain (Vite / esbuild / tsx versions) before a production release and upgrade to a version where `esbuild` is patched.
-> - Developers should avoid exposing local dev servers to untrusted networks and should only run them on their own machines.
+> - Keep production/runtime dependency auditing enabled in CI.
+> - Revisit the Vite / esbuild / tsx toolchain before beta and upgrade it as a
+>   dedicated build-tool change.
+> - Developers should use trusted npm registries and avoid exposing local dev
+>   servers to untrusted networks.
 
 ---
 
