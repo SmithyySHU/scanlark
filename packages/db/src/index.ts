@@ -191,6 +191,21 @@ export {
 export type { EmailOutboxEntry } from "./emailOutbox";
 
 export {
+  DEFAULT_EMAIL_TEMPLATE_BY_KEY,
+  DEFAULT_EMAIL_TEMPLATES,
+  getEmailTemplate,
+  isEmailTemplateKey,
+  listEmailTemplates,
+  restoreDefaultEmailTemplate,
+  updateEmailTemplate,
+} from "./emailTemplates";
+export type {
+  DefaultEmailTemplate,
+  EmailTemplateKey,
+  EmailTemplateRow,
+} from "./emailTemplates";
+
+export {
   getAdminFailedEmailForRetry,
   getAdminOverview,
   getAdminSiteDetail,

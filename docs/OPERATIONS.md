@@ -36,6 +36,9 @@ Email:
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`: SMTP transport settings.
 - `EMAIL_TEST_TO`: optional override for test-alert endpoint.
 
+Deliverability setup for SPF, DKIM, DMARC, and IONOS-specific notes lives in
+`docs/EMAIL_DELIVERABILITY.md`.
+
 Report shares:
 
 - `REPORT_SHARE_TOKEN_SECRET`: required outside development/test. Use a stable
@@ -137,8 +140,19 @@ In-app notifications:
 Email notifications:
 
 - assembled in `apps/api/src/notifyOnScanComplete.ts`.
+- rendered through admin-managed transactional templates when valid enabled
+  database templates exist.
 - sent/logged in `apps/api/src/email.ts`.
 - de-duplicated through DB notification events.
+
+Template management:
+
+- admins manage templates from the internal admin console.
+- defaults are seeded by `packages/db/migrations/031_email_templates.sql`.
+- disabled, missing, invalid, or failed database templates fall back to
+  code-defined defaults.
+- templates use simple `{{variable}}` replacement only; no JavaScript,
+  conditionals, loops, helpers, marketing campaigns, or bulk send workflow.
 
 Uptime down/recovered notifications are created from
 `packages/db/src/uptimeMonitors.ts` when incidents cross thresholds or recover.

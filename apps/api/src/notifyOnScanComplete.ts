@@ -12,18 +12,10 @@ import {
   type NotificationEventKind,
 } from "@scanlark/db";
 import { sendEmail } from "./email";
+import { renderTransactionalEmail } from "./emailTemplates";
 
 const APP_URL =
   process.env.APP_BASE_URL || process.env.APP_URL || "http://localhost:5173";
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 function getSiteHost(value: string) {
   try {
@@ -49,22 +41,9 @@ function formatIssueText(issue: IssueNotificationDigest["topIssues"][number]) {
   return `- [${issue.severity}] ${issue.title} (${issue.category}) — ${issue.affectedUrl}`;
 }
 
-function formatIssueHtml(issue: IssueNotificationDigest["topIssues"][number]) {
-  return `<li><strong>${escapeHtml(issue.severity)}</strong> ${escapeHtml(
-    issue.title,
-  )} <span>(${escapeHtml(
-    issue.category,
-  )})</span><br /><code>${escapeHtml(issue.affectedUrl)}</code></li>`;
-}
-
 function buildIssueListText(digest: IssueNotificationDigest) {
   if (digest.topIssues.length === 0) return "No open issues recorded.";
   return digest.topIssues.map(formatIssueText).join("\n");
-}
-
-function buildIssueListHtml(digest: IssueNotificationDigest) {
-  if (digest.topIssues.length === 0) return "<p>No open issues recorded.</p>";
-  return `<ul>${digest.topIssues.map(formatIssueHtml).join("")}</ul>`;
 }
 
 function buildIssueSummaryLines(digest: IssueNotificationDigest) {
@@ -77,7 +56,7 @@ function buildIssueSummaryLines(digest: IssueNotificationDigest) {
   };
 }
 
-function buildIssueEmail(params: {
+async function buildIssueEmail(params: {
   kind: "high_priority_issues_found" | "weekly_scan_summary";
   siteUrl: string;
   siteId: string;
@@ -88,55 +67,33 @@ function buildIssueEmail(params: {
   const siteHost = getSiteHost(params.siteUrl);
   const appLink = buildAppLink(params.scanRunId);
   const finishedAt = params.finishedAt ?? new Date();
-  const { severityCounts, categoryCounts, summaryLine } =
-    buildIssueSummaryLines(params.digest);
-  const isHighPriority = params.kind === "high_priority_issues_found";
-  const subject = isHighPriority
-    ? `Scanlark: high-priority issues found on ${siteHost}`
-    : `Scanlark: weekly scan summary for ${siteHost}`;
-  const heading = isHighPriority
-    ? "High-priority issues found"
-    : "Weekly scan summary";
-  const intro = isHighPriority
-    ? "This scheduled scan found new critical or high severity issues."
-    : "This is the weekly scheduled scan summary.";
-
-  const text = [
-    `${heading} for ${params.siteUrl}`,
-    intro,
-    "Status: completed",
-    `Finished: ${finishedAt.toISOString()}`,
-    summaryLine,
-    `By severity: ${severityCounts}`,
-    `By category: ${categoryCounts}`,
-    "",
-    "Top issues:",
-    buildIssueListText(params.digest),
-    "",
-    `View report: ${appLink}`,
-    "You can change alert settings in Scanlark.",
-  ].join("\n");
-
-  const html = `
-    <p><strong>${escapeHtml(heading)}</strong> for ${escapeHtml(
-      params.siteUrl,
-    )}</p>
-    <p>${escapeHtml(intro)}</p>
-    <p>Status: completed</p>
-    <p>Finished: ${escapeHtml(finishedAt.toISOString())}</p>
-    <p>${escapeHtml(summaryLine)}</p>
-    <p>By severity: ${escapeHtml(severityCounts)}</p>
-    <p>By category: ${escapeHtml(categoryCounts)}</p>
-    <h3>Top issues</h3>
-    ${buildIssueListHtml(params.digest)}
-    <p><a href="${escapeHtml(appLink)}">View report</a></p>
-    <p>You can change alert settings in Scanlark.</p>
-  `;
-
-  return { subject, text, html };
+  const { severityCounts, categoryCounts } = buildIssueSummaryLines(
+    params.digest,
+  );
+  const key =
+    params.kind === "high_priority_issues_found"
+      ? "high_priority_issues_found"
+      : "weekly_summary";
+  return renderTransactionalEmail(key, {
+    appName: "Scanlark",
+    siteName: siteHost,
+    siteUrl: params.siteUrl,
+    reportUrl: appLink,
+    scanRunId: params.scanRunId,
+    dashboardUrl: APP_URL.replace(/\/+$/, ""),
+    unsubscribeOrPreferencesUrl: `${APP_URL.replace(/\/+$/, "")}/dashboard/settings`,
+    completedAt: finishedAt.toISOString(),
+    healthScore: `${params.digest.healthScore}%`,
+    issueCount: params.digest.totalOpenIssues,
+    criticalCount: params.digest.bySeverity.critical ?? 0,
+    highCount: params.digest.bySeverity.high ?? 0,
+    severityCounts,
+    categoryCounts,
+    topIssues: buildIssueListText(params.digest),
+  });
 }
 
-function buildFailureEmail(params: {
+async function buildFailureEmail(params: {
   siteUrl: string;
   siteId: string;
   scanRunId: string;
@@ -146,31 +103,22 @@ function buildFailureEmail(params: {
 }) {
   const siteHost = getSiteHost(params.siteUrl);
   const appLink = buildAppLink(params.scanRunId);
-  const subject = `Scanlark: scheduled scan failed for ${siteHost}`;
   const errorMessage = params.errorMessage ?? "Unknown error";
   const finishedLine = params.finishedAt
-    ? `Finished: ${params.finishedAt.toISOString()}`
-    : "Finished: not recorded";
-  const text = [
-    `Scheduled scan failed for ${params.siteUrl}`,
-    "Status: failed",
-    `Started: ${params.startedAt.toISOString()}`,
-    finishedLine,
-    `Error: ${errorMessage}`,
-    "",
-    `View report: ${appLink}`,
-  ].join("\n");
-  const html = `
-    <p><strong>Scheduled scan failed</strong> for ${escapeHtml(
-      params.siteUrl,
-    )}</p>
-    <p>Status: failed</p>
-    <p>Started: ${escapeHtml(params.startedAt.toISOString())}</p>
-    <p>${escapeHtml(finishedLine)}</p>
-    <p>Error: ${escapeHtml(errorMessage)}</p>
-    <p><a href="${escapeHtml(appLink)}">View report</a></p>
-  `;
-  return { subject, text, html };
+    ? params.finishedAt.toISOString()
+    : "not recorded";
+  return renderTransactionalEmail("scan_failed", {
+    appName: "Scanlark",
+    siteName: siteHost,
+    siteUrl: params.siteUrl,
+    reportUrl: appLink,
+    scanRunId: params.scanRunId,
+    dashboardUrl: APP_URL.replace(/\/+$/, ""),
+    unsubscribeOrPreferencesUrl: `${APP_URL.replace(/\/+$/, "")}/dashboard/settings`,
+    startedAt: params.startedAt.toISOString(),
+    completedAt: finishedLine,
+    errorMessage,
+  });
 }
 
 async function sendNotification(params: {
@@ -230,7 +178,7 @@ export async function notifyIfNeeded(
   let sentAny = false;
   if (run.status === "failed") {
     if (!settings.notifyEnabled || settings.notifyOn === "never") return;
-    const email = buildFailureEmail({
+    const email = await buildFailureEmail({
       siteUrl: site.url,
       siteId: run.site_id,
       scanRunId: run.id,
@@ -261,7 +209,7 @@ export async function notifyIfNeeded(
       settings.notifyOn !== "never" &&
       digest.highPriorityCount > 0
     ) {
-      const email = buildIssueEmail({
+      const email = await buildIssueEmail({
         kind: "high_priority_issues_found",
         siteUrl: site.url,
         siteId: run.site_id,
@@ -284,7 +232,7 @@ export async function notifyIfNeeded(
     }
 
     if (settings.summaryEnabled && site.schedule_frequency === "weekly") {
-      const email = buildIssueEmail({
+      const email = await buildIssueEmail({
         kind: "weekly_scan_summary",
         siteUrl: site.url,
         siteId: run.site_id,
@@ -321,59 +269,79 @@ export async function sendTestEmail(
   if (!site) throw new Error("site_not_found");
   const latestRun = await getLatestScanForSiteForUser(userId, siteId);
   if (!latestRun) {
-    const subject = `Scanlark: test alert for ${getSiteHost(site.url)}`;
-    const html = `
-      <p>This is a test alert for ${escapeHtml(site.url)}.</p>
-      <p>No scans have completed yet, so there is no data to summarize.</p>
-      <p><a href="${escapeHtml(APP_URL)}">Open dashboard</a></p>
-    `;
-    const text = `This is a test alert for ${site.url}.\nNo scans have completed yet, so there is no data to summarize.\nOpen dashboard: ${APP_URL}`;
+    const email = await renderTransactionalEmail("test_email", {
+      appName: "Scanlark",
+      siteName: getSiteHost(site.url),
+      siteUrl: site.url,
+      reportUrl: APP_URL.replace(/\/+$/, ""),
+      scanRunId: "",
+      dashboardUrl: APP_URL.replace(/\/+$/, ""),
+      unsubscribeOrPreferencesUrl: `${APP_URL.replace(/\/+$/, "")}/dashboard/settings`,
+      healthScore: "Not available",
+      issueCount: "No scans yet",
+      criticalCount: 0,
+      highCount: 0,
+    });
     await sendEmail({
       to: toEmail,
-      subject,
-      html,
-      text,
+      subject: email.subject,
+      html: email.html,
+      text: email.text,
       userId,
       siteId,
       scanRunId: null,
-      metadata: { test: true },
+      metadata: {
+        test: true,
+        templateKey: "test_email",
+        templateSource: email.source,
+      },
     });
     await recordNotificationEvent({
       siteId,
       scanRunId: null,
       kind: "test",
       toEmail,
-      subject,
+      subject: email.subject,
       payload: { test: true, hasScan: false },
     });
     return;
   }
 
   const digest = await getIssueNotificationDigestForRun(latestRun.id);
-  const email = buildIssueEmail({
-    kind: "weekly_scan_summary",
+  const email = await renderTransactionalEmail("test_email", {
+    appName: "Scanlark",
+    siteName: getSiteHost(site.url),
     siteUrl: site.url,
-    siteId,
+    reportUrl: buildAppLink(latestRun.id),
     scanRunId: latestRun.id,
-    finishedAt: latestRun.finished_at,
-    digest,
+    dashboardUrl: APP_URL.replace(/\/+$/, ""),
+    unsubscribeOrPreferencesUrl: `${APP_URL.replace(/\/+$/, "")}/dashboard/settings`,
+    healthScore: `${digest.healthScore}%`,
+    issueCount: digest.totalOpenIssues,
+    criticalCount: digest.bySeverity.critical ?? 0,
+    highCount: digest.bySeverity.high ?? 0,
   });
   await sendEmail({
     to: toEmail,
-    subject: `Scanlark: test alert for ${getSiteHost(site.url)}`,
+    subject: email.subject,
     html: email.html,
     text: email.text,
     userId,
     siteId,
     scanRunId: null,
-    metadata: { test: true, digest },
+    metadata: {
+      test: true,
+      digest,
+      templateKey: "test_email",
+      templateSource: email.source,
+    },
   });
   await recordNotificationEvent({
     siteId,
     scanRunId: null,
     kind: "test",
     toEmail,
-    subject: `Scanlark: test alert for ${getSiteHost(site.url)}`,
+    subject: email.subject,
     payload: { test: true, digest },
   });
 }

@@ -3,7 +3,10 @@ import type { Request, Response } from "express";
 import {
   cancelScanJob,
   cancelScanRun,
+  getEmailTemplate,
   enqueueExistingScanRunIfIdle,
+  isEmailTemplateKey,
+  isValidEmailAddress,
   getAdminFailedEmailForRetry,
   getAdminOverview,
   getAdminSiteDetail,
@@ -12,22 +15,32 @@ import {
   getScanRunById,
   listAdminAuditLog,
   listAdminEmailOutbox,
+  listEmailTemplates,
   listAdminScans,
   listAdminShareLinks,
   listAdminSites,
   listAdminUptime,
   listAdminUsers,
   recordAdminAuditLog,
+  restoreDefaultEmailTemplate,
   revokeAdminShareLink,
   setAdminSiteDisabled,
   setAdminSiteSchedulePaused,
   setAdminUptimePaused,
   setAdminUserDisabled,
   setScanRunStatus,
+  updateEmailTemplate,
   type AdminActor,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
 import { sendEmail } from "../email";
+import {
+  getSampleTemplateVariables,
+  renderTemplateParts,
+  renderTransactionalEmail,
+  sanitizeEmailHtml,
+  type EmailTemplateVariables,
+} from "../emailTemplates";
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 50;
@@ -80,6 +93,65 @@ function parseSearch(req: Request) {
 
 function getErrorMessage(err: unknown, fallback: string) {
   return err instanceof Error && err.message ? err.message : fallback;
+}
+
+function getTemplateKey(req: Request, res: Response) {
+  const key = req.params.key;
+  if (!isEmailTemplateKey(key)) {
+    sendApiError(
+      res,
+      404,
+      "email_template_not_found",
+      "Email template not found",
+    );
+    return null;
+  }
+  return key;
+}
+
+function parseTemplateBody(body: unknown) {
+  const input = body as Record<string, unknown>;
+  const subjectTemplate =
+    typeof input.subjectTemplate === "string" ? input.subjectTemplate : "";
+  const htmlTemplate =
+    typeof input.htmlTemplate === "string" ? input.htmlTemplate : "";
+  const rawTextTemplate =
+    typeof input.textTemplate === "string" ? input.textTemplate : null;
+  const enabled =
+    typeof input.enabled === "boolean" ? input.enabled : Boolean(input.enabled);
+  const changeNote =
+    typeof input.changeNote === "string" && input.changeNote.trim()
+      ? input.changeNote.trim().slice(0, 500)
+      : null;
+  return {
+    subjectTemplate: subjectTemplate.trim(),
+    htmlTemplate: sanitizeEmailHtml(htmlTemplate).trim(),
+    textTemplate: rawTextTemplate,
+    enabled,
+    changeNote,
+  };
+}
+
+function parseVariables(body: unknown): EmailTemplateVariables {
+  const input = body as Record<string, unknown>;
+  if (!input || typeof input.variables !== "object" || !input.variables) {
+    return {};
+  }
+  return Object.entries(input.variables as Record<string, unknown>).reduce(
+    (values, [key, value]) => {
+      if (!/^[a-zA-Z0-9_]+$/.test(key)) return values;
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean" ||
+        value === null
+      ) {
+        values[key] = value;
+      }
+      return values;
+    },
+    {} as EmailTemplateVariables,
+  );
 }
 
 function mountListRoutes(router: express.Router) {
@@ -229,6 +301,45 @@ function mountListRoutes(router: express.Router) {
         500,
         "admin_email_failed",
         "Failed to load email outbox",
+      );
+    }
+  });
+
+  router.get("/email-templates", async (_req, res) => {
+    try {
+      return res.json({ templates: await listEmailTemplates() });
+    } catch (err) {
+      console.error("Admin email templates list failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_templates_failed",
+        "Failed to load email templates",
+      );
+    }
+  });
+
+  router.get("/email-templates/:key", async (req, res) => {
+    const key = getTemplateKey(req, res);
+    if (!key) return;
+    try {
+      const template = await getEmailTemplate(key);
+      if (!template) {
+        return sendApiError(
+          res,
+          404,
+          "email_template_not_found",
+          "Email template not found",
+        );
+      }
+      return res.json({ template });
+    } catch (err) {
+      console.error("Admin email template detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_template_failed",
+        "Failed to load email template",
       );
     }
   });
@@ -612,6 +723,200 @@ function mountActionRoutes(router: express.Router) {
         500,
         "admin_email_retry_failed",
         "Failed to retry email",
+      );
+    }
+  });
+
+  router.patch("/email-templates/:key", async (req, res) => {
+    const key = getTemplateKey(req, res);
+    if (!key) return;
+    const actor = getActor(req);
+    const body = parseTemplateBody(req.body);
+    if (!body.subjectTemplate || !body.htmlTemplate) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_email_template",
+        "Subject and HTML template are required",
+      );
+    }
+    try {
+      const template = await updateEmailTemplate(key, {
+        ...body,
+        changedByUserId: actor.id,
+      });
+      await recordAdminAuditLog(actor, {
+        action: "email_template.update",
+        targetType: "email_template",
+        targetId: key,
+        metadata: {
+          enabled: template.enabled,
+          version: template.version,
+          changeNote: body.changeNote,
+        },
+      });
+      return res.json({ template });
+    } catch (err) {
+      console.error("Admin update email template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_template_update_failed",
+        "Failed to update email template",
+      );
+    }
+  });
+
+  router.post("/email-templates/:key/preview", async (req, res) => {
+    const key = getTemplateKey(req, res);
+    if (!key) return;
+    try {
+      const input = req.body as Record<string, unknown>;
+      const variables = getSampleTemplateVariables(
+        key,
+        parseVariables(req.body),
+      );
+      const subjectTemplate =
+        typeof input.subjectTemplate === "string"
+          ? input.subjectTemplate
+          : undefined;
+      const htmlTemplate =
+        typeof input.htmlTemplate === "string" ? input.htmlTemplate : undefined;
+      const textTemplate =
+        typeof input.textTemplate === "string" ? input.textTemplate : undefined;
+
+      if (subjectTemplate !== undefined || htmlTemplate !== undefined) {
+        if (!subjectTemplate?.trim() || !htmlTemplate?.trim()) {
+          return sendApiError(
+            res,
+            400,
+            "invalid_email_template",
+            "Subject and HTML template are required for preview",
+          );
+        }
+        const preview = renderTemplateParts(
+          {
+            subjectTemplate,
+            htmlTemplate: sanitizeEmailHtml(htmlTemplate),
+            textTemplate: textTemplate ?? null,
+          },
+          variables,
+        );
+        return res.json({ preview, variables });
+      }
+
+      const preview = await renderTransactionalEmail(key, variables);
+      return res.json({ preview, variables });
+    } catch (err) {
+      console.error("Admin preview email template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_template_preview_failed",
+        "Failed to preview email template",
+      );
+    }
+  });
+
+  router.post("/email-templates/:key/test", async (req, res) => {
+    const key = getTemplateKey(req, res);
+    if (!key) return;
+    const actor = getActor(req);
+    const input = req.body as Record<string, unknown>;
+    const toEmail =
+      typeof input.toEmail === "string" && input.toEmail.trim()
+        ? input.toEmail.trim()
+        : actor.email;
+    if (!isValidEmailAddress(toEmail)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_email",
+        "Please enter a valid email address",
+      );
+    }
+
+    try {
+      const email = await renderTransactionalEmail(
+        key,
+        getSampleTemplateVariables(key, {
+          ...parseVariables(req.body),
+          recipientEmail: toEmail,
+        }),
+      );
+      let deliveryError: string | null = null;
+      try {
+        await sendEmail({
+          to: toEmail,
+          subject: email.subject,
+          html: email.html,
+          text: email.text,
+          userId: actor.id,
+          siteId: null,
+          scanRunId: null,
+          metadata: {
+            adminTemplateTest: true,
+            templateKey: key,
+            templateSource: email.source,
+          },
+        });
+      } catch (err) {
+        deliveryError = getErrorMessage(err, "email_send_failed");
+      }
+      await recordAdminAuditLog(actor, {
+        action: "email_template.test",
+        targetType: "email_template",
+        targetId: key,
+        metadata: {
+          recipient: toEmail,
+          templateSource: email.source,
+          deliveryStatus: deliveryError ? "failed" : "sent_or_recorded",
+          deliveryError,
+        },
+      });
+      return res.status(deliveryError ? 202 : 200).json({
+        ok: true,
+        deliveryStatus: deliveryError ? "failed" : "sent_or_recorded",
+        message: deliveryError
+          ? "Test email was recorded, but SMTP delivery failed"
+          : "Test email send attempted",
+      });
+    } catch (err) {
+      console.error("Admin test email template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_template_test_failed",
+        "Failed to send template test email",
+      );
+    }
+  });
+
+  router.post("/email-templates/:key/restore-default", async (req, res) => {
+    const key = getTemplateKey(req, res);
+    if (!key) return;
+    const actor = getActor(req);
+    try {
+      const template = await restoreDefaultEmailTemplate(key, {
+        changedByUserId: actor.id,
+        changeNote: "Restored default template from admin console",
+      });
+      await recordAdminAuditLog(actor, {
+        action: "email_template.restore_default",
+        targetType: "email_template",
+        targetId: key,
+        metadata: {
+          version: template.version,
+        },
+      });
+      return res.json({ template });
+    } catch (err) {
+      console.error("Admin restore email template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "admin_email_template_restore_failed",
+        "Failed to restore default email template",
       );
     }
   });
