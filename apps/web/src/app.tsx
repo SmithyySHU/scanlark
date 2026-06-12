@@ -930,6 +930,7 @@ const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_SETUP_STORAGE_PREFIX = "site_setup:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
 const SITE_PICKER_SESSION_PREFIX = "dashboard_site_selection_session:";
+const LAST_SELECTED_SITE_STORAGE_PREFIX = "scanlark:lastSelectedSiteId:";
 const DASHBOARD_COMPLETION_DISMISS_STORAGE_PREFIX =
   "dashboard_completion_dismissed:";
 const SITE_PICKER_SESSION_TTL_MS = 45 * 60 * 1000;
@@ -2122,6 +2123,11 @@ function normalizeSiteNotifyOn(site: Site): Site {
   };
 }
 
+function findSiteById(sites: Site[], siteId: string | null | undefined) {
+  if (!siteId) return null;
+  return sites.find((site) => site.id === siteId) ?? null;
+}
+
 function getStorageKey(prefix: string, userId: string) {
   return `${prefix}${userId}`;
 }
@@ -2131,6 +2137,31 @@ function clearStorageItem(key: string | null) {
   try {
     window.sessionStorage.removeItem(key);
   } catch {}
+}
+
+function readLocalStorageValue(key: string | null) {
+  if (!key || typeof window === "undefined") return null;
+  try {
+    const value = window.localStorage.getItem(key);
+    return value?.trim() ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalStorageValue(key: string | null, value: string | null) {
+  if (!key || typeof window === "undefined") return;
+  try {
+    if (value?.trim()) {
+      window.localStorage.setItem(key, value);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {}
+}
+
+function clearLocalStorageValue(key: string | null) {
+  writeLocalStorageValue(key, null);
 }
 
 function loadStorageMap(key: string) {
@@ -3675,6 +3706,9 @@ const App: React.FC = () => {
     : null;
   const sitePickerSessionKey = authUser
     ? getStorageKey(SITE_PICKER_SESSION_PREFIX, authUser.id)
+    : null;
+  const lastSelectedSiteStorageKey = authUser
+    ? getStorageKey(LAST_SELECTED_SITE_STORAGE_PREFIX, authUser.id)
     : null;
   const dashboardCompletionDismissStorageKey = authUser
     ? getStorageKey(DASHBOARD_COMPLETION_DISMISS_STORAGE_PREFIX, authUser.id)
@@ -6303,6 +6337,71 @@ const App: React.FC = () => {
     clearStorageItem(sitePickerSessionKey);
   }, [sitePickerSessionKey]);
 
+  const getLastSelectedDashboardSiteId = useCallback(() => {
+    return readLocalStorageValue(lastSelectedSiteStorageKey);
+  }, [lastSelectedSiteStorageKey]);
+
+  const rememberLastSelectedDashboardSite = useCallback(
+    (siteId: string | null) => {
+      writeLocalStorageValue(lastSelectedSiteStorageKey, siteId);
+    },
+    [lastSelectedSiteStorageKey],
+  );
+
+  const clearLastSelectedDashboardSite = useCallback(() => {
+    clearLocalStorageValue(lastSelectedSiteStorageKey);
+  }, [lastSelectedSiteStorageKey]);
+
+  const rememberDashboardSiteSelection = useCallback(
+    (siteId: string | null) => {
+      rememberSitePickerSelection(siteId);
+      rememberLastSelectedDashboardSite(siteId);
+    },
+    [rememberLastSelectedDashboardSite, rememberSitePickerSelection],
+  );
+
+  const clearDashboardSiteSelection = useCallback(() => {
+    clearSitePickerSelection();
+    clearLastSelectedDashboardSite();
+  }, [clearLastSelectedDashboardSite, clearSitePickerSelection]);
+
+  const getPreferredDashboardSiteId = useCallback(
+    (availableSites: Site[]) => {
+      const currentSelection = findSiteById(
+        availableSites,
+        selectedSiteIdRef.current,
+      )?.id;
+
+      const savedSiteId = getLastSelectedDashboardSiteId();
+      const savedSelection = findSiteById(availableSites, savedSiteId)?.id;
+      if (savedSiteId && !savedSelection) {
+        clearLastSelectedDashboardSite();
+      }
+
+      const existingSession = getSitePickerSession();
+      const sessionSelection = existingSession?.hasActiveSiteSelection
+        ? (findSiteById(availableSites, existingSession.selectedSiteId)?.id ??
+          null)
+        : null;
+      if (existingSession?.selectedSiteId && !sessionSelection) {
+        clearSitePickerSelection();
+      }
+
+      return (
+        currentSelection ??
+        savedSelection ??
+        sessionSelection ??
+        (availableSites.length === 1 ? availableSites[0].id : null)
+      );
+    },
+    [
+      clearLastSelectedDashboardSite,
+      clearSitePickerSelection,
+      getLastSelectedDashboardSiteId,
+      getSitePickerSession,
+    ],
+  );
+
   const isEmptyEvidenceValue = (value: unknown) => {
     if (value == null) return true;
     if (typeof value === "string") return value.trim().length === 0;
@@ -8548,7 +8647,7 @@ const App: React.FC = () => {
   }, [authLoading, authUser]);
 
   useEffect(() => {
-    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (!authUser || authLoading || !canEvaluateSiteState) return;
     if (sitesLoadError) return;
     if (
       route !== "app" ||
@@ -8570,17 +8669,17 @@ const App: React.FC = () => {
     if (hasLoadedOneSite) {
       const site = sites[0];
       if (selectedSiteStatus === "resolved" && selectedSiteId === site.id) {
-        navigateTo("/dashboard");
+        navigateTo("/dashboard", undefined, { replace: true });
         return;
       }
       void (async () => {
         await handleSelectSite(site);
-        navigateTo("/dashboard");
+        navigateTo("/dashboard", undefined, { replace: true });
       })();
       return;
     }
 
-    navigateTo("/dashboard/select-site");
+    navigateTo("/dashboard/select-site", undefined, { replace: true });
   }, [
     appSection,
     authLoading,
@@ -8598,7 +8697,7 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (!authUser || authLoading || !canEvaluateSiteState) return;
     if (sitesLoadError) return;
     if (
       route !== "app" ||
@@ -8647,7 +8746,7 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (!authUser || authLoading || canEvaluateSiteState) return;
+    if (!authUser || authLoading || !canEvaluateSiteState) return;
     if (sitesLoadError) return;
     if (!isSiteSelectionRoute) return;
 
@@ -8659,12 +8758,12 @@ const App: React.FC = () => {
     if (hasLoadedOneSite) {
       const site = sites[0];
       if (selectedSiteStatus === "resolved" && selectedSiteId === site.id) {
-        navigateTo("/dashboard");
+        navigateTo("/dashboard", undefined, { replace: true });
         return;
       }
       void (async () => {
         await handleSelectSite(site);
-        navigateTo("/dashboard");
+        navigateTo("/dashboard", undefined, { replace: true });
       })();
     }
   }, [
@@ -8683,12 +8782,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!selectedSiteId) return;
-    rememberSitePickerSelection(selectedSiteId);
-  }, [selectedSiteId, rememberSitePickerSelection]);
+    rememberDashboardSiteSelection(selectedSiteId);
+  }, [selectedSiteId, rememberDashboardSiteSelection]);
 
   useEffect(() => {
     if (!authUser || !onboardingStorageKey) return;
-    if (authLoading || canEvaluateSiteState) return;
+    if (authLoading || !canEvaluateSiteState) return;
     if (sitesLoadError) return;
     if (
       route === "report" ||
@@ -8753,7 +8852,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (route !== "onboarding" && route !== "new_site") return;
-    if (authLoading || canEvaluateSiteState || sitesLoadError || historyLoading)
+    if (
+      authLoading ||
+      !canEvaluateSiteState ||
+      sitesLoadError ||
+      historyLoading
+    )
       return;
     if (route === "new_site" && !setupTargetSite) {
       setOnboardingStep(0);
@@ -9461,22 +9565,7 @@ const App: React.FC = () => {
             : "loaded_many",
       );
 
-      const existingSession = getSitePickerSession();
-      const hasCurrentSelection = !!selectedSiteIdRef.current;
-      const selectionMatch =
-        existingSession?.hasActiveSiteSelection &&
-        existingSession.selectedSiteId &&
-        normalizedSites.some(
-          (site) => site.id === existingSession.selectedSiteId,
-        )
-          ? existingSession.selectedSiteId
-          : null;
-      const preferredSiteId =
-        (hasCurrentSelection &&
-        normalizedSites.some((site) => site.id === selectedSiteIdRef.current)
-          ? selectedSiteIdRef.current
-          : selectionMatch) ??
-        (normalizedSites.length === 1 ? normalizedSites[0].id : null);
+      const preferredSiteId = getPreferredDashboardSiteId(normalizedSites);
 
       if (normalizedSites.length > 0) {
         if (!preferredSiteId) {
@@ -9509,7 +9598,7 @@ const App: React.FC = () => {
             setSelectedSiteId(selected.id);
             selectedSiteIdRef.current = selected.id;
 
-            rememberSitePickerSelection(selected.id);
+            rememberDashboardSiteSelection(selected.id);
             setStartUrl(selected.url);
 
             setActiveRunId(null);
@@ -9528,6 +9617,7 @@ const App: React.FC = () => {
       } else {
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
+        clearDashboardSiteSelection();
 
         setHistory([]);
         setSelectedRunId(null);
@@ -9558,17 +9648,20 @@ const App: React.FC = () => {
 
       const currentId = selectedSiteIdRef.current;
       if (currentId) {
-        const match = normalizedSites.find((site) => site.id === currentId);
+        const match = findSiteById(normalizedSites, currentId);
         if (match) {
           setStartUrl(match.url);
+          rememberDashboardSiteSelection(match.id);
           return;
         }
+        setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
       }
 
       if (data.sites.length === 0) {
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
-        clearSitePickerSelection();
+        clearDashboardSiteSelection();
         setStartUrl("");
         setHistory([]);
         setSelectedRunId(null);
@@ -9580,42 +9673,29 @@ const App: React.FC = () => {
         return;
       }
 
-      if (!currentId) {
-        const session = getSitePickerSession();
-        const matchingSessionId =
-          session?.hasActiveSiteSelection &&
-          session.selectedSiteId &&
-          data.sites.some((site) => site.id === session.selectedSiteId)
-            ? session.selectedSiteId
-            : null;
+      const nextSelection = getPreferredDashboardSiteId(normalizedSites);
 
-        const nextSelection =
-          matchingSessionId ??
-          (data.sites.length === 1 ? normalizedSites[0]?.id : null);
+      if (!nextSelection) {
+        setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
+        setStartUrl("");
+        setResults([]);
+        setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+        setActiveRunId(null);
+        activeRunIdRef.current = null;
+        resetOccurrencesState();
+        setHistory([]);
+        return;
+      }
 
-        if (!nextSelection) {
-          setSelectedSiteId(null);
-          selectedSiteIdRef.current = null;
-          setStartUrl("");
-          setResults([]);
-          setSelectedRunId(null);
-          selectedRunIdRef.current = null;
-          setActiveRunId(null);
-          activeRunIdRef.current = null;
-          resetOccurrencesState();
-          setHistory([]);
-          return;
-        }
-
-        const next =
-          data.sites.find((site) => site.id === nextSelection) ?? null;
-        if (next) {
-          setSelectedSiteId(next.id);
-          selectedSiteIdRef.current = next.id;
-          rememberSitePickerSelection(next.id);
-          setStartUrl(next.url);
-          await loadHistory(next.id, { preserveSelection: false });
-        }
+      const next = findSiteById(normalizedSites, nextSelection);
+      if (next) {
+        setSelectedSiteId(next.id);
+        selectedSiteIdRef.current = next.id;
+        rememberDashboardSiteSelection(next.id);
+        setStartUrl(next.url);
+        await loadHistory(next.id, { preserveSelection: false });
       }
     } catch {}
   }
@@ -10445,6 +10525,8 @@ const App: React.FC = () => {
   }
 
   async function handleSelectSite(site: Site) {
+    rememberDashboardSiteSelection(site.id);
+
     if (
       selectedSiteId &&
       selectedSiteId !== site.id &&
@@ -10470,7 +10552,6 @@ const App: React.FC = () => {
 
     setSelectedSiteId(site.id);
     selectedSiteIdRef.current = site.id;
-    rememberSitePickerSelection(site.id);
 
     setStartUrl(site.url);
 
@@ -10975,6 +11056,7 @@ const App: React.FC = () => {
       if (selectedSiteId === siteId) {
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
+        clearDashboardSiteSelection();
 
         setHistory([]);
         setResults([]);
@@ -11717,12 +11799,17 @@ const App: React.FC = () => {
   function navigateTo(
     pathname: string,
     searchParams?: Record<string, string | null | undefined>,
+    options?: { replace?: boolean },
   ) {
     const normalizedPath = normalizeDashboardCompatPath(
       pathname.replace(/\/+$/, "") || "/",
     );
     const url = buildAppUrl(normalizedPath, searchParams);
-    window.history.pushState({}, "", url);
+    if (options?.replace) {
+      window.history.replaceState({}, "", url);
+    } else {
+      window.history.pushState({}, "", url);
+    }
     setLocationSearch(getLocationSearch());
     const nextRoute = getRouteFromLocation();
     const nextReportId = getReportScanRunIdFromLocation();
@@ -11844,17 +11931,17 @@ const App: React.FC = () => {
   }
 
   async function openDashboardForSite(site: Site) {
-    if (site.id !== selectedSiteId) {
-      await handleSelectSite(site);
-    }
-    navigateToDashboard();
+    await handleSelectSite(site);
+    navigateToDashboard({ replace: isSiteSelectionRoute });
   }
 
-  function navigateToDashboard(options: { skipPicker?: boolean } = {}) {
+  function navigateToDashboard(
+    options: { skipPicker?: boolean; replace?: boolean } = {},
+  ) {
     if (options.skipPicker) {
       bypassDashboardPickerRef.current = true;
     }
-    navigateTo("/dashboard");
+    navigateTo("/dashboard", undefined, { replace: options.replace });
   }
 
   function handlePrintReport() {
