@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --import tsx src/runSingleScan.ts 85efa142-35dc-4b06-93ee-fb7180ab28fd https://twiddlefood.co.uk",
     "scan:once": "node --import tsx src/runSingleScan.ts",
+    "test": "node --import tsx --test src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
