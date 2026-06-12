@@ -1,7 +1,8 @@
 import dotenv from "dotenv";
 import express from "express";
-import type { Response } from "express";
+import type { NextFunction, Request, RequestHandler, Response } from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import type {
   ExportClassification,
   IgnoreRuleType,
@@ -133,8 +134,14 @@ import { authMiddleware, initDemoAuth } from "./authMiddleware";
 import { sessionMiddleware } from "./auth";
 import { mountAuthRoutes } from "./routes/auth";
 import { initEventRelay, mountEventStream } from "./events";
+import {
+  assertSecurityConfig,
+  getAllowedCorsOrigins,
+  normalizeOrigin,
+} from "./securityConfig";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
+assertSecurityConfig();
 
 const LINK_CLASSIFICATIONS = new Set<LinkClassification>([
   "ok",
@@ -194,6 +201,7 @@ const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
 const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const API_JSON_LIMIT = process.env.API_JSON_LIMIT || "256kb";
 const DASHBOARD_ISSUE_CATEGORIES: ScanIssueCategory[] = [
   "link_integrity",
   "seo_basic",
@@ -378,6 +386,27 @@ function validateIgnoreRulePattern(
 
 function getErrorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
+}
+
+function getErrorLogFields(err: unknown) {
+  const maybeError = err as {
+    code?: unknown;
+    detail?: unknown;
+    hint?: unknown;
+    position?: unknown;
+    routine?: unknown;
+  };
+  return {
+    message: getErrorMessage(err),
+    code: typeof maybeError.code === "string" ? maybeError.code : undefined,
+    detail:
+      typeof maybeError.detail === "string" ? maybeError.detail : undefined,
+    hint: typeof maybeError.hint === "string" ? maybeError.hint : undefined,
+    position:
+      typeof maybeError.position === "string" ? maybeError.position : undefined,
+    routine:
+      typeof maybeError.routine === "string" ? maybeError.routine : undefined,
+  };
 }
 
 const MAX_SITE_AVATAR_BYTES = 256 * 1024;
@@ -685,13 +714,10 @@ function sendApiError(
 }
 
 function sendInternalError(res: Response, message: string, err?: unknown) {
-  return sendApiError(
-    res,
-    500,
-    "internal_error",
-    message,
-    err ? getErrorMessage(err) : undefined,
-  );
+  if (err) {
+    console.error("Internal API error", getErrorLogFields(err), err);
+  }
+  return sendApiError(res, 500, "internal_error", message);
 }
 
 function sendNotFound(res: Response) {
@@ -855,27 +881,18 @@ function csvEscape(value: unknown): string {
 
 const app = express();
 
-function normalizeOrigin(value: string | undefined) {
-  if (!value) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return value.replace(/\/+$/, "");
-  }
+function setSecurityHeaders(_req: Request, res: Response, next: NextFunction) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=()",
+  );
+  return next();
 }
 
-const corsOrigins = new Set(
-  [
-    process.env.WEB_ORIGIN,
-    process.env.APP_URL,
-    process.env.APP_BASE_URL,
-    process.env.API_ORIGIN,
-    "http://localhost:5173",
-    "http://localhost:3000",
-  ]
-    .map(normalizeOrigin)
-    .filter((origin): origin is string => Boolean(origin)),
-);
+const corsOrigins = getAllowedCorsOrigins();
 
 const corsOptions: cors.CorsOptions = {
   origin(origin, callback) {
@@ -890,10 +907,100 @@ const corsOptions: cors.CorsOptions = {
   credentials: true,
 };
 
+const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function isInternalScanNotify(req: Request): boolean {
+  const internalToken =
+    typeof req.headers["x-internal-token"] === "string"
+      ? req.headers["x-internal-token"]
+      : "";
+  return Boolean(
+    API_INTERNAL_TOKEN &&
+    internalToken === API_INTERNAL_TOKEN &&
+    req.path.startsWith("/scan-runs/") &&
+    req.path.endsWith("/notify"),
+  );
+}
+
+function rateLimitKey(req: Request, prefix: string): string {
+  if (req.user?.id) return `${prefix}:user:${req.user.id}`;
+  return `${prefix}:ip:${req.ip ?? req.socket.remoteAddress ?? "unknown"}`;
+}
+
+function createRateLimiter({
+  prefix,
+  windowMs,
+  max,
+  skip,
+}: {
+  prefix: string;
+  windowMs: number;
+  max: number;
+  skip?: (req: Request) => boolean;
+}): RequestHandler {
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => rateLimitKey(req, prefix),
+    skip,
+    message: {
+      error: "rate_limited",
+      message: "Too many requests. Please try again shortly.",
+    },
+  });
+}
+
+const publicReportLimiter = createRateLimiter({
+  prefix: "public-report",
+  windowMs: 60 * 1000,
+  max: Number(process.env.PUBLIC_REPORT_RATE_LIMIT_PER_MINUTE ?? "120"),
+});
+
+const authenticatedWriteLimiter = createRateLimiter({
+  prefix: "write",
+  windowMs: 60 * 1000,
+  max: Number(process.env.API_WRITE_RATE_LIMIT_PER_MINUTE ?? "120"),
+  skip: (req) => !WRITE_METHODS.has(req.method) || isInternalScanNotify(req),
+});
+
+const scanActionLimiter = createRateLimiter({
+  prefix: "scan-action",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.SCAN_ACTION_RATE_LIMIT_PER_10_MINUTES ?? "20"),
+});
+
+const linkRecheckLimiter = createRateLimiter({
+  prefix: "link-recheck",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.LINK_RECHECK_RATE_LIMIT_PER_10_MINUTES ?? "30"),
+});
+
+const testEmailLimiter = createRateLimiter({
+  prefix: "test-email",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.TEST_EMAIL_RATE_LIMIT_PER_10_MINUTES ?? "5"),
+});
+
+const shareActionLimiter = createRateLimiter({
+  prefix: "share-action",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.SHARE_ACTION_RATE_LIMIT_PER_10_MINUTES ?? "20"),
+});
+
+const ignoreRuleLimiter = createRateLimiter({
+  prefix: "ignore-rule",
+  windowMs: 10 * 60 * 1000,
+  max: Number(process.env.IGNORE_RULE_RATE_LIMIT_PER_10_MINUTES ?? "30"),
+});
+
+app.disable("x-powered-by");
 app.set("trust proxy", 1);
+app.use(setSecurityHeaders);
 app.options("*", cors(corsOptions));
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: API_JSON_LIMIT }));
 app.use(sessionMiddleware);
 
 if (process.env.DEV_BYPASS_AUTH === "true") {
@@ -906,7 +1013,9 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "scanlark-api" });
 });
 
+app.use("/public/reports", publicReportLimiter);
 app.use(authMiddleware);
+app.use(authenticatedWriteLimiter);
 
 mountEventStream(app);
 mountScanRunEvents(app);
@@ -1339,8 +1448,12 @@ async function handleSendTestAlert(
   }
 }
 
-app.post("/sites/:siteId/notifications/test", handleSendTestAlert);
-app.post("/sites/:siteId/alerts/test", handleSendTestAlert);
+app.post(
+  "/sites/:siteId/notifications/test",
+  testEmailLimiter,
+  handleSendTestAlert,
+);
+app.post("/sites/:siteId/alerts/test", testEmailLimiter, handleSendTestAlert);
 
 function serializeUserNotificationPreferences(
   preferences: UserNotificationPreferences,
@@ -2541,61 +2654,69 @@ app.get("/scan-runs/:scanRunId/share", async (req, res) => {
   }
 });
 
-app.post("/scan-runs/:scanRunId/share", async (req, res) => {
-  const scanRunId = req.params.scanRunId;
-  try {
-    const result = await requireScanRunForUser(req, res, scanRunId);
-    if (!result) return;
-    const userId = req.user?.id;
-    if (!userId) {
-      return sendApiError(res, 401, "unauthorized", "Unauthorized");
-    }
+app.post(
+  "/scan-runs/:scanRunId/share",
+  shareActionLimiter,
+  async (req, res) => {
+    const scanRunId = req.params.scanRunId;
+    try {
+      const result = await requireScanRunForUser(req, res, scanRunId);
+      if (!result) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
-    const { share, created } = await createOrRotateReportShareForRunForUser(
-      userId,
-      scanRunId,
-    );
-    return res.json({
-      created,
-      share: serializeReportShare(req, share),
-    });
-  } catch (err: unknown) {
-    if (err instanceof Error && err.message === "scan_run_not_shareable") {
-      return sendApiError(
-        res,
-        400,
-        "scan_run_not_shareable",
-        "Only completed scan runs can create share links",
+      const { share, created } = await createOrRotateReportShareForRunForUser(
+        userId,
+        scanRunId,
       );
+      return res.json({
+        created,
+        share: serializeReportShare(req, share),
+      });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === "scan_run_not_shareable") {
+        return sendApiError(
+          res,
+          400,
+          "scan_run_not_shareable",
+          "Only completed scan runs can create share links",
+        );
+      }
+      if (err instanceof Error && err.message === "scan_run_not_found") {
+        return sendNotFound(res);
+      }
+      console.error("Error in POST /scan-runs/:scanRunId/share", err);
+      return sendInternalError(res, "Failed to create report share", err);
     }
-    if (err instanceof Error && err.message === "scan_run_not_found") {
-      return sendNotFound(res);
-    }
-    console.error("Error in POST /scan-runs/:scanRunId/share", err);
-    return sendInternalError(res, "Failed to create report share", err);
-  }
-});
+  },
+);
 
-app.delete("/scan-runs/:scanRunId/share", async (req, res) => {
-  const scanRunId = req.params.scanRunId;
-  try {
-    const result = await requireScanRunForUser(req, res, scanRunId);
-    if (!result) return;
-    const userId = req.user?.id;
-    if (!userId) {
-      return sendApiError(res, 401, "unauthorized", "Unauthorized");
-    }
+app.delete(
+  "/scan-runs/:scanRunId/share",
+  shareActionLimiter,
+  async (req, res) => {
+    const scanRunId = req.params.scanRunId;
+    try {
+      const result = await requireScanRunForUser(req, res, scanRunId);
+      if (!result) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
-    const revoked = await disableReportShareForRunForUser(userId, scanRunId);
-    return res.json({ revoked });
-  } catch (err: unknown) {
-    if (err instanceof Error && err.message === "scan_run_not_found") {
-      return sendNotFound(res);
+      const revoked = await disableReportShareForRunForUser(userId, scanRunId);
+      return res.json({ revoked });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === "scan_run_not_found") {
+        return sendNotFound(res);
+      }
+      console.error("Error in DELETE /scan-runs/:scanRunId/share", err);
+      return sendInternalError(res, "Failed to revoke report share", err);
     }
-    console.error("Error in DELETE /scan-runs/:scanRunId/share", err);
-    return sendInternalError(res, "Failed to revoke report share", err);
-  }
-});
+  },
+);
 
 app.get("/public/reports/:token/report", async (req, res) => {
   const token = req.params.token;
@@ -2868,24 +2989,28 @@ app.get("/public/reports/:token/ignored", async (req, res) => {
 
 // Cancel a scan run
 // curl -X POST "http://localhost:3001/scan-runs/<scanRunId>/cancel"
-app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
-  const scanRunId = req.params.scanRunId;
-  try {
-    const result = await requireScanRunForUser(req, res, scanRunId);
-    if (!result) return;
-    const job = await getJobForScanRun(scanRunId);
-    if (job && job.status !== "completed") {
-      await cancelScanJob(job.id);
+app.post(
+  "/scan-runs/:scanRunId/cancel",
+  scanActionLimiter,
+  async (req, res) => {
+    const scanRunId = req.params.scanRunId;
+    try {
+      const result = await requireScanRunForUser(req, res, scanRunId);
+      if (!result) return;
+      const job = await getJobForScanRun(scanRunId);
+      if (job && job.status !== "completed") {
+        await cancelScanJob(job.id);
+      }
+      await cancelScanRun(scanRunId);
+      return res.json({ ok: true, status: "cancelled" });
+    } catch (err: unknown) {
+      console.error("Error in POST /scan-runs/:scanRunId/cancel", err);
+      return sendInternalError(res, "Failed to cancel scan run", err);
     }
-    await cancelScanRun(scanRunId);
-    return res.json({ ok: true, status: "cancelled" });
-  } catch (err: unknown) {
-    console.error("Error in POST /scan-runs/:scanRunId/cancel", err);
-    return sendInternalError(res, "Failed to cancel scan run", err);
-  }
-});
+  },
+);
 
-app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
+app.post("/scan-runs/:scanRunId/retry", scanActionLimiter, async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
     const result = await requireScanRunForUser(req, res, scanRunId);
@@ -3193,7 +3318,7 @@ app.patch("/sites/:siteId", async (req, res) => {
 });
 
 // Trigger a new scan
-app.post("/sites/:siteId/scans", async (req, res) => {
+app.post("/sites/:siteId/scans", scanActionLimiter, async (req, res) => {
   const siteId = req.params.siteId;
   const body = req.body as { startUrl?: string };
 
@@ -4195,77 +4320,81 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
   }
 });
 
-app.post("/scan-links/:scanLinkId/recheck", async (req, res) => {
-  const scanLinkId = req.params.scanLinkId;
-  try {
-    const userId = req.user?.id;
-    if (!userId) {
-      return sendApiError(res, 401, "unauthorized", "Unauthorized");
-    }
-    const link = await getScanLinkByIdForUser(userId, scanLinkId);
-    if (!link) {
-      return sendNotFound(res);
-    }
-    if (link.ignored) {
-      return sendApiError(
-        res,
-        400,
-        "scan_link_ignored",
-        "Ignored links cannot be rechecked",
-      );
-    }
+app.post(
+  "/scan-links/:scanLinkId/recheck",
+  linkRecheckLimiter,
+  async (req, res) => {
+    const scanLinkId = req.params.scanLinkId;
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const link = await getScanLinkByIdForUser(userId, scanLinkId);
+      if (!link) {
+        return sendNotFound(res);
+      }
+      if (link.ignored) {
+        return sendApiError(
+          res,
+          400,
+          "scan_link_ignored",
+          "Ignored links cannot be rechecked",
+        );
+      }
 
-    const result = await validateLink(link.link_url);
-    const statusCode = result.ok ? result.status : result.status;
-    const classification = classifyStatus(
-      link.link_url,
-      statusCode ?? undefined,
-    );
-    const errorMessage = result.ok ? null : result.error;
-
-    const updated = await updateScanLinkAfterRecheck({
-      scanLinkId,
-      classification,
-      statusCode,
-      errorMessage,
-    });
-    if (!updated) {
-      return sendApiError(
-        res,
-        500,
-        "scan_link_update_failed",
-        "Failed to update scan link",
+      const result = await validateLink(link.link_url);
+      const statusCode = result.ok ? result.status : result.status;
+      const classification = classifyStatus(
+        link.link_url,
+        statusCode ?? undefined,
       );
+      const errorMessage = result.ok ? null : result.error;
+
+      const updated = await updateScanLinkAfterRecheck({
+        scanLinkId,
+        classification,
+        statusCode,
+        errorMessage,
+      });
+      if (!updated) {
+        return sendApiError(
+          res,
+          500,
+          "scan_link_update_failed",
+          "Failed to update scan link",
+        );
+      }
+      const serialized = {
+        ...updated,
+        first_seen_at:
+          updated.first_seen_at instanceof Date
+            ? updated.first_seen_at.toISOString()
+            : updated.first_seen_at,
+        last_seen_at:
+          updated.last_seen_at instanceof Date
+            ? updated.last_seen_at.toISOString()
+            : updated.last_seen_at,
+        created_at:
+          updated.created_at instanceof Date
+            ? updated.created_at.toISOString()
+            : updated.created_at,
+        updated_at:
+          updated.updated_at instanceof Date
+            ? updated.updated_at.toISOString()
+            : updated.updated_at,
+        ignored_at:
+          updated.ignored_at instanceof Date
+            ? updated.ignored_at.toISOString()
+            : updated.ignored_at,
+      };
+      return res.json({ scanLink: serialized });
+    } catch (err: unknown) {
+      console.error("Error in POST /scan-links/:scanLinkId/recheck", err);
+      return sendInternalError(res, "Failed to recheck scan link", err);
     }
-    const serialized = {
-      ...updated,
-      first_seen_at:
-        updated.first_seen_at instanceof Date
-          ? updated.first_seen_at.toISOString()
-          : updated.first_seen_at,
-      last_seen_at:
-        updated.last_seen_at instanceof Date
-          ? updated.last_seen_at.toISOString()
-          : updated.last_seen_at,
-      created_at:
-        updated.created_at instanceof Date
-          ? updated.created_at.toISOString()
-          : updated.created_at,
-      updated_at:
-        updated.updated_at instanceof Date
-          ? updated.updated_at.toISOString()
-          : updated.updated_at,
-      ignored_at:
-        updated.ignored_at instanceof Date
-          ? updated.ignored_at.toISOString()
-          : updated.ignored_at,
-    };
-    return res.json({ scanLink: serialized });
-  } catch (err: unknown) {
-    console.error("Error in POST /scan-links/:scanLinkId/recheck", err);
-    return sendInternalError(res, "Failed to recheck scan link", err);
-  }
-});
+  },
+);
 
 // Ignore rules (global list)
 app.get("/ignore-rules", async (req, res) => {
@@ -4282,7 +4411,7 @@ app.get("/ignore-rules", async (req, res) => {
   }
 });
 
-app.post("/ignore-rules", async (req, res) => {
+app.post("/ignore-rules", ignoreRuleLimiter, async (req, res) => {
   const pattern =
     typeof req.body?.pattern === "string" ? req.body.pattern.trim() : "";
   const enabled =
@@ -4348,7 +4477,7 @@ app.get("/sites/:siteId/ignore-rules", async (req, res) => {
   }
 });
 
-app.post("/sites/:siteId/ignore-rules", async (req, res) => {
+app.post("/sites/:siteId/ignore-rules", ignoreRuleLimiter, async (req, res) => {
   const siteId = req.params.siteId;
   const ruleType = parseIgnoreRuleType(req.body?.ruleType);
   const pattern =
@@ -4404,7 +4533,7 @@ app.post("/sites/:siteId/ignore-rules", async (req, res) => {
   }
 });
 
-app.patch("/ignore-rules/:ruleId", async (req, res) => {
+app.patch("/ignore-rules/:ruleId", ignoreRuleLimiter, async (req, res) => {
   const ruleId = req.params.ruleId;
   const isEnabled = req.body?.isEnabled;
   if (typeof isEnabled !== "boolean") {
@@ -4439,7 +4568,7 @@ app.patch("/ignore-rules/:ruleId", async (req, res) => {
   }
 });
 
-app.delete("/ignore-rules/:ruleId", async (req, res) => {
+app.delete("/ignore-rules/:ruleId", ignoreRuleLimiter, async (req, res) => {
   const ruleId = req.params.ruleId;
   try {
     const userId = req.user?.id;

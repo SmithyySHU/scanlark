@@ -11,6 +11,7 @@ Core:
 - `WEB_ORIGIN`: allowed browser origin for CORS/SSE, default local web origin.
 - `API_ORIGIN`: API origin used by frontend defaults.
 - `APP_URL` or `APP_BASE_URL`: web base URL used in email links.
+- `API_JSON_LIMIT`: Express JSON body limit, default `256kb`.
 
 Auth:
 
@@ -19,6 +20,21 @@ Auth:
 - `AUTH_COOKIE_NAME`: session cookie name.
 - `SESSION_SECRET`: 32+ character secret required when bypass is off.
 - `NODE_ENV`: affects secure cookies and production-like secret enforcement.
+- Production-like API startup rejects dev auth bypass, short secrets, missing
+  share/internal secrets, localhost CORS origins, and non-HTTPS configured
+  public origins.
+
+Rate limits:
+
+- `API_WRITE_RATE_LIMIT_PER_MINUTE`: authenticated write request limit.
+- `PUBLIC_REPORT_RATE_LIMIT_PER_MINUTE`: public shared report read limit.
+- `SCAN_ACTION_RATE_LIMIT_PER_10_MINUTES`: scan start/cancel/retry limit.
+- `LINK_RECHECK_RATE_LIMIT_PER_10_MINUTES`: single-link recheck limit.
+- `TEST_EMAIL_RATE_LIMIT_PER_10_MINUTES`: test email send limit.
+- `SHARE_ACTION_RATE_LIMIT_PER_10_MINUTES`: report share create/revoke limit.
+- `IGNORE_RULE_RATE_LIMIT_PER_10_MINUTES`: ignore-rule mutation limit.
+- Current alpha rate limiting uses in-process memory. Use a shared store before
+  scaling API horizontally.
 
 Worker:
 
