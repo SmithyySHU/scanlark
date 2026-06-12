@@ -356,7 +356,9 @@ export async function claimDueUptimeMonitors(
       WITH due AS (
         SELECT s.id
         FROM site_uptime_settings s
+        JOIN sites site ON site.id = s.site_id
         WHERE s.enabled = true
+          AND site.disabled_at IS NULL
           AND (s.next_check_at IS NULL OR s.next_check_at <= NOW())
         ORDER BY s.next_check_at ASC NULLS FIRST
         LIMIT $1

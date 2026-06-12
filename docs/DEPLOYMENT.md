@@ -112,7 +112,7 @@ Caddy serves HTTPS for `SCANLARK_DOMAIN`.
 - `/api/public/reports/:token/...` reaches public report API routes.
 - Everything else goes to the web service so SPA routes refresh correctly:
   `/dashboard`, `/dashboard/reports`, `/report`, `/shared-reports/:token`,
-  `/learn`, `/learn/:slug`, `/onboarding`, and `/sites/new`.
+  `/learn`, `/learn/:slug`, `/onboarding`, `/sites/new`, and `/admin`.
 
 ## Migrations
 

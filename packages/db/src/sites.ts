@@ -5,6 +5,7 @@ export interface DbSiteRow {
   user_id: string;
   url: string;
   created_at: Date;
+  disabled_at: Date | null;
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
@@ -76,6 +77,7 @@ const SITE_SELECT_COLUMNS = `
   user_id,
   url,
   created_at,
+  disabled_at,
   schedule_enabled,
   schedule_frequency,
   schedule_time_utc,

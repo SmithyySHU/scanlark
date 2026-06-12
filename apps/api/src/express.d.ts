@@ -9,6 +9,7 @@ declare module "express-serve-static-core" {
       email: string;
       displayName?: string | null;
       name?: string;
+      isAdmin?: boolean;
     };
   }
 }

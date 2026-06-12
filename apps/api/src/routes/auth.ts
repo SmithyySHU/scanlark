@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { createUser, isValidEmailAddress, verifyUser } from "@scanlark/db";
 import { clearSession, setSession } from "../auth";
+import { isAdminEmail } from "../adminAccess";
 
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
@@ -14,6 +15,7 @@ function serializeAuthUser(user: Awaited<ReturnType<typeof createUser>>) {
     email: user.email,
     displayName: user.displayName,
     name: user.displayName,
+    isAdmin: isAdminEmail(user.email),
   };
 }
 

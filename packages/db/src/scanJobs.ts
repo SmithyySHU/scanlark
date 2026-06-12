@@ -223,6 +223,7 @@ export async function enqueueManualScanIfIdle(params: {
         SELECT id
         FROM sites
         WHERE id = $1
+          AND disabled_at IS NULL
         FOR UPDATE
       `,
       [params.siteId],
@@ -281,15 +282,20 @@ export async function enqueueExistingScanRunIfIdle(params: {
 
   await client.query("BEGIN");
   try {
-    await client.query(
+    const siteRes = await client.query(
       `
         SELECT id
         FROM sites
         WHERE id = $1
+          AND disabled_at IS NULL
         FOR UPDATE
       `,
       [params.siteId],
     );
+    if ((siteRes.rowCount ?? 0) === 0) {
+      await client.query("ROLLBACK");
+      throw new Error("site_not_found");
+    }
 
     const runRes = await client.query<{
       id: string;
@@ -356,10 +362,12 @@ export async function claimNextScanJob(params: {
   const res = await client.query<ScanJobRow>(
     `
       WITH next_job AS (
-        SELECT id
+        SELECT scan_jobs.id
         FROM scan_jobs
-        WHERE status = 'queued'
-          AND run_at <= NOW()
+        JOIN sites ON sites.id = scan_jobs.site_id
+        WHERE scan_jobs.status = 'queued'
+          AND scan_jobs.run_at <= NOW()
+          AND sites.disabled_at IS NULL
           AND NOT EXISTS (
             SELECT 1
             FROM scan_jobs active_jobs
@@ -371,7 +379,7 @@ export async function claimNextScanJob(params: {
                 OR active_jobs.lock_expires_at > NOW()
               )
           )
-        ORDER BY run_at ASC, created_at ASC
+        ORDER BY scan_jobs.run_at ASC, scan_jobs.created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       )

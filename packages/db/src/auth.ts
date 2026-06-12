@@ -8,6 +8,7 @@ type UserRow = {
   display_name: string | null;
   created_at: Date;
   updated_at: Date;
+  disabled_at: Date | null;
 };
 
 export type AuthUser = {
@@ -16,6 +17,7 @@ export type AuthUser = {
   displayName: string | null;
   createdAt: Date;
   updatedAt: Date;
+  disabledAt: Date | null;
 };
 
 function mapUser(row: UserRow): AuthUser {
@@ -25,6 +27,7 @@ function mapUser(row: UserRow): AuthUser {
     displayName: row.display_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    disabledAt: row.disabled_at,
   };
 }
 
@@ -47,7 +50,7 @@ export async function createUser(
       `
         INSERT INTO users (email, password_hash)
         VALUES ($1, $2)
-        RETURNING id, email, password_hash, display_name, created_at, updated_at
+        RETURNING id, email, password_hash, display_name, created_at, updated_at, disabled_at
       `,
       [email.toLowerCase().trim(), passwordHash],
     );
@@ -69,7 +72,7 @@ export async function getUserByEmail(email: string): Promise<AuthUser | null> {
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, display_name, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at, disabled_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -85,7 +88,7 @@ export async function getUserById(userId: string): Promise<AuthUser | null> {
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, display_name, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at, disabled_at
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -104,7 +107,7 @@ export async function verifyUser(
   const client = await ensureConnected();
   const res = await client.query<UserRow>(
     `
-      SELECT id, email, password_hash, display_name, created_at, updated_at
+      SELECT id, email, password_hash, display_name, created_at, updated_at, disabled_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -113,6 +116,7 @@ export async function verifyUser(
   );
   const row = res.rows[0];
   if (!row) return null;
+  if (row.disabled_at) return null;
   let ok = false;
   try {
     ok = await argon2.verify(row.password_hash, password);
@@ -135,7 +139,7 @@ export async function updateUserProfile(
       SET display_name = $2,
           updated_at = NOW()
       WHERE id = $1
-      RETURNING id, email, password_hash, display_name, created_at, updated_at
+      RETURNING id, email, password_hash, display_name, created_at, updated_at, disabled_at
     `,
     [userId, displayName],
   );

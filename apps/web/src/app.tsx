@@ -12,6 +12,7 @@ import {
 } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { AuthPage } from "./components/AuthPage";
+import { AdminPage } from "./components/AdminPage";
 import {
   CategoryStatusCard,
   MetricCard,
@@ -66,6 +67,7 @@ type AppRoute =
   | "app"
   | "report"
   | "shared_report"
+  | "admin"
   | "learn";
 type AppSection = "dashboard" | "reports" | "site_settings" | "account";
 type SitesLoadState =
@@ -90,6 +92,7 @@ interface Site {
   user_id: string;
   url: string;
   created_at: string;
+  disabled_at: string | null;
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
@@ -154,6 +157,7 @@ interface AuthUser {
   email: string;
   displayName?: string | null;
   name?: string;
+  isAdmin?: boolean;
 }
 
 interface AccountProfileResponse {
@@ -2321,6 +2325,19 @@ function getLandingDashboardSelectSiteIntent(search = "") {
   }
 }
 
+function getLoginNextFromLocation() {
+  if (typeof window === "undefined") return null;
+  try {
+    const next = new URLSearchParams(window.location.search).get("next");
+    if (!next) return null;
+    if (next === "/admin") return next;
+    if (next === "/dashboard" || next.startsWith("/dashboard/")) return next;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function getLocationSearch() {
   if (typeof window === "undefined") return "";
   return window.location.search;
@@ -2396,6 +2413,7 @@ function getRouteFromLocation(): AppRoute {
   if (parseSiteSettingsLocation().isSiteSettingsPath) return "app";
   if (path === "/report") return "report";
   if (path.startsWith(`${SHARED_REPORT_ROUTE_PREFIX}/`)) return "shared_report";
+  if (path === "/admin" || path.startsWith("/admin/")) return "admin";
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
   if (path === "/dashboard/select-site") return "select_site";
   if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
@@ -3842,8 +3860,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!authUser || route !== "login") return;
-    navigateTo("/dashboard");
+    navigateTo(getLoginNextFromLocation() ?? "/dashboard");
   }, [authUser, route]);
+
+  useEffect(() => {
+    if (route !== "admin" || authLoading || authUser) return;
+    navigateTo("/login", { next: "/admin" }, { replace: true });
+  }, [authLoading, authUser, route]);
 
   useEffect(() => {
     if (route !== "learn") return;
@@ -6266,6 +6289,7 @@ const App: React.FC = () => {
     : "Set the customer-facing names now so reports and alerts are ready from the first scan.";
   const isReportRoute = route === "report";
   const isSharedReportRoute = route === "shared_report";
+  const isAdminRoute = route === "admin";
   const isReadOnlyReport = isSharedReportRoute;
   const hasLandingDashboardSelectIntent =
     getLandingDashboardSelectSiteIntent(locationSearch);
@@ -6273,6 +6297,7 @@ const App: React.FC = () => {
     route === "app" ||
     route === "select_site" ||
     route === "report" ||
+    route === "admin" ||
     route === "onboarding" ||
     route === "new_site";
   const authPageTitle =
@@ -9395,7 +9420,7 @@ const App: React.FC = () => {
       setAuthPassword("");
       setAuthError(null);
       if (route === "login" || route === "landing") {
-        navigateTo("/dashboard");
+        navigateTo(getLoginNextFromLocation() ?? "/dashboard");
       }
     } catch {
       setAuthError(
@@ -13006,6 +13031,16 @@ const App: React.FC = () => {
         >
           Account settings
         </button>
+        {authUser?.isAdmin === true && (
+          <button
+            onClick={() => {
+              navigateTo("/admin");
+              setUserMenuOpen(false);
+            }}
+          >
+            Internal admin
+          </button>
+        )}
       </div>
       <div className="account-menu__section">
         <div className="account-menu__label">Help & Learn</div>
@@ -19428,6 +19463,69 @@ const App: React.FC = () => {
             onOpenLearn={() => navigateTo("/learn")}
             onOpenAccount={() => navigateTo("/dashboard/account")}
           />
+        ) : isAdminRoute ? (
+          authUser?.isAdmin === true ? (
+            <AdminPage
+              apiBase={API_BASE}
+              apiFetch={apiFetch}
+              authUser={authUser}
+              onBackToDashboard={() => navigateTo("/dashboard")}
+            />
+          ) : (
+            <div
+              style={{
+                minHeight: "100vh",
+                display: "grid",
+                placeItems: "center",
+                background: "var(--bg)",
+                color: "var(--text)",
+                padding: "24px",
+              }}
+            >
+              <div
+                style={{
+                  width: "min(440px, 100%)",
+                  border: "1px solid var(--border)",
+                  background: "var(--panel)",
+                  borderRadius: "8px",
+                  padding: "22px",
+                  display: "grid",
+                  gap: "12px",
+                }}
+              >
+                <span
+                  style={{
+                    color: "var(--warning)",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Internal admin
+                </span>
+                <h1
+                  style={{
+                    margin: 0,
+                    fontFamily: "var(--font-display)",
+                    fontSize: "24px",
+                  }}
+                >
+                  Admin access required
+                </h1>
+                <p style={{ margin: 0, color: "var(--text-muted)" }}>
+                  This account is signed in, but it is not on the admin
+                  allowlist.
+                </p>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => navigateTo("/dashboard")}
+                >
+                  Back to dashboard
+                </button>
+              </div>
+            </div>
+          )
         ) : isSiteSelectionRoute ? (
           <>
             <nav className="top-nav top-nav--select-site">

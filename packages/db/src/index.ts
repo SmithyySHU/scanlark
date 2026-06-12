@@ -181,8 +181,43 @@ export {
 } from "./linkNotes";
 export type { LinkNote, LinkNoteStatus } from "./linkNotes";
 
-export { enqueueEmailOutbox } from "./emailOutbox";
+export {
+  enqueueEmailOutbox,
+  markEmailOutboxFailed,
+  markEmailOutboxRecorded,
+  markEmailOutboxSent,
+} from "./emailOutbox";
 export type { EmailOutboxEntry } from "./emailOutbox";
+
+export {
+  getAdminFailedEmailForRetry,
+  getAdminOverview,
+  getAdminSiteDetail,
+  getAdminUserDetail,
+  listAdminAuditLog,
+  listAdminEmailOutbox,
+  listAdminScans,
+  listAdminShareLinks,
+  listAdminSites,
+  listAdminUptime,
+  listAdminUsers,
+  recordAdminAuditLog,
+  revokeAdminShareLink,
+  setAdminSiteDisabled,
+  setAdminSiteSchedulePaused,
+  setAdminUptimePaused,
+  setAdminUserDisabled,
+} from "./admin";
+export type {
+  AdminActor,
+  AdminAuditLogRow,
+  AdminEmailOutboxRow,
+  AdminScanRow,
+  AdminShareLinkRow,
+  AdminSiteRow,
+  AdminUptimeRow,
+  AdminUserRow,
+} from "./admin";
 
 export {
   createOrRotateReportShareForRunForUser,

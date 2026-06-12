@@ -6,13 +6,15 @@ import {
   getUserByEmail,
   getUserById,
 } from "@scanlark/db";
-import { getSessionUserId } from "./auth";
+import { clearSession, getSessionUserId } from "./auth";
+import { isAdminEmail } from "./adminAccess";
 
 type AuthUser = {
   id: string;
   email: string;
   displayName?: string | null;
   name?: string;
+  isAdmin?: boolean;
 };
 
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === "true";
@@ -27,12 +29,16 @@ async function ensureDemoUser(): Promise<AuthUser> {
     demoUserPromise = (async () => {
       const existing = await getUserByEmail(DEMO_USER_EMAIL);
       if (existing) {
+        if (existing.disabledAt) {
+          throw new Error("demo_user_disabled");
+        }
         await backfillSitesUserId(existing.id);
         return {
           id: existing.id,
           email: existing.email,
           displayName: existing.displayName ?? "Demo User",
           name: existing.displayName ?? "Demo User",
+          isAdmin: isAdminEmail(existing.email),
         };
       }
       const password = crypto.randomBytes(24).toString("base64url");
@@ -43,6 +49,7 @@ async function ensureDemoUser(): Promise<AuthUser> {
         email: created.email,
         displayName: created.displayName ?? "Demo User",
         name: created.displayName ?? "Demo User",
+        isAdmin: isAdminEmail(created.email),
       };
     })();
   }
@@ -109,11 +116,19 @@ export async function authMiddleware(
     if (!user) {
       return res.status(401).json({ error: "unauthorized" });
     }
+    if (user.disabledAt) {
+      await clearSession(req);
+      return res.status(401).json({
+        error: "account_disabled",
+        message: "Account is disabled",
+      });
+    }
     req.user = {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
       name: user.displayName ?? undefined,
+      isAdmin: isAdminEmail(user.email),
     };
     return next();
   } catch (err) {

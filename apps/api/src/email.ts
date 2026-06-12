@@ -1,5 +1,10 @@
 import nodemailer from "nodemailer";
-import { enqueueEmailOutbox } from "@scanlark/db";
+import {
+  enqueueEmailOutbox,
+  markEmailOutboxFailed,
+  markEmailOutboxRecorded,
+  markEmailOutboxSent,
+} from "@scanlark/db";
 
 type EmailPayload = {
   to: string;
@@ -30,8 +35,9 @@ function getTransport() {
 }
 
 export async function sendEmail(payload: EmailPayload): Promise<void> {
+  let outboxEntryId: string | null = null;
   try {
-    await enqueueEmailOutbox({
+    const entry = await enqueueEmailOutbox({
       to: payload.to,
       subject: payload.subject,
       html: payload.html,
@@ -41,11 +47,15 @@ export async function sendEmail(payload: EmailPayload): Promise<void> {
       scanRunId: payload.scanRunId ?? null,
       metadata: payload.metadata ?? null,
     });
+    outboxEntryId = entry.id;
   } catch (err: unknown) {
     console.error("Failed to write email outbox entry", err);
   }
 
   if (!EMAIL_ENABLED) {
+    if (outboxEntryId) {
+      await markEmailOutboxRecorded(outboxEntryId);
+    }
     console.log(
       `[email] disabled; would send to=${payload.to} subject="${payload.subject}"`,
     );
@@ -55,11 +65,23 @@ export async function sendEmail(payload: EmailPayload): Promise<void> {
   const transport = getTransport();
   if (!transport) return;
 
-  await transport.sendMail({
-    from: EMAIL_FROM,
-    to: payload.to,
-    subject: payload.subject,
-    html: payload.html,
-    text: payload.text,
-  });
+  try {
+    await transport.sendMail({
+      from: EMAIL_FROM,
+      to: payload.to,
+      subject: payload.subject,
+      html: payload.html,
+      text: payload.text,
+    });
+    if (outboxEntryId) {
+      await markEmailOutboxSent(outboxEntryId);
+    }
+  } catch (err: unknown) {
+    if (outboxEntryId) {
+      const message =
+        err instanceof Error && err.message ? err.message : "email_send_failed";
+      await markEmailOutboxFailed(outboxEntryId, message);
+    }
+    throw err;
+  }
 }

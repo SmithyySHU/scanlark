@@ -118,6 +118,7 @@ import {
   SCANLARK_USER_AGENT,
 } from "../../../packages/crawler/src/limits";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
+import { mountAdminRoutes } from "./routes/admin";
 import { serializeScanRun } from "./serializers";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
 import { authMiddleware, initDemoAuth } from "./authMiddleware";
@@ -892,6 +893,7 @@ app.use(authMiddleware);
 
 mountEventStream(app);
 mountScanRunEvents(app);
+mountAdminRoutes(app);
 
 app.get("/me", (req, res) => {
   if (!req.user) {
@@ -903,6 +905,7 @@ app.get("/me", (req, res) => {
     email: req.user.email,
     displayName,
     name: displayName,
+    isAdmin: req.user.isAdmin === true,
   });
 });
 
@@ -917,6 +920,7 @@ app.get("/account/profile", (req, res) => {
       email: req.user.email,
       displayName,
       name: displayName,
+      isAdmin: req.user.isAdmin === true,
     },
   });
 });
@@ -980,6 +984,7 @@ app.patch("/account/profile", async (req, res) => {
         email: user.email,
         displayName: user.displayName,
         name: user.displayName,
+        isAdmin: req.user?.isAdmin === true,
       },
     });
   } catch (err: unknown) {
@@ -2877,6 +2882,14 @@ app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
       status: "queued",
     });
   } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendApiError(
+        res,
+        400,
+        "site_not_available",
+        "This site is disabled or unavailable",
+      );
+    }
     console.error("Error in POST /scan-runs/:scanRunId/retry", err);
     return sendInternalError(res, "Failed to retry scan run", err);
   }
@@ -3099,7 +3112,11 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    if (!(await requireSiteForUser(req, res, siteId))) return;
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    if (site.disabled_at) {
+      return sendApiError(res, 403, "site_disabled", "This site is disabled");
+    }
     const enqueueResult = await enqueueManualScanIfIdle({
       siteId,
       startUrl: body.startUrl,
