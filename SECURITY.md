@@ -99,6 +99,32 @@ Despite those mitigations, the CodeQL rule is not aware of our validation logic 
 
 ---
 
+## TLS Certificate Diagnostics
+
+Scanlark does **not** disable TLS certificate validation globally. There is no
+`NODE_TLS_REJECT_UNAUTHORIZED=0` setting in the app, and normal page, resource,
+link, uptime, SMTP, and API requests use the platform/default TLS validation
+path.
+
+The crawler has one isolated exception in
+`packages/crawler/src/inspectTlsCertificate.ts` for SSL/TLS certificate
+reporting:
+
+1. It first opens a normal TLS connection with certificate validation enabled.
+2. If that connection fails because of a certificate validation problem, such
+   as expiry, hostname mismatch, self-signed certificate, or untrusted chain, it
+   opens a second diagnostic-only TLS socket with certificate rejection disabled.
+3. That diagnostic socket is used only to read peer certificate metadata so
+   Scanlark can report the exact certificate issue. It does not send an HTTP
+   request and does not read page, header, or body content over the bypassed
+   connection.
+
+This exception is intentionally local to certificate inspection. Do not reuse it
+for crawler fetching, link validation, uptime checks, SMTP, API calls, or any
+path that transfers application data.
+
+---
+
 ## Build-tool Vulnerability: esbuild Dev Server CORS
 
 Dependabot reports a vulnerability in **`esbuild` ≤ 0.24.2** related to its built-in dev server:
