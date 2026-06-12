@@ -10,6 +10,7 @@ export interface DbSiteRow {
   permission_confirmed_by_user_id: string | null;
   permission_confirmation_text_version: string | null;
   permission_confirmation_text: string | null;
+  is_sample_site: boolean;
   verification_status:
     | "unverified"
     | "permission_confirmed"
@@ -83,6 +84,7 @@ export type SitePermissionConfirmationFields = {
     | "permission_confirmed"
     | "legacy_alpha"
     | "sample_site";
+  isSampleSite: boolean;
 };
 
 type NormalizedSiteMetadataFields = {
@@ -103,6 +105,7 @@ const SITE_SELECT_COLUMNS = `
   permission_confirmed_by_user_id,
   permission_confirmation_text_version,
   permission_confirmation_text,
+  is_sample_site,
   verification_status,
   schedule_enabled,
   schedule_frequency,
@@ -254,9 +257,10 @@ export async function createSite(
       permission_confirmed_by_user_id,
       permission_confirmation_text_version,
       permission_confirmation_text,
+      is_sample_site,
       verification_status
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [
@@ -272,6 +276,7 @@ export async function createSite(
       permission.permissionConfirmedByUserId ?? null,
       permission.permissionConfirmationTextVersion ?? null,
       permission.permissionConfirmationText ?? null,
+      permission.isSampleSite ?? false,
       permission.verificationStatus ?? "unverified",
     ],
   );

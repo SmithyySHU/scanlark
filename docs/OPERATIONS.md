@@ -166,6 +166,10 @@ Existing alpha sites are backfilled by
 methods such as DNS TXT, HTML file, meta tag, Search Console, or manual admin
 approval are future work and should be added before public beta recurring scans.
 
+Demo/sample sites are internal Scanlark examples. They are marked separately and
+cannot run real scheduled scans, uptime checks, manual scans, or monitoring
+emails. See `docs/DEMO_SITE.md`.
+
 - API: `/public/reports/:token/...`
 
 Share tokens are generated and verified by `packages/db/src/reportShares.ts`.

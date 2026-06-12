@@ -18,6 +18,7 @@ type ScheduleRow = {
   user_id?: string;
   url?: string;
   disabled_at?: Date | null;
+  is_sample_site?: boolean;
   schedule_enabled: boolean;
   schedule_frequency: ScheduleFrequency;
   schedule_time_utc: string;
@@ -63,6 +64,7 @@ export type ScheduledEnqueueResult =
       reason:
         | "site_not_found"
         | "site_disabled"
+        | "sample_site"
         | "schedule_disabled"
         | "schedule_not_due"
         | "schedule_invalid"
@@ -514,6 +516,7 @@ export async function updateSiteScheduleForUser(
           schedule_day_of_month = $7,
           next_scheduled_at = $8
       WHERE s.id = $1 AND s.user_id = $2
+        AND (s.is_sample_site = false OR $3 = false)
       RETURNING id,
                 user_id,
                 schedule_enabled,
@@ -568,6 +571,7 @@ export async function getDueSites(limit: number): Promise<
       FROM sites
       WHERE schedule_enabled = true
         AND disabled_at IS NULL
+        AND is_sample_site = false
         AND next_scheduled_at IS NOT NULL
         AND next_scheduled_at <= NOW()
       ORDER BY next_scheduled_at ASC
@@ -592,10 +596,11 @@ export async function markSiteScheduled(
              schedule_time_utc,
              schedule_day_of_week,
              schedule_day_of_month,
-             next_scheduled_at,
-             last_scheduled_at
-      FROM sites
-      WHERE id = $1
+               next_scheduled_at,
+               last_scheduled_at,
+               is_sample_site
+        FROM sites
+        WHERE id = $1
     `,
     [siteId],
   );
@@ -677,6 +682,11 @@ export async function enqueueScheduledScanIfDue(
     if (site.disabled_at) {
       await client.query("ROLLBACK");
       return { created: false, reason: "site_disabled" };
+    }
+
+    if (site.is_sample_site) {
+      await client.query("ROLLBACK");
+      return { created: false, reason: "sample_site" };
     }
 
     if (!site.schedule_enabled) {

@@ -68,6 +68,7 @@ type SiteRow = {
   permission_confirmed_at: string | null;
   permission_confirmed_by_user_id: string | null;
   permission_confirmation_text_version: string | null;
+  is_sample_site: boolean;
   verification_status: string;
   schedule_enabled: boolean;
   site_display_name: string | null;
@@ -651,6 +652,7 @@ export function AdminPage({
               <th>Client</th>
               <th>Created</th>
               <th>Verification</th>
+              <th>Source</th>
               <th>Scheduled scans</th>
               <th>Uptime</th>
               <th>Last scan</th>
@@ -676,6 +678,7 @@ export function AdminPage({
                     </span>
                   ) : null}
                 </td>
+                <td>{site.is_sample_site ? "Scanlark demo" : "User site"}</td>
                 <td>{site.schedule_enabled ? "Enabled" : "Paused"}</td>
                 <td>{site.uptime_enabled ? "Enabled" : "Paused"}</td>
                 <td>{renderStatus(site.last_scan_status)}</td>
@@ -1110,6 +1113,14 @@ export function AdminPage({
               <strong>Verification</strong>
               <span>
                 {(detail.data as SiteDetail).site.verification_status}
+              </span>
+            </p>
+            <p>
+              <strong>Source</strong>
+              <span>
+                {(detail.data as SiteDetail).site.is_sample_site
+                  ? "Scanlark demo"
+                  : "User site"}
               </span>
             </p>
             <p>

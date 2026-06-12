@@ -224,6 +224,7 @@ export async function enqueueManualScanIfIdle(params: {
         FROM sites
         WHERE id = $1
           AND disabled_at IS NULL
+          AND is_sample_site = false
         FOR UPDATE
       `,
       [params.siteId],
@@ -288,6 +289,7 @@ export async function enqueueExistingScanRunIfIdle(params: {
         FROM sites
         WHERE id = $1
           AND disabled_at IS NULL
+          AND is_sample_site = false
         FOR UPDATE
       `,
       [params.siteId],
@@ -368,6 +370,7 @@ export async function claimNextScanJob(params: {
         WHERE scan_jobs.status = 'queued'
           AND scan_jobs.run_at <= NOW()
           AND sites.disabled_at IS NULL
+          AND sites.is_sample_site = false
           AND NOT EXISTS (
             SELECT 1
             FROM scan_jobs active_jobs

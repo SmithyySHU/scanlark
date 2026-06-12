@@ -46,6 +46,7 @@ export type AdminSiteRow = {
   permission_confirmed_at: Date | null;
   permission_confirmed_by_user_id: string | null;
   permission_confirmation_text_version: string | null;
+  is_sample_site: boolean;
   verification_status: string;
   schedule_enabled: boolean;
   site_display_name: string | null;
@@ -355,6 +356,7 @@ export async function getAdminUserDetail(userId: string) {
           s.permission_confirmed_at,
           s.permission_confirmed_by_user_id,
           s.permission_confirmation_text_version,
+          s.is_sample_site,
           s.verification_status,
           s.schedule_enabled,
           s.site_display_name,
@@ -512,6 +514,7 @@ export async function listAdminSites(params: {
         s.permission_confirmed_at,
         s.permission_confirmed_by_user_id,
         s.permission_confirmation_text_version,
+        s.is_sample_site,
         s.verification_status,
         s.schedule_enabled,
         s.site_display_name,
@@ -557,6 +560,7 @@ export async function getAdminSiteDetail(siteId: string) {
         s.permission_confirmed_at,
         s.permission_confirmed_by_user_id,
         s.permission_confirmation_text_version,
+        s.is_sample_site,
         s.verification_status,
         s.schedule_enabled,
         s.site_display_name,
@@ -625,6 +629,7 @@ export async function setAdminSiteDisabled(
           s.permission_confirmed_at,
           s.permission_confirmed_by_user_id,
           s.permission_confirmation_text_version,
+          s.is_sample_site,
           s.verification_status,
           s.schedule_enabled,
           s.site_display_name,

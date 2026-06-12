@@ -88,6 +88,7 @@ export async function getSiteNotificationSettings(
              summary_enabled
       FROM sites
       WHERE id = $1
+        AND (is_sample_site = false OR ($2 = false AND $6 = false))
     `,
     [siteId],
   );
@@ -116,6 +117,7 @@ export async function getSiteNotificationSettingsForUser(
              summary_enabled
       FROM sites
       WHERE id = $1 AND user_id = $2
+        AND (is_sample_site = false OR ($3 = false AND $7 = false))
     `,
     [siteId, userId],
   );
