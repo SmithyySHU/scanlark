@@ -2290,6 +2290,11 @@ function getLandingDashboardSelectSiteIntent(search = "") {
   }
 }
 
+function getLocationSearch() {
+  if (typeof window === "undefined") return "";
+  return window.location.search;
+}
+
 function parseSiteSettingsLocation() {
   if (typeof window === "undefined") {
     return {
@@ -3314,6 +3319,9 @@ const App: React.FC = () => {
   const [results, setResults] = useState<ScanLink[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [locationSearch, setLocationSearch] = useState(() =>
+    getLocationSearch(),
+  );
   const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
   const [learnSlug, setLearnSlug] = useState<string | null>(() =>
     getLearnSlugFromLocation(),
@@ -3758,6 +3766,7 @@ const App: React.FC = () => {
     if (normalizedPath !== currentPathname) {
       window.history.replaceState({}, "", `${normalizedPath}${search}${hash}`);
     }
+    setLocationSearch(search);
 
     const handlePopState = () => {
       const currentPathname =
@@ -3771,6 +3780,7 @@ const App: React.FC = () => {
           `${normalizedPath}${search}${hash}`,
         );
       }
+      setLocationSearch(search);
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
       const nextSharedToken = getSharedReportTokenFromLocation();
@@ -3825,6 +3835,7 @@ const App: React.FC = () => {
       return;
     }
     window.history.replaceState({}, "", `${dashboardPath}${search}${hash}`);
+    setLocationSearch(search);
   }, [route]);
 
   useEffect(() => {
@@ -4591,6 +4602,7 @@ const App: React.FC = () => {
       const url = new URL(window.location.href);
       url.searchParams.delete("print");
       window.history.replaceState({}, "", url.toString());
+      setLocationSearch(url.search);
     }, 250);
 
     return () => {
@@ -6221,9 +6233,8 @@ const App: React.FC = () => {
   const isReportRoute = route === "report";
   const isSharedReportRoute = route === "shared_report";
   const isReadOnlyReport = isSharedReportRoute;
-  const hasLandingDashboardSelectIntent = getLandingDashboardSelectSiteIntent(
-    window.location.search,
-  );
+  const hasLandingDashboardSelectIntent =
+    getLandingDashboardSelectSiteIntent(locationSearch);
   const protectedRouteRequiresAuth =
     route === "app" ||
     route === "select_site" ||
@@ -11712,6 +11723,7 @@ const App: React.FC = () => {
     );
     const url = buildAppUrl(normalizedPath, searchParams);
     window.history.pushState({}, "", url);
+    setLocationSearch(getLocationSearch());
     const nextRoute = getRouteFromLocation();
     const nextReportId = getReportScanRunIdFromLocation();
     const nextSharedToken = getSharedReportTokenFromLocation();
@@ -11756,6 +11768,7 @@ const App: React.FC = () => {
     } else {
       window.history.pushState({}, "", url.toString());
     }
+    setLocationSearch(url.search);
     setRoute("app");
     setAppSection("site_settings");
     setSiteSettingsSection(section);
@@ -11788,6 +11801,7 @@ const App: React.FC = () => {
 
     const url = buildAppUrl(buildAppSectionPath(section));
     window.history.pushState({}, "", url);
+    setLocationSearch(getLocationSearch());
     setRoute("app");
     setAppSection(section);
     setSiteSettingsSection(parseSiteSettingsLocation().section);
@@ -11809,6 +11823,7 @@ const App: React.FC = () => {
   function openReport(scanRunId: string) {
     const url = buildReportUrl(scanRunId);
     window.history.pushState({}, "", url);
+    setLocationSearch(getLocationSearch());
     setRoute("report");
     setAppSection("reports");
     setLearnSlug(null);
@@ -17883,6 +17898,29 @@ const App: React.FC = () => {
         .theme-menu button.active {
           background: var(--surface-2);
           border-color: var(--border);
+        }
+        .account-menu .theme-segmented-control button {
+          padding: 7px 8px;
+          text-align: center;
+          border-radius: 9px;
+          font-size: 11px;
+          background: color-mix(in srgb, var(--panel) 58%, transparent);
+          color: var(--muted);
+        }
+        .account-menu .theme-segmented-control button:hover {
+          background: color-mix(in srgb, var(--panel-elev) 82%, var(--accent) 6%);
+          border-color: color-mix(in srgb, var(--border) 78%, var(--accent) 22%);
+          color: var(--text);
+        }
+        .account-menu .theme-segmented-control button.active {
+          background: var(--surface-2);
+          border-color: var(--border);
+          color: var(--text);
+          box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 12%, transparent);
+        }
+        .account-menu .theme-segmented-control button.active:hover {
+          background: color-mix(in srgb, var(--surface-2) 88%, var(--accent) 12%);
+          color: var(--text);
         }
         .action-menu button {
           width: 100%;
