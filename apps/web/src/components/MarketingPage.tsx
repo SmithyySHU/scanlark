@@ -176,10 +176,10 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
 
         <section className="marketing-hero">
           <div className="marketing-hero__content">
-            <div className="marketing-hero__headline">
+            <h1 className="marketing-hero__headline">
               Monitor public website health with clean reports and change
               tracking.
-            </div>
+            </h1>
             <div className="marketing-hero__body">
               Scanlark checks your public website signals from the outside and
               helps you track issues, score movement, and report outputs. It

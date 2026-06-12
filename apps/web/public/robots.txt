@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+
+Disallow: /api
+Disallow: /admin
+Disallow: /dashboard
+Disallow: /account
+Disallow: /settings
+Disallow: /login
+Disallow: /sites
+Disallow: /shared-reports
+Disallow: /shared-results
+
+Sitemap: https://app.scanlark.com/sitemap.xml

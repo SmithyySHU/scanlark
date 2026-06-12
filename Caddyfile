@@ -6,6 +6,12 @@
   encode zstd gzip
   header {
     Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    # The one inline script is the early theme bootstrap in apps/web/index.html;
+    # it is hash-pinned here so theme selection works before first paint without
+    # allowing arbitrary inline JavaScript. The React SPA still uses inline
+    # style attributes and injected style blocks, so style-src keeps
+    # 'unsafe-inline' until the styling layer is migrated to static CSS/classes.
+    Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-ZQLjnd6ra8t2uXd/oy48JaxUfWglZF6xuKl7FaXE/MA='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; form-action 'self'; manifest-src 'self'; media-src 'none'; upgrade-insecure-requests"
     X-Content-Type-Options "nosniff"
     X-Frame-Options "DENY"
     Referrer-Policy "no-referrer"
