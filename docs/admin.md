@@ -52,7 +52,8 @@ The MVP intentionally keeps writes narrow:
 
 Disabled users cannot log in or continue using existing sessions. Disabled
 sites do not run manual scans, scheduled scans, or uptime checks. Data is not
-deleted.
+deleted. These actions require the `users.disabled_at` and `sites.disabled_at`
+columns from `packages/db/migrations/028_add_admin_disabled_flags.sql`.
 
 ## Safety Limits
 
@@ -91,5 +92,7 @@ Run migrations before restarting app services:
 docker compose --env-file .env.production -f docker-compose.prod.yml --profile tools run --rm migrate
 ```
 
-The admin MVP adds `packages/db/migrations/027_admin_console_mvp.sql`. Take a
-normal production database backup before deploying migrations.
+The admin MVP adds `packages/db/migrations/027_admin_console_mvp.sql` and
+`packages/db/migrations/028_add_admin_disabled_flags.sql`. Apply `028` before
+deploying code paths that read `users.disabled_at` or `sites.disabled_at`.
+Take a normal production database backup before deploying migrations.
