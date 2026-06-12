@@ -239,13 +239,28 @@ function normalizeScheduleFields(fields: {
     throw new Error("manual schedule cannot be enabled");
   }
 
+  const normalizeDayOfWeek = (value: number | null) => {
+    if (value == null) return 1;
+    if (!Number.isInteger(value) || value < 0 || value > 6) {
+      throw new Error("scheduleDayOfWeek must be 0-6");
+    }
+    return value;
+  };
+  const normalizeDayOfMonth = (value: number | null) => {
+    if (value == null) return 1;
+    if (!Number.isInteger(value) || value < 1 || value > 31) {
+      throw new Error("scheduleDayOfMonth must be 1-31");
+    }
+    return value;
+  };
+
   const scheduleDayOfWeek =
     fields.scheduleFrequency === "weekly"
-      ? (fields.scheduleDayOfWeek ?? 1)
-      : null;
+      ? normalizeDayOfWeek(fields.scheduleDayOfWeek)
+      : 1;
   const scheduleDayOfMonth =
     fields.scheduleFrequency === "monthly"
-      ? (fields.scheduleDayOfMonth ?? 1)
+      ? normalizeDayOfMonth(fields.scheduleDayOfMonth)
       : null;
   const nextScheduledAt = fields.scheduleEnabled
     ? computeNextScheduledAt(

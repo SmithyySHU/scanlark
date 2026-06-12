@@ -768,6 +768,7 @@ interface ReportOverviewResponse {
     byStatusCode: Record<string, number>;
     rows?: ScanLinksSummaryRow[];
   };
+  categoryScores: ScanCategoryScore[];
   generatedAt: string;
 }
 
@@ -3392,6 +3393,8 @@ const App: React.FC = () => {
   );
   const [reportTechnicalDiagnostics, setReportTechnicalDiagnostics] =
     useState<Phase0Diagnostics | null>(null);
+  const [reportOverviewCategoryScores, setReportOverviewCategoryScores] =
+    useState<ScanCategoryScore[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportShare, setReportShare] = useState<ReportShareDetails | null>(
@@ -3799,6 +3802,11 @@ const App: React.FC = () => {
   }, [authUser, route]);
 
   useEffect(() => {
+    if (route !== "learn") return;
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [route, learnSlug]);
+
+  useEffect(() => {
     setDashboardHistoryExpanded(false);
   }, [selectedSiteId]);
 
@@ -3929,6 +3937,7 @@ const App: React.FC = () => {
     setReportIgnoredSection(createEmptyReportIgnoredSection());
     setReportIssues(EMPTY_REPORT_ISSUES_STATE);
     setReportTechnicalDiagnostics(null);
+    setReportOverviewCategoryScores([]);
     setReportSiteSnapshot(null);
     setReportFilteredIssueStates({});
     setReportIssueFilter("all");
@@ -4030,6 +4039,7 @@ const App: React.FC = () => {
 
       setReportRunData(run);
       setReportSiteSnapshot(overviewData.site ?? null);
+      setReportOverviewCategoryScores(overviewData.categoryScores ?? []);
       setReportSummaryRows(summaryRows);
       setReportSummaryTotals(
         summarizeReportOverview(
@@ -4048,7 +4058,10 @@ const App: React.FC = () => {
               blocked: null,
               noResponse: null,
               ignoredSkipped: null,
-              categoryScores: diagnosticsData.categoryScores ?? null,
+              categoryScores:
+                diagnosticsData.categoryScores ??
+                overviewData.categoryScores ??
+                null,
               seoBasic: diagnosticsData.seoBasic,
               robots: diagnosticsData.robots,
               sitemap: diagnosticsData.sitemap,
@@ -5503,7 +5516,10 @@ const App: React.FC = () => {
     reportIssueSummary,
     reportLinkIntegrityIssueSummary,
   );
-  const reportCategoryScores = reportTechnicalDiagnostics?.categoryScores ?? [];
+  const reportCategoryScores =
+    reportOverviewCategoryScores.length > 0
+      ? reportOverviewCategoryScores
+      : (reportTechnicalDiagnostics?.categoryScores ?? []);
   const reportCategoryScoresByKey = Object.fromEntries(
     reportCategoryScores.map((score) => [score.key, score]),
   ) as Partial<Record<ScanCategoryScoreKey, ScanCategoryScore>>;
@@ -9249,8 +9265,14 @@ const App: React.FC = () => {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
+        console.warn(`${endpoint} failed`, {
+          status: res.status,
+          body: text.slice(0, 200),
+        });
         throw new Error(
-          `Auth failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+          authMode === "login"
+            ? "Invalid email or password."
+            : "Could not create account. Please try again.",
         );
       }
       const data = (await res.json()) as AuthUser;
@@ -9260,8 +9282,12 @@ const App: React.FC = () => {
       if (route === "login" || route === "landing") {
         navigateTo("/dashboard");
       }
-    } catch (err: unknown) {
-      setAuthError(getErrorMessage(err, "Failed to authenticate"));
+    } catch {
+      setAuthError(
+        authMode === "login"
+          ? "Invalid email or password."
+          : "Could not create account. Please try again.",
+      );
     } finally {
       setAuthWorking(false);
     }
@@ -10763,9 +10789,7 @@ const App: React.FC = () => {
             frequency: onboardingScheduleFrequency,
             timeUtc: scheduleTimeUtc,
             dayOfWeek:
-              onboardingScheduleFrequency === "weekly"
-                ? scheduleDayOfWeek
-                : null,
+              onboardingScheduleFrequency === "weekly" ? scheduleDayOfWeek : 1,
             dayOfMonth:
               onboardingScheduleFrequency === "monthly"
                 ? scheduleDayOfMonth
@@ -11104,8 +11128,7 @@ const App: React.FC = () => {
             enabled: scheduleEnabled,
             frequency: scheduleFrequency,
             timeUtc: scheduleTimeUtc,
-            dayOfWeek:
-              scheduleFrequency === "weekly" ? scheduleDayOfWeek : null,
+            dayOfWeek: scheduleFrequency === "weekly" ? scheduleDayOfWeek : 1,
             dayOfMonth:
               scheduleFrequency === "monthly" ? scheduleDayOfMonth : null,
           }),
@@ -13646,6 +13669,7 @@ const App: React.FC = () => {
           --text: #e2e8f0;
           --muted: #94a3b8;
           --accent: #38bdf8;
+          --accent-strong: #0ea5e9;
           --accent-2: #22d3ee;
           --danger: #f87171;
           --warning: #fbbf24;
@@ -13666,6 +13690,7 @@ const App: React.FC = () => {
           --text: #0f172a;
           --muted: #64748b;
           --accent: #2563eb;
+          --accent-strong: #1d4ed8;
           --accent-2: #38bdf8;
           --danger: #dc2626;
           --warning: #d97706;
@@ -13681,6 +13706,7 @@ const App: React.FC = () => {
           --panel: var(--surface);
           --panel-elev: var(--surface-2);
           --panel-faint: var(--surface-3);
+          --text-muted: var(--muted);
           --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
           --font-display: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
         }
@@ -14796,6 +14822,7 @@ const App: React.FC = () => {
             inset 0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
             0 18px 40px color-mix(in srgb, var(--accent) 18%, transparent);
           animation: scanRingPulse 3s ease-in-out infinite;
+          overflow: hidden;
         }
         .scan-hero-card__ring-outer.is-indeterminate {
           background: radial-gradient(
@@ -14832,6 +14859,33 @@ const App: React.FC = () => {
           opacity: 0.95;
           animation: scanRingOrbit 3.2s linear infinite;
         }
+        .scan-hero-card__ring-svg {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          transform: rotate(-90deg);
+          pointer-events: none;
+          z-index: 1;
+        }
+        .scan-hero-card__ring-svg-track,
+        .scan-hero-card__ring-svg-progress {
+          fill: none;
+          stroke-width: 5;
+        }
+        .scan-hero-card__ring-svg-track {
+          stroke: color-mix(in srgb, var(--border) 70%, transparent);
+        }
+        .scan-hero-card__ring-svg-progress {
+          stroke: var(--scan-ring-color);
+          stroke-linecap: round;
+          transition: stroke-dashoffset 650ms cubic-bezier(0.22, 1, 0.36, 1);
+          filter: drop-shadow(0 0 6px color-mix(in srgb, var(--scan-ring-color) 40%, transparent));
+        }
+        .scan-hero-card__ring-outer.is-indeterminate
+          .scan-hero-card__ring-svg-progress {
+          display: none;
+        }
         .scan-hero-card__ring-outer:not(.is-indeterminate)
           .scan-hero-card__ring-orbit {
           inset: 10px;
@@ -14849,6 +14903,8 @@ const App: React.FC = () => {
           border-radius: 50%;
           display: grid;
           place-items: center;
+          position: relative;
+          z-index: 2;
           background: linear-gradient(
             180deg,
             color-mix(in srgb, var(--panel) 90%, rgba(255, 255, 255, 0.02)) 0%,
@@ -15213,6 +15269,25 @@ const App: React.FC = () => {
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 14px;
         }
+        .optional-client-details {
+          grid-column: 1 / -1;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: color-mix(in srgb, var(--panel) 88%, transparent);
+          padding: 10px 12px;
+        }
+        .optional-client-details summary {
+          cursor: pointer;
+          color: var(--text);
+          font-size: 12px;
+          font-weight: 800;
+        }
+        .optional-client-details__body {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+          padding-top: 12px;
+        }
         .onboarding-field {
           display: grid;
           gap: 7px;
@@ -15439,6 +15514,7 @@ const App: React.FC = () => {
             text-align: center;
           }
           .onboarding-form-grid,
+          .optional-client-details__body,
           .onboarding-choice-grid {
             grid-template-columns: 1fr;
           }
@@ -19266,7 +19342,7 @@ const App: React.FC = () => {
                     }}
                   >
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      {authUser.name ?? authUser.email}
+                      {getUserDisplayName(authUser) ?? authUser.email}
                     </div>
                     <button
                       onClick={() => setUserMenuOpen((prev) => !prev)}
@@ -19538,47 +19614,50 @@ const App: React.FC = () => {
                               autoFocus
                             />
                           </label>
-                          <div className="onboarding-form-grid">
-                            <label className="onboarding-field">
-                              Site display name
-                              <input
-                                className="onboarding-input"
-                                value={onboardingSiteDisplayName}
-                                onChange={(event) => {
-                                  setOnboardingSiteDisplayNameTouched(true);
-                                  setOnboardingSiteDisplayName(
-                                    event.target.value,
-                                  );
-                                }}
-                                placeholder="Suggested from your domain"
-                              />
-                            </label>
-                            <label className="onboarding-field">
-                              Client name
-                              <input
-                                className="onboarding-input"
-                                value={onboardingClientName}
-                                onChange={(event) =>
-                                  setOnboardingClientName(event.target.value)
-                                }
-                                placeholder="Optional"
-                              />
-                            </label>
-                            <label className="onboarding-field">
-                              Report display name
-                              <input
-                                className="onboarding-input"
-                                value={onboardingReportDisplayName}
-                                onChange={(event) => {
-                                  setOnboardingReportDisplayNameTouched(true);
-                                  setOnboardingReportDisplayName(
-                                    event.target.value,
-                                  );
-                                }}
-                                placeholder="Optional report title"
-                              />
-                            </label>
-                          </div>
+                          <label className="onboarding-field">
+                            Site display name
+                            <input
+                              className="onboarding-input"
+                              value={onboardingSiteDisplayName}
+                              onChange={(event) => {
+                                setOnboardingSiteDisplayNameTouched(true);
+                                setOnboardingSiteDisplayName(
+                                  event.target.value,
+                                );
+                              }}
+                              placeholder="Suggested from your domain"
+                            />
+                          </label>
+                          <details className="optional-client-details">
+                            <summary>Optional client details</summary>
+                            <div className="optional-client-details__body">
+                              <label className="onboarding-field">
+                                Client name
+                                <input
+                                  className="onboarding-input"
+                                  value={onboardingClientName}
+                                  onChange={(event) =>
+                                    setOnboardingClientName(event.target.value)
+                                  }
+                                  placeholder="Client or project label"
+                                />
+                              </label>
+                              <label className="onboarding-field">
+                                Report display name
+                                <input
+                                  className="onboarding-input"
+                                  value={onboardingReportDisplayName}
+                                  onChange={(event) => {
+                                    setOnboardingReportDisplayNameTouched(true);
+                                    setOnboardingReportDisplayName(
+                                      event.target.value,
+                                    );
+                                  }}
+                                  placeholder="Optional report title"
+                                />
+                              </label>
+                            </div>
+                          </details>
                           {onboardingError && (
                             <div className="onboarding-error">
                               {onboardingError}
@@ -20176,7 +20255,7 @@ const App: React.FC = () => {
                       }}
                     >
                       <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        {authUser.name ?? authUser.email}
+                        {getUserDisplayName(authUser) ?? authUser.email}
                       </div>
                       <button
                         onClick={() => setUserMenuOpen((prev) => !prev)}
@@ -20234,11 +20313,16 @@ const App: React.FC = () => {
                     )}
                   </div>
                 </div>
-                {!isReadOnlyReport && (
+                {(reportRun || !isReadOnlyReport) && (
                   <div className="report-actions">
-                    <button className="report-button" onClick={backToDashboard}>
-                      Back to dashboard
-                    </button>
+                    {!isReadOnlyReport && (
+                      <button
+                        className="report-button"
+                        onClick={backToDashboard}
+                      >
+                        Back to dashboard
+                      </button>
+                    )}
                     {reportRun && (
                       <button
                         className="report-button"
@@ -20247,7 +20331,7 @@ const App: React.FC = () => {
                         Print / save PDF
                       </button>
                     )}
-                    {reportRun?.status === "completed" && (
+                    {!isReadOnlyReport && reportRun?.status === "completed" && (
                       <button
                         className="report-button"
                         onClick={() => {
@@ -21117,7 +21201,7 @@ const App: React.FC = () => {
                     }}
                   >
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      {authUser.name ?? authUser.email}
+                      {getUserDisplayName(authUser) ?? authUser.email}
                     </div>
                     <button
                       onClick={() => setUserMenuOpen((prev) => !prev)}
@@ -26713,49 +26797,46 @@ const App: React.FC = () => {
                         className="app-input"
                       />
                     </label>
-                    <label className="field-label">
-                      Client name (optional)
-                      <input
-                        value={newSiteClientName}
-                        onChange={(e) => setNewSiteClientName(e.target.value)}
-                        placeholder="Optional client or project label"
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void handleCreateSite();
-                          }
-                        }}
-                        className="app-input"
-                      />
-                    </label>
-                    <label className="field-label">
-                      Report display name (optional)
-                      <input
-                        value={newSiteReportDisplayName}
-                        onChange={(e) => {
-                          setNewSiteReportDisplayNameTouched(true);
-                          setNewSiteReportDisplayName(e.target.value);
-                        }}
-                        placeholder="Optional report title"
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            void handleCreateSite();
-                          }
-                        }}
-                        className="app-input"
-                      />
-                    </label>
-                    <div
-                      style={{
-                        gridColumn: "1 / -1",
-                        fontSize: "11px",
-                        color: "var(--muted)",
-                      }}
-                    >
-                      Report title is optional and appears in the report header
-                      and PDF.
-                    </div>
+                    <details className="optional-client-details">
+                      <summary>Optional client details</summary>
+                      <div className="optional-client-details__body">
+                        <label className="field-label">
+                          Client name (optional)
+                          <input
+                            value={newSiteClientName}
+                            onChange={(e) =>
+                              setNewSiteClientName(e.target.value)
+                            }
+                            placeholder="Client or project label"
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleCreateSite();
+                              }
+                            }}
+                            className="app-input"
+                          />
+                        </label>
+                        <label className="field-label">
+                          Report display name (optional)
+                          <input
+                            value={newSiteReportDisplayName}
+                            onChange={(e) => {
+                              setNewSiteReportDisplayNameTouched(true);
+                              setNewSiteReportDisplayName(e.target.value);
+                            }}
+                            placeholder="Optional report title"
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void handleCreateSite();
+                              }
+                            }}
+                            className="app-input"
+                          />
+                        </label>
+                      </div>
+                    </details>
                   </div>
                   {createError && (
                     <div style={{ fontSize: "12px", color: "var(--warning)" }}>

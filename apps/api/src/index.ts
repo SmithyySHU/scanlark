@@ -46,6 +46,7 @@ import {
   getResultsForScanRunForUser,
   getResultsSummaryForScanRunForUser,
   getSharedReportAccessByToken,
+  getScanCategoryScores,
   getScanLinkByIdForUser,
   getScanLinkByRunAndUrlForUser,
   getScanCategoryScoresForUser,
@@ -836,16 +837,36 @@ function csvEscape(value: unknown): string {
 
 const app = express();
 
+function normalizeOrigin(value: string | undefined) {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return value.replace(/\/+$/, "");
+  }
+}
+
 const corsOrigins = new Set(
-  [process.env.WEB_ORIGIN, "http://localhost:5173", "http://localhost:3000"]
-    .filter(Boolean)
-    .map((origin) => origin as string),
+  [
+    process.env.WEB_ORIGIN,
+    process.env.APP_URL,
+    process.env.APP_BASE_URL,
+    process.env.API_ORIGIN,
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ]
+    .map(normalizeOrigin)
+    .filter((origin): origin is string => Boolean(origin)),
 );
 
 const corsOptions: cors.CorsOptions = {
   origin(origin, callback) {
     if (!origin) return callback(null, true);
-    if (corsOrigins.has(origin)) return callback(null, true);
+    const normalizedOrigin = normalizeOrigin(origin);
+    if (normalizedOrigin && corsOrigins.has(normalizedOrigin)) {
+      return callback(null, true);
+    }
+    console.warn("Blocked CORS origin", origin);
     return callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
@@ -1016,7 +1037,7 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
       res,
       400,
       "invalid_frequency",
-      "frequency must be daily or weekly",
+      "frequency must be manual, daily, weekly, or monthly",
     );
   }
   if (typeof timeUtc !== "string" || !isValidTimeUtc(timeUtc)) {
@@ -1029,7 +1050,7 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
     frequency === "monthly"
       ? frequency
       : "weekly";
-  let resolvedDay: number | null = null;
+  let resolvedDay = 1;
   let resolvedDayOfMonth: number | null = null;
   if (enabled && frequencyValue === "manual") {
     return sendApiError(
@@ -1040,7 +1061,13 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
     );
   }
   if (frequencyValue === "weekly") {
-    if (typeof dayOfWeek !== "number" || dayOfWeek < 0 || dayOfWeek > 6) {
+    if (
+      dayOfWeek != null &&
+      (typeof dayOfWeek !== "number" ||
+        !Number.isInteger(dayOfWeek) ||
+        dayOfWeek < 0 ||
+        dayOfWeek > 6)
+    ) {
       return sendApiError(
         res,
         400,
@@ -1048,14 +1075,15 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
         "dayOfWeek must be 0-6 for weekly schedules",
       );
     }
-    resolvedDay = dayOfWeek;
+    resolvedDay = typeof dayOfWeek === "number" ? dayOfWeek : 1;
   }
   if (frequencyValue === "monthly") {
     if (
-      typeof dayOfMonth !== "number" ||
-      !Number.isInteger(dayOfMonth) ||
-      dayOfMonth < 1 ||
-      dayOfMonth > 31
+      dayOfMonth != null &&
+      (typeof dayOfMonth !== "number" ||
+        !Number.isInteger(dayOfMonth) ||
+        dayOfMonth < 1 ||
+        dayOfMonth > 31)
     ) {
       return sendApiError(
         res,
@@ -1064,7 +1092,7 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
         "dayOfMonth must be 1-31 for monthly schedules",
       );
     }
-    resolvedDayOfMonth = dayOfMonth;
+    resolvedDayOfMonth = typeof dayOfMonth === "number" ? dayOfMonth : 1;
   }
 
   try {
@@ -1081,6 +1109,17 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
     });
     res.json({ siteId, ...schedule });
   } catch (err: unknown) {
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendNotFound(res);
+    }
+    if (
+      err instanceof Error &&
+      (err.message === "scheduleDayOfWeek must be 0-6" ||
+        err.message === "scheduleDayOfMonth must be 1-31" ||
+        err.message === "manual schedule cannot be enabled")
+    ) {
+      return sendApiError(res, 400, "invalid_schedule", err.message);
+    }
     console.error("Error in PUT /sites/:siteId/schedule", err);
     sendInternalError(res, "Failed to update schedule", err);
   }
@@ -2419,11 +2458,16 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
       20,
     );
     const site = await getSiteByIdForUser(userId, run.site_id);
+    const categoryScores = await getScanCategoryScoresForUser(
+      userId,
+      scanRunId,
+    );
 
     return res.json({
       scanRun: serializeScanRun(run),
       site: serializeAuthenticatedReportSite(site),
       summary: { byClassification, byStatusCode },
+      categoryScores,
       topBroken: topBroken.map(serializeTopRow),
       topBlocked: topBlocked.map(serializeTopRow),
       generatedAt: new Date().toISOString(),
@@ -2520,14 +2564,21 @@ app.get("/public/reports/:token/report", async (req, res) => {
     await applyIgnoreRulesForScanRun(run.id);
     await recordReportShareView(share.id);
 
-    const [summaryRows, timeoutCount, topBroken, topBlocked, site] =
-      await Promise.all([
-        getScanLinksSummary(run.id),
-        getTimeoutCountForRun(run.id),
-        getTopLinksByClassification(run.id, "broken", 20),
-        getTopLinksByClassification(run.id, "blocked", 20),
-        getSiteById(run.site_id),
-      ]);
+    const [
+      summaryRows,
+      timeoutCount,
+      topBroken,
+      topBlocked,
+      site,
+      categoryScores,
+    ] = await Promise.all([
+      getScanLinksSummary(run.id),
+      getTimeoutCountForRun(run.id),
+      getTopLinksByClassification(run.id, "broken", 20),
+      getTopLinksByClassification(run.id, "blocked", 20),
+      getSiteById(run.site_id),
+      getScanCategoryScores(run.id),
+    ]);
 
     const byClassification: Record<string, number> = {
       ok: 0,
@@ -2565,6 +2616,7 @@ app.get("/public/reports/:token/report", async (req, res) => {
       scanRun: serializeScanRun(run),
       site: serializePublicReportSite(site),
       summary: { byClassification, byStatusCode, rows: summaryRows },
+      categoryScores,
       topBroken: topBroken.map(serializeTopRow),
       topBlocked: topBlocked.map(serializeTopRow),
       generatedAt: new Date().toISOString(),

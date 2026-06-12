@@ -1,11 +1,12 @@
 {
-  email {$CADDY_ACME_EMAIL:admin@scanlark.example.com}
+  email {$CADDY_ACME_EMAIL:contact@scanlark.com}
 }
 
-{$SCANLARK_DOMAIN:scanlark.example.com} {
+{$SCANLARK_DOMAIN:app.scanlark.com} {
   encode zstd gzip
 
-  handle_path /api/events/stream {
+  handle /api/events/stream {
+    uri strip_prefix /api
     reverse_proxy api:3001 {
       flush_interval -1
     }

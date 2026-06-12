@@ -50,9 +50,14 @@ export const ScanProgressHero: React.FC<{
   const normalizedProgress = Number.isFinite(progress)
     ? Math.min(100, Math.max(0, progress))
     : 0;
+  const ringRadius = 52;
+  const ringCircumference = 2 * Math.PI * ringRadius;
   const [displayedProgress, setDisplayedProgress] =
     useState(normalizedProgress);
   const displayedProgressRef = useRef(normalizedProgress);
+  const ringDashOffset =
+    ringCircumference *
+    (1 - Math.min(100, Math.max(0, displayedProgress)) / 100);
 
   useEffect(() => {
     if (indeterminate) {
@@ -104,6 +109,26 @@ export const ScanProgressHero: React.FC<{
                 } as React.CSSProperties
               }
             >
+              <svg
+                className="scan-hero-card__ring-svg"
+                viewBox="0 0 120 120"
+                aria-hidden="true"
+              >
+                <circle
+                  className="scan-hero-card__ring-svg-track"
+                  cx="60"
+                  cy="60"
+                  r={ringRadius}
+                />
+                <circle
+                  className="scan-hero-card__ring-svg-progress"
+                  cx="60"
+                  cy="60"
+                  r={ringRadius}
+                  strokeDasharray={ringCircumference}
+                  strokeDashoffset={ringDashOffset}
+                />
+              </svg>
               <div className="scan-hero-card__ring-orbit" aria-hidden="true" />
               <div className="scan-hero-card__ring-inner">
                 <strong>

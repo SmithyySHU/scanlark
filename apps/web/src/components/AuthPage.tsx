@@ -97,7 +97,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           </div>
           <div>
             <button className="ghost-button" onClick={onBackToLanding}>
-              Back to landing
+              Back to homepage
             </button>
           </div>
         </div>
