@@ -43,6 +43,10 @@ export type AdminSiteRow = {
   url: string;
   created_at: Date;
   disabled_at: Date | null;
+  permission_confirmed_at: Date | null;
+  permission_confirmed_by_user_id: string | null;
+  permission_confirmation_text_version: string | null;
+  verification_status: string;
   schedule_enabled: boolean;
   site_display_name: string | null;
   client_name: string | null;
@@ -348,6 +352,10 @@ export async function getAdminUserDetail(userId: string) {
           s.url,
           s.created_at,
           s.disabled_at,
+          s.permission_confirmed_at,
+          s.permission_confirmed_by_user_id,
+          s.permission_confirmation_text_version,
+          s.verification_status,
           s.schedule_enabled,
           s.site_display_name,
           s.client_name,
@@ -501,6 +509,10 @@ export async function listAdminSites(params: {
         s.url,
         s.created_at,
         s.disabled_at,
+        s.permission_confirmed_at,
+        s.permission_confirmed_by_user_id,
+        s.permission_confirmation_text_version,
+        s.verification_status,
         s.schedule_enabled,
         s.site_display_name,
         s.client_name,
@@ -542,6 +554,10 @@ export async function getAdminSiteDetail(siteId: string) {
         s.url,
         s.created_at,
         s.disabled_at,
+        s.permission_confirmed_at,
+        s.permission_confirmed_by_user_id,
+        s.permission_confirmation_text_version,
+        s.verification_status,
         s.schedule_enabled,
         s.site_display_name,
         s.client_name,
@@ -606,6 +622,10 @@ export async function setAdminSiteDisabled(
           s.url,
           s.created_at,
           s.disabled_at,
+          s.permission_confirmed_at,
+          s.permission_confirmed_by_user_id,
+          s.permission_confirmation_text_version,
+          s.verification_status,
           s.schedule_enabled,
           s.site_display_name,
           s.client_name,

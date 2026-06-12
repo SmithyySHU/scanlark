@@ -6,6 +6,15 @@ export interface DbSiteRow {
   url: string;
   created_at: Date;
   disabled_at: Date | null;
+  permission_confirmed_at: Date | null;
+  permission_confirmed_by_user_id: string | null;
+  permission_confirmation_text_version: string | null;
+  permission_confirmation_text: string | null;
+  verification_status:
+    | "unverified"
+    | "permission_confirmed"
+    | "legacy_alpha"
+    | "sample_site";
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
@@ -64,6 +73,18 @@ export type SiteMetadataFields = {
   developerTabsEnabled: boolean;
 };
 
+export type SitePermissionConfirmationFields = {
+  permissionConfirmedAt: Date | null;
+  permissionConfirmedByUserId: string | null;
+  permissionConfirmationTextVersion: string | null;
+  permissionConfirmationText: string | null;
+  verificationStatus:
+    | "unverified"
+    | "permission_confirmed"
+    | "legacy_alpha"
+    | "sample_site";
+};
+
 type NormalizedSiteMetadataFields = {
   siteDisplayName: string | null | undefined;
   clientName: string | null | undefined;
@@ -78,6 +99,11 @@ const SITE_SELECT_COLUMNS = `
   url,
   created_at,
   disabled_at,
+  permission_confirmed_at,
+  permission_confirmed_by_user_id,
+  permission_confirmation_text_version,
+  permission_confirmation_text,
+  verification_status,
   schedule_enabled,
   schedule_frequency,
   schedule_time_utc,
@@ -201,6 +227,7 @@ export async function createSite(
   userId: string,
   url: string,
   metadata: Partial<SiteMetadataFields> = {},
+  permission: Partial<SitePermissionConfirmationFields> = {},
 ): Promise<DbSiteRow> {
   if (!userId) {
     throw new Error("userId is required");
@@ -222,9 +249,14 @@ export async function createSite(
       client_name,
       report_display_name,
       internal_notes,
-      developer_tabs_enabled
+      developer_tabs_enabled,
+      permission_confirmed_at,
+      permission_confirmed_by_user_id,
+      permission_confirmation_text_version,
+      permission_confirmation_text,
+      verification_status
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [
@@ -236,6 +268,11 @@ export async function createSite(
       normalized.reportDisplayName ?? null,
       normalized.internalNotes ?? null,
       normalized.developerTabsEnabled ?? false,
+      permission.permissionConfirmedAt ?? null,
+      permission.permissionConfirmedByUserId ?? null,
+      permission.permissionConfirmationTextVersion ?? null,
+      permission.permissionConfirmationText ?? null,
+      permission.verificationStatus ?? "unverified",
     ],
   );
 
@@ -246,8 +283,9 @@ export async function createSiteForUser(
   userId: string,
   url: string,
   metadata: Partial<SiteMetadataFields> = {},
+  permission: Partial<SitePermissionConfirmationFields> = {},
 ): Promise<DbSiteRow> {
-  return createSite(userId, url, metadata);
+  return createSite(userId, url, metadata, permission);
 }
 
 export async function updateSiteMetadataForUser(

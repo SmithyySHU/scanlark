@@ -93,6 +93,15 @@ interface Site {
   url: string;
   created_at: string;
   disabled_at: string | null;
+  permission_confirmed_at: string | null;
+  permission_confirmed_by_user_id: string | null;
+  permission_confirmation_text_version: string | null;
+  permission_confirmation_text: string | null;
+  verification_status:
+    | "unverified"
+    | "permission_confirmed"
+    | "legacy_alpha"
+    | "sample_site";
   schedule_enabled: boolean;
   schedule_frequency: "manual" | "daily" | "weekly" | "monthly";
   schedule_time_utc: string;
@@ -930,6 +939,12 @@ const DEFAULT_USER_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const SAMPLE_SITE_URL = "https://example.com";
 const SAMPLE_SITE_NAME = "Sample site";
+const SITE_PERMISSION_CONFIRMATION_TEXT =
+  "I confirm I own this website or have permission from the website owner to scan and monitor it with Scanlark.";
+const SITE_PERMISSION_HELPER_TEXT =
+  "Scanlark only monitors public website information. You should only add websites you own or are authorised to monitor.";
+const SITE_URL_VALIDATION_MESSAGE =
+  "Please enter a valid website address, for example site.com or https://site.com.";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_completed:";
 const SITE_SETUP_STORAGE_PREFIX = "site_setup:";
 const SITE_NAME_STORAGE_PREFIX = "site_names:";
@@ -2514,6 +2529,18 @@ function normalizeCreateSiteError(
     };
   }
 
+  if (
+    status === 400 &&
+    /permission_confirmation_required|permission/i.test(lowered)
+  ) {
+    return {
+      kind: "invalid_url",
+      status,
+      message:
+        "Please confirm you own this website or have permission to monitor it.",
+    };
+  }
+
   return {
     kind: "unknown",
     status,
@@ -2705,7 +2732,7 @@ function splitDisplayToken(value: string) {
 
 function getSuggestedSiteDisplayName(url: string) {
   try {
-    const parsed = new URL(url);
+    const parsed = new URL(normalizeSiteUrlInput(url));
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return "";
     }
@@ -2729,19 +2756,60 @@ function getSuggestedSiteDisplayName(url: string) {
   }
 }
 
+function normalizeSiteUrlInput(input: string) {
+  let value = input.trim();
+  if (!value) {
+    throw new Error("empty_url");
+  }
+
+  value = value.replace(/^(https?)\/\/:/i, "$1://");
+
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+    value = `https://${value}`;
+  }
+
+  const parsed = new URL(value);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http and https URLs are supported");
+  }
+  if (!parsed.hostname || !parsed.hostname.includes(".")) {
+    throw new Error("Invalid hostname");
+  }
+
+  parsed.protocol = parsed.protocol.toLowerCase();
+  parsed.hostname = parsed.hostname.toLowerCase();
+  parsed.hash = "";
+  if (
+    (parsed.protocol === "https:" && parsed.port === "443") ||
+    (parsed.protocol === "http:" && parsed.port === "80")
+  ) {
+    parsed.port = "";
+  }
+  if (
+    parsed.pathname.length > 1 &&
+    parsed.pathname.endsWith("/") &&
+    !parsed.search
+  ) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  }
+
+  const path = parsed.pathname === "/" ? "" : parsed.pathname;
+  return `${parsed.origin}${path}${parsed.search}`;
+}
+
 function getSiteUrlValidationError(url: string) {
   const trimmed = url.trim();
   if (!trimmed) return "Website URL is required.";
   try {
-    normalizeComparableUrl(trimmed);
+    normalizeSiteUrlInput(trimmed);
     return null;
   } catch {
-    return "Enter a valid website URL starting with http:// or https://";
+    return SITE_URL_VALIDATION_MESSAGE;
   }
 }
 
 function normalizeComparableUrl(url: string) {
-  const parsed = new URL(url);
+  const parsed = new URL(normalizeSiteUrlInput(url));
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("Only http and https URLs are supported");
   }
@@ -3349,6 +3417,11 @@ const App: React.FC = () => {
   ] = useState(false);
   const [onboardingWorking, setOnboardingWorking] = useState(false);
   const [onboardingError, setOnboardingError] = useState<string | null>(null);
+  const [onboardingPermissionConfirmed, setOnboardingPermissionConfirmed] =
+    useState(false);
+  const [onboardingPermissionError, setOnboardingPermissionError] = useState<
+    string | null
+  >(null);
   const [onboardingScanRequested, setOnboardingScanRequested] = useState(false);
 
   const [history, setHistory] = useState<ScanRunSummary[]>([]);
@@ -3532,6 +3605,11 @@ const App: React.FC = () => {
     useState(false);
   const [newSiteReportDisplayNameTouched, setNewSiteReportDisplayNameTouched] =
     useState(false);
+  const [newSitePermissionConfirmed, setNewSitePermissionConfirmed] =
+    useState(false);
+  const [newSitePermissionError, setNewSitePermissionError] = useState<
+    string | null
+  >(null);
   const [creatingSite, setCreatingSite] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const newSiteUrlValidationError = useMemo(
@@ -9505,6 +9583,8 @@ const App: React.FC = () => {
     setOnboardingReportDisplayName("");
     setOnboardingSiteDisplayNameTouched(false);
     setOnboardingReportDisplayNameTouched(false);
+    setOnboardingPermissionConfirmed(false);
+    setOnboardingPermissionError(null);
     setOnboardingError(null);
     setOnboardingWorking(false);
     setTriggerError(null);
@@ -9525,6 +9605,8 @@ const App: React.FC = () => {
     setNewSiteReportDisplayName("");
     setNewSiteDisplayNameTouched(false);
     setNewSiteReportDisplayNameTouched(false);
+    setNewSitePermissionConfirmed(false);
+    setNewSitePermissionError(null);
     setCreateError(null);
   }
 
@@ -9559,6 +9641,8 @@ const App: React.FC = () => {
     setOnboardingReportDisplayName("");
     setOnboardingSiteDisplayNameTouched(false);
     setOnboardingReportDisplayNameTouched(false);
+    setOnboardingPermissionConfirmed(false);
+    setOnboardingPermissionError(null);
     setOnboardingError(null);
     setOnboardingWorking(false);
     navigateTo("/dashboard");
@@ -9566,6 +9650,7 @@ const App: React.FC = () => {
 
   function openOnboarding(step = 0) {
     setOnboardingError(null);
+    setOnboardingPermissionError(null);
     setOnboardingScanRequested(false);
     setOnboardingStep(step);
     navigateTo("/onboarding");
@@ -10619,15 +10704,18 @@ const App: React.FC = () => {
       clientName?: string;
       reportDisplayName?: string;
     },
+    options?: { permissionConfirmed?: boolean },
   ) {
+    const normalizedUrl = normalizeSiteUrlInput(url);
     const res = await apiFetch(`${API_BASE}/sites`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        url,
+        url: normalizedUrl,
         siteDisplayName: metadata?.siteDisplayName?.trim() || undefined,
         clientName: metadata?.clientName?.trim() || undefined,
         reportDisplayName: metadata?.reportDisplayName?.trim() || undefined,
+        permissionConfirmed: options?.permissionConfirmed === true,
       }),
     });
 
@@ -10717,6 +10805,7 @@ const App: React.FC = () => {
 
     setCreatingSite(true);
     setCreateError(null);
+    setNewSitePermissionError(null);
     try {
       const urlValidationError = getSiteUrlValidationError(url);
       if (urlValidationError) {
@@ -10741,14 +10830,27 @@ const App: React.FC = () => {
         return;
       }
 
+      if (!newSitePermissionConfirmed) {
+        setNewSitePermissionError(
+          "Please confirm you own this website or have permission to monitor it.",
+        );
+        return;
+      }
+
       const siteDisplayName = newSiteDisplayName.trim();
       const clientName = newSiteClientName.trim();
       const reportDisplayName = newSiteReportDisplayName.trim();
-      const site = await createSiteRecord(url, {
-        siteDisplayName,
-        clientName,
-        reportDisplayName,
-      });
+      const site = await createSiteRecord(
+        url,
+        {
+          siteDisplayName,
+          clientName,
+          reportDisplayName,
+        },
+        {
+          permissionConfirmed: newSitePermissionConfirmed,
+        },
+      );
       applyCreatedSite(site, siteDisplayName || undefined);
       openAppSection("dashboard");
       closeAddSiteModal();
@@ -10795,16 +10897,14 @@ const App: React.FC = () => {
     if (!url) return;
     setOnboardingWorking(true);
     setOnboardingError(null);
+    setOnboardingPermissionError(null);
     try {
       try {
         normalizeComparableUrl(url);
       } catch {
-        setOnboardingError(
-          "Enter a valid website URL starting with http:// or https://",
-        );
+        setOnboardingError(SITE_URL_VALIDATION_MESSAGE);
         return;
       }
-
       const existing = sites.find((site) => {
         try {
           return (
@@ -10824,11 +10924,24 @@ const App: React.FC = () => {
         return;
       }
 
-      const site = await createSiteRecord(url, {
-        siteDisplayName: onboardingSiteDisplayName,
-        clientName: onboardingClientName,
-        reportDisplayName: onboardingReportDisplayName,
-      });
+      if (!onboardingPermissionConfirmed) {
+        setOnboardingPermissionError(
+          "Please confirm you own this website or have permission to monitor it.",
+        );
+        return;
+      }
+
+      const site = await createSiteRecord(
+        url,
+        {
+          siteDisplayName: onboardingSiteDisplayName,
+          clientName: onboardingClientName,
+          reportDisplayName: onboardingReportDisplayName,
+        },
+        {
+          permissionConfirmed: onboardingPermissionConfirmed,
+        },
+      );
       applyCreatedSite(site, onboardingSiteDisplayName);
       setSetupSiteId(site.id);
       saveSiteSetupSession(site.id);
@@ -10838,15 +10951,15 @@ const App: React.FC = () => {
       setOnboardingReportDisplayName("");
       setOnboardingSiteDisplayNameTouched(false);
       setOnboardingReportDisplayNameTouched(false);
+      setOnboardingPermissionConfirmed(false);
+      setOnboardingPermissionError(null);
       setOnboardingStep(1);
     } catch (err: unknown) {
       const createErr = err as CreateSiteError | null;
       if (createErr?.kind === "duplicate") {
         setOnboardingError("That website is already in your workspace.");
       } else if (createErr?.kind === "invalid_url") {
-        setOnboardingError(
-          "Enter a valid website URL starting with http:// or https://",
-        );
+        setOnboardingError(SITE_URL_VALIDATION_MESSAGE);
       } else if (createErr?.status === 400) {
         setOnboardingError("Check the website URL and try again.");
       } else {
@@ -15432,6 +15545,36 @@ const App: React.FC = () => {
           color: var(--text-muted);
           font-weight: 700;
         }
+        .permission-confirmation {
+          display: grid;
+          grid-template-columns: 18px minmax(0, 1fr);
+          gap: 10px;
+          align-items: start;
+          padding: 12px;
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          background: color-mix(in srgb, var(--panel) 90%, transparent);
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1.45;
+        }
+        .permission-confirmation input {
+          margin-top: 2px;
+          width: 16px;
+          height: 16px;
+          accent-color: var(--accent);
+        }
+        .permission-confirmation strong,
+        .permission-confirmation span {
+          display: block;
+        }
+        .permission-confirmation strong {
+          font-weight: 700;
+        }
+        .permission-confirmation span span {
+          margin-top: 4px;
+          color: var(--text-muted);
+        }
         .onboarding-input,
         .onboarding-select {
           width: 100%;
@@ -19881,6 +20024,31 @@ const App: React.FC = () => {
                               </label>
                             </div>
                           </details>
+                          <label className="permission-confirmation">
+                            <input
+                              type="checkbox"
+                              checked={onboardingPermissionConfirmed}
+                              onChange={(event) => {
+                                setOnboardingPermissionConfirmed(
+                                  event.target.checked,
+                                );
+                                if (event.target.checked) {
+                                  setOnboardingPermissionError(null);
+                                }
+                              }}
+                            />
+                            <span>
+                              <strong>
+                                {SITE_PERMISSION_CONFIRMATION_TEXT}
+                              </strong>
+                              <span>{SITE_PERMISSION_HELPER_TEXT}</span>
+                            </span>
+                          </label>
+                          {onboardingPermissionError && (
+                            <div className="onboarding-error">
+                              {onboardingPermissionError}
+                            </div>
+                          )}
                           {onboardingError && (
                             <div className="onboarding-error">
                               {onboardingError}
@@ -27002,6 +27170,36 @@ const App: React.FC = () => {
                       Enter a valid website URL and Scanlark will suggest a
                       display name from the domain.
                     </p>
+                    <label
+                      className="permission-confirmation"
+                      style={{ gridColumn: "1 / -1" }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={newSitePermissionConfirmed}
+                        onChange={(event) => {
+                          setNewSitePermissionConfirmed(event.target.checked);
+                          if (event.target.checked) {
+                            setNewSitePermissionError(null);
+                          }
+                        }}
+                      />
+                      <span>
+                        <strong>{SITE_PERMISSION_CONFIRMATION_TEXT}</strong>
+                        <span>{SITE_PERMISSION_HELPER_TEXT}</span>
+                      </span>
+                    </label>
+                    {newSitePermissionError ? (
+                      <div
+                        style={{
+                          gridColumn: "1 / -1",
+                          color: "var(--warning)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        {newSitePermissionError}
+                      </div>
+                    ) : null}
                     <label className="field-label">
                       Site display name (optional)
                       <input

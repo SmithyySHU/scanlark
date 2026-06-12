@@ -120,6 +120,13 @@ import {
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { mountAdminRoutes } from "./routes/admin";
 import { serializeScanRun } from "./serializers";
+import {
+  isSampleSiteUrl,
+  normalizeSiteUrlInput,
+  SITE_PERMISSION_CONFIRMATION_TEXT,
+  SITE_PERMISSION_CONFIRMATION_TEXT_VERSION,
+  SITE_URL_VALIDATION_MESSAGE,
+} from "./siteUrl";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
 import { authMiddleware, initDemoAuth } from "./authMiddleware";
 import { sessionMiddleware } from "./auth";
@@ -2910,11 +2917,35 @@ app.post("/sites", async (req, res) => {
       reportDisplayName?: string | null;
       internalNotes?: string | null;
       developerTabsEnabled?: boolean;
+      permissionConfirmed?: boolean;
     };
     const url = body.url;
 
     if (!url) {
       return sendApiError(res, 400, "missing_url", "Missing 'url' in body");
+    }
+
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizeSiteUrlInput(url);
+      await validateCrawlTarget(normalizedUrl);
+    } catch {
+      return sendApiError(
+        res,
+        400,
+        "invalid_site_url",
+        SITE_URL_VALIDATION_MESSAGE,
+      );
+    }
+
+    const isSampleSite = isSampleSiteUrl(normalizedUrl);
+    if (!isSampleSite && body.permissionConfirmed !== true) {
+      return sendApiError(
+        res,
+        400,
+        "permission_confirmation_required",
+        "Confirm you own this website or have permission from the owner to scan and monitor it with Scanlark.",
+      );
     }
 
     const siteDisplayName = parseOptionalSiteMetadataField(
@@ -2940,16 +2971,36 @@ app.post("/sites", async (req, res) => {
       );
     }
 
-    const site = await createSiteForUser(userId, url, {
-      siteDisplayName,
-      clientName,
-      reportDisplayName,
-      internalNotes,
-      developerTabsEnabled:
-        typeof body.developerTabsEnabled === "boolean"
-          ? body.developerTabsEnabled
-          : false,
-    });
+    const site = await createSiteForUser(
+      userId,
+      normalizedUrl,
+      {
+        siteDisplayName,
+        clientName,
+        reportDisplayName,
+        internalNotes,
+        developerTabsEnabled:
+          typeof body.developerTabsEnabled === "boolean"
+            ? body.developerTabsEnabled
+            : false,
+      },
+      isSampleSite
+        ? {
+            permissionConfirmedAt: null,
+            permissionConfirmedByUserId: null,
+            permissionConfirmationTextVersion: null,
+            permissionConfirmationText: null,
+            verificationStatus: "sample_site",
+          }
+        : {
+            permissionConfirmedAt: new Date(),
+            permissionConfirmedByUserId: userId,
+            permissionConfirmationTextVersion:
+              SITE_PERMISSION_CONFIRMATION_TEXT_VERSION,
+            permissionConfirmationText: SITE_PERMISSION_CONFIRMATION_TEXT,
+            verificationStatus: "permission_confirmed",
+          },
+    );
 
     startSiteAvatarRefresh(userId, site.id);
 

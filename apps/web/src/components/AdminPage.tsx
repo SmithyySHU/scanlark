@@ -65,6 +65,10 @@ type SiteRow = {
   url: string;
   created_at: string;
   disabled_at: string | null;
+  permission_confirmed_at: string | null;
+  permission_confirmed_by_user_id: string | null;
+  permission_confirmation_text_version: string | null;
+  verification_status: string;
   schedule_enabled: boolean;
   site_display_name: string | null;
   client_name: string | null;
@@ -646,6 +650,7 @@ export function AdminPage({
               <th>Owner</th>
               <th>Client</th>
               <th>Created</th>
+              <th>Verification</th>
               <th>Scheduled scans</th>
               <th>Uptime</th>
               <th>Last scan</th>
@@ -663,6 +668,14 @@ export function AdminPage({
                 <td>{site.owner_email}</td>
                 <td>{site.client_name || "Not set"}</td>
                 <td>{formatDate(site.created_at)}</td>
+                <td>
+                  {renderStatus(site.verification_status)}
+                  {site.permission_confirmed_at ? (
+                    <span className="admin-subtext">
+                      {formatDate(site.permission_confirmed_at)}
+                    </span>
+                  ) : null}
+                </td>
                 <td>{site.schedule_enabled ? "Enabled" : "Paused"}</td>
                 <td>{site.uptime_enabled ? "Enabled" : "Paused"}</td>
                 <td>{renderStatus(site.last_scan_status)}</td>
@@ -1091,6 +1104,22 @@ export function AdminPage({
                 {(detail.data as SiteDetail).site.disabled_at
                   ? "Disabled"
                   : "Active"}
+              </span>
+            </p>
+            <p>
+              <strong>Verification</strong>
+              <span>
+                {(detail.data as SiteDetail).site.verification_status}
+              </span>
+            </p>
+            <p>
+              <strong>Permission confirmed</strong>
+              <span>
+                {(detail.data as SiteDetail).site.permission_confirmed_at
+                  ? formatDate(
+                      (detail.data as SiteDetail).site.permission_confirmed_at,
+                    )
+                  : "Not confirmed"}
               </span>
             </p>
             <h3>Recent Scans</h3>

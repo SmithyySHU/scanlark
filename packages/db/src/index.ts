@@ -19,6 +19,7 @@ export type {
   SiteAvatarAsset,
   SiteAvatarStatus,
   SiteMetadataFields,
+  SitePermissionConfirmationFields,
 } from "./sites";
 
 export {

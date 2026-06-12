@@ -153,6 +153,19 @@ Authenticated report route:
 Shared report route:
 
 - frontend: `/shared-reports/:token`
+
+## Site Permission Confirmation
+
+New real site creation requires a user confirmation that they own the website or
+have permission from the owner to scan and monitor it with Scanlark. This is a
+basic permission attestation, not technical ownership verification.
+
+Existing alpha sites are backfilled by
+`packages/db/migrations/029_site_permission_confirmation.sql` as
+`legacy_alpha` so they continue to load and scan. Full ownership verification
+methods such as DNS TXT, HTML file, meta tag, Search Console, or manual admin
+approval are future work and should be added before public beta recurring scans.
+
 - API: `/public/reports/:token/...`
 
 Share tokens are generated and verified by `packages/db/src/reportShares.ts`.
