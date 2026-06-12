@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import type { LegalPageLink } from "../legalPages";
 
 type MarketingPageProps = {
   isAuthenticated: boolean;
@@ -7,6 +8,8 @@ type MarketingPageProps = {
   onOpenPrimary: () => void;
   onOpenSecondary: () => void;
   onOpenLearn: () => void;
+  legalLinks: LegalPageLink[];
+  onOpenLegal: (path: string) => void;
   onOpenAccount?: () => void;
 };
 
@@ -67,6 +70,8 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
   onOpenPrimary,
   onOpenSecondary,
   onOpenLearn,
+  legalLinks,
+  onOpenLegal,
   onOpenAccount,
 }) => {
   const finalIssueCount = 18;
@@ -402,6 +407,20 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             <div style={{ color: "var(--muted)", fontSize: "13px" }}>
               Public website monitoring for site health, reliability, and trust
               signals.
+            </div>
+            <div className="marketing-footer__legal">
+              {legalLinks.map((link) => (
+                <a
+                  key={link.slug}
+                  href={link.path}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    onOpenLegal(link.path);
+                  }}
+                >
+                  {link.label}
+                </a>
+              ))}
             </div>
           </div>
           <div className="marketing-footer__actions">

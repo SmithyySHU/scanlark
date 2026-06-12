@@ -20,6 +20,7 @@ import {
   StatusBadge,
 } from "./components/DashboardPrimitives";
 import { MarketingPage } from "./components/MarketingPage";
+import { LegalPage } from "./components/LegalPage";
 import {
   FEATURED_LEARN_ARTICLE_SLUGS,
   LEARN_ARTICLES,
@@ -29,6 +30,12 @@ import {
   type LearnArticle,
   type LearnArticleCategory,
 } from "./learnArticles";
+import {
+  LEGAL_PAGE_BY_SLUG,
+  LEGAL_PAGE_LINKS,
+  getLegalPageSlugFromPath,
+  type LegalPageSlug,
+} from "./legalPages";
 import { ScanProgressHero } from "./components/ScanProgressHero";
 
 type ScanStatus =
@@ -68,6 +75,7 @@ type AppRoute =
   | "report"
   | "shared_report"
   | "admin"
+  | "legal"
   | "learn";
 type AppSection = "dashboard" | "reports" | "site_settings" | "account";
 type SitesLoadState =
@@ -2428,6 +2436,7 @@ function getRouteFromLocation(): AppRoute {
   );
   if (path === "/" || path === "/landing") return "landing";
   if (path === "/login") return "login";
+  if (getLegalPageSlugFromPath(path)) return "legal";
   if (path === "/onboarding") return "onboarding";
   if (path === "/sites/new") return "new_site";
   if (parseSiteSettingsLocation().isSiteSettingsPath) return "app";
@@ -2438,6 +2447,14 @@ function getRouteFromLocation(): AppRoute {
   if (path === "/dashboard/select-site") return "select_site";
   if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
   return "app";
+}
+
+function getLegalPageSlugFromLocation(): LegalPageSlug | null {
+  if (typeof window === "undefined") return null;
+  const path = normalizeDashboardCompatPath(
+    window.location.pathname.replace(/\/+$/, "") || "/",
+  );
+  return getLegalPageSlugFromPath(path);
 }
 
 function getLearnSlugFromLocation() {
@@ -3453,6 +3470,9 @@ const App: React.FC = () => {
   const [learnSlug, setLearnSlug] = useState<string | null>(() =>
     getLearnSlugFromLocation(),
   );
+  const [legalPageSlug, setLegalPageSlug] = useState<LegalPageSlug | null>(() =>
+    getLegalPageSlugFromLocation(),
+  );
   const [learnSearchQuery, setLearnSearchQuery] = useState("");
   const [learnCategoryFilter, setLearnCategoryFilter] =
     useState<LearnCategoryFilter>("all");
@@ -3926,6 +3946,7 @@ const App: React.FC = () => {
       setAppSection(getAppSectionFromLocation());
       setSiteSettingsSection(parseSiteSettingsLocation().section);
       setLearnSlug(getLearnSlugFromLocation());
+      setLegalPageSlug(getLegalPageSlugFromLocation());
       setReportScanRunId(nextReportId);
       setSharedReportToken(nextSharedToken);
       setViewMode(
@@ -3952,9 +3973,9 @@ const App: React.FC = () => {
   }, [authLoading, authUser, route]);
 
   useEffect(() => {
-    if (route !== "learn") return;
+    if (route !== "learn" && route !== "legal") return;
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [route, learnSlug]);
+  }, [route, learnSlug, legalPageSlug]);
 
   useEffect(() => {
     setDashboardHistoryExpanded(false);
@@ -5822,6 +5843,10 @@ const App: React.FC = () => {
   const currentLearnArticle = useMemo(
     () => (learnSlug ? (LEARN_ARTICLES_BY_SLUG[learnSlug] ?? null) : null),
     [learnSlug],
+  );
+  const currentLegalPage = useMemo(
+    () => (legalPageSlug ? LEGAL_PAGE_BY_SLUG[legalPageSlug] : null),
+    [legalPageSlug],
   );
   const featuredLearnArticles = useMemo(
     () =>
@@ -11964,6 +11989,7 @@ const App: React.FC = () => {
     setAppSection(getAppSectionFromLocation());
     setSiteSettingsSection(parseSiteSettingsLocation().section);
     setLearnSlug(getLearnSlugFromLocation());
+    setLegalPageSlug(getLegalPageSlugFromLocation());
     setReportScanRunId(nextReportId);
     setSharedReportToken(nextSharedToken);
     setViewMode(
@@ -12003,6 +12029,7 @@ const App: React.FC = () => {
     setAppSection("site_settings");
     setSiteSettingsSection(section);
     setLearnSlug(null);
+    setLegalPageSlug(null);
     setScanWorkspaceOpen(false);
     setViewMode("dashboard");
     setReportScanRunId(null);
@@ -12036,6 +12063,7 @@ const App: React.FC = () => {
     setAppSection(section);
     setSiteSettingsSection(parseSiteSettingsLocation().section);
     setLearnSlug(null);
+    setLegalPageSlug(null);
     if (section !== "reports") {
       setScanWorkspaceOpen(false);
     }
@@ -12057,6 +12085,7 @@ const App: React.FC = () => {
     setRoute("report");
     setAppSection("reports");
     setLearnSlug(null);
+    setLegalPageSlug(null);
     setReportScanRunId(scanRunId);
     setReportRunData(null);
     setReportSummaryRows([]);
@@ -13169,6 +13198,22 @@ const App: React.FC = () => {
           }}
         >
           Scanlark Learn
+        </button>
+        <button
+          onClick={() => {
+            navigateTo("/contact");
+            setUserMenuOpen(false);
+          }}
+        >
+          Contact
+        </button>
+        <button
+          onClick={() => {
+            navigateTo("/report-abuse");
+            setUserMenuOpen(false);
+          }}
+        >
+          Report abuse
         </button>
         <button
           onClick={() => {
@@ -14515,6 +14560,23 @@ const App: React.FC = () => {
           display: flex;
           gap: 10px;
           flex-wrap: wrap;
+        }
+        .marketing-footer__legal {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          margin-top: 12px;
+          max-width: 720px;
+        }
+        .marketing-footer__legal a {
+          color: var(--muted);
+          font-size: 12px;
+          text-decoration: none;
+          border-bottom: 1px solid transparent;
+        }
+        .marketing-footer__legal a:hover {
+          color: var(--accent);
+          border-bottom-color: var(--accent);
         }
         .surface-card {
           border: 1px solid var(--border);
@@ -16250,6 +16312,22 @@ const App: React.FC = () => {
           overflow-y: auto;
           overflow-x: hidden;
           padding-right: 4px;
+        }
+        .sidebar-legal-links {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          border-top: 1px solid var(--border);
+          padding-top: 12px;
+          margin-top: auto;
+        }
+        .sidebar-legal-links a {
+          color: var(--muted);
+          font-size: 11px;
+          text-decoration: none;
+        }
+        .sidebar-legal-links a:hover {
+          color: var(--accent);
         }
         .main {
           width: 100%;
@@ -19554,6 +19632,12 @@ const App: React.FC = () => {
               setLearnCategoryFilter("all");
             }}
           />
+        ) : route === "legal" && currentLegalPage ? (
+          <LegalPage
+            page={currentLegalPage}
+            isAuthenticated={!!authUser}
+            onNavigate={(path) => navigateTo(path)}
+          />
         ) : authLoading ? (
           <div
             style={{
@@ -19576,6 +19660,8 @@ const App: React.FC = () => {
               onOpenPrimary={() => openAuth("register")}
               onOpenSecondary={() => openAuth("login")}
               onOpenLearn={() => navigateTo("/learn")}
+              legalLinks={LEGAL_PAGE_LINKS}
+              onOpenLegal={(path) => navigateTo(path)}
               onOpenAccount={undefined}
             />
           ) : isLoginRoute || protectedRouteRequiresAuth ? (
@@ -19609,6 +19695,8 @@ const App: React.FC = () => {
             }
             onOpenSecondary={() => navigateTo("/dashboard/account")}
             onOpenLearn={() => navigateTo("/learn")}
+            legalLinks={LEGAL_PAGE_LINKS}
+            onOpenLegal={(path) => navigateTo(path)}
             onOpenAccount={() => navigateTo("/dashboard/account")}
           />
         ) : isAdminRoute ? (
@@ -22095,6 +22183,25 @@ const App: React.FC = () => {
                       </table>
                     </div>
                   </div>
+
+                  <nav
+                    className="sidebar-legal-links"
+                    aria-label="Legal and contact links"
+                  >
+                    {LEGAL_PAGE_LINKS.map((link) => (
+                      <a
+                        key={link.slug}
+                        href={link.path}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          setIsDrawerOpen(false);
+                          navigateTo(link.path);
+                        }}
+                      >
+                        {link.label}
+                      </a>
+                    ))}
+                  </nav>
                 </div>
               </aside>
 
