@@ -316,6 +316,7 @@ export async function updateUptimeMonitorSettingsForUser(
       WHERE s.site_id = $1
         AND site.id = s.site_id
         AND site.user_id = $2
+        AND (site.is_sample_site = false OR $3 = false)
       RETURNING
         s.id,
         s.site_id,
@@ -359,6 +360,7 @@ export async function claimDueUptimeMonitors(
         JOIN sites site ON site.id = s.site_id
         WHERE s.enabled = true
           AND site.disabled_at IS NULL
+          AND site.is_sample_site = false
           AND (s.next_check_at IS NULL OR s.next_check_at <= NOW())
         ORDER BY s.next_check_at ASC NULLS FIRST
         LIMIT $1

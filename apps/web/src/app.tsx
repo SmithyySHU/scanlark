@@ -97,6 +97,7 @@ interface Site {
   permission_confirmed_by_user_id: string | null;
   permission_confirmation_text_version: string | null;
   permission_confirmation_text: string | null;
+  is_sample_site: boolean;
   verification_status:
     | "unverified"
     | "permission_confirmed"
@@ -127,6 +128,10 @@ interface Site {
   avatar_fetched_at: string | null;
   avatar_checked_at: string | null;
   avatar_error: string | null;
+}
+
+function isSampleSite(site: Pick<Site, "is_sample_site" | "url">) {
+  return site.is_sample_site === true || site.url === SAMPLE_SITE_URL;
 }
 
 type UptimeMonitorStatus = "up" | "down" | "degraded" | "unknown";
@@ -937,7 +942,7 @@ const DEFAULT_USER_NOTIFICATION_PREFERENCES: UserNotificationPreferences = {
   updatedAt: null,
 };
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const SAMPLE_SITE_URL = "https://example.com";
+const SAMPLE_SITE_URL = "https://demo.scanlark.test";
 const SAMPLE_SITE_NAME = "Sample site";
 const SITE_PERMISSION_CONFIRMATION_TEXT =
   "I confirm I own this website or have permission from the website owner to scan and monitor it with Scanlark.";
@@ -10871,7 +10876,7 @@ const App: React.FC = () => {
   }
 
   async function handleCreateSampleSite() {
-    const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+    const existing = sites.find((site) => isSampleSite(site));
     if (existing) {
       await handleSelectSite(existing);
       return;
@@ -10974,7 +10979,7 @@ const App: React.FC = () => {
     setOnboardingWorking(true);
     setOnboardingError(null);
     try {
-      const existing = sites.find((site) => site.url === SAMPLE_SITE_URL);
+      const existing = sites.find((site) => isSampleSite(site));
       if (existing) {
         await handleSelectSite(existing);
         setSetupSiteId(existing.id);
@@ -21781,7 +21786,7 @@ const App: React.FC = () => {
                                     {site.url}
                                   </div>
                                 )}
-                                {site.url === SAMPLE_SITE_URL && (
+                                {isSampleSite(site) && (
                                   <div
                                     style={{
                                       fontSize: "10px",
@@ -21789,7 +21794,7 @@ const App: React.FC = () => {
                                       marginTop: "2px",
                                     }}
                                   >
-                                    Sample site
+                                    Scanlark demo
                                   </div>
                                 )}
                                 <div

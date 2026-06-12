@@ -3,7 +3,11 @@ export const SITE_PERMISSION_CONFIRMATION_TEXT =
 
 export const SITE_PERMISSION_CONFIRMATION_TEXT_VERSION = "2026-06-12";
 
-export const SAMPLE_SITE_URL = "https://example.com";
+export const SAMPLE_SITE_URL = "https://demo.scanlark.test";
+export const LEGACY_SAMPLE_SITE_URLS = new Set([
+  "https://example.com",
+  "https://example.com/",
+]);
 
 export const SITE_URL_VALIDATION_MESSAGE =
   "Please enter a valid website address, for example site.com or https://site.com.";
@@ -57,5 +61,8 @@ export function normalizeSiteUrlInput(input: string): string {
 }
 
 export function isSampleSiteUrl(url: string): boolean {
-  return normalizeSiteUrlInput(url) === SAMPLE_SITE_URL;
+  const normalized = normalizeSiteUrlInput(url);
+  return (
+    normalized === SAMPLE_SITE_URL || LEGACY_SAMPLE_SITE_URLS.has(normalized)
+  );
 }

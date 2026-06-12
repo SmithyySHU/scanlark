@@ -123,6 +123,7 @@ import { serializeScanRun } from "./serializers";
 import {
   isSampleSiteUrl,
   normalizeSiteUrlInput,
+  SAMPLE_SITE_URL,
   SITE_PERMISSION_CONFIRMATION_TEXT,
   SITE_PERMISSION_CONFIRMATION_TEXT_VERSION,
   SITE_URL_VALIDATION_MESSAGE,
@@ -788,6 +789,15 @@ async function requireSiteForUser(
   return site;
 }
 
+function sendSampleSiteMonitoringDisabled(res: express.Response) {
+  return sendApiError(
+    res,
+    400,
+    "sample_site_monitoring_disabled",
+    "Demo sites use internal sample data and cannot run real monitoring.",
+  );
+}
+
 async function requireScanRunForUser(
   req: express.Request,
   res: express.Response,
@@ -1112,6 +1122,11 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
     if (!userId) {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    if (site.is_sample_site && enabled) {
+      return sendSampleSiteMonitoringDisabled(res);
+    }
     const schedule = await updateSiteScheduleForUser(userId, siteId, {
       scheduleEnabled: enabled,
       scheduleFrequency: frequencyValue,
@@ -1241,6 +1256,14 @@ async function handlePatchNotificationSettings(
     if (!userId) {
       return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    if (
+      site.is_sample_site &&
+      (patch.notifyEnabled === true || patch.summaryEnabled === true)
+    ) {
+      return sendSampleSiteMonitoringDisabled(res);
+    }
     const updated = await updateSiteNotificationSettingsForUser(
       userId,
       siteId,
@@ -1292,6 +1315,9 @@ async function handleSendTestAlert(
     }
     const site = await requireSiteForUser(req, res, siteId);
     if (!site) return;
+    if (site.is_sample_site) {
+      return sendSampleSiteMonitoringDisabled(res);
+    }
     const settings = await getSiteNotificationSettingsForUser(userId, siteId);
     if (!settings) {
       return sendNotFound(res);
@@ -1599,6 +1625,11 @@ app.put("/sites/:siteId/uptime", async (req, res) => {
   }
 
   try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    if (site.is_sample_site && enabled === true) {
+      return sendSampleSiteMonitoringDisabled(res);
+    }
     await updateUptimeMonitorSettingsForUser(userId, siteId, {
       enabled,
       checkUrl,
@@ -2928,7 +2959,6 @@ app.post("/sites", async (req, res) => {
     let normalizedUrl: string;
     try {
       normalizedUrl = normalizeSiteUrlInput(url);
-      await validateCrawlTarget(normalizedUrl);
     } catch {
       return sendApiError(
         res,
@@ -2939,6 +2969,18 @@ app.post("/sites", async (req, res) => {
     }
 
     const isSampleSite = isSampleSiteUrl(normalizedUrl);
+    if (!isSampleSite) {
+      try {
+        await validateCrawlTarget(normalizedUrl);
+      } catch {
+        return sendApiError(
+          res,
+          400,
+          "invalid_site_url",
+          SITE_URL_VALIDATION_MESSAGE,
+        );
+      }
+    }
     if (!isSampleSite && body.permissionConfirmed !== true) {
       return sendApiError(
         res,
@@ -2973,7 +3015,7 @@ app.post("/sites", async (req, res) => {
 
     const site = await createSiteForUser(
       userId,
-      normalizedUrl,
+      isSampleSite ? SAMPLE_SITE_URL : normalizedUrl,
       {
         siteDisplayName,
         clientName,
@@ -2990,6 +3032,7 @@ app.post("/sites", async (req, res) => {
             permissionConfirmedByUserId: null,
             permissionConfirmationTextVersion: null,
             permissionConfirmationText: null,
+            isSampleSite: true,
             verificationStatus: "sample_site",
           }
         : {
@@ -2998,6 +3041,7 @@ app.post("/sites", async (req, res) => {
             permissionConfirmationTextVersion:
               SITE_PERMISSION_CONFIRMATION_TEXT_VERSION,
             permissionConfirmationText: SITE_PERMISSION_CONFIRMATION_TEXT,
+            isSampleSite: false,
             verificationStatus: "permission_confirmed",
           },
     );
@@ -3167,6 +3211,14 @@ app.post("/sites/:siteId/scans", async (req, res) => {
     if (!site) return;
     if (site.disabled_at) {
       return sendApiError(res, 403, "site_disabled", "This site is disabled");
+    }
+    if (site.is_sample_site) {
+      return sendApiError(
+        res,
+        403,
+        "sample_site_scan_disabled",
+        "Demo sites use internal sample data and cannot run real scans.",
+      );
     }
     const enqueueResult = await enqueueManualScanIfIdle({
       siteId,
