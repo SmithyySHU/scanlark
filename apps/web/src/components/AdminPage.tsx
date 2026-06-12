@@ -12,6 +12,7 @@ type AdminTab =
   | "scans"
   | "uptime"
   | "email"
+  | "templates"
   | "shares"
   | "audit";
 
@@ -142,6 +143,39 @@ type EmailRow = {
   last_error: string | null;
 };
 
+type EmailTemplateRow = {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  subject_template: string;
+  html_template: string;
+  text_template: string | null;
+  enabled: boolean;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  updated_by_user_id: string | null;
+  updated_by_email: string | null;
+  variables: string[];
+};
+
+type EmailTemplateEditor = {
+  subjectTemplate: string;
+  htmlTemplate: string;
+  textTemplate: string;
+  enabled: boolean;
+  changeNote: string;
+  testRecipient: string;
+};
+
+type EmailTemplatePreview = {
+  subject: string;
+  html: string;
+  text: string;
+  source: string;
+};
+
 type ShareRow = {
   id: string;
   scan_run_id: string;
@@ -188,6 +222,7 @@ const TABS: Array<{ key: AdminTab; label: string }> = [
   { key: "scans", label: "Scans / Jobs" },
   { key: "uptime", label: "Uptime" },
   { key: "email", label: "Email Outbox" },
+  { key: "templates", label: "Email Templates" },
   { key: "shares", label: "Share Links" },
   { key: "audit", label: "Audit Log" },
 ];
@@ -274,6 +309,14 @@ export function AdminPage({
   const [scans, setScans] = useState<ScanRow[]>([]);
   const [uptime, setUptime] = useState<UptimeRow[]>([]);
   const [emails, setEmails] = useState<EmailRow[]>([]);
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplateRow[]>([]);
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState<string | null>(
+    null,
+  );
+  const [templateEditor, setTemplateEditor] =
+    useState<EmailTemplateEditor | null>(null);
+  const [templatePreview, setTemplatePreview] =
+    useState<EmailTemplatePreview | null>(null);
   const [shares, setShares] = useState<ShareRow[]>([]);
   const [auditActions, setAuditActions] = useState<AuditAction[]>([]);
 
@@ -283,6 +326,7 @@ export function AdminPage({
     if (activeTab === "scans") return scans.length;
     if (activeTab === "uptime") return uptime.length;
     if (activeTab === "email") return emails.length;
+    if (activeTab === "templates") return emailTemplates.length;
     if (activeTab === "shares") return shares.length;
     if (activeTab === "audit") return auditActions.length;
     return 0;
@@ -290,6 +334,7 @@ export function AdminPage({
     activeTab,
     auditActions.length,
     emails.length,
+    emailTemplates.length,
     scans.length,
     shares.length,
     sites.length,
@@ -311,6 +356,23 @@ export function AdminPage({
     if (activeTab !== "scans" && activeTab !== "email") return;
     setOffset(0);
   }, [activeTab, statusFilter]);
+
+  useEffect(() => {
+    if (activeTab !== "templates" || !selectedTemplateKey) return;
+    const template = emailTemplates.find(
+      (item) => item.key === selectedTemplateKey,
+    );
+    if (!template) return;
+    setTemplateEditor({
+      subjectTemplate: template.subject_template,
+      htmlTemplate: template.html_template,
+      textTemplate: template.text_template ?? "",
+      enabled: template.enabled,
+      changeNote: "",
+      testRecipient: authUser.email,
+    });
+    setTemplatePreview(null);
+  }, [activeTab, authUser.email, emailTemplates, selectedTemplateKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -338,6 +400,7 @@ export function AdminPage({
         scans: `/admin/scans${suffix}`,
         uptime: `/admin/uptime${suffix}`,
         email: `/admin/email-outbox${suffix}`,
+        templates: "/admin/email-templates",
         shares: `/admin/share-links${suffix}`,
         audit: `/admin/audit-log${suffix}`,
       };
@@ -364,6 +427,16 @@ export function AdminPage({
         }
         if (activeTab === "email") {
           setEmails((data as { emails: EmailRow[] }).emails ?? []);
+        }
+        if (activeTab === "templates") {
+          const templates =
+            (data as { templates: EmailTemplateRow[] }).templates ?? [];
+          setEmailTemplates(templates);
+          setSelectedTemplateKey((current) =>
+            current && templates.some((template) => template.key === current)
+              ? current
+              : (templates[0]?.key ?? null),
+          );
         }
         if (activeTab === "shares") {
           setShares((data as { shares: ShareRow[] }).shares ?? []);
@@ -427,6 +500,127 @@ export function AdminPage({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load detail");
       setDetail(null);
+    }
+  }
+
+  const selectedTemplate = useMemo(
+    () =>
+      emailTemplates.find((template) => template.key === selectedTemplateKey) ??
+      null,
+    [emailTemplates, selectedTemplateKey],
+  );
+
+  async function previewTemplate() {
+    if (!selectedTemplate || !templateEditor) return;
+    setBusyAction(`template-preview:${selectedTemplate.key}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/admin/email-templates/${encodeURIComponent(
+          selectedTemplate.key,
+        )}/preview`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(templateEditor),
+        },
+      );
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as {
+        preview: EmailTemplatePreview;
+      };
+      setTemplatePreview(data.preview);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Preview failed");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function saveTemplate() {
+    if (!selectedTemplate || !templateEditor) return;
+    setBusyAction(`template-save:${selectedTemplate.key}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/admin/email-templates/${encodeURIComponent(
+          selectedTemplate.key,
+        )}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(templateEditor),
+        },
+      );
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as { template: EmailTemplateRow };
+      setEmailTemplates((templates) =>
+        templates.map((template) =>
+          template.key === data.template.key ? data.template : template,
+        ),
+      );
+      setNotice("Email template saved");
+      setRefreshKey((value) => value + 1);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function sendTemplateTest() {
+    if (!selectedTemplate || !templateEditor) return;
+    setBusyAction(`template-test:${selectedTemplate.key}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/admin/email-templates/${encodeURIComponent(
+          selectedTemplate.key,
+        )}/test`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ toEmail: templateEditor.testRecipient }),
+        },
+      );
+      if (!res.ok) throw new Error(await parseError(res));
+      setNotice("Template test email send attempted");
+      setRefreshKey((value) => value + 1);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Test send failed");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function restoreTemplateDefault() {
+    if (!selectedTemplate) return;
+    setBusyAction(`template-restore:${selectedTemplate.key}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/admin/email-templates/${encodeURIComponent(
+          selectedTemplate.key,
+        )}/restore-default`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error(await parseError(res));
+      const data = (await res.json()) as { template: EmailTemplateRow };
+      setEmailTemplates((templates) =>
+        templates.map((template) =>
+          template.key === data.template.key ? data.template : template,
+        ),
+      );
+      setNotice("Email template restored to default");
+      setRefreshKey((value) => value + 1);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -496,7 +690,7 @@ export function AdminPage({
   }
 
   function renderPager() {
-    if (activeTab === "overview") return null;
+    if (activeTab === "overview" || activeTab === "templates") return null;
     return (
       <div className="admin-pager">
         <button
@@ -926,6 +1120,230 @@ export function AdminPage({
     );
   }
 
+  function renderEmailTemplates() {
+    return (
+      <div className="admin-template-layout">
+        <section className="admin-panel admin-template-list">
+          <div className="admin-template-warning">
+            Transactional emails only. Do not use this for marketing campaigns.
+          </div>
+          <div className="admin-table-wrap">
+            <table className="admin-table admin-template-table">
+              <thead>
+                <tr>
+                  <th>Template</th>
+                  <th>Enabled</th>
+                  <th>Version</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {emailTemplates.map((template) => (
+                  <tr
+                    key={template.key}
+                    className={
+                      selectedTemplateKey === template.key
+                        ? "admin-row-selected"
+                        : undefined
+                    }
+                    onClick={() => setSelectedTemplateKey(template.key)}
+                  >
+                    <td>
+                      <strong>{template.name}</strong>
+                      <span className="admin-subtext">{template.key}</span>
+                    </td>
+                    <td>{template.enabled ? "Enabled" : "Disabled"}</td>
+                    <td>{template.version}</td>
+                    <td>
+                      {formatDate(template.updated_at)}
+                      <span className="admin-subtext">
+                        {template.updated_by_email || "System default"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="admin-panel admin-template-editor">
+          {!selectedTemplate || !templateEditor ? (
+            <div className="admin-empty">Select a template to edit.</div>
+          ) : (
+            <>
+              <div className="admin-template-heading">
+                <div>
+                  <h2>{selectedTemplate.name}</h2>
+                  <p>{selectedTemplate.description}</p>
+                </div>
+                {renderStatus(templateEditor.enabled ? "enabled" : "disabled")}
+              </div>
+
+              <label className="admin-field">
+                <span>Subject</span>
+                <input
+                  value={templateEditor.subjectTemplate}
+                  onChange={(event) =>
+                    setTemplateEditor({
+                      ...templateEditor,
+                      subjectTemplate: event.target.value,
+                    })
+                  }
+                />
+              </label>
+
+              <label className="admin-field">
+                <span>HTML</span>
+                <textarea
+                  rows={10}
+                  value={templateEditor.htmlTemplate}
+                  onChange={(event) =>
+                    setTemplateEditor({
+                      ...templateEditor,
+                      htmlTemplate: event.target.value,
+                    })
+                  }
+                />
+              </label>
+
+              <label className="admin-field">
+                <span>Text</span>
+                <textarea
+                  rows={8}
+                  value={templateEditor.textTemplate}
+                  onChange={(event) =>
+                    setTemplateEditor({
+                      ...templateEditor,
+                      textTemplate: event.target.value,
+                    })
+                  }
+                />
+              </label>
+
+              <label className="admin-check">
+                <input
+                  type="checkbox"
+                  checked={templateEditor.enabled}
+                  onChange={(event) =>
+                    setTemplateEditor({
+                      ...templateEditor,
+                      enabled: event.target.checked,
+                    })
+                  }
+                />
+                <span>Use this database template when sending emails</span>
+              </label>
+
+              <label className="admin-field">
+                <span>Change note</span>
+                <input
+                  value={templateEditor.changeNote}
+                  onChange={(event) =>
+                    setTemplateEditor({
+                      ...templateEditor,
+                      changeNote: event.target.value,
+                    })
+                  }
+                  placeholder="Optional note for template history"
+                />
+              </label>
+
+              <div className="admin-variable-list">
+                {selectedTemplate.variables.map((variable) => (
+                  <code key={variable}>{`{{${variable}}}`}</code>
+                ))}
+              </div>
+
+              <div className="admin-template-actions">
+                <button
+                  type="button"
+                  className="admin-button"
+                  disabled={
+                    busyAction === `template-preview:${selectedTemplate.key}`
+                  }
+                  onClick={() => void previewTemplate()}
+                >
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  className="admin-button"
+                  disabled={
+                    busyAction === `template-save:${selectedTemplate.key}`
+                  }
+                  onClick={() => void saveTemplate()}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="admin-button admin-button--secondary"
+                  disabled={
+                    busyAction === `template-restore:${selectedTemplate.key}`
+                  }
+                  onClick={() => void restoreTemplateDefault()}
+                >
+                  Restore default
+                </button>
+              </div>
+
+              <div className="admin-template-test">
+                <label className="admin-field">
+                  <span>Test recipient</span>
+                  <input
+                    value={templateEditor.testRecipient}
+                    onChange={(event) =>
+                      setTemplateEditor({
+                        ...templateEditor,
+                        testRecipient: event.target.value,
+                      })
+                    }
+                    placeholder={authUser.email}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="admin-button"
+                  disabled={
+                    busyAction === `template-test:${selectedTemplate.key}`
+                  }
+                  onClick={() => void sendTemplateTest()}
+                >
+                  Send test
+                </button>
+              </div>
+
+              <div className="admin-template-preview">
+                <h3>Preview</h3>
+                {templatePreview ? (
+                  <>
+                    <p>
+                      <strong>Subject</strong>
+                      <span>{templatePreview.subject}</span>
+                    </p>
+                    <div
+                      className="admin-template-preview__html"
+                      dangerouslySetInnerHTML={{ __html: templatePreview.html }}
+                    />
+                    <pre>{templatePreview.text}</pre>
+                    <span className="admin-subtext">
+                      Source: {templatePreview.source}
+                    </span>
+                  </>
+                ) : (
+                  <div className="admin-empty">
+                    Generate a preview to inspect rendered sample content.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+      </div>
+    );
+  }
+
   function renderShares() {
     return (
       <div className="admin-table-wrap">
@@ -1177,6 +1595,8 @@ export function AdminPage({
       return <div className="admin-empty">No uptime monitors found.</div>;
     if (activeTab === "email" && emails.length === 0)
       return <div className="admin-empty">No email outbox records found.</div>;
+    if (activeTab === "templates" && emailTemplates.length === 0)
+      return <div className="admin-empty">No email templates found.</div>;
     if (activeTab === "shares" && shares.length === 0)
       return <div className="admin-empty">No share links found.</div>;
     if (activeTab === "audit" && auditActions.length === 0)
@@ -1186,6 +1606,7 @@ export function AdminPage({
     if (activeTab === "scans") return renderScans();
     if (activeTab === "uptime") return renderUptime();
     if (activeTab === "email") return renderEmail();
+    if (activeTab === "templates") return renderEmailTemplates();
     if (activeTab === "shares") return renderShares();
     return renderAudit();
   }
@@ -1550,6 +1971,131 @@ const adminStyles = `
     border-radius: 8px;
     padding: 8px;
   }
+  .admin-template-layout {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+    gap: 14px;
+  }
+  .admin-template-warning {
+    border: 1px solid var(--warning);
+    border-radius: 8px;
+    color: var(--warning);
+    padding: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .admin-template-table {
+    min-width: 640px;
+  }
+  .admin-template-table tr {
+    cursor: pointer;
+  }
+  .admin-row-selected td {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .admin-template-editor {
+    display: grid;
+    gap: 12px;
+  }
+  .admin-template-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .admin-template-heading p {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  .admin-field {
+    display: grid;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .admin-field input,
+  .admin-field textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    padding: 9px 10px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .admin-field textarea {
+    min-height: 120px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      "Liberation Mono", "Courier New", monospace;
+  }
+  .admin-check {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 13px;
+  }
+  .admin-variable-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .admin-variable-list code {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 8px;
+    color: var(--text-muted);
+    background: var(--bg);
+    font-size: 11px;
+  }
+  .admin-template-actions,
+  .admin-template-test {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  .admin-template-test .admin-field {
+    min-width: min(320px, 100%);
+    flex: 1;
+  }
+  .admin-template-preview {
+    display: grid;
+    gap: 10px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .admin-template-preview h3 {
+    margin: 0;
+    font-size: 14px;
+  }
+  .admin-template-preview p {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+  }
+  .admin-template-preview p strong {
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  .admin-template-preview__html,
+  .admin-template-preview pre {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    padding: 12px;
+    overflow: auto;
+    overflow-wrap: anywhere;
+  }
+  .admin-template-preview pre {
+    white-space: pre-wrap;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
   @media (max-width: 980px) {
     .admin-page {
       padding: 12px;
@@ -1572,6 +2118,9 @@ const adminStyles = `
       white-space: nowrap;
     }
     .admin-section-grid {
+      grid-template-columns: 1fr;
+    }
+    .admin-template-layout {
       grid-template-columns: 1fr;
     }
     .admin-detail {
