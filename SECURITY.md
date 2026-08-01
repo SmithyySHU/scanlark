@@ -160,6 +160,13 @@ password hashing and `iron-session` cookies:
   `users.disabled_at` is set.
 - API routes use backend user/site ownership checks. Frontend route checks are
   convenience only.
+- When `INTERNAL_ONLY_MODE=true`, all operational routes require a logged-in
+  user whose normalized email appears in `INTERNAL_ADMIN_EMAILS`. Empty or
+  missing `INTERNAL_ADMIN_EMAILS` fails closed.
+- `/auth/logout`, `/health`, and `/public/config` remain public/minimal so
+  blocked sessions can be cleared and infrastructure health checks still work.
+- `API_INTERNAL_TOKEN` is accepted only for the exact worker completion callback
+  `POST /scan-runs/:scanRunId/notify`; it is not a general API bypass.
 
 Admin access is internal-only and backend-enforced:
 
@@ -217,9 +224,10 @@ The API also applies baseline hardening:
 - Admin APIs and UI must not expose password hashes, session token material,
   SMTP passwords, API tokens, report share token hashes, raw share tokens, or
   email bodies.
-- Public shared reports are intentionally unauthenticated bearer-link views.
-  They should expose only the report data needed for that share, and links can
-  be revoked.
+- Public shared reports are intentionally unauthenticated bearer-link views when
+  public SaaS mode is enabled. When `INTERNAL_ONLY_MODE=true`, shared-report
+  token routes require an approved internal admin session. Share links can be
+  revoked.
 
 ---
 

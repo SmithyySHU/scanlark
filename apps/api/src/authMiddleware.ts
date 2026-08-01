@@ -8,6 +8,10 @@ import {
 } from "@scanlark/db";
 import { clearSession, getSessionUserId } from "./auth";
 import { isAdminEmail } from "./adminAccess";
+import {
+  isInternalOnlyMode,
+  isTrustedWorkerNotifyRequest,
+} from "./internalAccess";
 
 type AuthUser = {
   id: string;
@@ -19,7 +23,6 @@ type AuthUser = {
 
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === "true";
 const DEMO_USER_EMAIL = process.env.DEMO_USER_EMAIL || "demo@scanlark.local";
-const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
 let demoUserPromise: Promise<AuthUser> | null = null;
 let demoLogged = false;
@@ -74,20 +77,14 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction,
 ) {
-  if (req.path.startsWith("/public/")) {
+  if (
+    req.path.startsWith("/public/") &&
+    (!isInternalOnlyMode() || !req.path.startsWith("/public/reports/"))
+  ) {
     return next();
   }
 
-  const internalToken =
-    typeof req.headers["x-internal-token"] === "string"
-      ? req.headers["x-internal-token"]
-      : "";
-  if (
-    API_INTERNAL_TOKEN &&
-    internalToken === API_INTERNAL_TOKEN &&
-    req.path.startsWith("/scan-runs/") &&
-    req.path.endsWith("/notify")
-  ) {
+  if (isTrustedWorkerNotifyRequest(req)) {
     return next();
   }
 

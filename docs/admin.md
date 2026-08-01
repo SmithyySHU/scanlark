@@ -5,31 +5,40 @@ use during alpha and beta only.
 
 ## Enable Access
 
-Admin access is controlled only by `ADMIN_EMAILS`.
+Admin console access is controlled by `ADMIN_EMAILS`. During the temporary
+internal-only phase, emails in `INTERNAL_ADMIN_EMAILS` are also treated as admin
+operators while `INTERNAL_ONLY_MODE=true`, so the founder/operator allowlist can
+use the existing console without a schema change.
 
 ```bash
 ADMIN_EMAILS=admin@example.com,ops@example.com
+INTERNAL_ONLY_MODE=true
+INTERNAL_ADMIN_EMAILS=owner@example.com
 ```
 
 The value is a comma-separated allowlist. Matching is case-insensitive after
-trimming whitespace. If `ADMIN_EMAILS` is missing or empty, admin access is
-disabled by default.
+trimming whitespace. If both relevant allowlists are missing or empty, admin
+access is disabled by default.
 
 For production, set the intended admin email in `.env.production`:
 
 ```bash
-ADMIN_EMAILS=support@scanlark.com
+INTERNAL_ONLY_MODE=true
+INTERNAL_ADMIN_EMAILS=admin@example.com
+ADMIN_EMAILS=admin@example.com
 ```
 
 Do not hardcode admin email addresses in TypeScript, React, API code, or
 checked-in environment files. The admin user must log in normally using an
-email address listed in `ADMIN_EMAILS`.
+email address listed in the configured allowlist.
 
 ## Security Model
 
 - Backend admin API routes are mounted under `/admin/*`.
 - In production, Caddy exposes them as `/api/admin/*`.
 - Admin API routes require a logged-in session and a backend allowlist match.
+- In internal-only mode, all operational API routes require a logged-in session
+  and an `INTERNAL_ADMIN_EMAILS` match before route handlers run.
 - The frontend only shows admin navigation when the backend session response
   includes `isAdmin: true`.
 - Frontend checks are convenience only. Backend checks are authoritative.

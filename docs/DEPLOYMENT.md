@@ -82,6 +82,9 @@ Replace every `CHANGE_ME` value. At minimum set:
 - `SESSION_SECRET`
 - `REPORT_SHARE_TOKEN_SECRET`
 - `API_INTERNAL_TOKEN`
+- `INTERNAL_ONLY_MODE=true`
+- `INTERNAL_ADMIN_EMAILS`
+- `PUBLIC_CONTACT_EMAIL`
 - `APP_URL`
 - `WEB_ORIGIN`
 - SMTP credentials
@@ -249,14 +252,18 @@ Container health:
 Alpha smoke checks:
 
 - `https://scanlark.example.com` loads the landing page.
-- `https://scanlark.example.com/api/health` returns healthy.
+- `https://scanlark.example.com/api/health` returns `{ "status": "ok" }`.
+- `https://scanlark.example.com/api/public/config` returns only public client
+  config.
 - `/dashboard`, `/dashboard/reports`, `/report`, `/shared-reports/:token`,
   `/learn`, `/onboarding`, and `/sites/new` refresh without 404.
-- Register/login works with `DEV_BYPASS_AUTH=false`.
+- Login works with `DEV_BYPASS_AUTH=false`; registration is rejected while
+  `INTERNAL_ONLY_MODE=true`.
 - Add site works.
 - Manual scan queues and worker completes it.
 - Report loads after completion.
-- Shared report opens in an unauthenticated browser.
+- Shared report opens for the approved internal admin. In internal-only mode it
+  must not open in an unauthenticated browser.
 - Browser print/PDF flow opens.
 - Uptime monitoring writes new `uptime_checks`.
 - In-app notifications load and can be marked read.

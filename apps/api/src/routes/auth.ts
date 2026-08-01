@@ -4,6 +4,11 @@ import rateLimit from "express-rate-limit";
 import { createUser, isValidEmailAddress, verifyUser } from "@scanlark/db";
 import { clearSession, setSession } from "../auth";
 import { isAdminEmail } from "../adminAccess";
+import {
+  isInternalAdminEmail,
+  isInternalOnlyMode,
+  isRegistrationAvailable,
+} from "../internalAccess";
 
 function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
@@ -33,6 +38,11 @@ export function mountAuthRoutes(app: express.Application) {
     "/auth/register",
     authLimiter,
     async (req: Request, res: Response) => {
+      if (!isRegistrationAvailable()) {
+        await clearSession(req);
+        return res.status(403).json({ error: "registration_closed" });
+      }
+
       const emailRaw =
         typeof req.body?.email === "string" ? req.body.email : "";
       const password =
@@ -92,6 +102,10 @@ export function mountAuthRoutes(app: express.Application) {
           error: "invalid_credentials",
           message: "Invalid credentials",
         });
+      }
+      if (isInternalOnlyMode() && !isInternalAdminEmail(user.email)) {
+        await clearSession(req);
+        return res.status(403).json({ error: "forbidden" });
       }
       await setSession(req, user.id);
       return res.json(serializeAuthUser(user));

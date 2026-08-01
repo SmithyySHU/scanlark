@@ -182,6 +182,12 @@ interface AuthUser {
   isAdmin?: boolean;
 }
 
+interface PublicConfig {
+  internalOnlyMode: boolean;
+  registrationAvailable: boolean;
+  contactEmail: string;
+}
+
 interface AccountProfileResponse {
   user: AuthUser;
 }
@@ -926,6 +932,11 @@ type SsePayload =
   | NotificationCountUpdatedEventPayload;
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
+const DEFAULT_PUBLIC_CONFIG: PublicConfig = {
+  internalOnlyMode: false,
+  registrationAvailable: true,
+  contactEmail: "",
+};
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const MAX_HISTORY_RESULTS = 100;
@@ -3318,6 +3329,10 @@ const App: React.FC = () => {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authWorking, setAuthWorking] = useState(false);
+  const [publicConfig, setPublicConfig] = useState<PublicConfig>(
+    DEFAULT_PUBLIC_CONFIG,
+  );
+  const [publicConfigLoading, setPublicConfigLoading] = useState(true);
   const [profileDisplayNameDraft, setProfileDisplayNameDraft] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -3801,6 +3816,12 @@ const App: React.FC = () => {
   const [filtersOpen, setFiltersOpen] = useState(false);
 
   const hasSites = sites.length > 0;
+  const internalOnlyMode = publicConfig.internalOnlyMode;
+  const registrationAvailable = publicConfig.registrationAvailable;
+  const hasInternalAppAccess =
+    !publicConfigLoading && (!internalOnlyMode || authUser?.isAdmin === true);
+  const isBlockedInternalUser =
+    internalOnlyMode && !!authUser && authUser.isAdmin !== true;
   const sitesLoadError = sitesLoadState === "error";
   const isSiteStatePending = ["idle", "loading"].includes(sitesLoadState);
   const hasSiteSelectionResolved = Boolean(
@@ -6379,6 +6400,8 @@ const App: React.FC = () => {
     { key: "reports", label: "Reports" },
   ];
   const isPublicLandingRoute = route === "landing";
+  const isManagedPublicLandingRoute =
+    isPublicLandingRoute || (internalOnlyMode && route === "learn");
   const isLoginRoute = route === "login";
   const isOnboardingRoute = route === "onboarding";
   const isNewSiteRoute = route === "new_site";
@@ -6399,6 +6422,7 @@ const App: React.FC = () => {
   const isSharedReportRoute = route === "shared_report";
   const isAdminRoute = route === "admin";
   const isReadOnlyReport = isSharedReportRoute;
+  const allowAnonymousSharedReport = isSharedReportRoute && !internalOnlyMode;
   const hasLandingDashboardSelectIntent =
     getLandingDashboardSelectSiteIntent(locationSearch);
   const protectedRouteRequiresAuth =
@@ -6407,13 +6431,18 @@ const App: React.FC = () => {
     route === "report" ||
     route === "admin" ||
     route === "onboarding" ||
-    route === "new_site";
+    route === "new_site" ||
+    (internalOnlyMode && route === "shared_report");
   const authPageTitle =
-    isReportRoute && !authUser ? "Sign in to view this report" : "Welcome back";
+    (isReportRoute || (internalOnlyMode && isSharedReportRoute)) && !authUser
+      ? "Sign in to view this report"
+      : "Welcome back";
   const authPageSubtitle =
     isReportRoute && !authUser
       ? "Reports stay behind your account so evidence and history remain private."
-      : "Use your Scanlark account to open the monitoring dashboard.";
+      : internalOnlyMode
+        ? "Public access is temporarily closed. Approved internal operators can sign in."
+        : "Use your Scanlark account to open the monitoring dashboard.";
 
   const formatReportUrlLabel = (url: string) => {
     try {
@@ -8762,6 +8791,41 @@ const App: React.FC = () => {
   }
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/public/config`, {
+          cache: "no-store",
+          credentials: "include",
+        });
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        const data = (await res.json()) as Partial<PublicConfig>;
+        if (cancelled) return;
+        setPublicConfig({
+          internalOnlyMode: data.internalOnlyMode === true,
+          registrationAvailable: data.registrationAvailable !== false,
+          contactEmail:
+            typeof data.contactEmail === "string" ? data.contactEmail : "",
+        });
+      } catch (err) {
+        console.warn("Failed to load public config", err);
+        if (!cancelled) setPublicConfig(DEFAULT_PUBLIC_CONFIG);
+      } finally {
+        if (!cancelled) setPublicConfigLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!registrationAvailable && authMode === "register") {
+      setAuthMode("login");
+    }
+  }, [authMode, registrationAvailable]);
+
+  useEffect(() => {
     void loadMe();
   }, []);
 
@@ -8772,15 +8836,21 @@ const App: React.FC = () => {
   }, [authUser?.id, authUser?.displayName, authUser?.name]);
 
   useEffect(() => {
-    if (authUser) {
+    if (authUser && hasInternalAppAccess) {
       void loadSites();
     } else if (!authLoading) {
       resetSessionState();
     }
-  }, [authLoading, authUser]);
+  }, [authLoading, authUser, hasInternalAppAccess]);
 
   useEffect(() => {
-    if (!authUser || authLoading || !canEvaluateSiteState) return;
+    if (
+      !authUser ||
+      !hasInternalAppAccess ||
+      authLoading ||
+      !canEvaluateSiteState
+    )
+      return;
     if (sitesLoadError) return;
     if (
       route !== "app" ||
@@ -8817,6 +8887,7 @@ const App: React.FC = () => {
     appSection,
     authLoading,
     authUser,
+    hasInternalAppAccess,
     canEvaluateSiteState,
     hasLandingDashboardSelectIntent,
     hasLoadedNoSites,
@@ -8830,7 +8901,13 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (!authUser || authLoading || !canEvaluateSiteState) return;
+    if (
+      !authUser ||
+      !hasInternalAppAccess ||
+      authLoading ||
+      !canEvaluateSiteState
+    )
+      return;
     if (sitesLoadError) return;
     if (
       route !== "app" ||
@@ -8865,6 +8942,7 @@ const App: React.FC = () => {
     appSection,
     authLoading,
     authUser,
+    hasInternalAppAccess,
     hasLandingDashboardSelectIntent,
     hasLoadedNoSites,
     hasLoadedOneSite,
@@ -8879,7 +8957,13 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (!authUser || authLoading || !canEvaluateSiteState) return;
+    if (
+      !authUser ||
+      !hasInternalAppAccess ||
+      authLoading ||
+      !canEvaluateSiteState
+    )
+      return;
     if (sitesLoadError) return;
     if (!isSiteSelectionRoute) return;
 
@@ -8902,6 +8986,7 @@ const App: React.FC = () => {
   }, [
     authLoading,
     authUser,
+    hasInternalAppAccess,
     canEvaluateSiteState,
     hasLoadedNoSites,
     hasLoadedOneSite,
@@ -8919,7 +9004,7 @@ const App: React.FC = () => {
   }, [selectedSiteId, rememberDashboardSiteSelection]);
 
   useEffect(() => {
-    if (!authUser || !onboardingStorageKey) return;
+    if (!authUser || !hasInternalAppAccess || !onboardingStorageKey) return;
     if (authLoading || !canEvaluateSiteState) return;
     if (sitesLoadError) return;
     if (
@@ -8946,6 +9031,7 @@ const App: React.FC = () => {
   }, [
     authLoading,
     authUser,
+    hasInternalAppAccess,
     appSection,
     onboardingRequired,
     onboardingStorageKey,
@@ -9026,7 +9112,7 @@ const App: React.FC = () => {
   ]);
 
   useEffect(() => {
-    if (authUser) {
+    if (authUser && hasInternalAppAccess) {
       startEventStream();
       void loadAppNotifications({ showLoading: false });
       void loadUnreadNotificationCount();
@@ -9034,7 +9120,7 @@ const App: React.FC = () => {
     } else {
       stopEventStream();
     }
-  }, [authUser]);
+  }, [authUser, hasInternalAppAccess]);
 
   useEffect(() => {
     if (
@@ -9050,12 +9136,16 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleVisibility = () => {
-      if (document.visibilityState === "visible" && authUser) {
+      if (
+        document.visibilityState === "visible" &&
+        authUser &&
+        hasInternalAppAccess
+      ) {
         void syncStateOnce();
       }
     };
     const handleFocus = () => {
-      if (authUser) {
+      if (authUser && hasInternalAppAccess) {
         void loadAppNotifications({ showLoading: false });
         void loadUnreadNotificationCount();
       }
@@ -9066,16 +9156,16 @@ const App: React.FC = () => {
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("focus", handleFocus);
     };
-  }, [authUser]);
+  }, [authUser, hasInternalAppAccess]);
 
   useEffect(() => {
-    if (!authUser) return;
+    if (!authUser || !hasInternalAppAccess) return;
     const intervalId = window.setInterval(() => {
       void loadAppNotifications({ showLoading: false });
       void loadUnreadNotificationCount();
     }, NOTIFICATION_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [authUser]);
+  }, [authUser, hasInternalAppAccess]);
 
   useEffect(() => {
     const stored = localStorage.getItem(
@@ -9348,7 +9438,7 @@ const App: React.FC = () => {
   }
 
   async function loadAppNotifications(options?: { showLoading?: boolean }) {
-    if (!authUser) return;
+    if (!authUser || !hasInternalAppAccess) return;
     const showLoading = options?.showLoading ?? true;
     if (showLoading) setNotificationsLoading(true);
     setNotificationsError(null);
@@ -9376,7 +9466,7 @@ const App: React.FC = () => {
   }
 
   async function loadAccountNotificationPreferences() {
-    if (!authUser) return;
+    if (!authUser || !hasInternalAppAccess) return;
     setAccountNotificationPreferencesLoading(true);
     setAccountNotificationPreferencesError(null);
     try {
@@ -9400,7 +9490,7 @@ const App: React.FC = () => {
   }
 
   async function handleSaveProfile() {
-    if (!authUser) return;
+    if (!authUser || !hasInternalAppAccess) return;
     setProfileSaving(true);
     setProfileError(null);
     setProfileSavedAt(null);
@@ -9429,6 +9519,7 @@ const App: React.FC = () => {
     patch: Partial<Record<UserNotificationPreferenceField, boolean>>,
     options?: { rethrow?: boolean },
   ) {
+    if (!authUser || !hasInternalAppAccess) return null;
     const previous = accountNotificationPreferences;
     setAccountNotificationPreferences((current) => ({ ...current, ...patch }));
     setAccountNotificationPreferencesSaving(true);
@@ -9505,7 +9596,8 @@ const App: React.FC = () => {
     setAuthWorking(true);
     setAuthError(null);
     try {
-      const endpoint = authMode === "login" ? "login" : "register";
+      const endpoint =
+        authMode === "login" || !registrationAvailable ? "login" : "register";
       const res = await apiFetch(`${API_BASE}/auth/${endpoint}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -9517,8 +9609,13 @@ const App: React.FC = () => {
           status: res.status,
           body: text.slice(0, 200),
         });
+        if (res.status === 403 && !registrationAvailable) {
+          throw new Error(
+            "Scanlark is currently operating as a managed website health service. Public access is temporarily closed.",
+          );
+        }
         throw new Error(
-          authMode === "login"
+          endpoint === "login"
             ? "Invalid email or password."
             : "Could not create account. Please try again.",
         );
@@ -9530,11 +9627,14 @@ const App: React.FC = () => {
       if (route === "login" || route === "landing") {
         navigateTo(getLoginNextFromLocation() ?? "/dashboard");
       }
-    } catch {
+    } catch (err: unknown) {
       setAuthError(
-        authMode === "login"
-          ? "Invalid email or password."
-          : "Could not create account. Please try again.",
+        getErrorMessage(
+          err,
+          authMode === "login" || !registrationAvailable
+            ? "Invalid email or password."
+            : "Could not create account. Please try again.",
+        ),
       );
     } finally {
       setAuthWorking(false);
@@ -9554,8 +9654,100 @@ const App: React.FC = () => {
   }
 
   function openAuth(mode: "login" | "register") {
-    setAuthMode(mode);
+    setAuthMode(registrationAvailable ? mode : "login");
     navigateTo("/login");
+  }
+
+  function openManagedServiceContact() {
+    const email = publicConfig.contactEmail.trim();
+    if (!email || typeof window === "undefined") return;
+    window.location.href = `mailto:${email}?subject=${encodeURIComponent(
+      "Website health check request",
+    )}`;
+  }
+
+  function renderClosedAccess() {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "grid",
+          placeItems: "center",
+          background: "var(--bg)",
+          color: "var(--text)",
+          padding: "24px",
+        }}
+      >
+        <div
+          style={{
+            width: "min(520px, 100%)",
+            border: "1px solid var(--border)",
+            background: "var(--panel)",
+            borderRadius: "8px",
+            padding: "24px",
+            display: "grid",
+            gap: "14px",
+            boxShadow: "var(--shadow)",
+          }}
+        >
+          <span
+            style={{
+              color: "var(--warning)",
+              fontSize: "12px",
+              fontWeight: 700,
+              textTransform: "uppercase",
+            }}
+          >
+            Access closed
+          </span>
+          <h1
+            style={{
+              margin: 0,
+              fontFamily: "var(--font-display)",
+              fontSize: "24px",
+              lineHeight: 1.2,
+            }}
+          >
+            Scanlark is operating as a managed service
+          </h1>
+          <p style={{ margin: 0, color: "var(--text-muted)", lineHeight: 1.6 }}>
+            Public dashboard access is temporarily closed while Scanlark works
+            directly with a limited number of businesses.
+          </p>
+          {authUser?.email && (
+            <p
+              style={{
+                margin: 0,
+                color: "var(--text-muted)",
+                fontSize: "13px",
+              }}
+            >
+              Signed in as {authUser.email}
+            </p>
+          )}
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            {publicConfig.contactEmail.trim() && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={openManagedServiceContact}
+              >
+                Request a website health check
+              </button>
+            )}
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                void handleLogout();
+              }}
+            >
+              Log out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   function persistSiteName(siteId: string, name: string) {
@@ -16185,6 +16377,22 @@ const App: React.FC = () => {
           gap: 18px;
           min-width: 0;
         }
+        .internal-mode-label {
+          display: inline-flex;
+          align-items: center;
+          width: max-content;
+          margin-top: 6px;
+          min-height: 24px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+          background: color-mix(in srgb, var(--warning) 10%, transparent);
+          color: var(--warning);
+          font-size: 10px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
         .select-site-topbar-copy {
           padding: 7px 12px;
           border-radius: 999px;
@@ -19611,7 +19819,7 @@ const App: React.FC = () => {
         }
       `}</style>
       <div className="app-container">
-        {route === "learn" ? (
+        {route === "learn" && !internalOnlyMode ? (
           <LearnExperience
             isAuthenticated={!!authUser}
             currentArticle={currentLearnArticle}
@@ -19638,7 +19846,7 @@ const App: React.FC = () => {
             isAuthenticated={!!authUser}
             onNavigate={(path) => navigateTo(path)}
           />
-        ) : authLoading ? (
+        ) : authLoading || publicConfigLoading ? (
           <div
             style={{
               minHeight: "60vh",
@@ -19651,18 +19859,29 @@ const App: React.FC = () => {
           >
             Loading session...
           </div>
-        ) : !authUser && !isSharedReportRoute ? (
-          isPublicLandingRoute ? (
+        ) : isBlockedInternalUser ? (
+          renderClosedAccess()
+        ) : !authUser && !allowAnonymousSharedReport ? (
+          isManagedPublicLandingRoute ? (
             <MarketingPage
               isAuthenticated={false}
-              primaryLabel="Get started"
+              primaryLabel={
+                internalOnlyMode
+                  ? "Request a website health check"
+                  : "Get started"
+              }
               secondaryLabel="Login"
-              onOpenPrimary={() => openAuth("register")}
+              onOpenPrimary={
+                internalOnlyMode
+                  ? openManagedServiceContact
+                  : () => openAuth("register")
+              }
               onOpenSecondary={() => openAuth("login")}
               onOpenLearn={() => navigateTo("/learn")}
               legalLinks={LEGAL_PAGE_LINKS}
               onOpenLegal={(path) => navigateTo(path)}
               onOpenAccount={undefined}
+              managedMode={internalOnlyMode}
             />
           ) : isLoginRoute || protectedRouteRequiresAuth ? (
             <AuthPage
@@ -19673,6 +19892,7 @@ const App: React.FC = () => {
               authWorking={authWorking}
               title={authPageTitle}
               subtitle={authPageSubtitle}
+              registrationAvailable={registrationAvailable}
               onAuthModeChange={setAuthMode}
               onAuthEmailChange={setAuthEmail}
               onAuthPasswordChange={setAuthPassword}
@@ -19683,7 +19903,7 @@ const App: React.FC = () => {
               }}
             />
           ) : null
-        ) : isPublicLandingRoute ? (
+        ) : isManagedPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
             primaryLabel="Open dashboard"
@@ -19698,6 +19918,7 @@ const App: React.FC = () => {
             legalLinks={LEGAL_PAGE_LINKS}
             onOpenLegal={(path) => navigateTo(path)}
             onOpenAccount={() => navigateTo("/dashboard/account")}
+            managedMode={internalOnlyMode}
           />
         ) : isAdminRoute ? (
           authUser?.isAdmin === true ? (
@@ -19779,6 +20000,11 @@ const App: React.FC = () => {
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
                     Customer monitoring control centre
                   </div>
+                  {internalOnlyMode && (
+                    <div className="internal-mode-label">
+                      Internal Operations
+                    </div>
+                  )}
                 </div>
                 <div className="select-site-topbar-copy">
                   Choose a site to continue
@@ -21624,6 +21850,11 @@ const App: React.FC = () => {
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
                     Customer monitoring control centre
                   </div>
+                  {internalOnlyMode && (
+                    <div className="internal-mode-label">
+                      Internal Operations
+                    </div>
+                  )}
                 </div>
                 <div className="app-nav-tabs">
                   {primaryAppSections.map((item) => {

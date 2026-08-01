@@ -1,17 +1,19 @@
 import type { NextFunction, Request, Response } from "express";
-
-function normalizeEmail(value: string) {
-  return value.trim().toLowerCase();
-}
-
-function parseAdminEmails(value: string | undefined): Set<string> {
-  if (!value?.trim()) return new Set();
-  return new Set(value.split(",").map(normalizeEmail).filter(Boolean));
-}
+import {
+  isInternalAdminEmail,
+  isInternalOnlyMode,
+  normalizeEmail,
+  parseEmailAllowlist,
+} from "./internalAccess";
 
 export function isAdminEmail(email: string | null | undefined): boolean {
   if (!email) return false;
-  return parseAdminEmails(process.env.ADMIN_EMAILS).has(normalizeEmail(email));
+  if (
+    parseEmailAllowlist(process.env.ADMIN_EMAILS).has(normalizeEmail(email))
+  ) {
+    return true;
+  }
+  return isInternalOnlyMode() && isInternalAdminEmail(email);
 }
 
 export function adminGuard(req: Request, res: Response, next: NextFunction) {

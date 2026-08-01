@@ -8,6 +8,7 @@ type AuthPageProps = {
   authWorking: boolean;
   title: string;
   subtitle: string;
+  registrationAvailable: boolean;
   onAuthModeChange: (mode: "login" | "register") => void;
   onAuthEmailChange: (value: string) => void;
   onAuthPasswordChange: (value: string) => void;
@@ -23,6 +24,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   authWorking,
   title,
   subtitle,
+  registrationAvailable,
   onAuthModeChange,
   onAuthEmailChange,
   onAuthPasswordChange,
@@ -130,20 +132,37 @@ export const AuthPage: React.FC<AuthPageProps> = ({
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {(["login", "register"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => onAuthModeChange(mode)}
-                className={
-                  authMode === mode ? "toggle-pill active" : "toggle-pill"
-                }
-              >
-                {mode === "login" ? "Login" : "Register"}
-              </button>
-            ))}
-          </div>
+          {registrationAvailable ? (
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              {(["login", "register"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => onAuthModeChange(mode)}
+                  className={
+                    authMode === mode ? "toggle-pill active" : "toggle-pill"
+                  }
+                >
+                  {mode === "login" ? "Login" : "Register"}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: "12px",
+                border: "1px solid var(--border)",
+                background: "var(--panel-elev)",
+                color: "var(--text-muted)",
+                fontSize: "13px",
+                lineHeight: 1.55,
+              }}
+            >
+              Scanlark is currently operating as a managed website health
+              service. Public access is temporarily closed.
+            </div>
+          )}
 
           <label className="field-label">
             Email
@@ -198,7 +217,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           >
             {authWorking
               ? "Please wait..."
-              : authMode === "login"
+              : authMode === "login" || !registrationAvailable
                 ? "Log in"
                 : "Create account"}
           </button>

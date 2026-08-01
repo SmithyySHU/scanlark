@@ -20,6 +20,13 @@ Auth:
 - `AUTH_COOKIE_NAME`: session cookie name.
 - `SESSION_SECRET`: 32+ character secret required when bypass is off.
 - `NODE_ENV`: affects secure cookies and production-like secret enforcement.
+- `INTERNAL_ONLY_MODE=true`: disables public registration and restricts all
+  operational routes to authenticated users in `INTERNAL_ADMIN_EMAILS`.
+- `INTERNAL_ADMIN_EMAILS`: comma-separated internal operations allowlist. Email
+  matching is case-insensitive and whitespace-trimmed. Missing or empty values
+  fail closed when internal-only mode is enabled.
+- `PUBLIC_CONTACT_EMAIL`: public managed-service contact email returned by
+  `/public/config`.
 - Production-like API startup rejects dev auth bypass, short secrets, missing
   share/internal secrets, localhost CORS origins, and non-HTTPS configured
   public origins.
@@ -101,7 +108,11 @@ Useful log markers:
 - `[uptime ...] due=... checking ... recorded ...`
 
 Scheduled scan notifications require `API_INTERNAL_TOKEN` to match between API
-and worker.
+and worker. The API accepts this token only for
+`POST /scan-runs/:scanRunId/notify`; it is not a general API bypass and does not
+grant access to site, scan, report, export, account, SSE, or admin routes.
+Scheduler, scan processing, reaper recovery, and uptime checks run inside the
+worker through DB helpers and do not receive any broad HTTP authorization bypass.
 
 ## Email And SMTP
 
@@ -203,6 +214,9 @@ emails. See `docs/DEMO_SITE.md`.
 - API: `/public/reports/:token/...`
 
 Share tokens are generated and verified by `packages/db/src/reportShares.ts`.
+When `INTERNAL_ONLY_MODE=true`, these routes require an authenticated approved
+internal admin. Public bearer-link report access resumes when internal-only mode
+is disabled.
 
 PDF export is browser print based. The report view exposes print styling through
 `@media print` blocks in `apps/web/src/app.tsx`; `print=1` opens the report in a
@@ -212,6 +226,8 @@ print-ready state and `handlePrintReport` calls `window.print()`.
 
 - Use a real `SESSION_SECRET` and disable `DEV_BYPASS_AUTH`.
 - Set `REPORT_SHARE_TOKEN_SECRET`.
+- For the internal managed-service phase, set `INTERNAL_ONLY_MODE=true`,
+  `INTERNAL_ADMIN_EMAILS`, and `PUBLIC_CONTACT_EMAIL`.
 - Set production `WEB_ORIGIN`, `API_ORIGIN`, and `APP_URL`.
 - Run migrations against the target DB.
 - Start API and worker as separate long-running services.

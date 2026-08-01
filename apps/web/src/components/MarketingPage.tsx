@@ -11,6 +11,7 @@ type MarketingPageProps = {
   legalLinks: LegalPageLink[];
   onOpenLegal: (path: string) => void;
   onOpenAccount?: () => void;
+  managedMode?: boolean;
 };
 
 const featureCards = [
@@ -73,6 +74,7 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
   legalLinks,
   onOpenLegal,
   onOpenAccount,
+  managedMode = false,
 }) => {
   const finalIssueCount = 18;
   const [animatedIssueCount, setAnimatedIssueCount] = useState(0);
@@ -156,9 +158,11 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
               justifyContent: "flex-end",
             }}
           >
-            <button className="ghost-button" onClick={onOpenLearn}>
-              Learn
-            </button>
+            {!managedMode && (
+              <button className="ghost-button" onClick={onOpenLearn}>
+                Learn
+              </button>
+            )}
             {isAuthenticated && onOpenAccount ? (
               <button className="ghost-button" onClick={onOpenAccount}>
                 Account
@@ -177,14 +181,14 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
         <section className="marketing-hero">
           <div className="marketing-hero__content">
             <h1 className="marketing-hero__headline">
-              Monitor public website health with clean reports and change
-              tracking.
+              {managedMode
+                ? "Know when your website has problems before your customers do."
+                : "Monitor public website health with clean reports and change tracking."}
             </h1>
             <div className="marketing-hero__body">
-              Scanlark checks your public website signals from the outside and
-              helps you track issues, score movement, and report outputs. It
-              does not log in, submit forms, scan ports, attack, or exploit
-              websites.
+              {managedMode
+                ? "Scanlark helps businesses identify broken links, missing resources, website errors and other issues that can affect visitors and trust. We are currently working directly with a limited number of businesses."
+                : "Scanlark checks your public website signals from the outside and helps you track issues, score movement, and report outputs. It does not log in, submit forms, scan ports, attack, or exploit websites."}
             </div>
             <div className="marketing-hero__actions">
               <button
@@ -199,22 +203,32 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
               >
                 {secondaryLabel}
               </button>
-              <button
-                className="ghost-button primary-button--large"
-                onClick={onOpenLearn}
-              >
-                Learn more
-              </button>
+              {!managedMode && (
+                <button
+                  className="ghost-button primary-button--large"
+                  onClick={onOpenLearn}
+                >
+                  Learn more
+                </button>
+              )}
             </div>
             <div className="marketing-hero__chips">
-              {[
-                "Manual and scheduled scans",
-                "Issue change detection",
-                "Email alerts and in-app notifications",
-                "Client and site metadata context",
-                "Shareable report links",
-                "Raw evidence in reports",
-              ].map((item) => (
+              {(managedMode
+                ? [
+                    "Managed website health checks",
+                    "Broken link and missing resource review",
+                    "Website error monitoring",
+                    "Client-ready summaries",
+                  ]
+                : [
+                    "Manual and scheduled scans",
+                    "Issue change detection",
+                    "Email alerts and in-app notifications",
+                    "Client and site metadata context",
+                    "Shareable report links",
+                    "Raw evidence in reports",
+                  ]
+              ).map((item) => (
                 <div key={item} className="marketing-chip">
                   {item}
                 </div>
@@ -317,11 +331,14 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
           <div className="marketing-section__heading">
             <div className="marketing-kicker">Product overview</div>
             <h2>
-              Built for customer-facing monitoring, not just raw scan tables.
+              {managedMode
+                ? "Managed monitoring for businesses that rely on their website."
+                : "Built for customer-facing monitoring, not just raw scan tables."}
             </h2>
             <p>
-              Keep the dashboard focused on health, movement, and next actions.
-              Keep detailed evidence in reports where it belongs.
+              {managedMode
+                ? "Scanlark reviews the public signals that shape visitor confidence and turns findings into practical, client-ready reports."
+                : "Keep the dashboard focused on health, movement, and next actions. Keep detailed evidence in reports where it belongs."}
             </p>
           </div>
           <div className="marketing-feature-grid">
@@ -424,9 +441,11 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
             </div>
           </div>
           <div className="marketing-footer__actions">
-            <button className="ghost-button" onClick={onOpenLearn}>
-              Learn
-            </button>
+            {!managedMode && (
+              <button className="ghost-button" onClick={onOpenLearn}>
+                Learn
+              </button>
+            )}
             <button className="ghost-button" onClick={onOpenSecondary}>
               {secondaryLabel}
             </button>

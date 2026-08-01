@@ -1,7 +1,9 @@
 # Scanlark
 
-Scanlark is a pre-alpha website monitoring app for client-friendly link, issue,
-report, schedule, notification, and availability workflows.
+Scanlark is currently operated as an internal, founder-run website monitoring
+tool for managed client health checks. The underlying product remains a
+pre-alpha website monitoring app for client-friendly link, issue, report,
+schedule, notification, and availability workflows.
 
 It is intentionally focused on passive checks: crawl public website pages,
 identify broken or blocked links, generate practical issue summaries, monitor
@@ -10,7 +12,7 @@ shareable reports.
 
 ## Current MVP Features
 
-- Landing page, login/register flow, onboarding, and new-site setup.
+- Managed-service landing page, login flow, onboarding, and new-site setup.
 - Authenticated dashboard with site picker, scan history, reports, settings, and
   account pages.
 - Manual scans and scheduled scan queueing.
@@ -33,7 +35,7 @@ Frontend routes are parsed in `apps/web/src/app.tsx`; there is no separate
 router package.
 
 - `/` and `/landing`: marketing landing page.
-- `/login`: login and registration.
+- `/login`: login. Registration is disabled when `INTERNAL_ONLY_MODE=true`.
 - `/onboarding`: first-site onboarding flow.
 - `/sites/new`: add another site.
 - `/dashboard`: main dashboard for the selected site.
@@ -44,7 +46,9 @@ router package.
 - `/dashboard/account`: account profile and notification preferences.
 - `/report?scanRunId=...`: authenticated report view.
 - `/report?scanRunId=...&print=1`: report view prepared for browser print/PDF.
-- `/shared-reports/:token`: public shared report view.
+- `/shared-reports/:token`: public shared report view when
+  `INTERNAL_ONLY_MODE=false`; requires an approved internal admin when
+  `INTERNAL_ONLY_MODE=true`.
 - `/learn` and `/learn/:slug`: Scanlark Learn index and article pages.
 
 Compatibility redirects/normalization exist for `/app...` and
@@ -101,6 +105,13 @@ Required for normal local development:
 - `WEB_ORIGIN`: web app origin, usually `http://localhost:5173`.
 - `API_ORIGIN`: API origin, usually `http://localhost:3001`.
 - `API_INTERNAL_TOKEN`: shared API/worker token for scheduled scan notifications.
+- `INTERNAL_ONLY_MODE=true`: closes public registration, public shared reports,
+  and all operational app/API access except for approved internal admins.
+- `INTERNAL_ADMIN_EMAILS`: comma-separated internal operations allowlist. Email
+  matching is case-insensitive and whitespace-trimmed. Empty configuration fails
+  closed.
+- `PUBLIC_CONTACT_EMAIL`: public contact address returned by `/public/config`
+  and used by the managed-service landing CTA.
 
 Common development variables:
 
@@ -178,6 +189,8 @@ page app bundle; the build still succeeds.
 - Uptime is stale: confirm the worker uptime loop is running and that
   `site_uptime_settings.enabled=true` with `next_check_at <= now()` or null.
 - Shared links fail in production-like mode: set `REPORT_SHARE_TOKEN_SECRET`.
+- Internal-only deployment blocks expected users: confirm `INTERNAL_ONLY_MODE`
+  and `INTERNAL_ADMIN_EMAILS`; the allowlist fails closed when empty.
 
 ## Alpha Readiness Notes
 

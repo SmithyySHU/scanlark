@@ -135,6 +135,11 @@ import { sessionMiddleware } from "./auth";
 import { mountAuthRoutes } from "./routes/auth";
 import { initEventRelay, mountEventStream } from "./events";
 import {
+  getPublicConfig,
+  internalOnlyGuard,
+  isTrustedWorkerNotifyRequest,
+} from "./internalAccess";
+import {
   assertSecurityConfig,
   getAllowedCorsOrigins,
   normalizeOrigin,
@@ -200,7 +205,6 @@ const ISSUE_SEVERITIES = new Set<ScanIssueSeverity>([
 ]);
 const ISSUE_STATUSES = new Set<ScanIssueStatus>(["open", "resolved"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
-const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 const API_JSON_LIMIT = process.env.API_JSON_LIMIT || "256kb";
 const DASHBOARD_ISSUE_CATEGORIES: ScanIssueCategory[] = [
   "link_integrity",
@@ -909,19 +913,6 @@ const corsOptions: cors.CorsOptions = {
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-function isInternalScanNotify(req: Request): boolean {
-  const internalToken =
-    typeof req.headers["x-internal-token"] === "string"
-      ? req.headers["x-internal-token"]
-      : "";
-  return Boolean(
-    API_INTERNAL_TOKEN &&
-    internalToken === API_INTERNAL_TOKEN &&
-    req.path.startsWith("/scan-runs/") &&
-    req.path.endsWith("/notify"),
-  );
-}
-
 function rateLimitKey(req: Request, prefix: string): string {
   if (req.user?.id) return `${prefix}:user:${req.user.id}`;
   return `${prefix}:ip:${req.ip ?? req.socket.remoteAddress ?? "unknown"}`;
@@ -962,7 +953,8 @@ const authenticatedWriteLimiter = createRateLimiter({
   prefix: "write",
   windowMs: 60 * 1000,
   max: Number(process.env.API_WRITE_RATE_LIMIT_PER_MINUTE ?? "120"),
-  skip: (req) => !WRITE_METHODS.has(req.method) || isInternalScanNotify(req),
+  skip: (req) =>
+    !WRITE_METHODS.has(req.method) || isTrustedWorkerNotifyRequest(req),
 });
 
 const scanActionLimiter = createRateLimiter({
@@ -1010,16 +1002,15 @@ if (process.env.DEV_BYPASS_AUTH === "true") {
 mountAuthRoutes(app);
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "scanlark-api" });
+  res.json({ status: "ok" });
+});
+
+app.get("/public/config", (_req, res) => {
+  res.json(getPublicConfig());
 });
 
 app.use("/public/reports", publicReportLimiter);
 app.use(authMiddleware);
-app.use(authenticatedWriteLimiter);
-
-mountEventStream(app);
-mountScanRunEvents(app);
-mountAdminRoutes(app);
 
 app.get("/me", (req, res) => {
   if (!req.user) {
@@ -1034,6 +1025,13 @@ app.get("/me", (req, res) => {
     isAdmin: req.user.isAdmin === true,
   });
 });
+
+app.use(internalOnlyGuard);
+app.use(authenticatedWriteLimiter);
+
+mountEventStream(app);
+mountScanRunEvents(app);
+mountAdminRoutes(app);
 
 app.get("/account/profile", (req, res) => {
   if (!req.user) {
@@ -1769,11 +1767,7 @@ app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
     let run = null;
 
     if (!userId) {
-      const internalToken =
-        typeof req.headers["x-internal-token"] === "string"
-          ? req.headers["x-internal-token"]
-          : "";
-      if (!API_INTERNAL_TOKEN || internalToken !== API_INTERNAL_TOKEN) {
+      if (!isTrustedWorkerNotifyRequest(req)) {
         return sendApiError(res, 401, "unauthorized", "Unauthorized");
       }
       const internalRun = await getScanRunById(scanRunId);
