@@ -31,8 +31,12 @@ import type {
   OperationsRetestStatus,
   OperationsReportClientPriority,
   OperationsReportComparisonStatus,
+  OperationsReportActionPlanGroup,
+  OperationsReportActionPlanItemUpdateInput,
   OperationsReportCreateInput,
   OperationsReportFindingUpdateInput,
+  OperationsReportFindingBulkInput,
+  OperationsReportPositiveObservationUpdateInput,
   OperationsReportStatus,
   OperationsReportType,
   OperationsReportUpdateInput,
@@ -422,6 +426,12 @@ const REPORT_CLIENT_PRIORITY_SET = new Set<string>(
 const REPORT_COMPARISON_STATUS_SET = new Set<string>(
   OPERATIONS_REPORT_COMPARISON_STATUSES,
 );
+const REPORT_ACTION_PLAN_GROUPS = [
+  "address_now",
+  "address_soon",
+  "consider_later",
+] as const;
+const REPORT_ACTION_PLAN_GROUP_SET = new Set<string>(REPORT_ACTION_PLAN_GROUPS);
 const QUOTE_STATUS_SET = new Set<string>(OPERATIONS_QUOTE_STATUSES);
 const QUOTE_ITEM_TYPE_SET = new Set<string>(OPERATIONS_QUOTE_ITEM_TYPES);
 const ACCESS_REQUIREMENT_STATUS_SET = new Set<string>(
@@ -699,6 +709,15 @@ export function parseOperationsReportComparisonStatus(
   if (typeof value !== "string") return null;
   return REPORT_COMPARISON_STATUS_SET.has(value)
     ? (value as OperationsReportComparisonStatus)
+    : null;
+}
+
+export function parseOperationsReportActionPlanGroup(
+  value: unknown,
+): OperationsReportActionPlanGroup | null {
+  if (typeof value !== "string") return null;
+  return REPORT_ACTION_PLAN_GROUP_SET.has(value)
+    ? (value as OperationsReportActionPlanGroup)
     : null;
 }
 
@@ -1301,6 +1320,10 @@ export function parseOperationsReportUpdateInput(
         typeof settings.displayWebsiteHealthScore === "boolean"
           ? settings.displayWebsiteHealthScore
           : undefined,
+      displayPositiveObservations:
+        typeof settings.displayPositiveObservations === "boolean"
+          ? settings.displayPositiveObservations
+          : undefined,
       displayTechnicalAppendix:
         typeof settings.displayTechnicalAppendix === "boolean"
           ? settings.displayTechnicalAppendix
@@ -1309,10 +1332,18 @@ export function parseOperationsReportUpdateInput(
         typeof settings.displayMethodologyLimitations === "boolean"
           ? settings.displayMethodologyLimitations
           : undefined,
-      displayPricingOffer:
-        typeof settings.displayPricingOffer === "boolean"
-          ? settings.displayPricingOffer
+      displayNextSteps:
+        typeof settings.displayNextSteps === "boolean"
+          ? settings.displayNextSteps
           : undefined,
+      displayContactDetails:
+        typeof settings.displayContactDetails === "boolean"
+          ? settings.displayContactDetails
+          : undefined,
+      confidentialNotice: optionalClientTextField(
+        settings,
+        "confidentialNotice",
+      ),
       footerText: optionalClientTextField(settings, "footerText"),
     };
   }
@@ -1347,8 +1378,26 @@ export function parseOperationsReportFindingUpdateInput(
       "recommendedAction",
     );
   }
+  if ("clientEvidence" in record) {
+    parsed.clientEvidence = optionalClientTextField(record, "clientEvidence");
+  }
+  if ("affectedUrlNote" in record) {
+    parsed.affectedUrlNote = optionalClientTextField(record, "affectedUrlNote");
+  }
   if ("internalNote" in record) {
     parsed.internalNote = optionalClientTextField(record, "internalNote");
+  }
+  if ("falsePositiveReason" in record) {
+    parsed.falsePositiveReason = optionalClientTextField(
+      record,
+      "falsePositiveReason",
+    );
+  }
+  if ("reviewNote" in record) {
+    parsed.reviewNote = optionalClientTextField(record, "reviewNote");
+  }
+  if ("reviewedAt" in record) {
+    parsed.reviewedAt = parseDateField(record, "reviewedAt");
   }
   if ("estimatedEffort" in record) {
     parsed.estimatedEffort = optionalClientTextField(record, "estimatedEffort");
@@ -1377,6 +1426,98 @@ export function parseOperationsReportFindingUpdateInput(
       if (!status) throw new Error("invalid_comparison_status");
       parsed.comparisonStatus = status;
     }
+  }
+  return parsed;
+}
+
+function optionalDisplayOrder(record: Record<string, unknown>) {
+  if (!("displayOrder" in record)) return undefined;
+  const order =
+    typeof record.displayOrder === "number"
+      ? record.displayOrder
+      : Number.parseInt(String(record.displayOrder), 10);
+  if (!Number.isInteger(order) || order < 0) {
+    throw new Error("invalid_display_order");
+  }
+  return order;
+}
+
+export function parseOperationsReportPositiveObservationUpdateInput(
+  body: unknown,
+): OperationsReportPositiveObservationUpdateInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const parsed: OperationsReportPositiveObservationUpdateInput = {};
+  if ("title" in record) {
+    parsed.title = requiredClientTextField(record, "title");
+  }
+  if ("description" in record) {
+    parsed.description = optionalClientTextField(record, "description");
+  }
+  if ("isIncluded" in record) {
+    parsed.isIncluded = record.isIncluded === true;
+  }
+  if ("reviewedAt" in record) {
+    parsed.reviewedAt = parseDateField(record, "reviewedAt");
+  }
+  parsed.displayOrder = optionalDisplayOrder(record);
+  return parsed;
+}
+
+export function parseOperationsReportActionPlanItemUpdateInput(
+  body: unknown,
+): OperationsReportActionPlanItemUpdateInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const parsed: OperationsReportActionPlanItemUpdateInput = {};
+  if ("groupKey" in record) {
+    const group = parseOperationsReportActionPlanGroup(record.groupKey);
+    if (!group) throw new Error("invalid_action_plan_group");
+    parsed.groupKey = group;
+  }
+  if ("title" in record) {
+    parsed.title = requiredClientTextField(record, "title");
+  }
+  if ("summary" in record) {
+    parsed.summary = optionalClientTextField(record, "summary");
+  }
+  if ("isIncluded" in record) {
+    parsed.isIncluded = record.isIncluded === true;
+  }
+  parsed.displayOrder = optionalDisplayOrder(record);
+  return parsed;
+}
+
+export function parseOperationsReportFindingBulkInput(
+  body: unknown,
+): OperationsReportFindingBulkInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const ids = Array.isArray(record.findingIds) ? record.findingIds : [];
+  if (
+    ids.length === 0 ||
+    !ids.every((id) => typeof id === "string" && UUID_RE.test(id))
+  ) {
+    throw new Error("invalid_finding_selection");
+  }
+  const action = record.action;
+  if (
+    action !== "include" &&
+    action !== "exclude" &&
+    action !== "change_priority" &&
+    action !== "mark_reviewed" &&
+    action !== "restore"
+  ) {
+    throw new Error("invalid_bulk_action");
+  }
+  const parsed: OperationsReportFindingBulkInput = {
+    findingIds: ids as string[],
+    action,
+  };
+  if (action === "change_priority") {
+    const priority = parseOperationsReportClientPriority(record.clientPriority);
+    if (!priority) throw new Error("invalid_client_priority");
+    parsed.clientPriority = priority;
   }
   return parsed;
 }

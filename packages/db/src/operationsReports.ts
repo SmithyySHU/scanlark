@@ -52,9 +52,12 @@ export type OperationsReportDisplaySettings = {
   displayLogo: boolean;
   displayScanlarkContact: boolean;
   displayWebsiteHealthScore: boolean;
+  displayPositiveObservations: boolean;
   displayTechnicalAppendix: boolean;
   displayMethodologyLimitations: boolean;
-  displayPricingOffer: boolean;
+  displayNextSteps: boolean;
+  displayContactDetails: boolean;
+  confidentialNotice: string | null;
   footerText: string | null;
 };
 
@@ -100,6 +103,9 @@ export type OperationsReportRow = {
   contact_first_name?: string | null;
   contact_last_name?: string | null;
   contact_email?: string | null;
+  scan_finished_at?: Date | null;
+  scan_checked_links?: number;
+  scan_total_links?: number;
   included_findings?: number;
   excluded_findings?: number;
   critical_findings?: number;
@@ -124,13 +130,49 @@ export type OperationsReportFindingRow = {
   why_it_matters: string | null;
   recommended_action: string | null;
   affected_url: string | null;
+  client_evidence: string | null;
+  affected_url_note: string | null;
   evidence_json: Record<string, unknown>;
   is_included: boolean;
   is_false_positive: boolean;
+  false_positive_reason: string | null;
+  review_note: string | null;
+  reviewed_at: Date | null;
   internal_note: string | null;
   display_order: number;
   estimated_effort: string | null;
   comparison_status: OperationsReportComparisonStatus | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type OperationsReportPositiveObservationRow = {
+  id: string;
+  operations_report_id: string;
+  title: string;
+  description: string | null;
+  source_key: string | null;
+  is_included: boolean;
+  reviewed_at: Date | null;
+  display_order: number;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type OperationsReportActionPlanGroup =
+  | "address_now"
+  | "address_soon"
+  | "consider_later";
+
+export type OperationsReportActionPlanItemRow = {
+  id: string;
+  operations_report_id: string;
+  report_finding_id: string | null;
+  group_key: OperationsReportActionPlanGroup;
+  title: string;
+  summary: string | null;
+  is_included: boolean;
+  display_order: number;
   created_at: Date;
   updated_at: Date;
 };
@@ -162,6 +204,8 @@ export type OperationsReportActivityRow = {
 export type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFindingRow[];
+  positiveObservations: OperationsReportPositiveObservationRow[];
+  actionPlanItems: OperationsReportActionPlanItemRow[];
   comparisonItems: OperationsReportComparisonItemRow[];
   activity: OperationsReportActivityRow[];
 };
@@ -206,12 +250,44 @@ export type OperationsReportFindingUpdateInput = {
   clientExplanation?: string | null;
   whyItMatters?: string | null;
   recommendedAction?: string | null;
+  clientEvidence?: string | null;
+  affectedUrlNote?: string | null;
   internalNote?: string | null;
+  falsePositiveReason?: string | null;
+  reviewNote?: string | null;
+  reviewedAt?: Date | null;
   estimatedEffort?: string | null;
   isIncluded?: boolean;
   isFalsePositive?: boolean;
   displayOrder?: number;
   comparisonStatus?: OperationsReportComparisonStatus | null;
+};
+
+export type OperationsReportPositiveObservationUpdateInput = {
+  title?: string;
+  description?: string | null;
+  isIncluded?: boolean;
+  reviewedAt?: Date | null;
+  displayOrder?: number;
+};
+
+export type OperationsReportActionPlanItemUpdateInput = {
+  groupKey?: OperationsReportActionPlanGroup;
+  title?: string;
+  summary?: string | null;
+  isIncluded?: boolean;
+  displayOrder?: number;
+};
+
+export type OperationsReportFindingBulkInput = {
+  findingIds: string[];
+  action:
+    | "include"
+    | "exclude"
+    | "change_priority"
+    | "mark_reviewed"
+    | "restore";
+  clientPriority?: OperationsReportClientPriority;
 };
 
 export type OperationsReportListParams = {
@@ -268,23 +344,32 @@ export type OperationsClientReportPayload = {
   settings: OperationsReportDisplaySettings;
   priorityCounts: Record<OperationsReportClientPriority, number>;
   findings: Array<{
-    id: string;
     priority: OperationsReportClientPriority;
     title: string;
     affectedUrl: string | null;
+    affectedUrlNote: string | null;
     whatWasFound: string | null;
     whyItMatters: string | null;
     recommendedAction: string | null;
-    evidence: Record<string, unknown>;
+    clientEvidence: string | null;
     estimatedEffort: string | null;
     displayOrder: number;
     comparisonStatus: OperationsReportComparisonStatus | null;
   }>;
-  positiveObservations: string[];
+  actionPlan: Record<
+    OperationsReportActionPlanGroup,
+    Array<{
+      title: string;
+      summary: string | null;
+    }>
+  >;
+  positiveObservations: Array<{
+    title: string;
+    description: string | null;
+  }>;
   methodology: string[];
   nextSteps: string[];
   comparison: Array<{
-    id: string;
     status: OperationsReportComparisonStatus;
     summary: string | null;
   }>;
@@ -320,9 +405,12 @@ const DEFAULT_DISPLAY_SETTINGS: OperationsReportDisplaySettings = {
   displayLogo: true,
   displayScanlarkContact: true,
   displayWebsiteHealthScore: false,
+  displayPositiveObservations: true,
   displayTechnicalAppendix: true,
   displayMethodologyLimitations: true,
-  displayPricingOffer: false,
+  displayNextSteps: true,
+  displayContactDetails: true,
+  confidentialNotice: "Confidential: prepared for client use.",
   footerText: "Prepared by Scanlark for client use.",
 };
 
@@ -402,12 +490,23 @@ function priorityFromSeverity(
   return "informational";
 }
 
+function actionPlanGroupForPriority(
+  priority: OperationsReportClientPriority,
+): OperationsReportActionPlanGroup {
+  if (priority === "critical") return "address_now";
+  if (priority === "important") return "address_soon";
+  return "consider_later";
+}
+
 function mergeDisplaySettings(
   settings: Partial<OperationsReportDisplaySettings> | null | undefined,
 ): OperationsReportDisplaySettings {
   return {
     ...DEFAULT_DISPLAY_SETTINGS,
     ...(settings ?? {}),
+    confidentialNotice:
+      textValue(settings?.confidentialNotice) ??
+      DEFAULT_DISPLAY_SETTINGS.confidentialNotice,
     footerText:
       textValue(settings?.footerText) ?? DEFAULT_DISPLAY_SETTINGS.footerText,
   };
@@ -428,6 +527,9 @@ function reportSelect() {
     b.name AS business_name,
     s.url AS site_url,
     s.site_display_name,
+    sr.finished_at AS scan_finished_at,
+    sr.checked_links AS scan_checked_links,
+    sr.total_links AS scan_total_links,
     c.first_name AS contact_first_name,
     c.last_name AS contact_last_name,
     c.email AS contact_email,
@@ -444,6 +546,7 @@ function reportJoins() {
   return `
     JOIN operations_businesses b ON b.id = r.business_id
     JOIN sites s ON s.id = r.site_id
+    JOIN scan_runs sr ON sr.id = r.scan_run_id
     LEFT JOIN operations_contacts c ON c.id = r.prepared_contact_id
     LEFT JOIN LATERAL (
       SELECT
@@ -549,6 +652,45 @@ async function listComparisonItems(
   return res.rows;
 }
 
+async function listPositiveObservations(
+  reportId: string,
+): Promise<OperationsReportPositiveObservationRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportPositiveObservationRow>(
+    `
+      SELECT *
+      FROM operations_report_positive_observations
+      WHERE operations_report_id = $1
+      ORDER BY display_order ASC, created_at ASC
+    `,
+    [reportId],
+  );
+  return res.rows;
+}
+
+async function listActionPlanItems(
+  reportId: string,
+): Promise<OperationsReportActionPlanItemRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportActionPlanItemRow>(
+    `
+      SELECT *
+      FROM operations_report_action_plan_items
+      WHERE operations_report_id = $1
+      ORDER BY
+        CASE group_key
+          WHEN 'address_now' THEN 1
+          WHEN 'address_soon' THEN 2
+          ELSE 3
+        END,
+        display_order ASC,
+        created_at ASC
+    `,
+    [reportId],
+  );
+  return res.rows;
+}
+
 async function listReportActivity(
   reportId: string,
 ): Promise<OperationsReportActivityRow[]> {
@@ -643,6 +785,96 @@ async function insertFindingsForScan(
           detectedAt: issue.last_seen_at.toISOString(),
         },
         order++,
+      ],
+    );
+  }
+}
+
+async function insertDefaultReportReviewSections(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  reportId: string,
+  siteUrl: string,
+) {
+  let observationOrder = 0;
+  if (siteUrl.startsWith("https://")) {
+    await client.query(
+      `
+        INSERT INTO operations_report_positive_observations (
+          operations_report_id, title, description, source_key, display_order
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [
+        reportId,
+        "HTTPS is active",
+        "The reviewed website address uses HTTPS, which helps protect normal visitor browsing sessions.",
+        "https_active",
+        observationOrder++,
+      ],
+    );
+  }
+  await client.query(
+    `
+      INSERT INTO operations_report_positive_observations (
+        operations_report_id, title, description, source_key, display_order
+      )
+      VALUES ($1, $2, $3, $4, $5)
+    `,
+    [
+      reportId,
+      "Website was reachable during the scan",
+      "Scanlark completed a review of publicly accessible pages for this website.",
+      "scan_completed",
+      observationOrder++,
+    ],
+  );
+
+  const findings = await client.query<
+    Pick<
+      OperationsReportFindingRow,
+      | "id"
+      | "client_priority"
+      | "title"
+      | "recommended_action"
+      | "display_order"
+    >
+  >(
+    `
+      SELECT id, client_priority, title, recommended_action, display_order
+      FROM operations_report_findings
+      WHERE operations_report_id = $1
+        AND is_included = true
+        AND is_false_positive = false
+      ORDER BY display_order ASC, created_at ASC
+    `,
+    [reportId],
+  );
+  const groupCounts: Record<OperationsReportActionPlanGroup, number> = {
+    address_now: 0,
+    address_soon: 0,
+    consider_later: 0,
+  };
+  for (const finding of findings.rows) {
+    const group = actionPlanGroupForPriority(finding.client_priority);
+    await client.query(
+      `
+        INSERT INTO operations_report_action_plan_items (
+          operations_report_id,
+          report_finding_id,
+          group_key,
+          title,
+          summary,
+          display_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [
+        reportId,
+        finding.id,
+        group,
+        finding.title,
+        finding.recommended_action,
+        groupCounts[group]++,
       ],
     );
   }
@@ -753,6 +985,11 @@ export async function createOperationsReport(
     );
     const report = reportRes.rows[0];
     await insertFindingsForScan(client, report.id, input.scanRunId);
+    await insertDefaultReportReviewSections(
+      client,
+      report.id,
+      relationship.site_url,
+    );
     await client.query("COMMIT");
 
     await recordAdminAuditLog(actor, {
@@ -941,12 +1178,27 @@ export async function getOperationsReportDetail(
 ): Promise<OperationsReportDetail | null> {
   const report = await getReportById(reportId);
   if (!report) return null;
-  const [findings, comparisonItems, activity] = await Promise.all([
+  const [
+    findings,
+    positiveObservations,
+    actionPlanItems,
+    comparisonItems,
+    activity,
+  ] = await Promise.all([
     listFindings(reportId),
+    listPositiveObservations(reportId),
+    listActionPlanItems(reportId),
     listComparisonItems(reportId),
     listReportActivity(reportId),
   ]);
-  return { report, findings, comparisonItems, activity };
+  return {
+    report,
+    findings,
+    positiveObservations,
+    actionPlanItems,
+    comparisonItems,
+    activity,
+  };
 }
 
 export async function updateOperationsReport(
@@ -1050,12 +1302,17 @@ export async function updateOperationsReportFinding(
           client_explanation = CASE WHEN $5::boolean THEN $6 ELSE client_explanation END,
           why_it_matters = CASE WHEN $7::boolean THEN $8 ELSE why_it_matters END,
           recommended_action = CASE WHEN $9::boolean THEN $10 ELSE recommended_action END,
-          internal_note = CASE WHEN $11::boolean THEN $12 ELSE internal_note END,
-          estimated_effort = CASE WHEN $13::boolean THEN $14 ELSE estimated_effort END,
-          is_included = COALESCE($15, is_included),
-          is_false_positive = COALESCE($16, is_false_positive),
-          display_order = COALESCE($17, display_order),
-          comparison_status = CASE WHEN $18::boolean THEN $19 ELSE comparison_status END,
+          client_evidence = CASE WHEN $11::boolean THEN $12 ELSE client_evidence END,
+          affected_url_note = CASE WHEN $13::boolean THEN $14 ELSE affected_url_note END,
+          internal_note = CASE WHEN $15::boolean THEN $16 ELSE internal_note END,
+          false_positive_reason = CASE WHEN $17::boolean THEN $18 ELSE false_positive_reason END,
+          review_note = CASE WHEN $19::boolean THEN $20 ELSE review_note END,
+          reviewed_at = CASE WHEN $21::boolean THEN $22 ELSE reviewed_at END,
+          estimated_effort = CASE WHEN $23::boolean THEN $24 ELSE estimated_effort END,
+          is_included = COALESCE($25, is_included),
+          is_false_positive = COALESCE($26, is_false_positive),
+          display_order = COALESCE($27, display_order),
+          comparison_status = CASE WHEN $28::boolean THEN $29 ELSE comparison_status END,
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
@@ -1074,8 +1331,18 @@ export async function updateOperationsReportFinding(
       textValue(input.whyItMatters),
       input.recommendedAction !== undefined,
       textValue(input.recommendedAction),
+      input.clientEvidence !== undefined,
+      textValue(input.clientEvidence),
+      input.affectedUrlNote !== undefined,
+      textValue(input.affectedUrlNote),
       input.internalNote !== undefined,
       textValue(input.internalNote),
+      input.falsePositiveReason !== undefined,
+      textValue(input.falsePositiveReason),
+      input.reviewNote !== undefined,
+      textValue(input.reviewNote),
+      input.reviewedAt !== undefined,
+      input.reviewedAt ?? null,
       input.estimatedEffort !== undefined,
       textValue(input.estimatedEffort),
       input.isIncluded,
@@ -1095,6 +1362,140 @@ export async function updateOperationsReportFinding(
     });
   }
   return finding;
+}
+
+export async function updateOperationsReportPositiveObservation(
+  actor: AdminActor,
+  reportId: string,
+  observationId: string,
+  input: OperationsReportPositiveObservationUpdateInput,
+): Promise<OperationsReportPositiveObservationRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportPositiveObservationRow>(
+    `
+      UPDATE operations_report_positive_observations
+      SET title = COALESCE($3, title),
+          description = CASE WHEN $4::boolean THEN $5 ELSE description END,
+          is_included = COALESCE($6, is_included),
+          reviewed_at = CASE WHEN $7::boolean THEN $8 ELSE reviewed_at END,
+          display_order = COALESCE($9, display_order),
+          updated_at = now()
+      WHERE operations_report_id = $1
+        AND id = $2
+      RETURNING *
+    `,
+    [
+      reportId,
+      observationId,
+      input.title === undefined
+        ? null
+        : requiredText(input.title, "positive_observation_title"),
+      input.description !== undefined,
+      textValue(input.description),
+      input.isIncluded,
+      input.reviewedAt !== undefined,
+      input.reviewedAt ?? null,
+      input.displayOrder,
+    ],
+  );
+  const observation = res.rows[0] ?? null;
+  if (observation) {
+    await recordAdminAuditLog(actor, {
+      action: "operations_report_positive_observation_updated",
+      targetType: "operations_report",
+      targetId: reportId,
+      metadata: { observationId, fields: Object.keys(input) },
+    });
+  }
+  return observation;
+}
+
+export async function updateOperationsReportActionPlanItem(
+  actor: AdminActor,
+  reportId: string,
+  itemId: string,
+  input: OperationsReportActionPlanItemUpdateInput,
+): Promise<OperationsReportActionPlanItemRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportActionPlanItemRow>(
+    `
+      UPDATE operations_report_action_plan_items
+      SET group_key = COALESCE($3, group_key),
+          title = COALESCE($4, title),
+          summary = CASE WHEN $5::boolean THEN $6 ELSE summary END,
+          is_included = COALESCE($7, is_included),
+          display_order = COALESCE($8, display_order),
+          updated_at = now()
+      WHERE operations_report_id = $1
+        AND id = $2
+      RETURNING *
+    `,
+    [
+      reportId,
+      itemId,
+      input.groupKey ?? null,
+      input.title === undefined
+        ? null
+        : requiredText(input.title, "action_plan_item_title"),
+      input.summary !== undefined,
+      textValue(input.summary),
+      input.isIncluded,
+      input.displayOrder,
+    ],
+  );
+  const item = res.rows[0] ?? null;
+  if (item) {
+    await recordAdminAuditLog(actor, {
+      action: "operations_report_action_plan_item_updated",
+      targetType: "operations_report",
+      targetId: reportId,
+      metadata: { itemId, fields: Object.keys(input) },
+    });
+  }
+  return item;
+}
+
+export async function bulkUpdateOperationsReportFindings(
+  actor: AdminActor,
+  reportId: string,
+  input: OperationsReportFindingBulkInput,
+): Promise<OperationsReportFindingRow[]> {
+  if (input.findingIds.length === 0) return [];
+  const client = await ensureConnected();
+  let setClause = "";
+  const values: unknown[] = [reportId, input.findingIds];
+  if (input.action === "include" || input.action === "restore") {
+    setClause = "is_included = true, is_false_positive = false";
+  } else if (input.action === "exclude") {
+    setClause = "is_included = false";
+  } else if (input.action === "change_priority") {
+    values.push(input.clientPriority);
+    setClause = `client_priority = $${values.length}`;
+  } else {
+    setClause = "reviewed_at = now()";
+  }
+  const res = await client.query<OperationsReportFindingRow>(
+    `
+      UPDATE operations_report_findings
+      SET ${setClause},
+          updated_at = now()
+      WHERE operations_report_id = $1
+        AND id = ANY($2::uuid[])
+      RETURNING *
+    `,
+    values,
+  );
+  await recordAdminAuditLog(actor, {
+    action: "operations_report_findings_bulk_updated",
+    targetType: "operations_report",
+    targetId: reportId,
+    metadata: {
+      action: input.action,
+      count: res.rows.length,
+      clientPriority: input.clientPriority ?? null,
+    },
+  });
+  return res.rows;
 }
 
 export async function reorderOperationsReportFindings(
@@ -1151,49 +1552,66 @@ function readinessIssues(
     issues.push("Executive summary must be reviewed and saved.");
   }
   for (const finding of included) {
-    if (!textValue(finding.title) || !textValue(finding.client_explanation)) {
-      issues.push(
-        "Included findings need client-facing titles and explanations.",
-      );
-      break;
+    const missing: string[] = [];
+    if (!textValue(finding.client_priority)) missing.push("priority");
+    if (!textValue(finding.title)) missing.push("title");
+    if (!textValue(finding.client_explanation)) {
+      missing.push("plain-English explanation");
+    }
+    if (!textValue(finding.why_it_matters)) missing.push("why it matters");
+    if (!textValue(finding.recommended_action)) {
+      missing.push("recommended action");
+    }
+    if (!hasClientUsableAffectedUrl(finding)) {
+      missing.push("affected URL or no-URL reason");
+    }
+    if (missing.length > 0) {
+      issues.push(`"${finding.title}" needs ${missing.join(", ")}.`);
     }
   }
   return issues;
 }
 
-function positiveObservations(
-  report: OperationsReportRow,
-  findings: OperationsReportFindingRow[],
-) {
-  const observations: string[] = [];
-  const siteUrl = report.site_url ?? "";
-  if (siteUrl.startsWith("https://"))
-    observations.push("HTTPS is active for the reviewed website address.");
-  if (
-    !findings.some(
-      (finding) =>
-        finding.category === "link_integrity" &&
-        finding.client_priority === "critical",
-    )
-  ) {
-    observations.push(
-      "No critical broken-link findings were included in this reviewed client report.",
-    );
+function hasClientUsableAffectedUrl(finding: OperationsReportFindingRow) {
+  const affectedUrl = textValue(finding.affected_url);
+  if (affectedUrl) {
+    try {
+      const parsed = new URL(affectedUrl);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        return true;
+      }
+    } catch {
+      return false;
+    }
   }
-  if (
-    (report.included_findings ?? 0) === 0 &&
-    report.no_major_findings_waived
-  ) {
-    observations.push(
-      "No major client-facing findings were selected for this report.",
-    );
-  }
-  return observations;
+  return Boolean(textValue(finding.affected_url_note));
+}
+
+function emptyActionPlan(): OperationsClientReportPayload["actionPlan"] {
+  return {
+    address_now: [],
+    address_soon: [],
+    consider_later: [],
+  };
+}
+
+function isCurrentClientReportPayload(
+  payload: OperationsClientReportPayload | null,
+): payload is OperationsClientReportPayload {
+  return Boolean(
+    payload &&
+    typeof payload === "object" &&
+    "actionPlan" in payload &&
+    Array.isArray(payload.positiveObservations) &&
+    !payload.findings.some((finding) => "evidence" in finding),
+  );
 }
 
 export function buildOperationsClientReportPayload(
   report: OperationsReportRow,
   findings: OperationsReportFindingRow[],
+  positiveObservationRows: OperationsReportPositiveObservationRow[] = [],
+  actionPlanItemRows: OperationsReportActionPlanItemRow[] = [],
   comparisonItems: OperationsReportComparisonItemRow[] = [],
 ): OperationsClientReportPayload {
   const included = findings.filter(
@@ -1208,6 +1626,13 @@ export function buildOperationsClientReportPayload(
   included.forEach((finding) => {
     priorityCounts[finding.client_priority] += 1;
   });
+  const actionPlan = emptyActionPlan();
+  for (const item of actionPlanItemRows.filter((row) => row.is_included)) {
+    actionPlan[item.group_key].push({
+      title: item.title,
+      summary: item.summary,
+    });
+  }
   return {
     report: {
       id: report.id,
@@ -1234,9 +1659,9 @@ export function buildOperationsClientReportPayload(
     },
     scan: {
       id: report.scan_run_id,
-      finishedAt: null,
-      checkedLinks: 0,
-      totalLinks: 0,
+      finishedAt: iso(report.scan_finished_at ?? null),
+      checkedLinks: report.scan_checked_links ?? 0,
+      totalLinks: report.scan_total_links ?? 0,
     },
     summaries: {
       executiveSummary: report.executive_summary,
@@ -1249,19 +1674,25 @@ export function buildOperationsClientReportPayload(
     settings: mergeDisplaySettings(report.display_settings_json),
     priorityCounts,
     findings: included.map((finding) => ({
-      id: finding.id,
       priority: finding.client_priority,
       title: finding.title,
       affectedUrl: finding.affected_url,
+      affectedUrlNote: finding.affected_url_note,
       whatWasFound: finding.client_explanation,
       whyItMatters: finding.why_it_matters,
       recommendedAction: finding.recommended_action,
-      evidence: finding.evidence_json,
+      clientEvidence: finding.client_evidence,
       estimatedEffort: finding.estimated_effort,
       displayOrder: finding.display_order,
       comparisonStatus: finding.comparison_status,
     })),
-    positiveObservations: positiveObservations(report, findings),
+    actionPlan,
+    positiveObservations: positiveObservationRows
+      .filter((row) => row.is_included)
+      .map((row) => ({
+        title: row.title,
+        description: row.description,
+      })),
     methodology: [
       "This report is based on publicly accessible pages checked by Scanlark.",
       "It reflects the selected scan date and website conditions can change afterwards.",
@@ -1275,7 +1706,6 @@ export function buildOperationsClientReportPayload(
       "Discuss ongoing monitoring if recurring website checks would be useful.",
     ],
     comparison: comparisonItems.map((item) => ({
-      id: item.id,
       status: item.comparison_status,
       summary: item.summary,
     })),
@@ -1286,7 +1716,7 @@ export function buildOperationsClientReportPayload(
 export async function getOperationsReportPreview(reportId: string) {
   const detail = await getOperationsReportDetail(reportId);
   if (!detail) return null;
-  if (detail.report.frozen_render_json) {
+  if (isCurrentClientReportPayload(detail.report.frozen_render_json)) {
     return {
       payload: detail.report.frozen_render_json,
       frozen: true,
@@ -1297,6 +1727,8 @@ export async function getOperationsReportPreview(reportId: string) {
     payload: buildOperationsClientReportPayload(
       detail.report,
       detail.findings,
+      detail.positiveObservations,
+      detail.actionPlanItems,
       detail.comparisonItems,
     ),
     frozen: false,
@@ -1314,6 +1746,8 @@ export async function freezeOperationsReportRender(
   const payload = buildOperationsClientReportPayload(
     detail.report,
     detail.findings,
+    detail.positiveObservations,
+    detail.actionPlanItems,
     detail.comparisonItems,
   );
   const client = await ensureConnected();
@@ -1498,6 +1932,14 @@ export async function deleteOperationsReport(
       [reportId],
     );
     await client.query(
+      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query(
+      `DELETE FROM operations_report_positive_observations WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query(
       `DELETE FROM operations_report_findings WHERE operations_report_id = $1`,
       [reportId],
     );
@@ -1573,6 +2015,8 @@ export async function recordOperationsReportSent(
   const payload = buildOperationsClientReportPayload(
     detail.report,
     detail.findings,
+    detail.positiveObservations,
+    detail.actionPlanItems,
     detail.comparisonItems,
   );
   const client = await ensureConnected();

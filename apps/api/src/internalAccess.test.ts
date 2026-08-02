@@ -20,7 +20,9 @@ import {
   parseOperationsContactInput,
   parseOperationsAccessRequirementInput,
   parseOperationsReportCreateInput,
+  parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
+  parseOperationsReportPositiveObservationUpdateInput,
   parseOperationsReportSentInput,
   parseOperationsReportUpdateInput,
   parseOperationsClientServiceActivationInput,
@@ -39,6 +41,8 @@ import {
   buildOperationsClientReportPayload,
   type OperationsReportComparisonItemRow,
   type OperationsReportFindingRow,
+  type OperationsReportPositiveObservationRow,
+  type OperationsReportActionPlanItemRow,
   type OperationsReportRow,
 } from "../../../packages/db/src/operationsReports";
 import {
@@ -623,11 +627,32 @@ test("operations report editing validation rejects unsafe client copy and invali
     clientPriority: "important",
     clientExplanation: "A broken resource can reduce visitor trust.",
     recommendedAction: "Replace the missing resource or update the page.",
+    clientEvidence: "The reviewed page links to a missing destination.",
+    affectedUrlNote: "No single URL applies to this site-wide finding.",
     internalNote: "Check manually before sending.",
+    falsePositiveReason: "Manual review confirmed this is real.",
+    reviewNote: "Ready for Connor to approve.",
+    reviewedAt: "2026-01-22T09:00:00.000Z",
     isIncluded: true,
   });
   assert.equal(findingPatch.clientPriority, "important");
   assert.equal(findingPatch.isIncluded, true);
+  assert(findingPatch.reviewedAt instanceof Date);
+
+  const observationPatch = parseOperationsReportPositiveObservationUpdateInput({
+    title: "HTTPS is active",
+    description: "The site uses HTTPS for the reviewed address.",
+    isIncluded: true,
+  });
+  assert.equal(observationPatch.title, "HTTPS is active");
+
+  const bulkPatch = parseOperationsReportFindingBulkInput({
+    action: "change_priority",
+    clientPriority: "critical",
+    findingIds: ["11111111-1111-4111-8111-111111111111"],
+  });
+  assert.equal(bulkPatch.action, "change_priority");
+  assert.equal(bulkPatch.clientPriority, "critical");
 
   assert.throws(
     () =>
@@ -642,6 +667,14 @@ test("operations report editing validation rejects unsafe client copy and invali
         clientPriority: "blocker",
       }),
     /invalid_client_priority/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsReportFindingBulkInput({
+        action: "mark_false_positive",
+        findingIds: ["11111111-1111-4111-8111-111111111111"],
+      }),
+    /invalid_bulk_action/,
   );
 });
 
@@ -703,6 +736,9 @@ test("operations client report payload excludes internal-only finding data", () 
     business_name: "Example Co",
     site_url: "https://www.example.com",
     site_display_name: "Example",
+    scan_finished_at: now,
+    scan_checked_links: 9,
+    scan_total_links: 12,
   } satisfies OperationsReportRow;
   const findings = [
     {
@@ -721,9 +757,14 @@ test("operations client report payload excludes internal-only finding data", () 
       why_it_matters: "Broken links reduce trust.",
       recommended_action: "Update or remove the link.",
       affected_url: "https://www.example.com/missing",
+      client_evidence: "Status code 404 was returned during review.",
+      affected_url_note: null,
       evidence_json: { statusCode: 404 },
       is_included: true,
       is_false_positive: false,
+      false_positive_reason: null,
+      review_note: "Private review note.",
+      reviewed_at: now,
       internal_note: "Do not leak this note.",
       display_order: 1,
       estimated_effort: "Small",
@@ -747,9 +788,14 @@ test("operations client report payload excludes internal-only finding data", () 
       why_it_matters: null,
       recommended_action: null,
       affected_url: null,
+      client_evidence: "Excluded evidence",
+      affected_url_note: null,
       evidence_json: {},
       is_included: false,
       is_false_positive: false,
+      false_positive_reason: "Private false-positive context.",
+      review_note: "Excluded review note.",
+      reviewed_at: null,
       internal_note: "Excluded note.",
       display_order: 2,
       estimated_effort: null,
@@ -758,16 +804,59 @@ test("operations client report payload excludes internal-only finding data", () 
       updated_at: now,
     },
   ] satisfies OperationsReportFindingRow[];
+  const observations = [
+    {
+      id: "observation_1",
+      operations_report_id: "report_1",
+      title: "HTTPS is active",
+      description: "The reviewed address uses HTTPS.",
+      source_key: "https_active",
+      is_included: true,
+      reviewed_at: now,
+      display_order: 0,
+      created_at: now,
+      updated_at: now,
+    },
+  ] satisfies OperationsReportPositiveObservationRow[];
+  const actionPlanItems = [
+    {
+      id: "action_1",
+      operations_report_id: "report_1",
+      report_finding_id: "finding_1",
+      group_key: "address_soon",
+      title: "Repair important broken link",
+      summary: "Update or remove the link.",
+      is_included: true,
+      display_order: 0,
+      created_at: now,
+      updated_at: now,
+    },
+  ] satisfies OperationsReportActionPlanItemRow[];
 
   const payload = buildOperationsClientReportPayload(
     report,
     findings,
+    observations,
+    actionPlanItems,
     [] satisfies OperationsReportComparisonItemRow[],
   );
   assert.equal(payload.findings.length, 1);
   assert.equal(payload.findings[0]?.title, "Important broken link");
+  assert.equal(
+    payload.findings[0]?.clientEvidence,
+    "Status code 404 was returned during review.",
+  );
+  assert.equal(payload.positiveObservations[0]?.title, "HTTPS is active");
+  assert.equal(
+    payload.actionPlan.address_soon[0]?.title,
+    "Repair important broken link",
+  );
+  assert.equal(payload.scan.checkedLinks, 9);
   const serialized = JSON.stringify(payload);
   assert(!serialized.includes("Do not leak this note."));
+  assert(!serialized.includes("Private review note."));
+  assert(!serialized.includes("Private false-positive context."));
+  assert(!serialized.includes("statusCode"));
   assert(!serialized.includes("Excluded issue"));
   assert(!serialized.includes("source_issue_id"));
   assert(!serialized.includes("contact_email"));

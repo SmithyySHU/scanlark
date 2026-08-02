@@ -39,6 +39,7 @@ import {
   duplicateOperationsServicePlan,
   duplicateOperationsQuote,
   duplicateOperationsReport,
+  bulkUpdateOperationsReportFindings,
   freezeOperationsReportRender,
   freezeOperationsQuoteRender,
   getOperationsCommunication,
@@ -107,8 +108,10 @@ import {
   updateOperationsQuoteItem,
   updateOperationsQuoteServiceItem,
   updateOperationsReport,
+  updateOperationsReportActionPlanItem,
   updateOperationsReportComparisonItem,
   updateOperationsReportFinding,
+  updateOperationsReportPositiveObservation,
   updateOperationsWorkItem,
   updateOperationsWorkOrder,
   updateOperationsWorkOrderAccessRequirement,
@@ -132,6 +135,10 @@ import {
   type OperationsTaskStatus,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
+import {
+  operationsReportPdfFilename,
+  renderOperationsReportPdf,
+} from "../operationsReportPdf";
 import {
   OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
   addBusinessDays,
@@ -159,10 +166,13 @@ import {
   parseOperationsQuoteStatus,
   parseOperationsQuoteUpdateInput,
   parseOperationsReportClientPriority,
+  parseOperationsReportActionPlanItemUpdateInput,
   parseOperationsReportComparisonStatus,
   parseOperationsReportComparisonUpdateInput,
   parseOperationsReportCreateInput,
+  parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
+  parseOperationsReportPositiveObservationUpdateInput,
   parseOperationsReportRetestInput,
   parseOperationsReportSentInput,
   parseOperationsReportStatus,
@@ -2882,6 +2892,29 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.post("/reports/:reportId/findings/bulk", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const findings = await bulkUpdateOperationsReportFindings(
+        getActor(req),
+        reportId,
+        parseOperationsReportFindingBulkInput(req.body),
+      );
+      return res.json({ findings: serializeObject(findings) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report findings bulk update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_findings_bulk_update_failed",
+        "Failed to update selected findings",
+      );
+    }
+  });
+
   router.post(
     "/reports/:reportId/findings/:findingId/include",
     async (req, res) => {
@@ -3008,6 +3041,81 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
   });
+
+  router.patch(
+    "/reports/:reportId/positive-observations/:observationId",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const observationId = getUuidParam(req, res, "observationId");
+      if (!reportId || !observationId) return;
+      try {
+        const observation = await updateOperationsReportPositiveObservation(
+          getActor(req),
+          reportId,
+          observationId,
+          parseOperationsReportPositiveObservationUpdateInput(req.body),
+        );
+        if (!observation) {
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Positive observation not found",
+          );
+        }
+        return res.json({ observation: serializeObject(observation) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error(
+          "Operations report positive observation update failed",
+          err,
+        );
+        return sendApiError(
+          res,
+          500,
+          "operations_report_positive_observation_update_failed",
+          "Failed to update positive observation",
+        );
+      }
+    },
+  );
+
+  router.patch(
+    "/reports/:reportId/action-plan-items/:itemId",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const itemId = getUuidParam(req, res, "itemId");
+      if (!reportId || !itemId) return;
+      try {
+        const item = await updateOperationsReportActionPlanItem(
+          getActor(req),
+          reportId,
+          itemId,
+          parseOperationsReportActionPlanItemUpdateInput(req.body),
+        );
+        if (!item) {
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Action plan item not found",
+          );
+        }
+        return res.json({ item: serializeObject(item) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations report action plan update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_report_action_plan_update_failed",
+          "Failed to update action plan item",
+        );
+      }
+    },
+  );
 
   router.post("/reports/:reportId/mark-needs-review", async (req, res) => {
     const reportId = getUuidParam(req, res, "reportId");
@@ -3168,10 +3276,13 @@ export function mountOperationsRoutes(app: express.Application) {
       );
       if (!payload)
         return sendApiError(res, 404, "not_found", "Report not found");
-      return res.json({
-        payload: serializeObject(payload),
-        pdfMode: "browser_print",
-      });
+      const pdf = await renderOperationsReportPdf(payload);
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader(
+        "content-disposition",
+        `attachment; filename="${operationsReportPdfFilename(payload)}"`,
+      );
+      return res.send(pdf);
     } catch (err) {
       console.error("Operations report PDF generation failed", err);
       return sendApiError(
@@ -3190,14 +3301,13 @@ export function mountOperationsRoutes(app: express.Application) {
       const preview = await getOperationsReportPreview(reportId);
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
-      const serializedPreview = serializeObject(preview) as Record<
-        string,
-        unknown
-      >;
-      return res.json({
-        ...serializedPreview,
-        pdfMode: "browser_print",
-      });
+      const pdf = await renderOperationsReportPdf(preview.payload);
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader(
+        "content-disposition",
+        `attachment; filename="${operationsReportPdfFilename(preview.payload)}"`,
+      );
+      return res.send(pdf);
     } catch (err) {
       console.error("Operations report download failed", err);
       return sendApiError(

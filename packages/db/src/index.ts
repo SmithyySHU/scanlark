@@ -323,6 +323,7 @@ export type {
 } from "./operationsCommunications";
 export {
   buildOperationsClientReportPayload,
+  bulkUpdateOperationsReportFindings,
   createOperationsReport,
   createOperationsReportRetest,
   deleteOperationsReport,
@@ -343,11 +344,16 @@ export {
   reorderOperationsReportFindings,
   setOperationsReportArchived,
   updateOperationsReport,
+  updateOperationsReportActionPlanItem,
   updateOperationsReportComparisonItem,
   updateOperationsReportFinding,
+  updateOperationsReportPositiveObservation,
 } from "./operationsReports";
 export type {
   OperationsClientReportPayload,
+  OperationsReportActionPlanGroup,
+  OperationsReportActionPlanItemRow,
+  OperationsReportActionPlanItemUpdateInput,
   OperationsReportClientPriority,
   OperationsReportComparisonItemRow,
   OperationsReportComparisonStatus,
@@ -356,8 +362,11 @@ export type {
   OperationsReportDetail,
   OperationsReportDisplaySettings,
   OperationsReportFindingRow,
+  OperationsReportFindingBulkInput,
   OperationsReportFindingUpdateInput,
   OperationsReportListParams,
+  OperationsReportPositiveObservationRow,
+  OperationsReportPositiveObservationUpdateInput,
   OperationsReportRow,
   OperationsReportStatus,
   OperationsReportType,
