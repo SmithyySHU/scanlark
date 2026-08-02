@@ -993,12 +993,19 @@ type QuoteItemFormState = {
   title: string;
   description: string;
   quantity: string;
-  unitPriceMinor: string;
+  unitPrice: string;
   itemType: OperationsQuoteItemType;
   isOptional: boolean;
   isSelected: boolean;
   estimatedEffort: string;
 };
+
+type QuoteFormErrors = Partial<
+  Record<
+    "businessId" | "currency" | "title" | "scopeSummary" | "contactId",
+    string
+  >
+>;
 
 type BusinessFormState = {
   name: string;
@@ -1182,6 +1189,12 @@ const quoteItemTypeOptions: Array<{
   { value: "consultation", label: "Consultation" },
   { value: "other", label: "Other" },
 ];
+
+const quoteCurrencyOptions = [
+  { value: "GBP", label: "GBP — British pound" },
+  { value: "EUR", label: "EUR — Euro" },
+  { value: "USD", label: "USD — US dollar" },
+] as const;
 
 const workStatusLabels: Record<OperationsWorkStatus, string> = {
   not_started: "Not started",
@@ -1419,7 +1432,7 @@ const emptyQuoteItemForm: QuoteItemFormState = {
   title: "",
   description: "",
   quantity: "1",
-  unitPriceMinor: "0",
+  unitPrice: "0.00",
   itemType: "website_fix",
   isOptional: false,
   isSelected: true,
@@ -1882,6 +1895,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     useState<OperationsQuotePreviewPayload | null>(null);
   const [quoteFormOpen, setQuoteFormOpen] = useState(false);
   const [quoteForm, setQuoteForm] = useState<QuoteFormState>(emptyQuoteForm);
+  const [quoteFormErrors, setQuoteFormErrors] = useState<QuoteFormErrors>({});
   const [quoteItemForm, setQuoteItemForm] =
     useState<QuoteItemFormState>(emptyQuoteItemForm);
   const [quoteServiceItems, setQuoteServiceItems] = useState<
@@ -3263,47 +3277,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       validUntil: overrides.validUntil ?? "",
       currency: overrides.currency ?? "GBP",
     });
+    setQuoteFormErrors({});
     setQuoteFormOpen(true);
   }
 
   async function submitQuote(event: React.FormEvent) {
     event.preventDefault();
     setActionError(null);
-    const reportFindings =
-      reportDetail?.report.id === quoteForm.operationsReportId
-        ? reportDetail.findings.filter(
-            (finding) => finding.is_included && !finding.is_false_positive,
-          )
-        : [];
-    const items =
-      reportFindings.length > 0
-        ? reportFindings.map((finding, index) => ({
-            reportFindingId: finding.id,
-            title: finding.title,
-            description:
-              finding.recommended_action ??
-              finding.client_explanation ??
-              "Review and complete the agreed fix.",
-            quantity: 1,
-            unitPriceMinor: 0,
-            itemType: "website_fix",
-            isOptional: false,
-            isSelected: true,
-            displayOrder: index,
-            estimatedEffort: finding.estimated_effort,
-          }))
-        : [
-            {
-              title: "Website fix",
-              description: "Manually scoped website improvement work.",
-              quantity: 1,
-              unitPriceMinor: 0,
-              itemType: "website_fix",
-              isOptional: false,
-              isSelected: true,
-              displayOrder: 0,
-            },
-          ];
+    const errors: QuoteFormErrors = {};
+    if (!quoteForm.businessId) errors.businessId = "Select a business.";
+    if (
+      !quoteCurrencyOptions.some((item) => item.value === quoteForm.currency)
+    ) {
+      errors.currency = "Select a valid currency.";
+    }
+    if (!quoteForm.title.trim()) errors.title = "Enter a quote title.";
+    if (!quoteForm.scopeSummary.trim()) {
+      errors.scopeSummary = "Enter a scope summary.";
+    }
+    if (Object.keys(errors).length > 0) {
+      setQuoteFormErrors(errors);
+      setActionError("Fix the highlighted quote fields.");
+      return;
+    }
+    setQuoteFormErrors({});
     try {
       const res = await apiFetch(`${apiBase}/operations/quotes`, {
         method: "POST",
@@ -3319,13 +3316,25 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           includedScope: quoteForm.includedScope,
           excludedScope: quoteForm.excludedScope,
           paymentTerms: quoteForm.paymentTerms,
-          items,
+          items: [],
         }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as {
+          error?: string;
           message?: string;
         } | null;
+        if (data?.error === "invalid_currency") {
+          setQuoteFormErrors({ currency: "Select a valid currency." });
+        } else if (data?.error === "contact_not_found") {
+          setQuoteFormErrors({
+            contactId: "This contact does not belong to the selected business.",
+          });
+        } else if (data?.error === "title_required") {
+          setQuoteFormErrors({ title: "Enter a quote title." });
+        } else if (data?.error === "scopeSummary_required") {
+          setQuoteFormErrors({ scopeSummary: "Enter a scope summary." });
+        }
         throw new Error(data?.message ?? "Failed to create quote");
       }
       const data = (await res.json()) as { quote: OperationsQuoteDetail };
@@ -3415,8 +3424,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             title: quoteItemForm.title,
             description: quoteItemForm.description,
             quantity: Number.parseInt(quoteItemForm.quantity, 10) || 1,
-            unitPriceMinor:
-              Number.parseInt(quoteItemForm.unitPriceMinor, 10) || 0,
+            unitPrice: quoteItemForm.unitPrice,
             itemType: quoteItemForm.itemType,
             isOptional: quoteItemForm.isOptional,
             isSelected: quoteItemForm.isSelected,
@@ -5168,6 +5176,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     </option>
                   ))}
                 </select>
+                {quoteFormErrors.businessId && (
+                  <small className="ops-overdue">
+                    {quoteFormErrors.businessId}
+                  </small>
+                )}
               </label>
               <label>
                 Contact
@@ -5189,18 +5202,34 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       </option>
                     ))}
                 </select>
+                {quoteFormErrors.contactId && (
+                  <small className="ops-overdue">
+                    {quoteFormErrors.contactId}
+                  </small>
+                )}
               </label>
               <label>
                 Currency
-                <input
+                <select
                   value={quoteForm.currency}
                   onChange={(event) =>
                     setQuoteForm((prev) => ({
                       ...prev,
-                      currency: event.target.value.toUpperCase(),
+                      currency: event.target.value,
                     }))
                   }
-                />
+                >
+                  {quoteCurrencyOptions.map((currency) => (
+                    <option key={currency.value} value={currency.value}>
+                      {currency.label}
+                    </option>
+                  ))}
+                </select>
+                {quoteFormErrors.currency && (
+                  <small className="ops-overdue">
+                    {quoteFormErrors.currency}
+                  </small>
+                )}
               </label>
               <label>
                 Valid until
@@ -5228,6 +5257,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 }
                 required
               />
+              {quoteFormErrors.title && (
+                <small className="ops-overdue">{quoteFormErrors.title}</small>
+              )}
             </label>
             <label>
               Scope summary
@@ -5239,7 +5271,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     scopeSummary: event.target.value,
                   }))
                 }
+                required
               />
+              {quoteFormErrors.scopeSummary && (
+                <small className="ops-overdue">
+                  {quoteFormErrors.scopeSummary}
+                </small>
+              )}
             </label>
             <div className="ops-form-grid">
               <label>
@@ -5694,7 +5732,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <span>{item.description}</span>
                 <small>
                   {quoteItemTypeLabel(item.item_type)} · quantity{" "}
-                  {item.quantity} ·{" "}
+                  {item.quantity} · unit{" "}
+                  {formatMoney(item.unit_price_minor, quote.currency)} · total{" "}
                   {formatMoney(item.line_total_minor, quote.currency)}
                   {item.is_optional ? " · optional" : ""}
                   {!item.is_selected ? " · not selected" : ""}
@@ -5750,13 +5789,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 </select>
               </label>
               <label>
-                Unit price minor
+                Unit price ({quote.currency === "GBP" ? "£" : quote.currency})
                 <input
-                  value={quoteItemForm.unitPriceMinor}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={quoteItemForm.unitPrice}
                   onChange={(event) =>
                     setQuoteItemForm((prev) => ({
                       ...prev,
-                      unitPriceMinor: event.target.value,
+                      unitPrice: event.target.value,
                     }))
                   }
                 />

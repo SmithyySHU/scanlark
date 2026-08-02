@@ -28,6 +28,7 @@ import {
   parseOperationsClientServiceUsageInput,
   parseOperationsServicePlanInput,
   parseOperationsQuoteAcceptedInput,
+  parseOperationsQuoteCreateInput,
   parseOperationsQuoteItemInput,
   parseOperationsTaskInput,
   renderClientCommunicationTemplate,
@@ -898,6 +899,41 @@ test("operations quote readiness requires complete client-facing quote content",
 });
 
 test("operations quote validators reject invalid money, acceptance, and credentials", () => {
+  const quoteInput = parseOperationsQuoteCreateInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    title: "Draft quote",
+    currency: "GBP",
+    scopeSummary: "Draft scope summary.",
+    items: [],
+  });
+  assert.equal(quoteInput.currency, "GBP");
+  assert.equal(quoteInput.items?.length, 0);
+
+  const defaultCurrencyQuoteInput = parseOperationsQuoteCreateInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    title: "Default currency quote",
+    scopeSummary: "Draft scope summary.",
+  });
+  assert.equal(defaultCurrencyQuoteInput.currency, "GBP");
+
+  assert.throws(
+    () =>
+      parseOperationsQuoteCreateInput({
+        businessId: "11111111-1111-4111-8111-111111111111",
+        title: "Bad currency quote",
+        currency: "GBP 20",
+        scopeSummary: "Draft scope summary.",
+      }),
+    /invalid_currency/,
+  );
+
+  const decimalPriceItem = parseOperationsQuoteItemInput({
+    title: "Fix",
+    quantity: 1,
+    unitPrice: "20.00",
+  });
+  assert.equal(decimalPriceItem.unitPriceMinor, 2000);
+
   assert.throws(
     () => parseOperationsQuoteItemInput({ title: "Fix", unitPriceMinor: -1 }),
     /invalid_unitPriceMinor/,

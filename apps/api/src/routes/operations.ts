@@ -571,6 +571,28 @@ function handleValidationError(res: Response, err: unknown) {
   if (message === "invalid_date") {
     return sendApiError(res, 400, message, "Date value is invalid");
   }
+  if (message === "invalid_currency") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_currency",
+      "Select a valid currency.",
+    );
+  }
+  if (message === "title_required") {
+    return sendApiError(res, 400, "title_required", "Enter a quote title.");
+  }
+  if (message === "scopeSummary_required") {
+    return sendApiError(
+      res,
+      400,
+      "scopeSummary_required",
+      "Enter a scope summary.",
+    );
+  }
+  if (message === "invalid_unitPrice" || message === "invalid_unitPriceMinor") {
+    return sendApiError(res, 400, message, "Enter a valid unit price.");
+  }
   if (message === "unsafe_html") {
     return sendApiError(
       res,
@@ -1409,7 +1431,12 @@ export function mountOperationsRoutes(app: express.Application) {
         return sendApiError(res, 404, "not_found", "Business not found");
       }
       if (result === "contact_not_found") {
-        return sendApiError(res, 404, "not_found", "Contact not found");
+        return sendApiError(
+          res,
+          400,
+          "contact_not_found",
+          "This contact does not belong to the selected business.",
+        );
       }
       if (result === "report_not_found") {
         return sendApiError(res, 404, "not_found", "Report not found");

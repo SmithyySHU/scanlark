@@ -1477,7 +1477,10 @@ export function parseOperationsQuoteItemInput(
     parsed.quantity = parseQuantity(record, "quantity");
   }
   if ("unitPriceMinor" in record || !options.partial) {
-    parsed.unitPriceMinor = parseMinorMoney(record, "unitPriceMinor", 0);
+    parsed.unitPriceMinor =
+      "unitPrice" in record
+        ? parseMajorMoneyToMinor(record, "unitPrice", 0)
+        : parseMinorMoney(record, "unitPriceMinor", 0);
   }
   if ("itemType" in record || !options.partial) {
     const itemType = parseOperationsQuoteItemType(
@@ -1552,11 +1555,13 @@ export function parseOperationsQuoteCreateInput(
       : {};
   const businessId = optionalUuidField(record, "businessId");
   if (!businessId) throw new Error("invalid_businessId");
+  const title = requiredClientTextField(record, "title");
+  const scopeSummary = requiredClientTextField(record, "scopeSummary");
   return {
     businessId,
     contactId: optionalUuidField(record, "contactId"),
     operationsReportId: optionalUuidField(record, "operationsReportId"),
-    title: requiredClientTextField(record, "title"),
+    title,
     currency: parseCurrency(record.currency),
     discountMinor: parseMinorMoney(record, "discountMinor", 0),
     validUntil: parseDateField(record, "validUntil"),
@@ -1567,7 +1572,7 @@ export function parseOperationsQuoteCreateInput(
       "estimatedDurationText",
     ),
     paymentTerms: optionalClientTextField(record, "paymentTerms"),
-    scopeSummary: optionalClientTextField(record, "scopeSummary"),
+    scopeSummary,
     includedScope: optionalClientTextField(record, "includedScope"),
     excludedScope: optionalClientTextField(record, "excludedScope"),
     assumptions: optionalClientTextField(record, "assumptions"),
