@@ -17,10 +17,13 @@ import {
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsAccessRequirementInput,
   parseOperationsReportCreateInput,
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportSentInput,
   parseOperationsReportUpdateInput,
+  parseOperationsQuoteAcceptedInput,
+  parseOperationsQuoteItemInput,
   parseOperationsTaskInput,
   renderClientCommunicationTemplate,
   serializeOperationsSummary,
@@ -31,6 +34,16 @@ import {
   type OperationsReportFindingRow,
   type OperationsReportRow,
 } from "../../../packages/db/src/operationsReports";
+import {
+  buildOperationsQuotePreviewPayload,
+  calculateQuoteTotals,
+  getOperationsCommercialConfig,
+  getQuoteReadinessIssues,
+  type OperationsQuoteAccessRequirementRow,
+  type OperationsQuoteDetail,
+  type OperationsQuoteItemRow,
+  type OperationsQuoteRow,
+} from "../../../packages/db/src/operationsQuotesWork";
 
 async function withEnv<T>(
   env: Record<string, string | undefined>,
@@ -162,7 +175,13 @@ test("operations summary serialization returns a compact safe shape", () => {
       reportFollowUpsDue: 0,
       criticalClientSites: 2,
       quotesAwaitingResponse: 0,
+      quotesReadyToSend: 0,
+      quotesExpiringSoon: 0,
+      acceptedQuotesAwaitingConversion: 0,
       openWorkItems: 0,
+      awaitingAccess: 0,
+      blockedWork: 0,
+      workReadyForTesting: 0,
     },
     monitoringAttention: [
       {
@@ -665,6 +684,223 @@ test("operations client report payload excludes internal-only finding data", () 
   assert(!serialized.includes("Excluded issue"));
   assert(!serialized.includes("source_issue_id"));
   assert(!serialized.includes("contact_email"));
+});
+
+function makeQuoteDetail(
+  overrides: Partial<OperationsQuoteDetail> = {},
+): OperationsQuoteDetail {
+  const now = new Date("2026-01-01T12:00:00.000Z");
+  const quote: OperationsQuoteRow = {
+    id: "quote_1",
+    business_id: "business_1",
+    contact_id: "contact_1",
+    operations_report_id: "report_1",
+    quote_number: "SL-Q-2026-0001",
+    title: "Website health fixes",
+    status: "draft",
+    currency: "GBP",
+    subtotal_minor: 20000,
+    discount_minor: 0,
+    tax_minor: 0,
+    total_minor: 20000,
+    valid_until: new Date("2026-01-15T00:00:00.000Z"),
+    estimated_start_date: null,
+    estimated_completion_date: null,
+    estimated_duration_text: "One week",
+    payment_terms: "50% upfront, balance on completion.",
+    scope_summary: "Fix the agreed website health issues.",
+    included_scope: "Broken links and missing resources.",
+    excluded_scope: "Content rewrites.",
+    assumptions: null,
+    client_responsibilities: null,
+    access_requirements_summary: "CMS editor access reference.",
+    internal_notes: "Do not expose pricing discussion.",
+    sent_at: null,
+    accepted_at: null,
+    declined_at: null,
+    expired_at: null,
+    cancelled_at: null,
+    frozen_render_json: null,
+    frozen_at: null,
+    last_pdf_generated_at: null,
+    delivery_communication_id: null,
+    follow_up_task_id: null,
+    converted_work_order_id: null,
+    created_by_user_id: null,
+    created_at: now,
+    updated_at: now,
+    business_name: "Example Ltd",
+    contact_first_name: "Ava",
+    contact_last_name: "Smith",
+    contact_email: "ava@example.com",
+    report_title: "Example website health report",
+    report_site_url: "https://example.com",
+    report_site_display_name: "Example",
+  };
+  const items: OperationsQuoteItemRow[] = [
+    {
+      id: "item_1",
+      quote_id: quote.id,
+      report_finding_id: "finding_1",
+      title: "Repair broken links",
+      description: "Fix the highest-impact broken links.",
+      quantity: 1,
+      unit_price_minor: 20000,
+      line_total_minor: 20000,
+      item_type: "website_fix",
+      is_optional: false,
+      is_selected: true,
+      display_order: 1,
+      estimated_effort: "Small",
+      internal_notes: "Margin target is private.",
+      created_at: now,
+      updated_at: now,
+      finding_title: "Broken checkout link",
+    },
+    {
+      id: "item_2",
+      quote_id: quote.id,
+      report_finding_id: null,
+      title: "Optional monitoring setup",
+      description: "Optional monthly monitoring setup.",
+      quantity: 1,
+      unit_price_minor: 10000,
+      line_total_minor: 10000,
+      item_type: "monitoring_setup",
+      is_optional: true,
+      is_selected: false,
+      display_order: 2,
+      estimated_effort: "Small",
+      internal_notes: "Upsell only.",
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+  const accessRequirements: OperationsQuoteAccessRequirementRow[] = [
+    {
+      id: "access_1",
+      quote_id: quote.id,
+      description: "CMS editor access",
+      status: "requested",
+      requested_at: null,
+      received_at: null,
+      secure_storage_reference: "1Password item ref only",
+      notes: "Do not include any credential values.",
+      display_order: 1,
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+  return {
+    quote,
+    items,
+    accessRequirements,
+    statusHistory: [],
+    readinessIssues: [],
+    linkedWorkOrder: null,
+    ...overrides,
+  };
+}
+
+test("operations quote totals use selected items and omit VAT by default", () => {
+  const totals = calculateQuoteTotals(
+    [
+      {
+        quantity: 1,
+        unitPriceMinor: 20000,
+        isSelected: true,
+        isOptional: false,
+      },
+      {
+        quantity: 1,
+        unitPriceMinor: 10000,
+        isSelected: false,
+        isOptional: true,
+      },
+    ],
+    2500,
+    getOperationsCommercialConfig({
+      OPERATIONS_BUSINESS_VAT_REGISTERED: "false",
+      OPERATIONS_VAT_RATE_PERCENT: "20",
+    }),
+  );
+
+  assert.deepEqual(totals, {
+    subtotalMinor: 20000,
+    discountMinor: 2500,
+    taxMinor: 0,
+    totalMinor: 17500,
+  });
+});
+
+test("operations quote preview excludes internal notes and unselected optional items", () => {
+  const detail = makeQuoteDetail();
+  const payload = buildOperationsQuotePreviewPayload(
+    detail.quote,
+    detail.items,
+  );
+
+  assert.equal(payload.items.length, 1);
+  assert.equal(payload.items[0]?.title, "Repair broken links");
+  assert.equal(payload.totals.vatRegistered, false);
+  assert.equal(payload.totals.vatNotice, "No VAT charged.");
+  const serialized = JSON.stringify(payload);
+  assert(!serialized.includes("Margin target"));
+  assert(!serialized.includes("Upsell only"));
+  assert(!serialized.includes("Do not expose pricing discussion"));
+  assert(!serialized.includes("Optional monthly monitoring setup"));
+});
+
+test("operations quote readiness requires complete client-facing quote content", () => {
+  const complete = makeQuoteDetail();
+  const incomplete = makeQuoteDetail({
+    quote: {
+      ...complete.quote,
+      scope_summary: "",
+      included_scope: "",
+      excluded_scope: "",
+      payment_terms: "",
+    },
+    items: [],
+  });
+
+  assert.deepEqual(getQuoteReadinessIssues(complete.quote, complete.items), []);
+  assert(
+    getQuoteReadinessIssues(incomplete.quote, incomplete.items).includes(
+      "At least one selected item is required.",
+    ),
+  );
+  assert(
+    getQuoteReadinessIssues(incomplete.quote, incomplete.items).includes(
+      "Scope summary is required.",
+    ),
+  );
+});
+
+test("operations quote validators reject invalid money, acceptance, and credentials", () => {
+  assert.throws(
+    () => parseOperationsQuoteItemInput({ title: "Fix", unitPriceMinor: -1 }),
+    /invalid_unitPriceMinor/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsQuoteAcceptedInput({
+        acceptedAt: "2026-01-01T12:00:00.000Z",
+        acceptanceMethod: "email",
+        totalMinorConfirmed: 1000,
+        selectedItemsConfirmed: true,
+        freezeConfirmed: false,
+      }),
+    /freeze_not_confirmed/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsAccessRequirementInput({
+        description: "CMS access",
+        secureStorageReference: "password=plain-text-value",
+      }),
+    /credential_values_not_allowed/,
+  );
 });
 
 test("multiple administrator emails are parsed case-insensitively", () => {

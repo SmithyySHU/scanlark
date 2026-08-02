@@ -118,6 +118,15 @@ Required for normal local development:
 - `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`: optional global default for
   suggested Operations follow-up dates. Leave blank to use each template or
   category default; valid values are `0` through `60`.
+- `OPERATIONS_QUOTE_PREFIX` and `OPERATIONS_WORK_ORDER_PREFIX`: document number
+  prefixes, defaulting to `SL-Q` and `SL-W`.
+- `OPERATIONS_DEFAULT_CURRENCY`: ISO currency used for new Operations quotes,
+  default `GBP`.
+- `OPERATIONS_DEFAULT_QUOTE_VALID_DAYS`: quote validity window for new quotes,
+  default `14`.
+- `OPERATIONS_BUSINESS_VAT_REGISTERED` and `OPERATIONS_VAT_RATE_PERCENT`:
+  quote VAT configuration. VAT is off by default, and client previews state
+  that no VAT is charged when disabled.
 
 Common development variables:
 

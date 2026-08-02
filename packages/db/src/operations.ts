@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { getOperationsBusinessCounts } from "./operationsCrm";
+import { getOperationsCommercialCounts } from "./operationsQuotesWork";
 import { getOperationsReportCountsForSummary } from "./operationsReports";
 
 export type OperationsSummaryCounts = {
@@ -11,7 +12,13 @@ export type OperationsSummaryCounts = {
   reportFollowUpsDue: number;
   criticalClientSites: number;
   quotesAwaitingResponse: number;
+  quotesReadyToSend: number;
+  quotesExpiringSoon: number;
+  acceptedQuotesAwaitingConversion: number;
   openWorkItems: number;
+  awaitingAccess: number;
+  blockedWork: number;
+  workReadyForTesting: number;
 };
 
 export type OperationsMonitoringAttentionItem = {
@@ -135,6 +142,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     highPrioritySiteCount,
     crmCounts,
     reportCounts,
+    commercialCounts,
   ] = await Promise.all([
     client.query<DownSiteRow>(
       `
@@ -269,6 +277,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     ),
     getOperationsBusinessCounts(),
     getOperationsReportCountsForSummary(),
+    getOperationsCommercialCounts(),
   ]);
 
   const monitoringAttention: OperationsMonitoringAttentionItem[] = [
@@ -377,8 +386,15 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
       reportsAwaitingClientResponse: reportCounts.reportsAwaitingClientResponse,
       reportFollowUpsDue: reportCounts.reportFollowUpsDue,
       criticalClientSites: countValue(highPrioritySiteCount.rows[0]),
-      quotesAwaitingResponse: 0,
-      openWorkItems: crmCounts.openWorkItems,
+      quotesAwaitingResponse: commercialCounts.quotesAwaitingResponse,
+      quotesReadyToSend: commercialCounts.quotesReadyToSend,
+      quotesExpiringSoon: commercialCounts.quotesExpiringSoon,
+      acceptedQuotesAwaitingConversion:
+        commercialCounts.acceptedQuotesAwaitingConversion,
+      openWorkItems: commercialCounts.openWorkItems || crmCounts.openWorkItems,
+      awaitingAccess: commercialCounts.awaitingAccess,
+      blockedWork: commercialCounts.blockedWork,
+      workReadyForTesting: commercialCounts.workReadyForTesting,
     },
     monitoringAttention,
     recentActivity,

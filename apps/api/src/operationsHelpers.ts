@@ -7,7 +7,15 @@ import type {
   OperationsCommunicationStatus,
   OperationsCommunicationTemplateCategory,
   OperationsContactInput,
+  OperationsAccessRequirementInput,
+  OperationsAccessRequirementStatus,
   OperationsPipelineStage,
+  OperationsQuoteInput,
+  OperationsQuoteItemInput,
+  OperationsQuoteItemType,
+  OperationsQuoteStatus,
+  OperationsQuoteUpdateInput,
+  OperationsRetestStatus,
   OperationsReportClientPriority,
   OperationsReportComparisonStatus,
   OperationsReportCreateInput,
@@ -18,6 +26,11 @@ import type {
   OperationsRelationshipType,
   OperationsSummary,
   OperationsTaskStatus,
+  OperationsWorkItemInput,
+  OperationsWorkItemStatus,
+  OperationsWorkOrderPriority,
+  OperationsWorkOrderStatus,
+  OperationsWorkOrderUpdateInput,
 } from "@scanlark/db";
 import { normalizeSiteUrlInput } from "./siteUrl";
 
@@ -128,6 +141,76 @@ export const OPERATIONS_REPORT_COMPARISON_STATUSES = [
   "unable_to_compare",
 ] as const;
 
+export const OPERATIONS_QUOTE_STATUSES = [
+  "draft",
+  "needs_review",
+  "ready_to_send",
+  "sent",
+  "accepted",
+  "declined",
+  "expired",
+  "cancelled",
+  "converted_to_work",
+] as const;
+
+export const OPERATIONS_QUOTE_ITEM_TYPES = [
+  "website_fix",
+  "investigation",
+  "configuration",
+  "content_change",
+  "monitoring_setup",
+  "retest",
+  "consultation",
+  "other",
+] as const;
+
+export const OPERATIONS_ACCESS_REQUIREMENT_STATUSES = [
+  "not_required",
+  "not_requested",
+  "requested",
+  "received",
+  "verified",
+  "no_longer_needed",
+] as const;
+
+export const OPERATIONS_WORK_ORDER_STATUSES = [
+  "not_started",
+  "awaiting_access",
+  "ready_to_start",
+  "in_progress",
+  "waiting_for_client",
+  "blocked",
+  "ready_for_testing",
+  "testing",
+  "completed",
+  "cancelled",
+] as const;
+
+export const OPERATIONS_WORK_ORDER_PRIORITIES = [
+  "urgent",
+  "high",
+  "normal",
+  "low",
+] as const;
+
+export const OPERATIONS_WORK_ITEM_STATUSES = [
+  "to_do",
+  "in_progress",
+  "waiting_for_client",
+  "blocked",
+  "ready_for_testing",
+  "completed",
+  "cancelled",
+] as const;
+
+export const OPERATIONS_RETEST_STATUSES = [
+  "not_required",
+  "pending",
+  "passed",
+  "failed",
+  "unable_to_verify",
+] as const;
+
 export const SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS = [
   "firstName",
   "lastName",
@@ -197,6 +280,17 @@ const REPORT_CLIENT_PRIORITY_SET = new Set<string>(
 const REPORT_COMPARISON_STATUS_SET = new Set<string>(
   OPERATIONS_REPORT_COMPARISON_STATUSES,
 );
+const QUOTE_STATUS_SET = new Set<string>(OPERATIONS_QUOTE_STATUSES);
+const QUOTE_ITEM_TYPE_SET = new Set<string>(OPERATIONS_QUOTE_ITEM_TYPES);
+const ACCESS_REQUIREMENT_STATUS_SET = new Set<string>(
+  OPERATIONS_ACCESS_REQUIREMENT_STATUSES,
+);
+const WORK_ORDER_STATUS_SET = new Set<string>(OPERATIONS_WORK_ORDER_STATUSES);
+const WORK_ORDER_PRIORITY_SET = new Set<string>(
+  OPERATIONS_WORK_ORDER_PRIORITIES,
+);
+const WORK_ITEM_STATUS_SET = new Set<string>(OPERATIONS_WORK_ITEM_STATUSES);
+const RETEST_STATUS_SET = new Set<string>(OPERATIONS_RETEST_STATUSES);
 
 const DEFAULT_FOLLOW_UP_BUSINESS_DAYS_BY_CATEGORY: Partial<
   Record<OperationsCommunicationTemplateCategory, number>
@@ -443,6 +537,67 @@ export function parseOperationsReportComparisonStatus(
   if (typeof value !== "string") return null;
   return REPORT_COMPARISON_STATUS_SET.has(value)
     ? (value as OperationsReportComparisonStatus)
+    : null;
+}
+
+export function parseOperationsQuoteStatus(
+  value: unknown,
+): OperationsQuoteStatus | null {
+  if (typeof value !== "string") return null;
+  return QUOTE_STATUS_SET.has(value) ? (value as OperationsQuoteStatus) : null;
+}
+
+export function parseOperationsQuoteItemType(
+  value: unknown,
+): OperationsQuoteItemType | null {
+  if (typeof value !== "string") return null;
+  return QUOTE_ITEM_TYPE_SET.has(value)
+    ? (value as OperationsQuoteItemType)
+    : null;
+}
+
+export function parseOperationsAccessRequirementStatus(
+  value: unknown,
+): OperationsAccessRequirementStatus | null {
+  if (typeof value !== "string") return null;
+  return ACCESS_REQUIREMENT_STATUS_SET.has(value)
+    ? (value as OperationsAccessRequirementStatus)
+    : null;
+}
+
+export function parseOperationsWorkOrderStatus(
+  value: unknown,
+): OperationsWorkOrderStatus | null {
+  if (typeof value !== "string") return null;
+  return WORK_ORDER_STATUS_SET.has(value)
+    ? (value as OperationsWorkOrderStatus)
+    : null;
+}
+
+export function parseOperationsWorkOrderPriority(
+  value: unknown,
+): OperationsWorkOrderPriority | null {
+  if (typeof value !== "string") return null;
+  return WORK_ORDER_PRIORITY_SET.has(value)
+    ? (value as OperationsWorkOrderPriority)
+    : null;
+}
+
+export function parseOperationsWorkItemStatus(
+  value: unknown,
+): OperationsWorkItemStatus | null {
+  if (typeof value !== "string") return null;
+  return WORK_ITEM_STATUS_SET.has(value)
+    ? (value as OperationsWorkItemStatus)
+    : null;
+}
+
+export function parseOperationsRetestStatus(
+  value: unknown,
+): OperationsRetestStatus | null {
+  if (typeof value !== "string") return null;
+  return RETEST_STATUS_SET.has(value)
+    ? (value as OperationsRetestStatus)
     : null;
 }
 
@@ -1023,6 +1178,471 @@ export function parseOperationsReportComparisonUpdateInput(body: unknown) {
     parsed.manualNote = optionalClientTextField(record, "manualNote");
   }
   return parsed;
+}
+
+function parseCurrency(value: unknown, fallback = "GBP") {
+  const currency =
+    typeof value === "string" && value.trim()
+      ? value.trim().toUpperCase()
+      : fallback;
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error("invalid_currency");
+  return currency;
+}
+
+function parseMinorMoney(
+  input: Record<string, unknown>,
+  key: string,
+  fallback = 0,
+) {
+  if (!(key in input)) return fallback;
+  const value = input[key];
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number.parseInt(value.trim(), 10)
+        : fallback;
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100_000_000) {
+    throw new Error(`invalid_${key}`);
+  }
+  return parsed;
+}
+
+function parseQuantity(input: Record<string, unknown>, key: string) {
+  if (!(key in input)) return 1;
+  const value = input[key];
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number.parseInt(value.trim(), 10)
+        : 1;
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 999) {
+    throw new Error(`invalid_${key}`);
+  }
+  return parsed;
+}
+
+function parsePlainArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => {
+        return Boolean(
+          item && typeof item === "object" && !Array.isArray(item),
+        );
+      })
+    : [];
+}
+
+export function parseOperationsQuoteItemInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsQuoteItemInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsQuoteItemInput> = {};
+  if ("title" in record || !options.partial) {
+    parsed.title = options.partial
+      ? (optionalClientTextField(record, "title") ?? undefined)
+      : requiredClientTextField(record, "title");
+  }
+  if ("reportFindingId" in record) {
+    parsed.reportFindingId = optionalUuidField(record, "reportFindingId");
+  }
+  if ("description" in record) {
+    parsed.description = optionalClientTextField(record, "description");
+  }
+  if ("quantity" in record || !options.partial) {
+    parsed.quantity = parseQuantity(record, "quantity");
+  }
+  if ("unitPriceMinor" in record || !options.partial) {
+    parsed.unitPriceMinor = parseMinorMoney(record, "unitPriceMinor", 0);
+  }
+  if ("itemType" in record || !options.partial) {
+    const itemType = parseOperationsQuoteItemType(
+      record.itemType ?? "website_fix",
+    );
+    if (!itemType) throw new Error("invalid_item_type");
+    parsed.itemType = itemType;
+  }
+  if ("isOptional" in record) parsed.isOptional = record.isOptional === true;
+  if ("isSelected" in record) parsed.isSelected = record.isSelected !== false;
+  if ("displayOrder" in record) {
+    const order = parseMinorMoney(record, "displayOrder", 0);
+    parsed.displayOrder = order;
+  }
+  if ("estimatedEffort" in record) {
+    parsed.estimatedEffort = optionalClientTextField(record, "estimatedEffort");
+  }
+  if ("internalNotes" in record) {
+    parsed.internalNotes = optionalClientTextField(record, "internalNotes");
+  }
+  return parsed as OperationsQuoteItemInput;
+}
+
+export function parseOperationsAccessRequirementInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsAccessRequirementInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsAccessRequirementInput> = {};
+  if ("description" in record || !options.partial) {
+    parsed.description = options.partial
+      ? (optionalClientTextField(record, "description") ?? undefined)
+      : requiredClientTextField(record, "description");
+  }
+  if ("status" in record || !options.partial) {
+    const status = parseOperationsAccessRequirementStatus(
+      record.status ?? "not_requested",
+    );
+    if (!status) throw new Error("invalid_access_status");
+    parsed.status = status;
+  }
+  if ("requestedAt" in record) {
+    parsed.requestedAt = parseDateField(record, "requestedAt");
+  }
+  if ("receivedAt" in record) {
+    parsed.receivedAt = parseDateField(record, "receivedAt");
+  }
+  if ("secureStorageReference" in record) {
+    const ref = optionalClientTextField(record, "secureStorageReference");
+    if (ref && /password|secret|token\s*[:=]/i.test(ref)) {
+      throw new Error("credential_values_not_allowed");
+    }
+    parsed.secureStorageReference = ref;
+  }
+  if ("notes" in record)
+    parsed.notes = optionalClientTextField(record, "notes");
+  if ("displayOrder" in record) {
+    parsed.displayOrder = parseMinorMoney(record, "displayOrder", 0);
+  }
+  return parsed as OperationsAccessRequirementInput;
+}
+
+export function parseOperationsQuoteCreateInput(
+  body: unknown,
+): OperationsQuoteInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const businessId = optionalUuidField(record, "businessId");
+  if (!businessId) throw new Error("invalid_businessId");
+  return {
+    businessId,
+    contactId: optionalUuidField(record, "contactId"),
+    operationsReportId: optionalUuidField(record, "operationsReportId"),
+    title: requiredClientTextField(record, "title"),
+    currency: parseCurrency(record.currency),
+    discountMinor: parseMinorMoney(record, "discountMinor", 0),
+    validUntil: parseDateField(record, "validUntil"),
+    estimatedStartDate: parseDateField(record, "estimatedStartDate"),
+    estimatedCompletionDate: parseDateField(record, "estimatedCompletionDate"),
+    estimatedDurationText: optionalClientTextField(
+      record,
+      "estimatedDurationText",
+    ),
+    paymentTerms: optionalClientTextField(record, "paymentTerms"),
+    scopeSummary: optionalClientTextField(record, "scopeSummary"),
+    includedScope: optionalClientTextField(record, "includedScope"),
+    excludedScope: optionalClientTextField(record, "excludedScope"),
+    assumptions: optionalClientTextField(record, "assumptions"),
+    clientResponsibilities: optionalClientTextField(
+      record,
+      "clientResponsibilities",
+    ),
+    accessRequirementsSummary: optionalClientTextField(
+      record,
+      "accessRequirementsSummary",
+    ),
+    internalNotes: optionalClientTextField(record, "internalNotes"),
+    items: parsePlainArray(record.items).map((item) =>
+      parseOperationsQuoteItemInput(item),
+    ),
+    accessRequirements: parsePlainArray(record.accessRequirements).map((item) =>
+      parseOperationsAccessRequirementInput(item),
+    ),
+  };
+}
+
+export function parseOperationsQuoteUpdateInput(
+  body: unknown,
+): OperationsQuoteUpdateInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: OperationsQuoteUpdateInput = {};
+  if ("contactId" in record)
+    parsed.contactId = optionalUuidField(record, "contactId");
+  if ("operationsReportId" in record) {
+    parsed.operationsReportId = optionalUuidField(record, "operationsReportId");
+  }
+  if ("title" in record)
+    parsed.title = requiredClientTextField(record, "title");
+  if ("currency" in record) parsed.currency = parseCurrency(record.currency);
+  if ("discountMinor" in record) {
+    parsed.discountMinor = parseMinorMoney(record, "discountMinor", 0);
+  }
+  if ("validUntil" in record)
+    parsed.validUntil = parseDateField(record, "validUntil");
+  if ("estimatedStartDate" in record) {
+    parsed.estimatedStartDate = parseDateField(record, "estimatedStartDate");
+  }
+  if ("estimatedCompletionDate" in record) {
+    parsed.estimatedCompletionDate = parseDateField(
+      record,
+      "estimatedCompletionDate",
+    );
+  }
+  if ("estimatedDurationText" in record) {
+    parsed.estimatedDurationText = optionalClientTextField(
+      record,
+      "estimatedDurationText",
+    );
+  }
+  if ("paymentTerms" in record) {
+    parsed.paymentTerms = optionalClientTextField(record, "paymentTerms");
+  }
+  if ("scopeSummary" in record) {
+    parsed.scopeSummary = optionalClientTextField(record, "scopeSummary");
+  }
+  if ("includedScope" in record) {
+    parsed.includedScope = optionalClientTextField(record, "includedScope");
+  }
+  if ("excludedScope" in record) {
+    parsed.excludedScope = optionalClientTextField(record, "excludedScope");
+  }
+  if ("assumptions" in record) {
+    parsed.assumptions = optionalClientTextField(record, "assumptions");
+  }
+  if ("clientResponsibilities" in record) {
+    parsed.clientResponsibilities = optionalClientTextField(
+      record,
+      "clientResponsibilities",
+    );
+  }
+  if ("accessRequirementsSummary" in record) {
+    parsed.accessRequirementsSummary = optionalClientTextField(
+      record,
+      "accessRequirementsSummary",
+    );
+  }
+  if ("internalNotes" in record) {
+    parsed.internalNotes = optionalClientTextField(record, "internalNotes");
+  }
+  return parsed;
+}
+
+export function parseOperationsQuoteSentInput(body: unknown) {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const deliveryMethod =
+    typeof record.deliveryMethod === "string" ? record.deliveryMethod : "";
+  if (!["email_attachment", "in_person", "other"].includes(deliveryMethod)) {
+    throw new Error("invalid_delivery_method");
+  }
+  return {
+    contactId: optionalUuidField(record, "contactId"),
+    deliveryMethod: deliveryMethod as
+      | "email_attachment"
+      | "in_person"
+      | "other",
+    sentAt: parseDateField(record, "sentAt"),
+    followUpAt: parseDateField(record, "followUpAt"),
+    updatePipelineStage: record.updatePipelineStage === true,
+  };
+}
+
+export function parseOperationsQuoteAcceptedInput(body: unknown) {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const method =
+    typeof record.acceptanceMethod === "string" ? record.acceptanceMethod : "";
+  if (!["email", "phone", "in_person", "other"].includes(method)) {
+    throw new Error("invalid_acceptance_method");
+  }
+  if (record.selectedItemsConfirmed !== true) {
+    throw new Error("selected_items_not_confirmed");
+  }
+  if (record.freezeConfirmed !== true) {
+    throw new Error("freeze_not_confirmed");
+  }
+  return {
+    acceptedAt: parseRequiredDateField(record, "acceptedAt"),
+    acceptanceMethod: method as "email" | "phone" | "in_person" | "other",
+    contactId: optionalUuidField(record, "contactId"),
+    totalMinorConfirmed: parseMinorMoney(record, "totalMinorConfirmed", -1),
+    selectedItemsConfirmed: record.selectedItemsConfirmed === true,
+    freezeConfirmed: record.freezeConfirmed === true,
+    summary: optionalClientTextField(record, "summary"),
+  };
+}
+
+export function parseOperationsQuoteDeclinedInput(body: unknown) {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  return {
+    declinedAt: parseDateField(record, "declinedAt"),
+    reason: optionalClientTextField(record, "reason"),
+  };
+}
+
+export function parseOperationsServiceItemInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): {
+  title: string;
+  description?: string | null;
+  suggestedPriceMinor?: number;
+  suggestedEffort?: string | null;
+  itemType?: OperationsQuoteItemType;
+  isActive?: boolean;
+} {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Record<string, unknown> = {};
+  if ("title" in record || !options.partial) {
+    parsed.title = options.partial
+      ? (optionalClientTextField(record, "title") ?? undefined)
+      : requiredClientTextField(record, "title");
+  }
+  if ("description" in record) {
+    parsed.description = optionalClientTextField(record, "description");
+  }
+  if ("suggestedPriceMinor" in record || !options.partial) {
+    parsed.suggestedPriceMinor = parseMinorMoney(
+      record,
+      "suggestedPriceMinor",
+      0,
+    );
+  }
+  if ("suggestedEffort" in record) {
+    parsed.suggestedEffort = optionalClientTextField(record, "suggestedEffort");
+  }
+  if ("itemType" in record || !options.partial) {
+    const itemType = parseOperationsQuoteItemType(
+      record.itemType ?? "website_fix",
+    );
+    if (!itemType) throw new Error("invalid_item_type");
+    parsed.itemType = itemType;
+  }
+  if ("isActive" in record) parsed.isActive = record.isActive !== false;
+  return parsed as {
+    title: string;
+    description?: string | null;
+    suggestedPriceMinor?: number;
+    suggestedEffort?: string | null;
+    itemType?: OperationsQuoteItemType;
+    isActive?: boolean;
+  };
+}
+
+export function parseOperationsWorkOrderUpdateInput(
+  body: unknown,
+): OperationsWorkOrderUpdateInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: OperationsWorkOrderUpdateInput = {};
+  if ("title" in record)
+    parsed.title = requiredClientTextField(record, "title");
+  if ("status" in record) {
+    const status = parseOperationsWorkOrderStatus(record.status);
+    if (!status) throw new Error("invalid_work_order_status");
+    parsed.status = status;
+  }
+  if ("priority" in record) {
+    const priority = parseOperationsWorkOrderPriority(record.priority);
+    if (!priority) throw new Error("invalid_work_order_priority");
+    parsed.priority = priority;
+  }
+  if ("scopeSummary" in record) {
+    parsed.scopeSummary = optionalClientTextField(record, "scopeSummary");
+  }
+  if ("targetCompletionAt" in record) {
+    parsed.targetCompletionAt = parseDateField(record, "targetCompletionAt");
+  }
+  if ("blockedReason" in record) {
+    parsed.blockedReason = optionalClientTextField(record, "blockedReason");
+  }
+  if ("clientWaitingReason" in record) {
+    parsed.clientWaitingReason = optionalClientTextField(
+      record,
+      "clientWaitingReason",
+    );
+  }
+  if ("completionSummary" in record) {
+    parsed.completionSummary = optionalClientTextField(
+      record,
+      "completionSummary",
+    );
+  }
+  if ("internalNotes" in record) {
+    parsed.internalNotes = optionalClientTextField(record, "internalNotes");
+  }
+  return parsed;
+}
+
+export function parseOperationsWorkItemInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsWorkItemInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsWorkItemInput> = {};
+  if ("title" in record || !options.partial) {
+    parsed.title = options.partial
+      ? (optionalClientTextField(record, "title") ?? undefined)
+      : requiredClientTextField(record, "title");
+  }
+  if ("description" in record) {
+    parsed.description = optionalClientTextField(record, "description");
+  }
+  if ("status" in record || !options.partial) {
+    const status = parseOperationsWorkItemStatus(record.status ?? "to_do");
+    if (!status) throw new Error("invalid_work_item_status");
+    parsed.status = status;
+  }
+  if ("displayOrder" in record) {
+    parsed.displayOrder = parseMinorMoney(record, "displayOrder", 0);
+  }
+  if ("completionNotes" in record) {
+    parsed.completionNotes = optionalClientTextField(record, "completionNotes");
+  }
+  if ("clientVisibleCompletionNotes" in record) {
+    parsed.clientVisibleCompletionNotes = optionalClientTextField(
+      record,
+      "clientVisibleCompletionNotes",
+    );
+  }
+  if ("requiresRetest" in record) {
+    parsed.requiresRetest = record.requiresRetest === true;
+  }
+  if ("retestStatus" in record) {
+    const retestStatus = parseOperationsRetestStatus(record.retestStatus);
+    if (!retestStatus) throw new Error("invalid_retest_status");
+    parsed.retestStatus = retestStatus;
+  }
+  if ("internalNotes" in record) {
+    parsed.internalNotes = optionalClientTextField(record, "internalNotes");
+  }
+  return parsed as OperationsWorkItemInput;
 }
 
 export function serializeOperationsSummary(summary: OperationsSummary) {

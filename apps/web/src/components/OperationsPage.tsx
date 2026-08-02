@@ -7,7 +7,8 @@ type OperationsRouteKey =
   | "tasks"
   | "communications"
   | "reports"
-  | "quotes";
+  | "quotes"
+  | "work";
 
 type PipelineStage =
   | "discovered"
@@ -90,6 +91,58 @@ type OperationsComparisonStatus =
   | "worsened"
   | "new"
   | "unable_to_compare";
+type OperationsQuoteStatus =
+  | "draft"
+  | "needs_review"
+  | "ready_to_send"
+  | "sent"
+  | "accepted"
+  | "declined"
+  | "expired"
+  | "cancelled"
+  | "converted_to_work";
+type OperationsQuoteItemType =
+  | "website_fix"
+  | "investigation"
+  | "configuration"
+  | "content_change"
+  | "monitoring_setup"
+  | "retest"
+  | "consultation"
+  | "other";
+type OperationsAccessStatus =
+  | "not_required"
+  | "not_requested"
+  | "requested"
+  | "received"
+  | "verified"
+  | "no_longer_needed";
+type OperationsWorkStatus =
+  | "not_started"
+  | "awaiting_access"
+  | "ready_to_start"
+  | "in_progress"
+  | "waiting_for_client"
+  | "blocked"
+  | "ready_for_testing"
+  | "testing"
+  | "completed"
+  | "cancelled";
+type OperationsWorkPriority = "urgent" | "high" | "normal" | "low";
+type OperationsWorkItemStatus =
+  | "to_do"
+  | "in_progress"
+  | "waiting_for_client"
+  | "blocked"
+  | "ready_for_testing"
+  | "completed"
+  | "cancelled";
+type OperationsRetestStatus =
+  | "not_required"
+  | "pending"
+  | "passed"
+  | "failed"
+  | "unable_to_verify";
 
 type BusinessListFilter =
   | "active"
@@ -109,7 +162,13 @@ type OperationsSummary = {
     reportFollowUpsDue: number;
     criticalClientSites: number;
     quotesAwaitingResponse: number;
+    quotesReadyToSend: number;
+    quotesExpiringSoon: number;
+    acceptedQuotesAwaitingConversion: number;
     openWorkItems: number;
+    awaitingAccess: number;
+    blockedWork: number;
+    workReadyForTesting: number;
   };
   monitoringAttention: Array<{
     id: string;
@@ -447,6 +506,224 @@ type ReportFormState = {
   allowDuplicate: boolean;
 };
 
+type OperationsQuoteItem = {
+  id: string;
+  quote_id: string;
+  report_finding_id: string | null;
+  title: string;
+  description: string | null;
+  quantity: number;
+  unit_price_minor: number;
+  line_total_minor: number;
+  item_type: OperationsQuoteItemType;
+  is_optional: boolean;
+  is_selected: boolean;
+  display_order: number;
+  estimated_effort: string | null;
+  internal_notes: string | null;
+  finding_title?: string | null;
+  affected_url?: string | null;
+};
+
+type OperationsAccessRequirement = {
+  id: string;
+  quote_id?: string;
+  work_order_id?: string;
+  description: string;
+  status: OperationsAccessStatus;
+  requested_at: string | null;
+  received_at: string | null;
+  secure_storage_reference: string | null;
+  notes: string | null;
+  display_order: number;
+};
+
+type OperationsQuoteRow = {
+  id: string;
+  business_id: string;
+  contact_id: string | null;
+  operations_report_id: string | null;
+  quote_number: string;
+  title: string;
+  status: OperationsQuoteStatus;
+  currency: string;
+  subtotal_minor: number;
+  discount_minor: number;
+  tax_minor: number;
+  total_minor: number;
+  valid_until: string | null;
+  estimated_start_date: string | null;
+  estimated_completion_date: string | null;
+  estimated_duration_text: string | null;
+  payment_terms: string | null;
+  scope_summary: string | null;
+  included_scope: string | null;
+  excluded_scope: string | null;
+  assumptions: string | null;
+  client_responsibilities: string | null;
+  access_requirements_summary: string | null;
+  internal_notes: string | null;
+  sent_at: string | null;
+  accepted_at: string | null;
+  declined_at: string | null;
+  expired_at: string | null;
+  cancelled_at: string | null;
+  frozen_at: string | null;
+  converted_work_order_id: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  contact_email?: string | null;
+  report_title?: string | null;
+  report_site_url?: string | null;
+  report_site_display_name?: string | null;
+  item_count?: number;
+};
+
+type OperationsQuoteDetail = {
+  quote: OperationsQuoteRow;
+  items: OperationsQuoteItem[];
+  accessRequirements: OperationsAccessRequirement[];
+  statusHistory: Array<{
+    id: string;
+    previous_status: OperationsQuoteStatus | null;
+    new_status: OperationsQuoteStatus;
+    reason: string | null;
+    created_at: string;
+    admin_email?: string | null;
+  }>;
+  readinessIssues: string[];
+  linkedWorkOrder: OperationsWorkOrderRow | null;
+};
+
+type OperationsQuotePreviewPayload = {
+  quote: {
+    quoteNumber: string;
+    title: string;
+    currency: string;
+    validUntil: string | null;
+    estimatedStartDate: string | null;
+    estimatedCompletionDate: string | null;
+    estimatedDurationText: string | null;
+  };
+  business: { name: string };
+  contact: { name: string | null; email: string | null };
+  report: { title: string | null; website: string | null } | null;
+  items: Array<{
+    id: string;
+    title: string;
+    description: string | null;
+    quantity: number;
+    unitPriceMinor: number;
+    lineTotalMinor: number;
+    itemType: OperationsQuoteItemType;
+    isOptional: boolean;
+    estimatedEffort: string | null;
+  }>;
+  totals: {
+    subtotalMinor: number;
+    discountMinor: number;
+    taxMinor: number;
+    totalMinor: number;
+    vatRegistered: boolean;
+    vatRatePercent: number;
+    vatNotice: string;
+  };
+  scope: {
+    summary: string | null;
+    included: string | null;
+    excluded: string | null;
+    assumptions: string | null;
+    clientResponsibilities: string | null;
+    accessRequirementsSummary: string | null;
+    paymentTerms: string | null;
+  };
+  limitations: string[];
+  generatedAt: string;
+};
+
+type OperationsWorkOrderRow = {
+  id: string;
+  business_id: string;
+  contact_id: string | null;
+  quote_id: string;
+  operations_report_id: string | null;
+  work_order_number: string;
+  title: string;
+  status: OperationsWorkStatus;
+  priority: OperationsWorkPriority;
+  scope_summary: string | null;
+  accepted_total_minor: number;
+  currency: string;
+  started_at: string | null;
+  target_completion_at: string | null;
+  completed_at: string | null;
+  blocked_reason: string | null;
+  client_waiting_reason: string | null;
+  completion_summary: string | null;
+  internal_notes: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  quote_number?: string | null;
+  quote_title?: string | null;
+  report_title?: string | null;
+  active_item_count?: number;
+  completed_item_count?: number;
+  outstanding_access_count?: number;
+};
+
+type OperationsWorkItem = {
+  id: string;
+  work_order_id: string;
+  quote_item_id: string | null;
+  report_finding_id: string | null;
+  title: string;
+  description: string | null;
+  status: OperationsWorkItemStatus;
+  display_order: number;
+  completed_at: string | null;
+  completion_notes: string | null;
+  client_visible_completion_notes: string | null;
+  requires_retest: boolean;
+  retest_status: OperationsRetestStatus;
+  internal_notes: string | null;
+  finding_title?: string | null;
+};
+
+type OperationsWorkOrderDetail = {
+  workOrder: OperationsWorkOrderRow;
+  items: OperationsWorkItem[];
+  accessRequirements: OperationsAccessRequirement[];
+  completionIssues: string[];
+};
+
+type QuoteFormState = {
+  businessId: string;
+  contactId: string;
+  operationsReportId: string;
+  title: string;
+  currency: string;
+  scopeSummary: string;
+  includedScope: string;
+  excludedScope: string;
+  paymentTerms: string;
+  validUntil: string;
+};
+
+type QuoteItemFormState = {
+  title: string;
+  description: string;
+  quantity: string;
+  unitPriceMinor: string;
+  itemType: OperationsQuoteItemType;
+  isOptional: boolean;
+  isSelected: boolean;
+  estimatedEffort: string;
+};
+
 type BusinessFormState = {
   name: string;
   websiteUrl: string;
@@ -604,6 +881,52 @@ const operationsReportStatusLabels: Record<OperationsReportStatus, string> = {
   archived: "Archived",
 };
 
+const quoteStatusLabels: Record<OperationsQuoteStatus, string> = {
+  draft: "Draft",
+  needs_review: "Needs review",
+  ready_to_send: "Ready to send",
+  sent: "Sent",
+  accepted: "Accepted",
+  declined: "Declined",
+  expired: "Expired",
+  cancelled: "Cancelled",
+  converted_to_work: "Converted to work",
+};
+
+const quoteItemTypeOptions: Array<{
+  value: OperationsQuoteItemType;
+  label: string;
+}> = [
+  { value: "website_fix", label: "Website fix" },
+  { value: "investigation", label: "Investigation" },
+  { value: "configuration", label: "Configuration" },
+  { value: "content_change", label: "Content change" },
+  { value: "monitoring_setup", label: "Monitoring setup" },
+  { value: "retest", label: "Re-test" },
+  { value: "consultation", label: "Consultation" },
+  { value: "other", label: "Other" },
+];
+
+const workStatusLabels: Record<OperationsWorkStatus, string> = {
+  not_started: "Not started",
+  awaiting_access: "Awaiting access",
+  ready_to_start: "Ready to start",
+  in_progress: "In progress",
+  waiting_for_client: "Waiting for client",
+  blocked: "Blocked",
+  ready_for_testing: "Ready for testing",
+  testing: "Testing",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+
+const workPriorityLabels: Record<OperationsWorkPriority, string> = {
+  urgent: "Urgent",
+  high: "High",
+  normal: "Normal",
+  low: "Low",
+};
+
 const routeItems: Array<{
   key: OperationsRouteKey;
   label: string;
@@ -620,10 +943,14 @@ const routeItems: Array<{
   },
   { key: "reports", label: "Reports", href: "/operations/reports" },
   { key: "quotes", label: "Quotes", href: "/operations/quotes" },
+  { key: "work", label: "Work", href: "/operations/work" },
 ];
 
 const placeholderContent: Record<
-  Exclude<OperationsRouteKey, "home" | "businesses" | "pipeline">,
+  Exclude<
+    OperationsRouteKey,
+    "home" | "businesses" | "pipeline" | "reports" | "quotes" | "work"
+  >,
   {
     eyebrow: string;
     title: string;
@@ -657,33 +984,6 @@ const placeholderContent: Record<
       "Follow-up reminders",
     ],
   },
-  reports: {
-    eyebrow: "Report workflow",
-    title: "Reports",
-    body: "Track the commercial lifecycle around client reports without duplicating the existing report renderer.",
-    action: "Review monitoring reports",
-    bullets: [
-      "Draft",
-      "Needs review",
-      "Ready to send",
-      "Sent",
-      "Client replied",
-      "Fixes quoted",
-      "Completed",
-    ],
-  },
-  quotes: {
-    eyebrow: "Commercial work",
-    title: "Quotes",
-    body: "Manage draft quotes, sent quotes, accepted work, and declined or expired opportunities.",
-    action: "Open businesses",
-    bullets: [
-      "Draft quotes",
-      "Sent quotes",
-      "Accepted work",
-      "Declined or expired quotes",
-    ],
-  },
 };
 
 const emptySummary: OperationsSummary = {
@@ -696,7 +996,13 @@ const emptySummary: OperationsSummary = {
     reportFollowUpsDue: 0,
     criticalClientSites: 0,
     quotesAwaitingResponse: 0,
+    quotesReadyToSend: 0,
+    quotesExpiringSoon: 0,
+    acceptedQuotesAwaitingConversion: 0,
     openWorkItems: 0,
+    awaitingAccess: 0,
+    blockedWork: 0,
+    workReadyForTesting: 0,
   },
   monitoringAttention: [],
   recentActivity: [],
@@ -769,6 +1075,30 @@ const emptyReportForm: ReportFormState = {
   allowDuplicate: false,
 };
 
+const emptyQuoteForm: QuoteFormState = {
+  businessId: "",
+  contactId: "",
+  operationsReportId: "",
+  title: "",
+  currency: "GBP",
+  scopeSummary: "",
+  includedScope: "",
+  excludedScope: "",
+  paymentTerms: "Payment due on completion unless otherwise agreed.",
+  validUntil: "",
+};
+
+const emptyQuoteItemForm: QuoteItemFormState = {
+  title: "",
+  description: "",
+  quantity: "1",
+  unitPriceMinor: "0",
+  itemType: "website_fix",
+  isOptional: false,
+  isSelected: true,
+  estimatedEffort: "",
+};
+
 function getRouteKey(path: string): OperationsRouteKey {
   const normalized = path.replace(/\/+$/, "") || "/operations";
   if (normalized === "/operations") return "home";
@@ -778,6 +1108,18 @@ function getRouteKey(path: string): OperationsRouteKey {
     normalized.startsWith("/operations/reports/")
   ) {
     return "reports";
+  }
+  if (
+    normalized === "/operations/quotes" ||
+    normalized.startsWith("/operations/quotes/")
+  ) {
+    return "quotes";
+  }
+  if (
+    normalized === "/operations/work" ||
+    normalized.startsWith("/operations/work/")
+  ) {
+    return "work";
   }
   if (
     normalized === "/operations/businesses" ||
@@ -792,6 +1134,27 @@ function getRouteKey(path: string): OperationsRouteKey {
 function getOperationsReportIdFromPath(path: string) {
   const normalized = path.replace(/\/+$/, "");
   const prefix = "/operations/reports/";
+  if (!normalized.startsWith(prefix)) return null;
+  const id = normalized.slice(prefix.length);
+  return id || null;
+}
+
+function getOperationsQuoteIdFromPath(path: string) {
+  const normalized = path.replace(/\/+$/, "");
+  const prefix = "/operations/quotes/";
+  if (!normalized.startsWith(prefix)) return null;
+  const id = normalized.slice(prefix.length);
+  if (!id || id === "service-items") return null;
+  return id;
+}
+
+function isQuoteServiceItemsPath(path: string) {
+  return path.replace(/\/+$/, "") === "/operations/quotes/service-items";
+}
+
+function getOperationsWorkOrderIdFromPath(path: string) {
+  const normalized = path.replace(/\/+$/, "");
+  const prefix = "/operations/work/";
   if (!normalized.startsWith(prefix)) return null;
   const id = normalized.slice(prefix.length);
   return id || null;
@@ -940,6 +1303,36 @@ function reportFilename(payload: ClientReportPayload) {
   return `scanlark-website-health-report-${business}-${domain}-${payload.report.coverDate}.pdf`;
 }
 
+function formatMoney(minor: number, currency: string) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).format((minor || 0) / 100);
+}
+
+function quoteStatusLabel(value: OperationsQuoteStatus) {
+  return quoteStatusLabels[value] ?? value;
+}
+
+function quoteItemTypeLabel(value: OperationsQuoteItemType) {
+  return (
+    quoteItemTypeOptions.find((item) => item.value === value)?.label ?? value
+  );
+}
+
+function workStatusLabel(value: OperationsWorkStatus) {
+  return workStatusLabels[value] ?? value;
+}
+
+function workPriorityLabel(value: OperationsWorkPriority) {
+  return workPriorityLabels[value] ?? value;
+}
+
+function quoteFilename(payload: OperationsQuotePreviewPayload) {
+  const business = sanitizeFilenamePart(payload.business.name) || "client";
+  return `scanlark-quote-${payload.quote.quoteNumber.toLowerCase()}-${business}.pdf`;
+}
+
 function templateCategoryLabel(value: CommunicationTemplateCategory) {
   return (
     communicationTemplateCategoryOptions.find((item) => item.value === value)
@@ -1012,6 +1405,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const activeRoute = getRouteKey(currentPath);
   const businessId = getBusinessIdFromPath(currentPath);
   const operationsReportId = getOperationsReportIdFromPath(currentPath);
+  const operationsQuoteId = getOperationsQuoteIdFromPath(currentPath);
+  const quoteServiceItemsPath = isQuoteServiceItemsPath(currentPath);
+  const operationsWorkOrderId = getOperationsWorkOrderIdFromPath(currentPath);
   const searchParams = useMemo(
     () => new URLSearchParams(currentSearch),
     [currentSearch],
@@ -1071,6 +1467,51 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       high_priority: number;
     }>
   >([]);
+  const [quotes, setQuotes] = useState<OperationsQuoteRow[]>([]);
+  const [quotesSummary, setQuotesSummary] = useState({
+    draft: 0,
+    needsReview: 0,
+    readyToSend: 0,
+    sent: 0,
+    accepted: 0,
+    convertedToWork: 0,
+  });
+  const [quotesLoading, setQuotesLoading] = useState(false);
+  const [quoteDetail, setQuoteDetail] = useState<OperationsQuoteDetail | null>(
+    null,
+  );
+  const [quoteDetailLoading, setQuoteDetailLoading] = useState(false);
+  const [quotePreview, setQuotePreview] =
+    useState<OperationsQuotePreviewPayload | null>(null);
+  const [quoteFormOpen, setQuoteFormOpen] = useState(false);
+  const [quoteForm, setQuoteForm] = useState<QuoteFormState>(emptyQuoteForm);
+  const [quoteItemForm, setQuoteItemForm] =
+    useState<QuoteItemFormState>(emptyQuoteItemForm);
+  const [quoteServiceItems, setQuoteServiceItems] = useState<
+    Array<{
+      id: string;
+      title: string;
+      description: string | null;
+      suggested_price_minor: number;
+      suggested_effort: string | null;
+      item_type: OperationsQuoteItemType;
+      is_active: boolean;
+    }>
+  >([]);
+  const [workOrders, setWorkOrders] = useState<OperationsWorkOrderRow[]>([]);
+  const [workSummary, setWorkSummary] = useState({
+    awaitingAccess: 0,
+    readyToStart: 0,
+    inProgress: 0,
+    waitingForClient: 0,
+    blocked: 0,
+    readyForTesting: 0,
+    completedThisMonth: 0,
+  });
+  const [workLoading, setWorkLoading] = useState(false);
+  const [workDetail, setWorkDetail] =
+    useState<OperationsWorkOrderDetail | null>(null);
+  const [workDetailLoading, setWorkDetailLoading] = useState(false);
   const [addBusinessOpen, setAddBusinessOpen] = useState(false);
   const [businessForm, setBusinessForm] =
     useState<BusinessFormState>(emptyBusinessForm);
@@ -1401,6 +1842,166 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     [apiBase, apiFetch, detail],
   );
 
+  const loadQuotes = useCallback(async () => {
+    setQuotesLoading(true);
+    const params: Record<string, string | null | undefined> = {
+      search: searchParams.get("search"),
+      status: searchParams.get("status"),
+      businessId:
+        businessId && activeRoute === "businesses" ? businessId : null,
+      operationsReportId:
+        operationsReportId && activeRoute === "reports"
+          ? operationsReportId
+          : null,
+      archived: searchParams.get("archived") ?? "false",
+      limit: "50",
+      offset: "0",
+    };
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes${buildQuery(params)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        quotes: OperationsQuoteRow[];
+        summary: typeof quotesSummary;
+      };
+      setQuotes(data.quotes);
+      setQuotesSummary(data.summary);
+    } catch (err) {
+      console.warn("Failed to load quotes", err);
+      setQuotes([]);
+    } finally {
+      setQuotesLoading(false);
+    }
+  }, [
+    activeRoute,
+    apiBase,
+    apiFetch,
+    businessId,
+    operationsReportId,
+    searchParams,
+  ]);
+
+  const loadQuoteDetail = useCallback(async () => {
+    if (!operationsQuoteId) return;
+    setQuoteDetailLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/${encodeURIComponent(operationsQuoteId)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as { quote: OperationsQuoteDetail };
+      setQuoteDetail(data.quote);
+    } catch (err) {
+      console.warn("Failed to load quote detail", err);
+      setQuoteDetail(null);
+    } finally {
+      setQuoteDetailLoading(false);
+    }
+  }, [apiBase, apiFetch, operationsQuoteId]);
+
+  const loadQuotePreview = useCallback(async () => {
+    if (!operationsQuoteId) return;
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/${encodeURIComponent(operationsQuoteId)}/preview`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        payload: OperationsQuotePreviewPayload;
+      };
+      setQuotePreview(data.payload);
+    } catch (err) {
+      console.warn("Failed to load quote preview", err);
+      setQuotePreview(null);
+    }
+  }, [apiBase, apiFetch, operationsQuoteId]);
+
+  const loadQuoteServiceItems = useCallback(async () => {
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/service-items?activeOnly=false`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        serviceItems: typeof quoteServiceItems;
+      };
+      setQuoteServiceItems(data.serviceItems);
+    } catch (err) {
+      console.warn("Failed to load service items", err);
+      setQuoteServiceItems([]);
+    }
+  }, [apiBase, apiFetch]);
+
+  const loadWorkOrders = useCallback(async () => {
+    setWorkLoading(true);
+    const params: Record<string, string | null | undefined> = {
+      search: searchParams.get("search"),
+      status: searchParams.get("status"),
+      priority: searchParams.get("priority"),
+      businessId:
+        businessId && activeRoute === "businesses" ? businessId : null,
+      operationsReportId:
+        operationsReportId && activeRoute === "reports"
+          ? operationsReportId
+          : null,
+      overdue: searchParams.get("overdue"),
+      limit: "50",
+      offset: "0",
+    };
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/work-orders${buildQuery(params)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        workOrders: OperationsWorkOrderRow[];
+        summary: typeof workSummary;
+      };
+      setWorkOrders(data.workOrders);
+      setWorkSummary(data.summary);
+    } catch (err) {
+      console.warn("Failed to load work orders", err);
+      setWorkOrders([]);
+    } finally {
+      setWorkLoading(false);
+    }
+  }, [
+    activeRoute,
+    apiBase,
+    apiFetch,
+    businessId,
+    operationsReportId,
+    searchParams,
+  ]);
+
+  const loadWorkDetail = useCallback(async () => {
+    if (!operationsWorkOrderId) return;
+    setWorkDetailLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/work-orders/${encodeURIComponent(operationsWorkOrderId)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        workOrder: OperationsWorkOrderDetail;
+      };
+      setWorkDetail(data.workOrder);
+    } catch (err) {
+      console.warn("Failed to load work order", err);
+      setWorkDetail(null);
+    } finally {
+      setWorkDetailLoading(false);
+    }
+  }, [apiBase, apiFetch, operationsWorkOrderId]);
+
   useEffect(() => {
     void loadSummary();
   }, [loadSummary]);
@@ -1409,11 +2010,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (
       (activeRoute === "businesses" && !businessId) ||
       activeRoute === "communications" ||
-      (activeRoute === "reports" && !operationsReportId)
+      (activeRoute === "reports" && !operationsReportId) ||
+      (activeRoute === "quotes" && !operationsQuoteId) ||
+      activeRoute === "work"
     ) {
       void loadBusinesses();
     }
-  }, [activeRoute, businessId, loadBusinesses, operationsReportId]);
+  }, [
+    activeRoute,
+    businessId,
+    loadBusinesses,
+    operationsQuoteId,
+    operationsReportId,
+  ]);
 
   useEffect(() => {
     if (businessId) {
@@ -1421,6 +2030,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       void loadAvailableSites();
       void loadCommunicationTemplates();
       void loadCommunications();
+      void loadQuotes();
+      void loadWorkOrders();
     }
   }, [
     businessId,
@@ -1428,6 +2039,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     loadCommunicationTemplates,
     loadCommunications,
     loadDetail,
+    loadQuotes,
+    loadWorkOrders,
   ]);
 
   useEffect(() => {
@@ -1455,8 +2068,48 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (operationsReportId) {
       void loadReportDetail();
       void loadReportPreview();
+      void loadQuotes();
+      void loadWorkOrders();
     }
-  }, [loadReportDetail, loadReportPreview, operationsReportId]);
+  }, [
+    loadQuotes,
+    loadReportDetail,
+    loadReportPreview,
+    loadWorkOrders,
+    operationsReportId,
+  ]);
+
+  useEffect(() => {
+    if (activeRoute === "quotes" && !operationsQuoteId) {
+      void loadQuotes();
+      void loadQuoteServiceItems();
+    }
+  }, [activeRoute, loadQuoteServiceItems, loadQuotes, operationsQuoteId]);
+
+  useEffect(() => {
+    if (operationsQuoteId) {
+      void loadQuoteDetail();
+      void loadQuotePreview();
+      void loadQuoteServiceItems();
+    }
+  }, [
+    loadQuoteDetail,
+    loadQuotePreview,
+    loadQuoteServiceItems,
+    operationsQuoteId,
+  ]);
+
+  useEffect(() => {
+    if (activeRoute === "work" && !operationsWorkOrderId) {
+      void loadWorkOrders();
+    }
+  }, [activeRoute, loadWorkOrders, operationsWorkOrderId]);
+
+  useEffect(() => {
+    if (operationsWorkOrderId) {
+      void loadWorkDetail();
+    }
+  }, [loadWorkDetail, operationsWorkOrderId]);
 
   const attentionCards = useMemo(
     () => [
@@ -1497,10 +2150,34 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         href: "/operations/quotes",
       },
       {
+        label: "Quotes ready to send",
+        value: summary.counts.quotesReadyToSend,
+        detail: "Reviewed quotes waiting for delivery.",
+        href: "/operations/quotes?status=ready_to_send",
+      },
+      {
+        label: "Accepted quotes to convert",
+        value: summary.counts.acceptedQuotesAwaitingConversion,
+        detail: "Accepted quotes not yet converted into work.",
+        href: "/operations/quotes?status=accepted",
+      },
+      {
         label: "Open work items",
         value: summary.counts.openWorkItems,
-        detail: "Active work that has not been closed.",
-        href: "/operations/tasks",
+        detail: "Active work items that have not been closed.",
+        href: "/operations/work",
+      },
+      {
+        label: "Awaiting access",
+        value: summary.counts.awaitingAccess,
+        detail: "Accepted work blocked by missing client access.",
+        href: "/operations/work?status=awaiting_access",
+      },
+      {
+        label: "Blocked work",
+        value: summary.counts.blockedWork,
+        detail: "Work orders with a documented blocker.",
+        href: "/operations/work?status=blocked",
       },
     ],
     [summary.counts],
@@ -1955,6 +2632,312 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   async function generateReportPdf() {
     await runReportAction("generate-pdf");
     window.setTimeout(() => window.print(), 50);
+  }
+
+  function openCreateQuote(overrides: Partial<QuoteFormState> = {}) {
+    const report = reportDetail?.report;
+    const selectedBusinessId =
+      overrides.businessId ?? detail?.business.id ?? report?.business_id ?? "";
+    setQuoteForm({
+      ...emptyQuoteForm,
+      businessId: selectedBusinessId,
+      contactId:
+        overrides.contactId ??
+        detail?.primaryContact?.id ??
+        report?.prepared_contact_id ??
+        "",
+      operationsReportId:
+        overrides.operationsReportId ?? report?.id ?? operationsReportId ?? "",
+      title:
+        overrides.title ??
+        (report ? `Fixes from ${report.title}` : "Website improvement quote"),
+      scopeSummary:
+        overrides.scopeSummary ??
+        "Fixed-price website health work based on the agreed scope below.",
+      includedScope:
+        overrides.includedScope ??
+        "Selected website fixes and checks listed in this quote.",
+      excludedScope:
+        overrides.excludedScope ??
+        "New design work, third-party charges, hosting costs, and issues outside the agreed scope.",
+      paymentTerms:
+        overrides.paymentTerms ??
+        "Payment due on completion unless otherwise agreed.",
+      validUntil: overrides.validUntil ?? "",
+      currency: overrides.currency ?? "GBP",
+    });
+    setQuoteFormOpen(true);
+  }
+
+  async function submitQuote(event: React.FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    const reportFindings =
+      reportDetail?.report.id === quoteForm.operationsReportId
+        ? reportDetail.findings.filter(
+            (finding) => finding.is_included && !finding.is_false_positive,
+          )
+        : [];
+    const items =
+      reportFindings.length > 0
+        ? reportFindings.map((finding, index) => ({
+            reportFindingId: finding.id,
+            title: finding.title,
+            description:
+              finding.recommended_action ??
+              finding.client_explanation ??
+              "Review and complete the agreed fix.",
+            quantity: 1,
+            unitPriceMinor: 0,
+            itemType: "website_fix",
+            isOptional: false,
+            isSelected: true,
+            displayOrder: index,
+            estimatedEffort: finding.estimated_effort,
+          }))
+        : [
+            {
+              title: "Website fix",
+              description: "Manually scoped website improvement work.",
+              quantity: 1,
+              unitPriceMinor: 0,
+              itemType: "website_fix",
+              isOptional: false,
+              isSelected: true,
+              displayOrder: 0,
+            },
+          ];
+    try {
+      const res = await apiFetch(`${apiBase}/operations/quotes`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          businessId: quoteForm.businessId,
+          contactId: quoteForm.contactId || null,
+          operationsReportId: quoteForm.operationsReportId || null,
+          title: quoteForm.title,
+          currency: quoteForm.currency,
+          validUntil: quoteForm.validUntil || null,
+          scopeSummary: quoteForm.scopeSummary,
+          includedScope: quoteForm.includedScope,
+          excludedScope: quoteForm.excludedScope,
+          paymentTerms: quoteForm.paymentTerms,
+          items,
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(data?.message ?? "Failed to create quote");
+      }
+      const data = (await res.json()) as { quote: OperationsQuoteDetail };
+      setQuoteFormOpen(false);
+      setQuoteForm(emptyQuoteForm);
+      await Promise.all([loadQuotes(), loadSummary()]);
+      onNavigate(`/operations/quotes/${data.quote.quote.id}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create quote",
+      );
+    }
+  }
+
+  async function patchQuote(input: Record<string, unknown>) {
+    if (!quoteDetail) return;
+    setActionError(null);
+    const res = await apiFetch(
+      `${apiBase}/operations/quotes/${encodeURIComponent(quoteDetail.quote.id)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as {
+        message?: string;
+      } | null;
+      throw new Error(data?.message ?? "Failed to update quote");
+    }
+    await Promise.all([loadQuoteDetail(), loadQuotePreview(), loadQuotes()]);
+  }
+
+  async function runQuoteAction(
+    action: string,
+    body: Record<string, unknown> = {},
+  ) {
+    if (!quoteDetail) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/${encodeURIComponent(quoteDetail.quote.id)}/${action}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+          readinessIssues?: string[];
+          completionIssues?: string[];
+        } | null;
+        throw new Error(
+          data?.readinessIssues?.join(" ") ??
+            data?.message ??
+            "Quote action failed",
+        );
+      }
+      await Promise.all([
+        loadQuoteDetail(),
+        loadQuotePreview(),
+        loadQuotes(),
+        loadWorkOrders(),
+        loadSummary(),
+      ]);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Quote action failed",
+      );
+    }
+  }
+
+  async function addQuoteItem(event: React.FormEvent) {
+    event.preventDefault();
+    if (!quoteDetail || !quoteItemForm.title.trim()) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/${encodeURIComponent(quoteDetail.quote.id)}/items`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: quoteItemForm.title,
+            description: quoteItemForm.description,
+            quantity: Number.parseInt(quoteItemForm.quantity, 10) || 1,
+            unitPriceMinor:
+              Number.parseInt(quoteItemForm.unitPriceMinor, 10) || 0,
+            itemType: quoteItemForm.itemType,
+            isOptional: quoteItemForm.isOptional,
+            isSelected: quoteItemForm.isSelected,
+            estimatedEffort: quoteItemForm.estimatedEffort,
+          }),
+        },
+      );
+      if (!res.ok) throw new Error("Failed to add quote item");
+      setQuoteItemForm(emptyQuoteItemForm);
+      await Promise.all([loadQuoteDetail(), loadQuotePreview()]);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to add item");
+    }
+  }
+
+  async function updateQuoteItem(
+    item: OperationsQuoteItem,
+    input: Record<string, unknown>,
+  ) {
+    if (!quoteDetail) return;
+    const res = await apiFetch(
+      `${apiBase}/operations/quotes/${encodeURIComponent(quoteDetail.quote.id)}/items/${encodeURIComponent(item.id)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) throw new Error("Failed to update quote item");
+    await Promise.all([loadQuoteDetail(), loadQuotePreview()]);
+  }
+
+  async function generateQuotePdf() {
+    await runQuoteAction("generate-pdf");
+    window.setTimeout(() => window.print(), 50);
+  }
+
+  async function recordQuoteAccepted() {
+    if (!quoteDetail) return;
+    if (
+      !window.confirm("Record this quote as explicitly accepted by the client?")
+    ) {
+      return;
+    }
+    await runQuoteAction("record-accepted", {
+      acceptedAt: new Date().toISOString(),
+      acceptanceMethod: "email",
+      totalMinorConfirmed: quoteDetail.quote.total_minor,
+      selectedItemsConfirmed: true,
+      freezeConfirmed: true,
+    });
+  }
+
+  async function convertQuoteToWork() {
+    if (!quoteDetail) return;
+    if (!window.confirm("Convert this accepted quote into a work order?"))
+      return;
+    await runQuoteAction("convert-to-work");
+    await loadWorkOrders();
+  }
+
+  async function patchWorkOrder(input: Record<string, unknown>) {
+    if (!workDetail) return;
+    setActionError(null);
+    const res = await apiFetch(
+      `${apiBase}/operations/work-orders/${encodeURIComponent(workDetail.workOrder.id)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) throw new Error("Failed to update work order");
+    await Promise.all([loadWorkDetail(), loadWorkOrders(), loadSummary()]);
+  }
+
+  async function completeWorkOrder() {
+    if (!workDetail) return;
+    setActionError(null);
+    const completionSummary =
+      workDetail.workOrder.completion_summary ?? "Agreed work completed.";
+    const res = await apiFetch(
+      `${apiBase}/operations/work-orders/${encodeURIComponent(
+        workDetail.workOrder.id,
+      )}/complete`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ completionSummary }),
+      },
+    );
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      const issues = Array.isArray(data?.details?.completionIssues)
+        ? data.details.completionIssues.join(" ")
+        : "";
+      throw new Error(issues || "Failed to complete work order");
+    }
+    await Promise.all([loadWorkDetail(), loadWorkOrders(), loadSummary()]);
+  }
+
+  async function updateWorkItem(
+    item: OperationsWorkItem,
+    input: Record<string, unknown>,
+  ) {
+    if (!workDetail) return;
+    const res = await apiFetch(
+      `${apiBase}/operations/work-orders/${encodeURIComponent(
+        workDetail.workOrder.id,
+      )}/items/${encodeURIComponent(item.id)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) throw new Error("Failed to update work item");
+    await Promise.all([loadWorkDetail(), loadWorkOrders(), loadSummary()]);
   }
 
   async function generateDraft() {
@@ -3271,6 +4254,909 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     );
   }
 
+  function renderQuoteCreateModal() {
+    if (!quoteFormOpen) return null;
+    const selectedBusiness =
+      detail?.business.id === quoteForm.businessId
+        ? detail
+        : reportCreateDetail;
+    return (
+      <div className="ops-modal">
+        <div className="ops-modal__panel ops-modal__panel--wide">
+          <div className="ops-panel__header">
+            <h2>Create quote</h2>
+            <button
+              className="ops-button"
+              onClick={() => setQuoteFormOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+          <form className="ops-form" onSubmit={submitQuote}>
+            <div className="ops-form-grid">
+              <label>
+                Business
+                <select
+                  value={quoteForm.businessId}
+                  onChange={(event) => {
+                    const nextBusinessId = event.target.value;
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      businessId: nextBusinessId,
+                      contactId: "",
+                    }));
+                    void loadReportCreateBusiness(nextBusinessId);
+                  }}
+                >
+                  <option value="">Select business</option>
+                  {(detail ? [detail.business] : businesses).map((business) => (
+                    <option key={business.id} value={business.id}>
+                      {business.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Contact
+                <select
+                  value={quoteForm.contactId}
+                  onChange={(event) =>
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      contactId: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">No contact selected</option>
+                  {(selectedBusiness?.contacts ?? []).map((contact) => (
+                    <option key={contact.id} value={contact.id}>
+                      {contactName(contact)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Currency
+                <input
+                  value={quoteForm.currency}
+                  onChange={(event) =>
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      currency: event.target.value.toUpperCase(),
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Valid until
+                <input
+                  type="date"
+                  value={quoteForm.validUntil}
+                  onChange={(event) =>
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      validUntil: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              Quote title
+              <input
+                value={quoteForm.title}
+                onChange={(event) =>
+                  setQuoteForm((prev) => ({
+                    ...prev,
+                    title: event.target.value,
+                  }))
+                }
+                required
+              />
+            </label>
+            <label>
+              Scope summary
+              <textarea
+                value={quoteForm.scopeSummary}
+                onChange={(event) =>
+                  setQuoteForm((prev) => ({
+                    ...prev,
+                    scopeSummary: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <div className="ops-form-grid">
+              <label>
+                Included scope
+                <textarea
+                  value={quoteForm.includedScope}
+                  onChange={(event) =>
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      includedScope: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Excluded scope
+                <textarea
+                  value={quoteForm.excludedScope}
+                  onChange={(event) =>
+                    setQuoteForm((prev) => ({
+                      ...prev,
+                      excludedScope: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              Payment terms
+              <textarea
+                value={quoteForm.paymentTerms}
+                onChange={(event) =>
+                  setQuoteForm((prev) => ({
+                    ...prev,
+                    paymentTerms: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            {quoteForm.operationsReportId && reportDetail && (
+              <div className="ops-empty-card">
+                {
+                  reportDetail.findings.filter(
+                    (finding) =>
+                      finding.is_included && !finding.is_false_positive,
+                  ).length
+                }{" "}
+                included report finding(s) will be copied as zero-priced quote
+                items for manual pricing.
+              </div>
+            )}
+            {actionError && <div className="ops-error">{actionError}</div>}
+            <div className="ops-form-actions">
+              <button
+                className="ops-button ops-button--primary"
+                disabled={!quoteForm.businessId || !quoteForm.title.trim()}
+              >
+                Create quote
+              </button>
+              <button
+                type="button"
+                className="ops-button"
+                onClick={() => setQuoteFormOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  function renderQuotesPage() {
+    if (operationsQuoteId) return renderQuoteDetail();
+    if (quoteServiceItemsPath) return renderServiceItemsPage();
+    const cards = [
+      ["Draft", quotesSummary.draft],
+      ["Needs review", quotesSummary.needsReview],
+      ["Ready", quotesSummary.readyToSend],
+      ["Sent", quotesSummary.sent],
+      ["Accepted", quotesSummary.accepted],
+      ["Converted", quotesSummary.convertedToWork],
+    ];
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Commercial proposals</div>
+            <h1>Quotes</h1>
+            <p>Create fixed-price scopes from reviewed report findings.</p>
+          </div>
+          <div className="ops-inline-actions">
+            <button
+              className="ops-button ops-button--primary"
+              onClick={() => openCreateQuote()}
+            >
+              Create quote
+            </button>
+            {renderLink(
+              "/operations/quotes/service-items",
+              "Service items",
+              "ops-button",
+            )}
+          </div>
+        </section>
+        <section className="ops-card-grid">
+          {cards.map(([label, value]) => (
+            <div key={label} className="ops-summary-card">
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>Quotes</small>
+            </div>
+          ))}
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>{quotes.length} quotes</h2>
+            <button className="ops-button" onClick={() => void loadQuotes()}>
+              Refresh
+            </button>
+          </div>
+          {quotesLoading ? (
+            <div className="ops-empty-card">Loading quotes...</div>
+          ) : quotes.length === 0 ? (
+            <div className="ops-empty-card">
+              No quotes have been created yet.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {quotes.map((quote) => (
+                <div key={quote.id} className="ops-list-card">
+                  <strong>
+                    {quote.quote_number} · {quote.title}
+                  </strong>
+                  <span>
+                    {quote.business_name ?? "Business"} ·{" "}
+                    {formatMoney(quote.total_minor, quote.currency)}
+                  </span>
+                  <small>
+                    {quoteStatusLabel(quote.status)} · valid until{" "}
+                    {formatDate(quote.valid_until)} · updated{" "}
+                    {formatDateTime(quote.updated_at)}
+                  </small>
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      `/operations/quotes/${quote.id}`,
+                      "Open quote",
+                      "ops-button ops-button--primary",
+                    )}
+                    {quote.operations_report_id &&
+                      renderLink(
+                        `/operations/reports/${quote.operations_report_id}`,
+                        "Report",
+                        "ops-button",
+                      )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        {renderQuoteCreateModal()}
+      </>
+    );
+  }
+
+  function renderServiceItemsPage() {
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Pricing suggestions</div>
+            <h1>Service items</h1>
+            <p>
+              Reusable internal quote item suggestions. Prices are never applied
+              automatically.
+            </p>
+          </div>
+          {renderLink("/operations/quotes", "Back to quotes", "ops-button")}
+        </section>
+        <section className="ops-panel">
+          <div className="ops-list">
+            {quoteServiceItems.map((item) => (
+              <div key={item.id} className="ops-list-card">
+                <strong>{item.title}</strong>
+                <span>{item.description}</span>
+                <small>
+                  {quoteItemTypeLabel(item.item_type)} ·{" "}
+                  {formatMoney(item.suggested_price_minor, "GBP")} ·{" "}
+                  {item.is_active ? "Active" : "Inactive"}
+                </small>
+              </div>
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderQuotePreview() {
+    if (!quotePreview) {
+      return (
+        <div className="ops-empty-card">Quote preview is not available.</div>
+      );
+    }
+    return (
+      <div className="ops-client-report">
+        <section className="ops-client-cover">
+          <div className="ops-client-brand">Scanlark</div>
+          <h1>Quote</h1>
+          <p>{quotePreview.quote.quoteNumber}</p>
+          <p>{quotePreview.business.name}</p>
+          <small>
+            Valid until {quotePreview.quote.validUntil ?? "to be agreed"}
+          </small>
+        </section>
+        <section>
+          <h2>Introduction</h2>
+          <p>
+            {quotePreview.scope.summary ?? "Fixed-price website health work."}
+          </p>
+          {quotePreview.report && (
+            <p>
+              This quote follows{" "}
+              {quotePreview.report.title ?? "a Scanlark report"}
+              {quotePreview.report.website
+                ? ` for ${quotePreview.report.website}`
+                : ""}
+              .
+            </p>
+          )}
+        </section>
+        <section>
+          <h2>Scope of work</h2>
+          <div className="ops-list">
+            {quotePreview.items.map((item) => (
+              <article key={item.id} className="ops-list-card">
+                <strong>{item.title}</strong>
+                {item.description && <p>{item.description}</p>}
+                <small>
+                  Quantity {item.quantity} ·{" "}
+                  {formatMoney(
+                    item.lineTotalMinor,
+                    quotePreview.quote.currency,
+                  )}
+                </small>
+              </article>
+            ))}
+          </div>
+        </section>
+        <section>
+          <h2>Pricing</h2>
+          <dl className="ops-definition-grid">
+            <dt>Subtotal</dt>
+            <dd>
+              {formatMoney(
+                quotePreview.totals.subtotalMinor,
+                quotePreview.quote.currency,
+              )}
+            </dd>
+            <dt>Discount</dt>
+            <dd>
+              {formatMoney(
+                quotePreview.totals.discountMinor,
+                quotePreview.quote.currency,
+              )}
+            </dd>
+            <dt>VAT</dt>
+            <dd>
+              {quotePreview.totals.vatNotice}{" "}
+              {formatMoney(
+                quotePreview.totals.taxMinor,
+                quotePreview.quote.currency,
+              )}
+            </dd>
+            <dt>Total</dt>
+            <dd>
+              <strong>
+                {formatMoney(
+                  quotePreview.totals.totalMinor,
+                  quotePreview.quote.currency,
+                )}
+              </strong>
+            </dd>
+          </dl>
+        </section>
+        <section>
+          <h2>Included scope</h2>
+          <p>
+            {quotePreview.scope.included ?? "Included scope to be confirmed."}
+          </p>
+        </section>
+        <section>
+          <h2>Excluded scope</h2>
+          <p>
+            {quotePreview.scope.excluded ?? "Excluded scope to be confirmed."}
+          </p>
+        </section>
+        <section>
+          <h2>Payment terms</h2>
+          <p>
+            {quotePreview.scope.paymentTerms ?? "Payment terms to be agreed."}
+          </p>
+        </section>
+        <section>
+          <h2>Limitations</h2>
+          <ul>
+            {quotePreview.limitations.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+      </div>
+    );
+  }
+
+  function renderQuoteDetail() {
+    if (quoteDetailLoading)
+      return <section className="ops-panel">Loading quote...</section>;
+    if (!quoteDetail)
+      return <section className="ops-panel">Quote not found.</section>;
+    const quote = quoteDetail.quote;
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Quote</div>
+            <h1>{quote.quote_number}</h1>
+            <p>{quote.title}</p>
+            <span className="ops-muted">
+              {quote.business_name} · {quoteStatusLabel(quote.status)} ·{" "}
+              {formatMoney(quote.total_minor, quote.currency)}
+            </span>
+          </div>
+          <div className="ops-inline-actions">
+            <button
+              className="ops-button"
+              onClick={() => void runQuoteAction("mark-ready")}
+            >
+              Mark ready
+            </button>
+            <button
+              className="ops-button"
+              onClick={() =>
+                void runQuoteAction("record-sent", {
+                  deliveryMethod: "email_attachment",
+                  sentAt: new Date().toISOString(),
+                  updatePipelineStage: true,
+                })
+              }
+            >
+              Record sent
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void recordQuoteAccepted()}
+            >
+              Record accepted
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void convertQuoteToWork()}
+            >
+              Convert to work
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void generateQuotePdf()}
+            >
+              Print / PDF
+            </button>
+          </div>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        {quoteDetail.readinessIssues.length > 0 && (
+          <section className="ops-warning">
+            {quoteDetail.readinessIssues.map((issue) => (
+              <div key={issue}>{issue}</div>
+            ))}
+          </section>
+        )}
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <h2>Overview</h2>
+            <dl className="ops-definition-grid">
+              <dt>Status</dt>
+              <dd>{quoteStatusLabel(quote.status)}</dd>
+              <dt>Total</dt>
+              <dd>{formatMoney(quote.total_minor, quote.currency)}</dd>
+              <dt>Valid until</dt>
+              <dd>{formatDate(quote.valid_until)}</dd>
+              <dt>Sent</dt>
+              <dd>{formatDateTime(quote.sent_at)}</dd>
+              <dt>Accepted</dt>
+              <dd>{formatDateTime(quote.accepted_at)}</dd>
+              <dt>Frozen</dt>
+              <dd>{formatDateTime(quote.frozen_at)}</dd>
+            </dl>
+          </div>
+          <div className="ops-panel">
+            <h2>Terms</h2>
+            <label>
+              Scope summary
+              <textarea
+                defaultValue={quote.scope_summary ?? ""}
+                onBlur={(event) =>
+                  void patchQuote({ scopeSummary: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              Payment terms
+              <textarea
+                defaultValue={quote.payment_terms ?? ""}
+                onBlur={(event) =>
+                  void patchQuote({ paymentTerms: event.target.value })
+                }
+              />
+            </label>
+          </div>
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Scope and items</h2>
+            <span className="ops-muted">
+              Optional unselected items are excluded from totals.
+            </span>
+          </div>
+          <div className="ops-list">
+            {quoteDetail.items.map((item) => (
+              <div key={item.id} className="ops-list-card">
+                <strong>{item.title}</strong>
+                <span>{item.description}</span>
+                <small>
+                  {quoteItemTypeLabel(item.item_type)} · quantity{" "}
+                  {item.quantity} ·{" "}
+                  {formatMoney(item.line_total_minor, quote.currency)}
+                  {item.is_optional ? " · optional" : ""}
+                  {!item.is_selected ? " · not selected" : ""}
+                </small>
+                {item.finding_title && (
+                  <small>Finding: {item.finding_title}</small>
+                )}
+                <div className="ops-inline-actions">
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void updateQuoteItem(item, {
+                        isSelected: !item.is_selected,
+                      })
+                    }
+                  >
+                    {item.is_selected ? "Exclude from total" : "Select"}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <form className="ops-form" onSubmit={addQuoteItem}>
+            <div className="ops-form-grid">
+              <label>
+                Item title
+                <input
+                  value={quoteItemForm.title}
+                  onChange={(event) =>
+                    setQuoteItemForm((prev) => ({
+                      ...prev,
+                      title: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Type
+                <select
+                  value={quoteItemForm.itemType}
+                  onChange={(event) =>
+                    setQuoteItemForm((prev) => ({
+                      ...prev,
+                      itemType: event.target.value as OperationsQuoteItemType,
+                    }))
+                  }
+                >
+                  {quoteItemTypeOptions.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Unit price minor
+                <input
+                  value={quoteItemForm.unitPriceMinor}
+                  onChange={(event) =>
+                    setQuoteItemForm((prev) => ({
+                      ...prev,
+                      unitPriceMinor: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Estimated effort
+                <input
+                  value={quoteItemForm.estimatedEffort}
+                  onChange={(event) =>
+                    setQuoteItemForm((prev) => ({
+                      ...prev,
+                      estimatedEffort: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <label>
+              Description
+              <textarea
+                value={quoteItemForm.description}
+                onChange={(event) =>
+                  setQuoteItemForm((prev) => ({
+                    ...prev,
+                    description: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <button className="ops-button ops-button--primary">Add item</button>
+          </form>
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Client preview</h2>
+            {quotePreview && (
+              <span className="ops-muted">{quoteFilename(quotePreview)}</span>
+            )}
+          </div>
+          {renderQuotePreview()}
+        </section>
+        <section className="ops-panel">
+          <h2>Activity</h2>
+          <div className="ops-timeline">
+            {quoteDetail.statusHistory.map((item) => (
+              <div key={item.id} className="ops-note">
+                <small>
+                  {formatDateTime(item.created_at)} ·{" "}
+                  {item.admin_email ?? "Internal operator"}
+                </small>
+                <p>
+                  {item.previous_status
+                    ? `${quoteStatusLabel(item.previous_status)} to `
+                    : ""}
+                  {quoteStatusLabel(item.new_status)}
+                  {item.reason ? ` · ${item.reason}` : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderWorkPage() {
+    if (operationsWorkOrderId) return renderWorkDetail();
+    const cards = [
+      ["Awaiting access", workSummary.awaitingAccess],
+      ["Ready to start", workSummary.readyToStart],
+      ["In progress", workSummary.inProgress],
+      ["Waiting for client", workSummary.waitingForClient],
+      ["Blocked", workSummary.blocked],
+      ["Ready for testing", workSummary.readyForTesting],
+      ["Completed this month", workSummary.completedThisMonth],
+    ];
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Delivery</div>
+            <h1>Work</h1>
+            <p>
+              Track accepted client work from access request through completion.
+            </p>
+          </div>
+          <button className="ops-button" onClick={() => void loadWorkOrders()}>
+            Refresh
+          </button>
+        </section>
+        <section className="ops-card-grid">
+          {cards.map(([label, value]) => (
+            <div key={label} className="ops-summary-card">
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>Work orders</small>
+            </div>
+          ))}
+        </section>
+        <section className="ops-panel">
+          <h2>{workOrders.length} work orders</h2>
+          {workLoading ? (
+            <div className="ops-empty-card">Loading work...</div>
+          ) : workOrders.length === 0 ? (
+            <div className="ops-empty-card">
+              No accepted quotes have been converted into work yet.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {workOrders.map((work) => (
+                <div key={work.id} className="ops-list-card">
+                  <strong>
+                    {work.work_order_number} · {work.title}
+                  </strong>
+                  <span>
+                    {work.business_name ?? "Business"} ·{" "}
+                    {formatMoney(work.accepted_total_minor, work.currency)}
+                  </span>
+                  <small>
+                    {workStatusLabel(work.status)} ·{" "}
+                    {work.completed_item_count ?? 0}/
+                    {work.active_item_count ?? 0} items complete · access{" "}
+                    {work.outstanding_access_count ?? 0}
+                  </small>
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      `/operations/work/${work.id}`,
+                      "Open work",
+                      "ops-button ops-button--primary",
+                    )}
+                    {renderLink(
+                      `/operations/quotes/${work.quote_id}`,
+                      "Quote",
+                      "ops-button",
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderWorkDetail() {
+    if (workDetailLoading)
+      return <section className="ops-panel">Loading work...</section>;
+    if (!workDetail)
+      return <section className="ops-panel">Work order not found.</section>;
+    const work = workDetail.workOrder;
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Work order</div>
+            <h1>{work.work_order_number}</h1>
+            <p>{work.title}</p>
+            <span className="ops-muted">
+              {work.business_name} · {workStatusLabel(work.status)} ·{" "}
+              {workPriorityLabel(work.priority)}
+            </span>
+          </div>
+          <div className="ops-inline-actions">
+            <button
+              className="ops-button"
+              onClick={() => void patchWorkOrder({ status: "in_progress" })}
+            >
+              Start work
+            </button>
+            <button
+              className="ops-button"
+              onClick={() =>
+                void patchWorkOrder({ status: "ready_for_testing" })
+              }
+            >
+              Begin testing
+            </button>
+            <button
+              className="ops-button"
+              onClick={() =>
+                void completeWorkOrder().catch((err) =>
+                  setActionError(String(err.message ?? err)),
+                )
+              }
+            >
+              Mark completed
+            </button>
+          </div>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        {workDetail.completionIssues.length > 0 && (
+          <section className="ops-warning">
+            {workDetail.completionIssues.map((issue) => (
+              <div key={issue}>{issue}</div>
+            ))}
+          </section>
+        )}
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <h2>Overview</h2>
+            <dl className="ops-definition-grid">
+              <dt>Status</dt>
+              <dd>{workStatusLabel(work.status)}</dd>
+              <dt>Priority</dt>
+              <dd>{workPriorityLabel(work.priority)}</dd>
+              <dt>Total</dt>
+              <dd>{formatMoney(work.accepted_total_minor, work.currency)}</dd>
+              <dt>Target</dt>
+              <dd>{formatDateTime(work.target_completion_at)}</dd>
+              <dt>Quote</dt>
+              <dd>{work.quote_number}</dd>
+            </dl>
+          </div>
+          <div className="ops-panel">
+            <h2>Access</h2>
+            {workDetail.accessRequirements.length === 0 ? (
+              <div className="ops-empty-card">
+                No access requirements recorded.
+              </div>
+            ) : (
+              <div className="ops-list">
+                {workDetail.accessRequirements.map((item) => (
+                  <div key={item.id} className="ops-list-card">
+                    <strong>{item.description}</strong>
+                    <small>{item.status.replaceAll("_", " ")}</small>
+                    {item.secure_storage_reference && (
+                      <small>{item.secure_storage_reference}</small>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+        <section className="ops-panel">
+          <h2>Work items</h2>
+          <div className="ops-list">
+            {workDetail.items.map((item) => (
+              <div key={item.id} className="ops-list-card">
+                <strong>{item.title}</strong>
+                <span>{item.description}</span>
+                <small>
+                  {item.status.replaceAll("_", " ")} · re-test{" "}
+                  {item.retest_status.replaceAll("_", " ")}
+                </small>
+                {item.finding_title && (
+                  <small>Finding: {item.finding_title}</small>
+                )}
+                <div className="ops-inline-actions">
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void updateWorkItem(item, { status: "in_progress" })
+                    }
+                  >
+                    Start
+                  </button>
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void updateWorkItem(item, {
+                        status: "ready_for_testing",
+                        retestStatus: item.requires_retest
+                          ? "pending"
+                          : "not_required",
+                      })
+                    }
+                  >
+                    Ready for testing
+                  </button>
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void updateWorkItem(item, {
+                        status: "completed",
+                        retestStatus: item.requires_retest
+                          ? "passed"
+                          : "not_required",
+                      })
+                    }
+                  >
+                    Complete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
   function renderReportsPage() {
     if (operationsReportId) return renderReportDetail();
     const cards = [
@@ -3489,6 +5375,18 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               onClick={() => void generateReportPdf()}
             >
               Print / PDF
+            </button>
+            <button
+              className="ops-button ops-button--primary"
+              onClick={() =>
+                openCreateQuote({
+                  businessId: report.business_id,
+                  operationsReportId: report.id,
+                  title: `Fixes from ${report.title}`,
+                })
+              }
+            >
+              Create quote
             </button>
           </div>
         </section>
@@ -3734,6 +5632,71 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             ))}
           </div>
         </section>
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <div className="ops-panel__header">
+              <h2>Linked quotes</h2>
+              <button
+                className="ops-button"
+                onClick={() =>
+                  openCreateQuote({
+                    businessId: report.business_id,
+                    operationsReportId: report.id,
+                    title: `Fixes from ${report.title}`,
+                  })
+                }
+              >
+                Create quote
+              </button>
+            </div>
+            {quotes.length === 0 ? (
+              <div className="ops-empty-card">
+                No quotes have been created from this report yet.
+              </div>
+            ) : (
+              <div className="ops-list">
+                {quotes.map((quote) => (
+                  <div key={quote.id} className="ops-list-card">
+                    <strong>{quote.quote_number}</strong>
+                    <span>{quote.title}</span>
+                    <small>
+                      {quoteStatusLabel(quote.status)} ·{" "}
+                      {formatMoney(quote.total_minor, quote.currency)}
+                    </small>
+                    {renderLink(
+                      `/operations/quotes/${quote.id}`,
+                      "Open quote",
+                      "ops-button",
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="ops-panel">
+            <h2>Related work</h2>
+            {workOrders.length === 0 ? (
+              <div className="ops-empty-card">
+                No work orders are linked to this report yet.
+              </div>
+            ) : (
+              <div className="ops-list">
+                {workOrders.map((work) => (
+                  <div key={work.id} className="ops-list-card">
+                    <strong>{work.work_order_number}</strong>
+                    <span>{work.title}</span>
+                    <small>{workStatusLabel(work.status)}</small>
+                    {renderLink(
+                      `/operations/work/${work.id}`,
+                      "Open work",
+                      "ops-button",
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
         <section className="ops-panel">
           <div className="ops-panel__header">
             <h2>Client preview</h2>
@@ -3769,6 +5732,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             ))}
           </div>
         </section>
+        {renderQuoteCreateModal()}
       </>
     );
   }
@@ -4575,6 +6539,83 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             )}
           </div>
         </section>
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <div className="ops-panel__header">
+              <h2>Quotes</h2>
+              <button
+                className="ops-button"
+                onClick={() => openCreateQuote({ businessId: b.id })}
+              >
+                Create quote
+              </button>
+            </div>
+            {quotes.length === 0 ? (
+              <div className="ops-empty-card">
+                No quotes have been created for this business yet.
+              </div>
+            ) : (
+              <div className="ops-list">
+                {quotes.map((quote) => (
+                  <div key={quote.id} className="ops-list-card">
+                    <strong>
+                      {quote.quote_number} · {quote.title}
+                    </strong>
+                    <small>
+                      {quoteStatusLabel(quote.status)} ·{" "}
+                      {formatMoney(quote.total_minor, quote.currency)}
+                    </small>
+                    <div className="ops-inline-actions">
+                      {renderLink(
+                        `/operations/quotes/${quote.id}`,
+                        "Open quote",
+                        "ops-button ops-button--primary",
+                      )}
+                      {quote.status === "accepted" && (
+                        <button
+                          className="ops-button"
+                          onClick={() =>
+                            onNavigate(`/operations/quotes/${quote.id}`)
+                          }
+                        >
+                          Convert accepted quote
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="ops-panel">
+            <h2>Work</h2>
+            {workOrders.length === 0 ? (
+              <div className="ops-empty-card">
+                No active work orders for this business yet.
+              </div>
+            ) : (
+              <div className="ops-list">
+                {workOrders.map((work) => (
+                  <div key={work.id} className="ops-list-card">
+                    <strong>
+                      {work.work_order_number} · {work.title}
+                    </strong>
+                    <small>
+                      {workStatusLabel(work.status)} ·{" "}
+                      {work.completed_item_count ?? 0}/
+                      {work.active_item_count ?? 0} items complete
+                    </small>
+                    {renderLink(
+                      `/operations/work/${work.id}`,
+                      "Open work",
+                      "ops-button ops-button--primary",
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
         <section className="ops-panel">
           <div className="ops-panel__header">
             <h2>Communication timeline</h2>
@@ -4806,6 +6847,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         )}
         {renderCommunicationModal()}
         {renderReportCreateModal()}
+        {renderQuoteCreateModal()}
       </>
     );
   }
@@ -4910,7 +6952,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function renderPlaceholder(
-    route: Exclude<OperationsRouteKey, "home" | "businesses" | "pipeline">,
+    route: Exclude<
+      OperationsRouteKey,
+      "home" | "businesses" | "pipeline" | "reports" | "quotes" | "work"
+    >,
   ) {
     const content = placeholderContent[route];
     return (
@@ -4927,9 +6972,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             because Scanlark does not have records for this area yet.
           </p>
           {renderLink(
-            route === "reports"
-              ? "/dashboard/reports"
-              : "/operations/businesses",
+            "/operations/businesses",
             content.action,
             "ops-button ops-button--primary",
           )}
@@ -4995,7 +7038,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     ? renderTasksPage()
                     : activeRoute === "reports"
                       ? renderReportsPage()
-                      : renderPlaceholder(activeRoute)}
+                      : activeRoute === "quotes"
+                        ? renderQuotesPage()
+                        : activeRoute === "work"
+                          ? renderWorkPage()
+                          : renderPlaceholder(activeRoute)}
         </main>
       </div>
     </div>

@@ -3,40 +3,67 @@ import type { Request, Response } from "express";
 import {
   addOperationsBusinessNote,
   addOperationsContact,
+  addOperationsQuoteAccessRequirement,
+  addOperationsQuoteItem,
+  addOperationsWorkItem,
+  addOperationsWorkOrderAccessRequirement,
   cancelOperationsCommunication,
+  cancelOperationsQuote,
   cancelOperationsTask,
+  completeOperationsWorkOrder,
   completeOperationsTask,
   completeOperationsCommunicationFollowUp,
+  convertOperationsQuoteToWorkOrder,
   createOperationsCommunication,
   createOperationsCommunicationTemplate,
   createOperationsTask,
   createOperationsBusiness,
+  createOperationsQuote,
+  createOperationsQuoteServiceItem,
   createOperationsReport,
   createOperationsReportRetest,
+  deleteOperationsQuoteAccessRequirement,
+  deleteOperationsQuoteItem,
+  deleteOperationsWorkOrderAccessRequirement,
   deleteOperationsContact,
+  duplicateOperationsQuote,
   duplicateOperationsReport,
   freezeOperationsReportRender,
+  freezeOperationsQuoteRender,
   getOperationsCommunication,
   getOperationsCommunicationDraftContext,
   getOperationsCommunicationTemplate,
   getOperationsBusinessDetail,
+  getOperationsQuoteDetail,
+  getOperationsQuotePreview,
   getOperationsReportDetail,
   getOperationsReportPreview,
   getOperationsSummary,
+  getOperationsWorkOrderDetail,
   linkOperationsBusinessSite,
   listOperationsCommunicationTemplates,
   listOperationsCommunications,
   listOperationsAvailableSites,
   listOperationsBusinesses,
   listOperationsPipeline,
+  listOperationsQuotes,
+  listOperationsQuoteServiceItems,
   listOperationsReportableScanRuns,
   listOperationsReports,
   listOperationsTasks,
+  listOperationsWorkOrders,
   markOperationsCommunicationReceived,
   markOperationsCommunicationSent,
+  markOperationsQuoteExpired,
+  markOperationsQuoteReady,
   markOperationsReportStatus,
+  recordOperationsQuoteAccepted,
+  recordOperationsQuoteDeclined,
+  recordOperationsQuoteSent,
   recordOperationsReportSent,
+  reorderOperationsQuoteItems,
   reorderOperationsReportFindings,
+  reorderOperationsWorkItems,
   setOperationsCommunicationTemplateActive,
   setOperationsBusinessArchived,
   setOperationsReportArchived,
@@ -46,9 +73,16 @@ import {
   updateOperationsBusiness,
   updateOperationsCommunication,
   updateOperationsCommunicationTemplate,
+  updateOperationsQuote,
+  updateOperationsQuoteAccessRequirement,
+  updateOperationsQuoteItem,
+  updateOperationsQuoteServiceItem,
   updateOperationsReport,
   updateOperationsReportComparisonItem,
   updateOperationsReportFinding,
+  updateOperationsWorkItem,
+  updateOperationsWorkOrder,
+  updateOperationsWorkOrderAccessRequirement,
   updateOperationsTask,
   updateOperationsContact,
   type AdminActor,
@@ -72,6 +106,14 @@ import {
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsAccessRequirementInput,
+  parseOperationsQuoteAcceptedInput,
+  parseOperationsQuoteCreateInput,
+  parseOperationsQuoteDeclinedInput,
+  parseOperationsQuoteItemInput,
+  parseOperationsQuoteSentInput,
+  parseOperationsQuoteStatus,
+  parseOperationsQuoteUpdateInput,
   parseOperationsReportClientPriority,
   parseOperationsReportComparisonStatus,
   parseOperationsReportComparisonUpdateInput,
@@ -82,7 +124,13 @@ import {
   parseOperationsReportStatus,
   parseOperationsReportType,
   parseOperationsReportUpdateInput,
+  parseOperationsServiceItemInput,
   parseOperationsTaskInput,
+  parseOperationsWorkItemInput,
+  parseOperationsWorkItemStatus,
+  parseOperationsWorkOrderPriority,
+  parseOperationsWorkOrderStatus,
+  parseOperationsWorkOrderUpdateInput,
   optionalTextField,
   optionalUuidField,
   parseDateField,
@@ -246,6 +294,64 @@ function parseReportListOptions(req: Request): OperationsReportListParams {
     dateTo: parseQueryDate(req.query.dateTo),
     awaitingFollowUp: req.query.awaitingFollowUp === "true",
     archived,
+  };
+}
+
+function parseQuoteListOptions(req: Request) {
+  const status =
+    typeof req.query.status === "string"
+      ? parseOperationsQuoteStatus(req.query.status)
+      : null;
+  if (typeof req.query.status === "string" && !status) {
+    throw new Error("invalid_quote_status");
+  }
+  return {
+    ...parsePagination(req),
+    businessId:
+      typeof req.query.businessId === "string" ? req.query.businessId : null,
+    operationsReportId:
+      typeof req.query.operationsReportId === "string"
+        ? req.query.operationsReportId
+        : null,
+    status,
+    search: typeof req.query.search === "string" ? req.query.search : null,
+    archived:
+      req.query.archived === "true"
+        ? true
+        : req.query.archived === "false"
+          ? false
+          : null,
+  };
+}
+
+function parseWorkOrderListOptions(req: Request) {
+  const status =
+    typeof req.query.status === "string"
+      ? parseOperationsWorkOrderStatus(req.query.status)
+      : null;
+  const priority =
+    typeof req.query.priority === "string"
+      ? parseOperationsWorkOrderPriority(req.query.priority)
+      : null;
+  if (typeof req.query.status === "string" && !status) {
+    throw new Error("invalid_work_order_status");
+  }
+  if (typeof req.query.priority === "string" && !priority) {
+    throw new Error("invalid_work_order_priority");
+  }
+  return {
+    ...parsePagination(req),
+    businessId:
+      typeof req.query.businessId === "string" ? req.query.businessId : null,
+    operationsReportId:
+      typeof req.query.operationsReportId === "string"
+        ? req.query.operationsReportId
+        : null,
+    quoteId: typeof req.query.quoteId === "string" ? req.query.quoteId : null,
+    status,
+    priority,
+    search: typeof req.query.search === "string" ? req.query.search : null,
+    overdue: req.query.overdue === "true",
   };
 }
 
@@ -445,6 +551,1166 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/quotes/service-items", async (req, res) => {
+    try {
+      return res.json({
+        serviceItems: serializeObject(
+          await listOperationsQuoteServiceItems(
+            req.query.activeOnly === "true",
+          ),
+        ),
+      });
+    } catch (err) {
+      console.error("Operations quote service items failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_service_items_failed",
+        "Failed to load service items",
+      );
+    }
+  });
+
+  router.post("/quotes/service-items", async (req, res) => {
+    try {
+      const item = await createOperationsQuoteServiceItem(
+        getActor(req),
+        parseOperationsServiceItemInput(req.body),
+      );
+      return res.status(201).json({ serviceItem: serializeObject(item) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote service item create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_service_item_create_failed",
+        "Failed to create service item",
+      );
+    }
+  });
+
+  router.patch("/quotes/service-items/:serviceItemId", async (req, res) => {
+    const serviceItemId = getUuidParam(req, res, "serviceItemId");
+    if (!serviceItemId) return;
+    try {
+      const item = await updateOperationsQuoteServiceItem(
+        getActor(req),
+        serviceItemId,
+        parseOperationsServiceItemInput(req.body, { partial: true }),
+      );
+      if (!item)
+        return sendApiError(res, 404, "not_found", "Service item not found");
+      return res.json({ serviceItem: serializeObject(item) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote service item update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_service_item_update_failed",
+        "Failed to update service item",
+      );
+    }
+  });
+
+  router.get("/quotes", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(await listOperationsQuotes(parseQuoteListOptions(req))),
+      );
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quotes failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quotes_failed",
+        "Failed to load quotes",
+      );
+    }
+  });
+
+  router.post("/quotes", async (req, res) => {
+    try {
+      const result = await createOperationsQuote(
+        getActor(req),
+        parseOperationsQuoteCreateInput(req.body),
+      );
+      if (result === "business_not_found") {
+        return sendApiError(res, 404, "not_found", "Business not found");
+      }
+      if (result === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (result === "report_not_found") {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      if (result === "finding_not_found") {
+        return sendApiError(res, 404, "not_found", "Finding not found");
+      }
+      return res.status(201).json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_create_failed",
+        "Failed to create quote",
+      );
+    }
+  });
+
+  router.get("/quotes/:quoteId", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const quote = await getOperationsQuoteDetail(quoteId);
+      if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(quote) });
+    } catch (err) {
+      console.error("Operations quote detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_failed",
+        "Failed to load quote",
+      );
+    }
+  });
+
+  router.patch("/quotes/:quoteId", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await updateOperationsQuote(
+        getActor(req),
+        quoteId,
+        parseOperationsQuoteUpdateInput(req.body),
+      );
+      if (result === "quote_locked") {
+        return sendApiError(
+          res,
+          409,
+          "quote_locked",
+          "Accepted or closed quotes cannot be edited",
+        );
+      }
+      if (
+        result === "contact_not_found" ||
+        result === "report_not_found" ||
+        result === "business_not_found"
+      ) {
+        return sendApiError(res, 404, "not_found", "Related record not found");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_update_failed",
+        "Failed to update quote",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/duplicate", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const quote = await duplicateOperationsQuote(getActor(req), quoteId);
+      if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.status(201).json({ quote: serializeObject(quote) });
+    } catch (err) {
+      console.error("Operations quote duplicate failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_duplicate_failed",
+        "Failed to duplicate quote",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/cancel", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    try {
+      const quote = await cancelOperationsQuote(
+        getActor(req),
+        quoteId,
+        optionalTextField(body as Record<string, unknown>, "reason"),
+      );
+      if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(quote) });
+    } catch (err) {
+      console.error("Operations quote cancel failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_cancel_failed",
+        "Failed to cancel quote",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/mark-ready", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await markOperationsQuoteReady(getActor(req), quoteId);
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      if (typeof result === "object" && "readinessIssues" in result) {
+        return sendApiError(
+          res,
+          400,
+          "quote_not_ready",
+          "Quote is not ready to send",
+          { readinessIssues: result.readinessIssues },
+        );
+      }
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations quote mark ready failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_ready_failed",
+        "Failed to mark quote ready",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/record-sent", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await recordOperationsQuoteSent(
+        getActor(req),
+        quoteId,
+        parseOperationsQuoteSentInput(req.body),
+      );
+      if (result === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote sent failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_sent_failed",
+        "Failed to record quote as sent",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/record-accepted", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await recordOperationsQuoteAccepted(
+        getActor(req),
+        quoteId,
+        parseOperationsQuoteAcceptedInput(req.body),
+      );
+      if (result === "acceptance_confirmation_required") {
+        return sendApiError(
+          res,
+          400,
+          "acceptance_confirmation_required",
+          "Quote acceptance requires explicit confirmation",
+        );
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote accepted failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_accept_failed",
+        "Failed to record quote acceptance",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/record-declined", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await recordOperationsQuoteDeclined(
+        getActor(req),
+        quoteId,
+        parseOperationsQuoteDeclinedInput(req.body),
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote declined failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_decline_failed",
+        "Failed to record quote decline",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/mark-expired", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    try {
+      const result = await markOperationsQuoteExpired(
+        getActor(req),
+        quoteId,
+        optionalTextField(body as Record<string, unknown>, "reason"),
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ quote: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations quote expire failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_expire_failed",
+        "Failed to expire quote",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/convert-to-work", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await convertOperationsQuoteToWorkOrder(
+        getActor(req),
+        quoteId,
+      );
+      if (result === "quote_not_accepted") {
+        return sendApiError(
+          res,
+          400,
+          "quote_not_accepted",
+          "Only accepted quotes can be converted",
+        );
+      }
+      if (result === "quote_has_no_selected_items") {
+        return sendApiError(
+          res,
+          400,
+          "quote_has_no_selected_items",
+          "Quote has no selected items",
+        );
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.status(201).json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations quote convert failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_convert_failed",
+        "Failed to convert quote to work",
+      );
+    }
+  });
+
+  router.get("/quotes/:quoteId/preview", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const preview = await getOperationsQuotePreview(quoteId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json(serializeObject(preview));
+    } catch (err) {
+      console.error("Operations quote preview failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_preview_failed",
+        "Failed to build quote preview",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/generate-pdf", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const payload = await freezeOperationsQuoteRender(
+        getActor(req),
+        quoteId,
+        "operations_quote_pdf_generated",
+      );
+      if (!payload)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({
+        payload: serializeObject(payload),
+        pdfMode: "browser_print",
+      });
+    } catch (err) {
+      console.error("Operations quote PDF failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_pdf_failed",
+        "Failed to prepare quote PDF",
+      );
+    }
+  });
+
+  router.get("/quotes/:quoteId/download", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const preview = await getOperationsQuotePreview(quoteId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({
+        ...((serializeObject(preview) as Record<string, unknown>) ?? {}),
+        pdfMode: "browser_print",
+      });
+    } catch (err) {
+      console.error("Operations quote download failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_download_failed",
+        "Failed to build quote download",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/items", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await addOperationsQuoteItem(
+        getActor(req),
+        quoteId,
+        parseOperationsQuoteItemInput(req.body),
+      );
+      if (result === "quote_locked") {
+        return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
+      }
+      if (
+        result === "business_not_found" ||
+        result === "report_not_found" ||
+        result === "finding_not_found"
+      ) {
+        return sendApiError(res, 404, "not_found", "Related record not found");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.status(201).json({ item: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote item add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_item_add_failed",
+        "Failed to add quote item",
+      );
+    }
+  });
+
+  router.patch("/quotes/:quoteId/items/:itemId", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    const itemId = getUuidParam(req, res, "itemId");
+    if (!quoteId || !itemId) return;
+    try {
+      const result = await updateOperationsQuoteItem(
+        getActor(req),
+        quoteId,
+        itemId,
+        parseOperationsQuoteItemInput(req.body, { partial: true }),
+      );
+      if (result === "quote_locked") {
+        return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
+      }
+      if (!result) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote item update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_item_update_failed",
+        "Failed to update quote item",
+      );
+    }
+  });
+
+  router.delete("/quotes/:quoteId/items/:itemId", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    const itemId = getUuidParam(req, res, "itemId");
+    if (!quoteId || !itemId) return;
+    try {
+      const result = await deleteOperationsQuoteItem(
+        getActor(req),
+        quoteId,
+        itemId,
+      );
+      if (result === "quote_locked") {
+        return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
+      }
+      if (!result) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations quote item delete failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_item_delete_failed",
+        "Failed to delete quote item",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/items/reorder", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const itemIds = Array.isArray((body as Record<string, unknown>).itemIds)
+        ? ((body as Record<string, unknown>).itemIds as unknown[])
+        : [];
+      if (
+        itemIds.length === 0 ||
+        !itemIds.every((id) => typeof id === "string" && UUID_RE.test(id))
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_item_order",
+          "Item order is invalid",
+        );
+      }
+      const result = await reorderOperationsQuoteItems(
+        getActor(req),
+        quoteId,
+        itemIds as string[],
+      );
+      if (result === "quote_locked") {
+        return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res.json({ items: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations quote item reorder failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_item_reorder_failed",
+        "Failed to reorder quote items",
+      );
+    }
+  });
+
+  router.post("/quotes/:quoteId/access-requirements", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    try {
+      const result = await addOperationsQuoteAccessRequirement(
+        getActor(req),
+        quoteId,
+        parseOperationsAccessRequirementInput(req.body),
+      );
+      if (result === "quote_locked") {
+        return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      return res
+        .status(201)
+        .json({ accessRequirement: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote access add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_access_add_failed",
+        "Failed to add access requirement",
+      );
+    }
+  });
+
+  router.patch(
+    "/quotes/:quoteId/access-requirements/:requirementId",
+    async (req, res) => {
+      const quoteId = getUuidParam(req, res, "quoteId");
+      const requirementId = getUuidParam(req, res, "requirementId");
+      if (!quoteId || !requirementId) return;
+      try {
+        const result = await updateOperationsQuoteAccessRequirement(
+          getActor(req),
+          quoteId,
+          requirementId,
+          parseOperationsAccessRequirementInput(req.body, { partial: true }),
+        );
+        if (result === "quote_locked") {
+          return sendApiError(
+            res,
+            409,
+            "quote_locked",
+            "Quote cannot be edited",
+          );
+        }
+        if (!result)
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Access requirement not found",
+          );
+        return res.json({ accessRequirement: serializeObject(result) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations quote access update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_quote_access_update_failed",
+          "Failed to update access requirement",
+        );
+      }
+    },
+  );
+
+  router.delete(
+    "/quotes/:quoteId/access-requirements/:requirementId",
+    async (req, res) => {
+      const quoteId = getUuidParam(req, res, "quoteId");
+      const requirementId = getUuidParam(req, res, "requirementId");
+      if (!quoteId || !requirementId) return;
+      try {
+        const result = await deleteOperationsQuoteAccessRequirement(
+          getActor(req),
+          quoteId,
+          requirementId,
+        );
+        if (result === "quote_locked") {
+          return sendApiError(
+            res,
+            409,
+            "quote_locked",
+            "Quote cannot be edited",
+          );
+        }
+        if (!result)
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Access requirement not found",
+          );
+        return res.json({ accessRequirement: serializeObject(result) });
+      } catch (err) {
+        console.error("Operations quote access delete failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_quote_access_delete_failed",
+          "Failed to delete access requirement",
+        );
+      }
+    },
+  );
+
+  router.get("/work-orders", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsWorkOrders(parseWorkOrderListOptions(req)),
+        ),
+      );
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work orders failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_orders_failed",
+        "Failed to load work orders",
+      );
+    }
+  });
+
+  router.get("/work-orders/:workOrderId", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const detail = await getOperationsWorkOrderDetail(workOrderId);
+      if (!detail)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({ workOrder: serializeObject(detail) });
+    } catch (err) {
+      console.error("Operations work order detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_failed",
+        "Failed to load work order",
+      );
+    }
+  });
+
+  router.patch("/work-orders/:workOrderId", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const input = parseOperationsWorkOrderUpdateInput(req.body);
+      if (input.status === "completed") {
+        return sendApiError(
+          res,
+          400,
+          "use_complete_endpoint",
+          "Use the completion workflow for completed work orders",
+        );
+      }
+      const result = await updateOperationsWorkOrder(
+        getActor(req),
+        workOrderId,
+        input,
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work order update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_update_failed",
+        "Failed to update work order",
+      );
+    }
+  });
+
+  router.post("/work-orders/:workOrderId/start", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const result = await updateOperationsWorkOrder(
+        getActor(req),
+        workOrderId,
+        {
+          status: "in_progress",
+        },
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations work order start failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_start_failed",
+        "Failed to start work order",
+      );
+    }
+  });
+
+  router.post("/work-orders/:workOrderId/set-status", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const record = req.body && typeof req.body === "object" ? req.body : {};
+      const status = parseOperationsWorkOrderStatus(
+        (record as Record<string, unknown>).status,
+      );
+      if (!status) throw new Error("invalid_work_order_status");
+      if (status === "completed") {
+        return sendApiError(
+          res,
+          400,
+          "use_complete_endpoint",
+          "Use the completion workflow for completed work orders",
+        );
+      }
+      const result = await updateOperationsWorkOrder(
+        getActor(req),
+        workOrderId,
+        {
+          status,
+        },
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work order status failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_status_failed",
+        "Failed to update work order status",
+      );
+    }
+  });
+
+  router.post("/work-orders/:workOrderId/complete", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const record = req.body && typeof req.body === "object" ? req.body : {};
+      const result = await completeOperationsWorkOrder(
+        getActor(req),
+        workOrderId,
+        textField(record as Record<string, unknown>, "completionSummary") ?? "",
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      if ("completionIssues" in result) {
+        return sendApiError(
+          res,
+          400,
+          "work_order_not_complete",
+          "Work order is not ready to complete",
+          { completionIssues: result.completionIssues },
+        );
+      }
+      return res.json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work order complete failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_complete_failed",
+        "Failed to complete work order",
+      );
+    }
+  });
+
+  router.post("/work-orders/:workOrderId/cancel", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const result = await updateOperationsWorkOrder(
+        getActor(req),
+        workOrderId,
+        {
+          status: "cancelled",
+        },
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({ workOrder: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations work order cancel failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_order_cancel_failed",
+        "Failed to cancel work order",
+      );
+    }
+  });
+
+  router.post("/work-orders/:workOrderId/items", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    try {
+      const item = await addOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        parseOperationsWorkItemInput(req.body),
+      );
+      if (!item)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.status(201).json({ item: serializeObject(item) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work item add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_item_add_failed",
+        "Failed to add work item",
+      );
+    }
+  });
+
+  router.patch("/work-orders/:workOrderId/items/:itemId", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    const itemId = getUuidParam(req, res, "itemId");
+    if (!workOrderId || !itemId) return;
+    try {
+      const item = await updateOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        itemId,
+        parseOperationsWorkItemInput(req.body, { partial: true }),
+      );
+      if (!item) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(item) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations work item update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_work_item_update_failed",
+        "Failed to update work item",
+      );
+    }
+  });
+
+  router.post(
+    "/work-orders/:workOrderId/items/:itemId/start",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const itemId = getUuidParam(req, res, "itemId");
+      if (!workOrderId || !itemId) return;
+      const item = await updateOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        itemId,
+        {
+          status: "in_progress",
+        },
+      );
+      if (!item) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(item) });
+    },
+  );
+
+  router.post(
+    "/work-orders/:workOrderId/items/:itemId/complete",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const itemId = getUuidParam(req, res, "itemId");
+      if (!workOrderId || !itemId) return;
+      const record = req.body && typeof req.body === "object" ? req.body : {};
+      const item = await updateOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        itemId,
+        {
+          status: "completed",
+          completionNotes: optionalTextField(
+            record as Record<string, unknown>,
+            "completionNotes",
+          ),
+          clientVisibleCompletionNotes: optionalTextField(
+            record as Record<string, unknown>,
+            "clientVisibleCompletionNotes",
+          ),
+        },
+      );
+      if (!item) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(item) });
+    },
+  );
+
+  router.post(
+    "/work-orders/:workOrderId/items/:itemId/block",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const itemId = getUuidParam(req, res, "itemId");
+      if (!workOrderId || !itemId) return;
+      const item = await updateOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        itemId,
+        {
+          status: "blocked",
+        },
+      );
+      if (!item) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(item) });
+    },
+  );
+
+  router.post(
+    "/work-orders/:workOrderId/items/:itemId/request-client-action",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const itemId = getUuidParam(req, res, "itemId");
+      if (!workOrderId || !itemId) return;
+      const item = await updateOperationsWorkItem(
+        getActor(req),
+        workOrderId,
+        itemId,
+        { status: "waiting_for_client" },
+      );
+      if (!item) return sendApiError(res, 404, "not_found", "Item not found");
+      return res.json({ item: serializeObject(item) });
+    },
+  );
+
+  router.post("/work-orders/:workOrderId/items/reorder", async (req, res) => {
+    const workOrderId = getUuidParam(req, res, "workOrderId");
+    if (!workOrderId) return;
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const itemIds = Array.isArray((body as Record<string, unknown>).itemIds)
+      ? ((body as Record<string, unknown>).itemIds as unknown[])
+      : [];
+    if (
+      itemIds.length === 0 ||
+      !itemIds.every((id) => typeof id === "string" && UUID_RE.test(id))
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_item_order",
+        "Item order is invalid",
+      );
+    }
+    const items = await reorderOperationsWorkItems(
+      getActor(req),
+      workOrderId,
+      itemIds as string[],
+    );
+    return res.json({ items: serializeObject(items) });
+  });
+
+  router.get(
+    "/work-orders/:workOrderId/access-requirements",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      if (!workOrderId) return;
+      const detail = await getOperationsWorkOrderDetail(workOrderId);
+      if (!detail)
+        return sendApiError(res, 404, "not_found", "Work order not found");
+      return res.json({
+        accessRequirements: serializeObject(detail.accessRequirements),
+      });
+    },
+  );
+
+  router.post(
+    "/work-orders/:workOrderId/access-requirements",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      if (!workOrderId) return;
+      try {
+        const result = await addOperationsWorkOrderAccessRequirement(
+          getActor(req),
+          workOrderId,
+          parseOperationsAccessRequirementInput(req.body),
+        );
+        if (!result)
+          return sendApiError(res, 404, "not_found", "Work order not found");
+        return res
+          .status(201)
+          .json({ accessRequirement: serializeObject(result) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations work access add failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_work_access_add_failed",
+          "Failed to add access requirement",
+        );
+      }
+    },
+  );
+
+  router.patch(
+    "/work-orders/:workOrderId/access-requirements/:requirementId",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const requirementId = getUuidParam(req, res, "requirementId");
+      if (!workOrderId || !requirementId) return;
+      try {
+        const result = await updateOperationsWorkOrderAccessRequirement(
+          getActor(req),
+          workOrderId,
+          requirementId,
+          parseOperationsAccessRequirementInput(req.body, { partial: true }),
+        );
+        if (!result)
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Access requirement not found",
+          );
+        return res.json({ accessRequirement: serializeObject(result) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations work access update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_work_access_update_failed",
+          "Failed to update access requirement",
+        );
+      }
+    },
+  );
+
+  router.delete(
+    "/work-orders/:workOrderId/access-requirements/:requirementId",
+    async (req, res) => {
+      const workOrderId = getUuidParam(req, res, "workOrderId");
+      const requirementId = getUuidParam(req, res, "requirementId");
+      if (!workOrderId || !requirementId) return;
+      const result = await deleteOperationsWorkOrderAccessRequirement(
+        getActor(req),
+        workOrderId,
+        requirementId,
+      );
+      if (!result)
+        return sendApiError(
+          res,
+          404,
+          "not_found",
+          "Access requirement not found",
+        );
+      return res.json({ accessRequirement: serializeObject(result) });
+    },
+  );
 
   router.get("/reports/reportable-scan-runs", async (req, res) => {
     try {

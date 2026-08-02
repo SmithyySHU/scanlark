@@ -33,6 +33,16 @@ Auth:
 - `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`: optional global override for
   suggested Operations follow-up dates. Leave blank to use template/category
   defaults; valid values are `0` through `60`.
+- `OPERATIONS_QUOTE_PREFIX`: quote document prefix, default `SL-Q`.
+- `OPERATIONS_WORK_ORDER_PREFIX`: work-order document prefix, default `SL-W`.
+- `OPERATIONS_DEFAULT_CURRENCY`: ISO currency for new Operations quotes,
+  default `GBP`.
+- `OPERATIONS_DEFAULT_QUOTE_VALID_DAYS`: default quote validity window, default
+  `14`.
+- `OPERATIONS_BUSINESS_VAT_REGISTERED`: enables VAT calculation for quote
+  previews when `true`; default is `false`.
+- `OPERATIONS_VAT_RATE_PERCENT`: VAT percentage used only when VAT is enabled,
+  default `20`.
 - Production-like API startup rejects dev auth bypass, short secrets, missing
   share/internal secrets, localhost CORS origins, and non-HTTPS configured
   public origins.
@@ -235,7 +245,9 @@ print-ready state and `handlePrintReport` calls `window.print()`.
 - For the internal managed-service phase, set `INTERNAL_ONLY_MODE=true`,
   `INTERNAL_ADMIN_EMAILS`, `PUBLIC_CONTACT_EMAIL`,
   `OPERATIONS_SENDER_NAME`, `OPERATIONS_SENDER_EMAIL`, and optionally
-  `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`.
+  `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`. Also set the Operations
+  quote/work prefixes, default currency, quote validity, and VAT variables
+  explicitly in production.
 - Set production `WEB_ORIGIN`, `API_ORIGIN`, and `APP_URL`.
 - Run migrations against the target DB.
 - Start API and worker as separate long-running services.
