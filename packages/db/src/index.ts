@@ -235,6 +235,47 @@ export type {
   AdminUserRow,
 } from "./admin";
 
+export { getOperationsSummary } from "./operations";
+export type {
+  OperationsActivityItem,
+  OperationsMonitoringAttentionItem,
+  OperationsSummary,
+  OperationsSummaryCounts,
+} from "./operations";
+export {
+  addOperationsBusinessNote,
+  addOperationsContact,
+  createOperationsBusiness,
+  deleteOperationsContact,
+  getOperationsBusinessCounts,
+  getOperationsBusinessDetail,
+  linkOperationsBusinessSite,
+  listOperationsAvailableSites,
+  listOperationsBusinesses,
+  listOperationsPipeline,
+  OPERATIONS_PIPELINE_STAGES,
+  OPERATIONS_RELATIONSHIP_TYPES,
+  setOperationsBusinessArchived,
+  setPrimaryOperationsContact,
+  unlinkOperationsBusinessSite,
+  updateOperationsBusiness,
+  updateOperationsContact,
+} from "./operationsCrm";
+export type {
+  OperationsBusinessDetail,
+  OperationsBusinessInput,
+  OperationsBusinessListParams,
+  OperationsBusinessListRow,
+  OperationsBusinessNoteRow,
+  OperationsBusinessReportRow,
+  OperationsBusinessRow,
+  OperationsContactInput,
+  OperationsContactRow,
+  OperationsLinkedSiteRow,
+  OperationsPipelineStage,
+  OperationsRelationshipType,
+} from "./operationsCrm";
+
 export {
   createOrRotateReportShareForRunForUser,
   disableReportShareForRunForUser,

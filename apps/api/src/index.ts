@@ -120,6 +120,7 @@ import {
 } from "../../../packages/crawler/src/limits";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { mountAdminRoutes } from "./routes/admin";
+import { mountOperationsRoutes } from "./routes/operations";
 import { serializeScanRun } from "./serializers";
 import {
   isSampleSiteUrl,
@@ -1031,6 +1032,7 @@ app.use(authenticatedWriteLimiter);
 
 mountEventStream(app);
 mountScanRunEvents(app);
+mountOperationsRoutes(app);
 mountAdminRoutes(app);
 
 app.get("/account/profile", (req, res) => {

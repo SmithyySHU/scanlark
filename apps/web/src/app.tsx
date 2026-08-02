@@ -21,6 +21,7 @@ import {
 } from "./components/DashboardPrimitives";
 import { MarketingPage } from "./components/MarketingPage";
 import { LegalPage } from "./components/LegalPage";
+import { OperationsPage } from "./components/OperationsPage";
 import {
   FEATURED_LEARN_ARTICLE_SLUGS,
   LEARN_ARTICLES,
@@ -75,6 +76,7 @@ type AppRoute =
   | "report"
   | "shared_report"
   | "admin"
+  | "operations"
   | "legal"
   | "learn";
 type AppSection = "dashboard" | "reports" | "site_settings" | "account";
@@ -2369,8 +2371,22 @@ function getLoginNextFromLocation() {
   try {
     const next = new URLSearchParams(window.location.search).get("next");
     if (!next) return null;
-    if (next === "/admin") return next;
-    if (next === "/dashboard" || next.startsWith("/dashboard/")) return next;
+    if (next === "/admin" || next.startsWith("/admin/")) return next;
+    if (
+      next === "/operations" ||
+      next.startsWith("/operations/") ||
+      next.startsWith("/operations?")
+    ) {
+      return next;
+    }
+    if (
+      next === "/dashboard" ||
+      next.startsWith("/dashboard/") ||
+      next.startsWith("/dashboard?")
+    ) {
+      return next;
+    }
+    if (next === "/report" || next.startsWith("/report?")) return next;
     return null;
   } catch {
     return null;
@@ -2454,6 +2470,9 @@ function getRouteFromLocation(): AppRoute {
   if (path === "/report") return "report";
   if (path.startsWith(`${SHARED_REPORT_ROUTE_PREFIX}/`)) return "shared_report";
   if (path === "/admin" || path.startsWith("/admin/")) return "admin";
+  if (path === "/operations" || path.startsWith("/operations/")) {
+    return "operations";
+  }
   if (path === "/learn" || path.startsWith("/learn/")) return "learn";
   if (path === "/dashboard/select-site") return "select_site";
   if (path === "/dashboard" || path.startsWith("/dashboard/")) return "app";
@@ -3481,6 +3500,13 @@ const App: React.FC = () => {
   const [locationSearch, setLocationSearch] = useState(() =>
     getLocationSearch(),
   );
+  const [locationPathname, setLocationPathname] = useState(() =>
+    typeof window === "undefined"
+      ? "/"
+      : normalizeDashboardCompatPath(
+          window.location.pathname.replace(/\/+$/, "") || "/",
+        ),
+  );
   const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
   const [learnSlug, setLearnSlug] = useState<string | null>(() =>
     getLearnSlugFromLocation(),
@@ -3943,6 +3969,7 @@ const App: React.FC = () => {
       window.history.replaceState({}, "", `${normalizedPath}${search}${hash}`);
     }
     setLocationSearch(search);
+    setLocationPathname(normalizedPath);
 
     const handlePopState = () => {
       const currentPathname =
@@ -3957,6 +3984,7 @@ const App: React.FC = () => {
         );
       }
       setLocationSearch(search);
+      setLocationPathname(normalizedPath);
       const nextRoute = getRouteFromLocation();
       const nextReportId = getReportScanRunIdFromLocation();
       const nextSharedToken = getSharedReportTokenFromLocation();
@@ -3985,12 +4013,26 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!authUser || route !== "login") return;
-    navigateTo(getLoginNextFromLocation() ?? "/dashboard");
+    const next = getLoginNextFromLocation();
+    if (next) {
+      navigateToHref(next, { replace: true });
+    } else {
+      navigateTo(getDefaultAuthenticatedPath(authUser), undefined, {
+        replace: true,
+      });
+    }
   }, [authUser, route]);
 
   useEffect(() => {
-    if (route !== "admin" || authLoading || authUser) return;
-    navigateTo("/login", { next: "/admin" }, { replace: true });
+    if (
+      (route !== "admin" && route !== "operations") ||
+      authLoading ||
+      authUser
+    ) {
+      return;
+    }
+    const nextPath = `${window.location.pathname}${window.location.search}`;
+    navigateTo("/login", { next: nextPath }, { replace: true });
   }, [authLoading, authUser, route]);
 
   useEffect(() => {
@@ -6421,6 +6463,7 @@ const App: React.FC = () => {
   const isReportRoute = route === "report";
   const isSharedReportRoute = route === "shared_report";
   const isAdminRoute = route === "admin";
+  const isOperationsRoute = route === "operations";
   const isReadOnlyReport = isSharedReportRoute;
   const allowAnonymousSharedReport = isSharedReportRoute && !internalOnlyMode;
   const hasLandingDashboardSelectIntent =
@@ -6430,6 +6473,7 @@ const App: React.FC = () => {
     route === "select_site" ||
     route === "report" ||
     route === "admin" ||
+    route === "operations" ||
     route === "onboarding" ||
     route === "new_site" ||
     (internalOnlyMode && route === "shared_report");
@@ -9012,6 +9056,7 @@ const App: React.FC = () => {
       route === "shared_report" ||
       route === "learn" ||
       route === "new_site" ||
+      route === "operations" ||
       (route === "app" && appSection === "account")
     ) {
       return;
@@ -9625,7 +9670,12 @@ const App: React.FC = () => {
       setAuthPassword("");
       setAuthError(null);
       if (route === "login" || route === "landing") {
-        navigateTo(getLoginNextFromLocation() ?? "/dashboard");
+        const next = getLoginNextFromLocation();
+        if (next) {
+          navigateToHref(next);
+        } else {
+          navigateTo(getDefaultAuthenticatedPath(data));
+        }
       }
     } catch (err: unknown) {
       setAuthError(
@@ -9664,6 +9714,10 @@ const App: React.FC = () => {
     window.location.href = `mailto:${email}?subject=${encodeURIComponent(
       "Website health check request",
     )}`;
+  }
+
+  function getDefaultAuthenticatedPath(user: AuthUser | null) {
+    return user?.isAdmin === true ? "/operations" : "/dashboard";
   }
 
   function renderClosedAccess() {
@@ -12171,6 +12225,7 @@ const App: React.FC = () => {
       window.history.pushState({}, "", url);
     }
     setLocationSearch(getLocationSearch());
+    setLocationPathname(normalizedPath);
     const nextRoute = getRouteFromLocation();
     const nextReportId = getReportScanRunIdFromLocation();
     const nextSharedToken = getSharedReportTokenFromLocation();
@@ -12191,6 +12246,16 @@ const App: React.FC = () => {
         nextSharedToken,
         isSharedReportPath,
       ),
+    );
+  }
+
+  function navigateToHref(href: string, options?: { replace?: boolean }) {
+    const url = new URL(href, window.location.origin);
+    const searchParams = Object.fromEntries(url.searchParams.entries());
+    navigateTo(
+      url.pathname,
+      Object.keys(searchParams).length > 0 ? searchParams : undefined,
+      options,
     );
   }
 
@@ -19906,12 +19971,16 @@ const App: React.FC = () => {
         ) : isManagedPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
-            primaryLabel="Open dashboard"
+            primaryLabel={
+              authUser?.isAdmin === true ? "Open operations" : "Open dashboard"
+            }
             secondaryLabel="Account"
             onOpenPrimary={() =>
-              navigateTo("/dashboard", {
-                [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
-              })
+              authUser?.isAdmin === true
+                ? navigateTo("/operations")
+                : navigateTo("/dashboard", {
+                    [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
+                  })
             }
             onOpenSecondary={() => navigateTo("/dashboard/account")}
             onOpenLearn={() => navigateTo("/learn")}
@@ -19920,6 +19989,85 @@ const App: React.FC = () => {
             onOpenAccount={() => navigateTo("/dashboard/account")}
             managedMode={internalOnlyMode}
           />
+        ) : isOperationsRoute ? (
+          authUser?.isAdmin === true ? (
+            <OperationsPage
+              apiBase={API_BASE}
+              apiFetch={apiFetch}
+              currentPath={locationPathname}
+              currentSearch={locationSearch}
+              authEmail={authUser.email}
+              onNavigate={navigateToHref}
+              onLogout={() => {
+                void handleLogout();
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                minHeight: "100vh",
+                display: "grid",
+                placeItems: "center",
+                background: "var(--bg)",
+                color: "var(--text)",
+                padding: "24px",
+              }}
+            >
+              <div
+                style={{
+                  width: "min(440px, 100%)",
+                  border: "1px solid var(--border)",
+                  background: "var(--panel)",
+                  borderRadius: "8px",
+                  padding: "22px",
+                  display: "grid",
+                  gap: "12px",
+                }}
+              >
+                <span
+                  style={{
+                    color: "var(--warning)",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Internal operations
+                </span>
+                <h1
+                  style={{
+                    margin: 0,
+                    fontFamily: "var(--font-display)",
+                    fontSize: "24px",
+                  }}
+                >
+                  Operations access required
+                </h1>
+                <p style={{ margin: 0, color: "var(--text-muted)" }}>
+                  This account is signed in, but it is not approved for the
+                  internal Operations workspace.
+                </p>
+                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => navigateTo("/dashboard")}
+                  >
+                    Back to dashboard
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      void handleLogout();
+                    }}
+                  >
+                    Log out
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
         ) : isAdminRoute ? (
           authUser?.isAdmin === true ? (
             <AdminPage
