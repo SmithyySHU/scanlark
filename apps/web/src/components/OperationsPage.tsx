@@ -141,6 +141,9 @@ type Contact = {
   job_title: string | null;
   is_primary: boolean;
   notes: string | null;
+  do_not_contact: boolean;
+  do_not_contact_reason: string | null;
+  preferred_channel: CommunicationChannel | null;
   created_at: string;
   updated_at: string;
 };
@@ -208,6 +211,7 @@ type CommunicationTemplate = {
   category: CommunicationTemplateCategory;
   subject_template: string;
   body_template: string;
+  default_follow_up_business_days: number | null;
   is_active: boolean;
   is_system_default: boolean;
   created_at: string;
@@ -283,6 +287,9 @@ type ContactFormState = {
   jobTitle: string;
   notes: string;
   isPrimary: boolean;
+  doNotContact: boolean;
+  doNotContactReason: string;
+  preferredChannel: "" | CommunicationChannel;
 };
 
 type CommunicationFormState = {
@@ -305,6 +312,7 @@ type TemplateFormState = {
   category: CommunicationTemplateCategory;
   subjectTemplate: string;
   bodyTemplate: string;
+  defaultFollowUpBusinessDays: string;
   isActive: boolean;
 };
 
@@ -498,6 +506,9 @@ const emptyContactForm: ContactFormState = {
   jobTitle: "",
   notes: "",
   isPrimary: false,
+  doNotContact: false,
+  doNotContactReason: "",
+  preferredChannel: "",
 };
 
 const emptyCommunicationForm: CommunicationFormState = {
@@ -520,6 +531,7 @@ const emptyTemplateForm: TemplateFormState = {
   category: "custom",
   subjectTemplate: "",
   bodyTemplate: "",
+  defaultFollowUpBusinessDays: "",
   isActive: true,
 };
 
@@ -611,6 +623,46 @@ function isOverdue(value: string | null) {
   return !Number.isNaN(date.getTime()) && date.getTime() <= Date.now();
 }
 
+function taskDueDate(task: OperationsTask) {
+  return task.snoozed_until ?? task.due_at;
+}
+
+function isSameLocalDay(left: Date, right: Date) {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function groupTasksForDisplay(tasks: OperationsTask[]) {
+  const now = new Date();
+  return {
+    overdue: tasks.filter((task) => {
+      if (task.status !== "open" && task.status !== "snoozed") return false;
+      const due = new Date(taskDueDate(task));
+      return !Number.isNaN(due.getTime()) && due.getTime() < now.getTime();
+    }),
+    today: tasks.filter((task) => {
+      if (task.status !== "open" && task.status !== "snoozed") return false;
+      const due = new Date(taskDueDate(task));
+      return (
+        !Number.isNaN(due.getTime()) &&
+        due.getTime() >= now.getTime() &&
+        isSameLocalDay(due, now)
+      );
+    }),
+    upcoming: tasks.filter((task) => {
+      if (task.status !== "open" && task.status !== "snoozed") return false;
+      const due = new Date(taskDueDate(task));
+      return !Number.isNaN(due.getTime()) && due.getTime() > now.getTime();
+    }),
+    completed: tasks.filter(
+      (task) => task.status === "completed" || task.status === "cancelled",
+    ),
+  };
+}
+
 function toDateTimeLocalValue(value: string | null) {
   if (!value) return "";
   const date = new Date(value);
@@ -629,6 +681,13 @@ function templateCategoryLabel(value: CommunicationTemplateCategory) {
   return (
     communicationTemplateCategoryOptions.find((item) => item.value === value)
       ?.label ?? value
+  );
+}
+
+function communicationChannelLabel(value: CommunicationChannel) {
+  return (
+    communicationChannelOptions.find((item) => item.value === value)?.label ??
+    value
   );
 }
 
@@ -1250,6 +1309,31 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     return business?.primary_contact_email ?? business?.general_email ?? "";
   }
 
+  function selectedCommunicationContact() {
+    if (detail?.business.id !== communicationForm.businessId) return null;
+    return (
+      detail.contacts.find((item) => item.id === communicationForm.contactId) ??
+      detail.primaryContact
+    );
+  }
+
+  function confirmDoNotContactOverride(action: string) {
+    const contact = selectedCommunicationContact();
+    if (
+      !contact?.do_not_contact ||
+      communicationForm.direction !== "outbound"
+    ) {
+      return true;
+    }
+    return window.confirm(
+      `${contactName(contact)} is marked do-not-contact${
+        contact.do_not_contact_reason
+          ? `: ${contact.do_not_contact_reason}`
+          : "."
+      }\n\nContinue and ${action}?`,
+    );
+  }
+
   async function generateDraft() {
     if (!communicationForm.businessId || !communicationForm.templateId) return;
     setActionError(null);
@@ -1274,12 +1358,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           subject: string;
           body: string;
           unresolvedPlaceholders: string[];
+          suggestedFollowUpAt?: string | null;
+          contactWarning?: {
+            doNotContact: boolean;
+            reason: string | null;
+            preferredChannel: CommunicationChannel | null;
+          } | null;
         };
       };
       setCommunicationForm((prev) => ({
         ...prev,
         subject: data.draft.subject,
         body: data.draft.body,
+        followUpAt:
+          prev.followUpAt ||
+          toDateTimeLocalValue(data.draft.suggestedFollowUpAt ?? null),
         unresolvedPlaceholders: data.draft.unresolvedPlaceholders,
       }));
     } catch (err) {
@@ -1291,6 +1384,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   async function saveCommunication(status: CommunicationStatus) {
     if (!communicationForm.businessId || !communicationForm.body.trim()) return;
+    if (status === "sent" && !confirmDoNotContactOverride("mark this sent")) {
+      return;
+    }
     setActionError(null);
     try {
       const res = await apiFetch(
@@ -1337,6 +1433,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function openEmailClient() {
+    if (!confirmDoNotContactOverride("open the email client")) return;
     const to = communicationRecipientEmail();
     const params = new URLSearchParams({
       subject: communicationForm.subject,
@@ -1354,7 +1451,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(templateForm),
+          body: JSON.stringify({
+            ...templateForm,
+            defaultFollowUpBusinessDays:
+              templateForm.defaultFollowUpBusinessDays.trim() === ""
+                ? null
+                : Number.parseInt(templateForm.defaultFollowUpBusinessDays, 10),
+          }),
         },
       );
       if (!res.ok) throw new Error("Failed to create template");
@@ -1471,6 +1574,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       jobTitle: contact.job_title ?? "",
       notes: contact.notes ?? "",
       isPrimary: contact.is_primary,
+      doNotContact: contact.do_not_contact,
+      doNotContactReason: contact.do_not_contact_reason ?? "",
+      preferredChannel: contact.preferred_channel ?? "",
     });
     setContactFormOpen(true);
   }
@@ -1724,6 +1830,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       detail?.business.id === communicationForm.businessId
         ? detail.contacts
         : [];
+    const selectedContact = selectedCommunicationContact();
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -1922,6 +2029,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   {communicationForm.unresolvedPlaceholders.join(", ")}
                 </div>
               )}
+              {selectedContact?.do_not_contact &&
+                communicationForm.direction === "outbound" && (
+                  <div className="ops-warning">
+                    {contactName(selectedContact)} is marked do-not-contact
+                    {selectedContact.do_not_contact_reason
+                      ? `: ${selectedContact.do_not_contact_reason}`
+                      : "."}
+                  </div>
+                )}
+              {selectedContact?.preferred_channel && (
+                <div className="ops-muted">
+                  Preferred channel:{" "}
+                  {communicationChannelLabel(selectedContact.preferred_channel)}
+                </div>
+              )}
               <div className="ops-form-actions">
                 <button
                   type="button"
@@ -2070,6 +2192,12 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     {template.is_active ? "Active" : "Inactive"} · Updated{" "}
                     {formatDateTime(template.updated_at)}
                   </small>
+                  {template.default_follow_up_business_days != null && (
+                    <small>
+                      Default follow-up:{" "}
+                      {template.default_follow_up_business_days} business days
+                    </small>
+                  )}
                   <div className="ops-inline-actions">
                     <button
                       className="ops-button"
@@ -2114,6 +2242,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       </option>
                     ))}
                   </select>
+                </label>
+                <label>
+                  Default follow-up days
+                  <input
+                    type="number"
+                    min="0"
+                    max="60"
+                    value={templateForm.defaultFollowUpBusinessDays}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        defaultFollowUpBusinessDays: event.target.value,
+                      }))
+                    }
+                  />
                 </label>
               </div>
               <label>
@@ -2168,6 +2311,70 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       ["completed", "Completed"],
       ["cancelled", "Cancelled"],
     ];
+    const groupedTasks = groupTasksForDisplay(tasks);
+    const taskSections =
+      activeStatus === "completed" || activeStatus === "cancelled"
+        ? [{ title: "Closed", items: tasks }]
+        : [
+            { title: "Overdue", items: groupedTasks.overdue },
+            { title: "Today", items: groupedTasks.today },
+            { title: "Upcoming", items: groupedTasks.upcoming },
+            { title: "Completed or cancelled", items: groupedTasks.completed },
+          ];
+    const renderTaskCard = (task: OperationsTask) => (
+      <div key={task.id} className="ops-list-card">
+        <strong className={isOverdue(taskDueDate(task)) ? "ops-overdue" : ""}>
+          {task.title}
+        </strong>
+        <span>
+          {task.business_name ?? "Business"}{" "}
+          {communicationContactName(task)
+            ? `· ${communicationContactName(task)}`
+            : ""}
+        </span>
+        <small>
+          Due {formatDateTime(taskDueDate(task))} · {task.status}
+        </small>
+        {task.notes && <p>{task.notes}</p>}
+        <div className="ops-inline-actions">
+          {renderLink(
+            `/operations/businesses/${task.business_id}`,
+            "Open business",
+            "ops-button",
+          )}
+          {task.status !== "completed" && (
+            <button
+              className="ops-button"
+              onClick={() => void runTaskAction(task, "complete")}
+            >
+              Complete
+            </button>
+          )}
+          {task.status !== "completed" && task.status !== "cancelled" && (
+            <>
+              <button
+                className="ops-button"
+                onClick={() => void runTaskAction(task, "snooze")}
+              >
+                Snooze 3 days
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => void runTaskAction(task, "reschedule")}
+              >
+                Reschedule
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => void runTaskAction(task, "cancel")}
+              >
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
     return (
       <>
         <section className="ops-hero">
@@ -2212,69 +2419,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               No follow-up tasks match this view.
             </div>
           ) : (
-            <div className="ops-list">
-              {tasks.map((task) => (
-                <div key={task.id} className="ops-list-card">
-                  <strong
-                    className={
-                      isOverdue(task.snoozed_until ?? task.due_at)
-                        ? "ops-overdue"
-                        : ""
-                    }
-                  >
-                    {task.title}
-                  </strong>
-                  <span>
-                    {task.business_name ?? "Business"}{" "}
-                    {communicationContactName(task)
-                      ? `· ${communicationContactName(task)}`
-                      : ""}
-                  </span>
-                  <small>
-                    Due {formatDateTime(task.snoozed_until ?? task.due_at)} ·{" "}
-                    {task.status}
-                  </small>
-                  {task.notes && <p>{task.notes}</p>}
-                  <div className="ops-inline-actions">
-                    {renderLink(
-                      `/operations/businesses/${task.business_id}`,
-                      "Open business",
-                      "ops-button",
-                    )}
-                    {task.status !== "completed" && (
-                      <button
-                        className="ops-button"
-                        onClick={() => void runTaskAction(task, "complete")}
-                      >
-                        Complete
-                      </button>
-                    )}
-                    {task.status !== "completed" &&
-                      task.status !== "cancelled" && (
-                        <>
-                          <button
-                            className="ops-button"
-                            onClick={() => void runTaskAction(task, "snooze")}
-                          >
-                            Snooze 3 days
-                          </button>
-                          <button
-                            className="ops-button"
-                            onClick={() =>
-                              void runTaskAction(task, "reschedule")
-                            }
-                          >
-                            Reschedule
-                          </button>
-                          <button
-                            className="ops-button"
-                            onClick={() => void runTaskAction(task, "cancel")}
-                          >
-                            Cancel
-                          </button>
-                        </>
-                      )}
+            <div className="ops-task-sections">
+              {taskSections.map((section) => (
+                <div key={section.title} className="ops-task-section">
+                  <div className="ops-section-label">
+                    {section.title} · {section.items.length}
                   </div>
+                  {section.items.length === 0 ? (
+                    <div className="ops-empty-card">
+                      No tasks in this group.
+                    </div>
+                  ) : (
+                    <div className="ops-list">
+                      {section.items.map((task) => renderTaskCard(task))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2862,6 +3021,20 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       {contact.email && contact.phone ? " · " : ""}
                       {contact.phone ?? ""}
                     </span>
+                    {contact.preferred_channel && (
+                      <small>
+                        Preferred:{" "}
+                        {communicationChannelLabel(contact.preferred_channel)}
+                      </small>
+                    )}
+                    {contact.do_not_contact && (
+                      <small className="ops-overdue">
+                        Do not contact
+                        {contact.do_not_contact_reason
+                          ? `: ${contact.do_not_contact_reason}`
+                          : ""}
+                      </small>
+                    )}
                     {contact.notes && <small>{contact.notes}</small>}
                     <div className="ops-inline-actions">
                       <button
@@ -3196,6 +3369,53 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   />
                   Primary contact
                 </label>
+                <label>
+                  Preferred channel
+                  <select
+                    value={contactForm.preferredChannel}
+                    onChange={(event) =>
+                      setContactForm((prev) => ({
+                        ...prev,
+                        preferredChannel: event.target
+                          .value as ContactFormState["preferredChannel"],
+                      }))
+                    }
+                  >
+                    <option value="">No preference</option>
+                    {communicationChannelOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="ops-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={contactForm.doNotContact}
+                    onChange={(event) =>
+                      setContactForm((prev) => ({
+                        ...prev,
+                        doNotContact: event.target.checked,
+                      }))
+                    }
+                  />
+                  Do not contact
+                </label>
+                {contactForm.doNotContact && (
+                  <label>
+                    Do-not-contact reason
+                    <textarea
+                      value={contactForm.doNotContactReason}
+                      onChange={(event) =>
+                        setContactForm((prev) => ({
+                          ...prev,
+                          doNotContactReason: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                )}
                 <label>
                   Notes
                   <textarea
@@ -3560,6 +3780,8 @@ const operationsStyles = `
   .ops-empty-panel,
   .ops-form,
   .ops-list,
+  .ops-task-sections,
+  .ops-task-section,
   .ops-timeline,
   .ops-work-grid,
   .ops-stage-grid {

@@ -11,6 +11,8 @@ import {
 } from "./internalAccess";
 import { adminGuard } from "./adminAccess";
 import {
+  addBusinessDays,
+  getConfiguredDefaultFollowUpBusinessDays,
   parseOperationsBusinessInput,
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
@@ -237,14 +239,31 @@ test("operations contact validation accepts useful contact details and rejects i
     firstName: "Ada",
     email: "ada@example.com",
     isPrimary: true,
+    doNotContact: true,
+    doNotContactReason: "Asked not to receive prospecting email.",
+    preferredChannel: "phone",
   });
   assert.equal(contact.firstName, "Ada");
   assert.equal(contact.email, "ada@example.com");
   assert.equal(contact.isPrimary, true);
+  assert.equal(contact.doNotContact, true);
+  assert.equal(
+    contact.doNotContactReason,
+    "Asked not to receive prospecting email.",
+  );
+  assert.equal(contact.preferredChannel, "phone");
 
   assert.throws(
     () => parseOperationsContactInput({ email: "not-an-email" }),
     /invalid_contact_email/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsContactInput({
+        firstName: "Ada",
+        preferredChannel: "fax",
+      }),
+    /invalid_preferred_channel/,
   );
   assert.throws(
     () => parseOperationsContactInput({}),
@@ -259,8 +278,10 @@ test("operations client communication template validation keeps templates separa
     subjectTemplate: "Website health check for {{businessName}}",
     bodyTemplate: "Hi {{firstName}}",
     isActive: true,
+    defaultFollowUpBusinessDays: 6,
   });
   assert.equal(input.category, "warm_introduction");
+  assert.equal(input.defaultFollowUpBusinessDays, 6);
   assert.equal(
     input.subjectTemplate,
     "Website health check for {{businessName}}",
@@ -275,6 +296,40 @@ test("operations client communication template validation keeps templates separa
         bodyTemplate: "This is a transactional key and should not validate.",
       }),
     /invalid_template_category/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsCommunicationTemplateInput({
+        name: "Bad follow-up",
+        category: "custom",
+        subjectTemplate: "Hello",
+        bodyTemplate: "Body",
+        defaultFollowUpBusinessDays: 90,
+      }),
+    /invalid_default_follow_up_business_days/,
+  );
+});
+
+test("operations default follow-up days support env override and business-day dates", () => {
+  assert.equal(
+    getConfiguredDefaultFollowUpBusinessDays("cold_outreach", {}),
+    4,
+  );
+  assert.equal(
+    getConfiguredDefaultFollowUpBusinessDays("custom", {
+      OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS: "2",
+    }),
+    2,
+  );
+  assert.equal(
+    getConfiguredDefaultFollowUpBusinessDays("custom", {
+      OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS: "not-a-number",
+    }),
+    null,
+  );
+  assert.equal(
+    addBusinessDays(new Date("2026-01-02T09:00:00.000Z"), 1).toISOString(),
+    "2026-01-05T09:00:00.000Z",
   );
 });
 
@@ -297,6 +352,9 @@ test("operations client communication rendering reports unresolved placeholders"
         first_name: "Ada",
         last_name: "Lovelace",
         email: "ada@example.com",
+        do_not_contact: false,
+        do_not_contact_reason: null,
+        preferred_channel: null,
       },
       site: {
         site_id: "site_1",

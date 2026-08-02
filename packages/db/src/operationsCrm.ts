@@ -59,6 +59,9 @@ export type OperationsContactRow = {
   job_title: string | null;
   is_primary: boolean;
   notes: string | null;
+  do_not_contact: boolean;
+  do_not_contact_reason: string | null;
+  preferred_channel: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -151,6 +154,9 @@ export type OperationsContactInput = {
   jobTitle?: string | null;
   isPrimary?: boolean;
   notes?: string | null;
+  doNotContact?: boolean;
+  doNotContactReason?: string | null;
+  preferredChannel?: string | null;
 };
 
 export type OperationsBusinessListParams = {
@@ -211,6 +217,9 @@ function contactValues(input: OperationsContactInput) {
     jobTitle: textValue(input.jobTitle),
     notes: textValue(input.notes),
     isPrimary: input.isPrimary === true,
+    doNotContact: input.doNotContact === true,
+    doNotContactReason: textValue(input.doNotContactReason),
+    preferredChannel: textValue(input.preferredChannel),
   };
 }
 
@@ -577,9 +586,12 @@ export async function createOperationsBusiness(
               phone,
               job_title,
               is_primary,
-              notes
+              notes,
+              do_not_contact,
+              do_not_contact_reason,
+              preferred_channel
             )
-            VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10)
           `,
           [
             business.id,
@@ -589,6 +601,9 @@ export async function createOperationsBusiness(
             contact.phone,
             contact.jobTitle,
             contact.notes,
+            contact.doNotContact,
+            contact.doNotContactReason,
+            contact.preferredChannel,
           ],
         );
       }
@@ -791,9 +806,12 @@ export async function addOperationsContact(
           phone,
           job_title,
           is_primary,
-          notes
+          notes,
+          do_not_contact,
+          do_not_contact_reason,
+          preferred_channel
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `,
       [
@@ -805,6 +823,9 @@ export async function addOperationsContact(
         contact.jobTitle,
         contact.isPrimary,
         contact.notes,
+        contact.doNotContact,
+        contact.doNotContactReason,
+        contact.preferredChannel,
       ],
     );
     await client.query(
@@ -856,6 +877,9 @@ export async function updateOperationsContact(
             job_title = $7,
             is_primary = $8,
             notes = $9,
+            do_not_contact = $10,
+            do_not_contact_reason = $11,
+            preferred_channel = $12,
             updated_at = now()
         WHERE id = $1 AND business_id = $2
         RETURNING *
@@ -872,6 +896,15 @@ export async function updateOperationsContact(
           ? existing.rows[0].is_primary
           : contact.isPrimary,
         contact.notes,
+        input.doNotContact === undefined
+          ? existing.rows[0].do_not_contact
+          : contact.doNotContact,
+        input.doNotContactReason === undefined
+          ? existing.rows[0].do_not_contact_reason
+          : contact.doNotContactReason,
+        input.preferredChannel === undefined
+          ? existing.rows[0].preferred_channel
+          : contact.preferredChannel,
       ],
     );
     await client.query(
