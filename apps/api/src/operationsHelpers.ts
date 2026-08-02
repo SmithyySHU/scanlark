@@ -146,6 +146,18 @@ const COMMUNICATION_STATUS_SET = new Set<string>(
 );
 const TASK_STATUS_SET = new Set<string>(OPERATIONS_TASK_STATUSES);
 
+const DEFAULT_FOLLOW_UP_BUSINESS_DAYS_BY_CATEGORY: Partial<
+  Record<OperationsCommunicationTemplateCategory, number>
+> = {
+  warm_introduction: 4,
+  cold_outreach: 4,
+  report_offer: 4,
+  report_delivery: 3,
+  quote_delivery: 5,
+  work_completed: 7,
+  testimonial_request: 7,
+};
+
 export function serializeDate(value: Date | null) {
   return value instanceof Date ? value.toISOString() : value;
 }
@@ -194,6 +206,46 @@ function isValidEmailAddress(value: string) {
   const labels = domain.split(".");
   if (labels.length < 2) return false;
   return labels.every(isValidDomainLabel);
+}
+
+function boundedInteger(value: unknown, key: string) {
+  if (value == null || value === "") return null;
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 60) {
+    throw new Error(`invalid_${key}`);
+  }
+  return parsed;
+}
+
+export function getConfiguredDefaultFollowUpBusinessDays(
+  category: OperationsCommunicationTemplateCategory,
+  env: Record<string, string | undefined> = process.env,
+) {
+  const configured = env.OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS;
+  if (configured?.trim()) {
+    const parsed = Number.parseInt(configured.trim(), 10);
+    if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 60) {
+      return parsed;
+    }
+  }
+  return DEFAULT_FOLLOW_UP_BUSINESS_DAYS_BY_CATEGORY[category] ?? null;
+}
+
+export function addBusinessDays(start: Date, businessDays: number) {
+  const date = new Date(start);
+  if (businessDays <= 0) return date;
+  let added = 0;
+  while (added < businessDays) {
+    date.setDate(date.getDate() + 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) added += 1;
+  }
+  return date;
 }
 
 export function textField(input: Record<string, unknown>, key: string) {
@@ -475,7 +527,18 @@ export function parseOperationsContactInput(
     jobTitle: optionalTextField(record, "jobTitle"),
     notes: optionalTextField(record, "notes"),
     isPrimary: record.isPrimary === true,
+    doNotContact: record.doNotContact === true,
+    doNotContactReason: optionalTextField(record, "doNotContactReason"),
+    preferredChannel: optionalTextField(record, "preferredChannel"),
   };
+  if (
+    contact.preferredChannel &&
+    !OPERATIONS_COMMUNICATION_CHANNELS.includes(
+      contact.preferredChannel as OperationsCommunicationChannel,
+    )
+  ) {
+    throw new Error("invalid_preferred_channel");
+  }
   if (
     !options.allowEmpty &&
     !contact.firstName &&
@@ -499,6 +562,7 @@ export function parseOperationsCommunicationTemplateInput(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    defaultFollowUpBusinessDays: number | null;
     isActive: boolean;
   }> = {};
 
@@ -518,6 +582,12 @@ export function parseOperationsCommunicationTemplateInput(
   }
   if ("isActive" in record) {
     parsed.isActive = record.isActive !== false;
+  }
+  if ("defaultFollowUpBusinessDays" in record) {
+    parsed.defaultFollowUpBusinessDays = boundedInteger(
+      record.defaultFollowUpBusinessDays,
+      "default_follow_up_business_days",
+    );
   }
   return parsed;
 }

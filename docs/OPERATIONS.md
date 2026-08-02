@@ -30,6 +30,9 @@ Auth:
 - `OPERATIONS_SENDER_NAME` and `OPERATIONS_SENDER_EMAIL`: sender values used
   only when rendering manual Operations client communication drafts. They are
   not SMTP credentials and they do not enable automated sending.
+- `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`: optional global override for
+  suggested Operations follow-up dates. Leave blank to use template/category
+  defaults; valid values are `0` through `60`.
 - Production-like API startup rejects dev auth bypass, short secrets, missing
   share/internal secrets, localhost CORS origins, and non-HTTPS configured
   public origins.
@@ -231,7 +234,8 @@ print-ready state and `handlePrintReport` calls `window.print()`.
 - Set `REPORT_SHARE_TOKEN_SECRET`.
 - For the internal managed-service phase, set `INTERNAL_ONLY_MODE=true`,
   `INTERNAL_ADMIN_EMAILS`, `PUBLIC_CONTACT_EMAIL`,
-  `OPERATIONS_SENDER_NAME`, and `OPERATIONS_SENDER_EMAIL`.
+  `OPERATIONS_SENDER_NAME`, `OPERATIONS_SENDER_EMAIL`, and optionally
+  `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`.
 - Set production `WEB_ORIGIN`, `API_ORIGIN`, and `APP_URL`.
 - Run migrations against the target DB.
 - Start API and worker as separate long-running services.

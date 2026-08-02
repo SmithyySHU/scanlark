@@ -87,6 +87,8 @@ Replace every `CHANGE_ME` value. At minimum set:
 - `PUBLIC_CONTACT_EMAIL`
 - `OPERATIONS_SENDER_NAME`
 - `OPERATIONS_SENDER_EMAIL`
+- `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS` if you want a global suggested
+  follow-up interval instead of template/category defaults
 - `APP_URL`
 - `WEB_ORIGIN`
 - SMTP credentials

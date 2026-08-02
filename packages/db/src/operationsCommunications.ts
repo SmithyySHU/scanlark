@@ -66,6 +66,7 @@ export type OperationsCommunicationTemplateRow = {
   category: OperationsCommunicationTemplateCategory;
   subject_template: string;
   body_template: string;
+  default_follow_up_business_days: number | null;
   is_active: boolean;
   is_system_default: boolean;
   created_by_user_id: string | null;
@@ -157,6 +158,9 @@ export type OperationsCommunicationDraftContext = {
     first_name: string | null;
     last_name: string | null;
     email: string | null;
+    do_not_contact: boolean;
+    do_not_contact_reason: string | null;
+    preferred_channel: string | null;
   } | null;
   site: {
     site_id: string;
@@ -167,6 +171,21 @@ export type OperationsCommunicationDraftContext = {
     high_issue_count: number;
     top_finding: string | null;
   } | null;
+};
+
+export type OperationsCommunicationListOptions = {
+  businessId?: string | null;
+  contactId?: string | null;
+  direction?: OperationsCommunicationDirection | null;
+  channel?: OperationsCommunicationChannel | null;
+  status?: OperationsCommunicationStatus | null;
+  templateCategory?: OperationsCommunicationTemplateCategory | null;
+  dateFrom?: Date | null;
+  dateTo?: Date | null;
+  followUpDue?: boolean;
+  search?: string | null;
+  limit: number;
+  offset: number;
 };
 
 type CountRow = { count: string };
@@ -378,6 +397,7 @@ export async function createOperationsCommunicationTemplate(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    defaultFollowUpBusinessDays?: number | null;
     isActive?: boolean;
   },
 ) {
@@ -396,13 +416,22 @@ export async function createOperationsCommunicationTemplate(
         category,
         subject_template,
         body_template,
+        default_follow_up_business_days,
         is_active,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
     `,
-    [name, input.category, subject, body, input.isActive !== false, actor.id],
+    [
+      name,
+      input.category,
+      subject,
+      body,
+      input.defaultFollowUpBusinessDays ?? null,
+      input.isActive !== false,
+      actor.id,
+    ],
   );
   await recordAdminAuditLog(actor, {
     action: "operations.communication_template.create",
@@ -421,6 +450,7 @@ export async function updateOperationsCommunicationTemplate(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    defaultFollowUpBusinessDays: number | null;
     isActive: boolean;
   }>,
 ) {
@@ -445,6 +475,12 @@ export async function updateOperationsCommunicationTemplate(
     const body = textValue(input.bodyTemplate);
     if (!body) throw new Error("template_body_required");
     setColumn("body_template", body);
+  }
+  if (input.defaultFollowUpBusinessDays !== undefined) {
+    setColumn(
+      "default_follow_up_business_days",
+      input.defaultFollowUpBusinessDays,
+    );
   }
   if (input.isActive !== undefined) setColumn("is_active", input.isActive);
   if (sets.length === 0) {
@@ -492,6 +528,29 @@ export async function getOperationsCommunicationTemplate(templateId: string) {
   return res.rows[0] ?? null;
 }
 
+export async function setOperationsCommunicationTemplateActive(
+  actor: AdminActor,
+  templateId: string,
+  isActive: boolean,
+) {
+  const template = await updateOperationsCommunicationTemplate(
+    actor,
+    templateId,
+    { isActive },
+  );
+  if (template) {
+    await recordAdminAuditLog(actor, {
+      action: isActive
+        ? "operations.communication_template.restore"
+        : "operations.communication_template.archive",
+      targetType: "operations_communication_template",
+      targetId: templateId,
+      metadata: { category: template.category },
+    });
+  }
+  return template;
+}
+
 export async function getOperationsCommunicationDraftContext(
   businessId: string,
   options: { contactId?: string | null } = {},
@@ -518,9 +577,19 @@ export async function getOperationsCommunicationDraftContext(
     first_name: string | null;
     last_name: string | null;
     email: string | null;
+    do_not_contact: boolean;
+    do_not_contact_reason: string | null;
+    preferred_channel: string | null;
   }>(
     `
-      SELECT id, first_name, last_name, email
+      SELECT
+        id,
+        first_name,
+        last_name,
+        email,
+        do_not_contact,
+        do_not_contact_reason,
+        preferred_channel
       FROM operations_contacts
       WHERE business_id = $1
         AND ($2::uuid IS NULL OR id = $2::uuid)
@@ -597,17 +666,56 @@ export async function getOperationsCommunicationDraftContext(
   };
 }
 
-export async function listOperationsCommunications(options: {
-  businessId?: string | null;
-  limit: number;
-  offset: number;
-}) {
+export async function listOperationsCommunications(
+  options: OperationsCommunicationListOptions,
+) {
   const client = await ensureConnected();
   const values: unknown[] = [];
   const filters: string[] = [];
   if (options.businessId) {
     values.push(options.businessId);
     filters.push(`c.business_id = $${values.length}`);
+  }
+  if (options.contactId) {
+    values.push(options.contactId);
+    filters.push(`c.contact_id = $${values.length}`);
+  }
+  if (options.direction) {
+    values.push(options.direction);
+    filters.push(`c.direction = $${values.length}`);
+  }
+  if (options.channel) {
+    values.push(options.channel);
+    filters.push(`c.channel = $${values.length}`);
+  }
+  if (options.status) {
+    values.push(options.status);
+    filters.push(`c.status = $${values.length}`);
+  }
+  if (options.templateCategory) {
+    values.push(options.templateCategory);
+    filters.push(`template.category = $${values.length}`);
+  }
+  if (options.dateFrom) {
+    values.push(options.dateFrom);
+    filters.push(`c.occurred_at >= $${values.length}`);
+  }
+  if (options.dateTo) {
+    values.push(options.dateTo);
+    filters.push(`c.occurred_at <= $${values.length}`);
+  }
+  if (options.followUpDue) {
+    filters.push(`c.follow_up_at IS NOT NULL`);
+    filters.push(`c.follow_up_completed_at IS NULL`);
+    filters.push(`c.follow_up_at <= NOW()`);
+    filters.push(`c.status <> 'cancelled'`);
+  }
+  const search = textValue(options.search);
+  if (search) {
+    values.push(`%${search.toLowerCase()}%`);
+    filters.push(
+      `(lower(c.subject) LIKE $${values.length} OR lower(b.name) LIKE $${values.length})`,
+    );
   }
   values.push(options.limit);
   const limitPlaceholder = `$${values.length}`;
@@ -639,6 +747,9 @@ export async function listOperationsCommunications(options: {
       `
         SELECT COUNT(*)::text AS count
         FROM operations_communications c
+        JOIN operations_businesses b ON b.id = c.business_id
+        LEFT JOIN operations_client_communication_templates template
+          ON template.id = c.template_id
         ${where}
       `,
       values.slice(0, values.length - 2),
@@ -651,6 +762,28 @@ export async function listOperationsCommunications(options: {
     limit: options.limit,
     offset: options.offset,
   };
+}
+
+export async function getOperationsCommunication(communicationId: string) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsCommunicationRow>(
+    `
+      SELECT c.*,
+             b.name AS business_name,
+             contact.first_name AS contact_first_name,
+             contact.last_name AS contact_last_name,
+             contact.email AS contact_email,
+             template.name AS template_name
+      FROM operations_communications c
+      JOIN operations_businesses b ON b.id = c.business_id
+      LEFT JOIN operations_contacts contact ON contact.id = c.contact_id
+      LEFT JOIN operations_client_communication_templates template
+        ON template.id = c.template_id
+      WHERE c.id = $1
+    `,
+    [communicationId],
+  );
+  return res.rows[0] ?? null;
 }
 
 export async function createOperationsCommunication(
@@ -959,6 +1092,134 @@ export async function markOperationsCommunicationSent(
     },
   });
   return communication;
+}
+
+export async function markOperationsCommunicationReceived(
+  actor: AdminActor,
+  businessId: string,
+  communicationId: string,
+  input: {
+    subject?: string | null;
+    body?: string | null;
+    followUpAt?: Date | null;
+    taskTitle?: string | null;
+    taskNotes?: string | null;
+  } = {},
+) {
+  const client = await ensureConnected();
+  const now = new Date();
+  const sets = [
+    "direction = 'inbound'",
+    "status = 'received'",
+    "received_at = COALESCE(received_at, $3)",
+    "occurred_at = $3",
+    "updated_at = now()",
+  ];
+  const values: unknown[] = [communicationId, businessId, now];
+  if (input.subject !== undefined) {
+    values.push(textValue(input.subject));
+    sets.push(`subject = $${values.length}`);
+  }
+  if (input.body !== undefined) {
+    const body = textValue(input.body);
+    if (!body) throw new Error("communication_body_required");
+    values.push(body);
+    sets.push(`body = $${values.length}`);
+  }
+  if (input.followUpAt !== undefined) {
+    values.push(input.followUpAt);
+    sets.push(`follow_up_at = $${values.length}`);
+  }
+  const res = await client.query<OperationsCommunicationRow>(
+    `
+      UPDATE operations_communications
+      SET ${sets.join(", ")}
+      WHERE id = $1
+        AND business_id = $2
+      RETURNING *
+    `,
+    values,
+  );
+  const communication = res.rows[0] ?? null;
+  if (!communication) return null;
+  await client.query(
+    `
+      UPDATE operations_businesses
+      SET last_contacted_at = $2,
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [businessId, now],
+  );
+  if (communication.follow_up_at) {
+    await upsertFollowUpTask(actor, {
+      businessId,
+      contactId: communication.contact_id,
+      sourceCommunicationId: communication.id,
+      title:
+        textValue(input.taskTitle) ??
+        `Follow up on ${textValue(communication.subject) ?? "reply"}`,
+      notes: input.taskNotes,
+      dueAt: communication.follow_up_at,
+    });
+  } else {
+    await syncBusinessFollowUpFields(businessId);
+  }
+  await recordAdminAuditLog(actor, {
+    action: "operations.communication.mark_received",
+    targetType: "operations_communication",
+    targetId: communicationId,
+    metadata: {
+      businessId,
+      contactId: communication.contact_id,
+      hasFollowUp: communication.follow_up_at != null,
+      hasSubjectChange: input.subject !== undefined,
+      hasBodyChange: input.body !== undefined,
+    },
+  });
+  return communication;
+}
+
+export async function completeOperationsCommunicationFollowUp(
+  actor: AdminActor,
+  communicationId: string,
+) {
+  const client = await ensureConnected();
+  const taskRes = await client.query<OperationsTaskRow>(
+    `
+      SELECT *
+      FROM operations_tasks
+      WHERE source_communication_id = $1
+        AND status IN ('open', 'snoozed')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [communicationId],
+  );
+  const task = taskRes.rows[0] ?? null;
+  if (task) return completeOperationsTask(actor, task.id);
+
+  const now = new Date();
+  const communicationRes = await client.query<OperationsCommunicationRow>(
+    `
+      UPDATE operations_communications
+      SET follow_up_completed_at = $2,
+          updated_at = now()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [communicationId, now],
+  );
+  const communication = communicationRes.rows[0] ?? null;
+  if (!communication) return null;
+  await syncBusinessFollowUpFields(communication.business_id);
+  await recordAdminAuditLog(actor, {
+    action: "operations.communication.follow_up_complete",
+    targetType: "operations_communication",
+    targetId: communicationId,
+    metadata: { businessId: communication.business_id },
+  });
+  return null;
 }
 
 export async function cancelOperationsCommunication(
