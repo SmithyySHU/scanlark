@@ -15,12 +15,15 @@ function normalizeEmail(value: string) {
 }
 
 function serializeAuthUser(user: Awaited<ReturnType<typeof createUser>>) {
+  const isInternalAdmin =
+    isInternalOnlyMode() && isInternalAdminEmail(user.email);
   return {
     id: user.id,
     email: user.email,
     displayName: user.displayName,
     name: user.displayName,
     isAdmin: isAdminEmail(user.email),
+    isInternalAdmin,
   };
 }
 

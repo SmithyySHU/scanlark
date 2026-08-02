@@ -1,6 +1,7 @@
 import {
   DEFAULT_EMAIL_TEMPLATE_BY_KEY,
   getEmailTemplate,
+  type EmailTemplateRow,
   type DefaultEmailTemplate,
   type EmailTemplateKey,
 } from "@scanlark/db";
@@ -85,6 +86,18 @@ export function sanitizeEmailHtml(input: string) {
     );
 }
 
+export function isMissingEmailTemplateRelationError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+
+  const candidate = error as { code?: string; message?: string };
+  if (candidate.code === "42P01") {
+    return true;
+  }
+
+  const message = typeof candidate.message === "string" ? candidate.message : "";
+  return message.includes('relation "email_templates" does not exist');
+}
+
 function validateParts(parts: TemplateParts) {
   return (
     parts.subjectTemplate.trim().length > 0 &&
@@ -117,10 +130,18 @@ function defaultsForKey(key: EmailTemplateKey): DefaultEmailTemplate {
 export async function renderTransactionalEmail(
   key: EmailTemplateKey,
   variables: EmailTemplateVariables,
+  options?: {
+    getTemplate?: (
+      key: EmailTemplateKey,
+    ) => Promise<(EmailTemplateRow & { variables: string[] }) | null>;
+  },
 ): Promise<RenderedTransactionalEmail> {
   const defaults = defaultsForKey(key);
   try {
-    const dbTemplate = await getEmailTemplate(key);
+    const getTemplate =
+      options?.getTemplate ??
+      ((templateKey: EmailTemplateKey) => getEmailTemplate(templateKey));
+    const dbTemplate = await getTemplate(key);
     if (dbTemplate?.enabled) {
       const rendered = renderTemplateParts(
         {
@@ -133,7 +154,12 @@ export async function renderTransactionalEmail(
       return { ...rendered, source: "database" };
     }
   } catch (err) {
-    console.error(`Email template fallback for ${key}`, err);
+    if (isMissingEmailTemplateRelationError(err)) {
+      console.warn(`Email templates table not found; using defaults for ${key}`);
+    } else {
+      console.error(`Email template lookup failed for ${key}`, err);
+      throw err;
+    }
   }
 
   const rendered = renderTemplateParts(

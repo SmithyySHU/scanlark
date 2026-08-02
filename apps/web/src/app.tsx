@@ -182,6 +182,16 @@ interface AuthUser {
   displayName?: string | null;
   name?: string;
   isAdmin?: boolean;
+  isInternalAdmin?: boolean;
+}
+
+function hasInternalOperationsAccess(
+  user: AuthUser | null,
+  internalOnlyMode: boolean,
+): boolean {
+  return internalOnlyMode
+    ? user?.isInternalAdmin === true
+    : user?.isAdmin === true;
 }
 
 interface PublicConfig {
@@ -3844,10 +3854,19 @@ const App: React.FC = () => {
   const hasSites = sites.length > 0;
   const internalOnlyMode = publicConfig.internalOnlyMode;
   const registrationAvailable = publicConfig.registrationAvailable;
+  const hasOperationsWorkspaceAccess = hasInternalOperationsAccess(
+    authUser,
+    internalOnlyMode,
+  );
+  const hasMonitoringWorkspaceAccess = !!authUser && (
+    !internalOnlyMode || hasOperationsWorkspaceAccess
+  );
   const hasInternalAppAccess =
-    !publicConfigLoading && (!internalOnlyMode || authUser?.isAdmin === true);
+    hasMonitoringWorkspaceAccess && !publicConfigLoading;
   const isBlockedInternalUser =
-    internalOnlyMode && !!authUser && authUser.isAdmin !== true;
+    internalOnlyMode &&
+    !!authUser &&
+    !hasOperationsWorkspaceAccess;
   const sitesLoadError = sitesLoadState === "error";
   const isSiteStatePending = ["idle", "loading"].includes(sitesLoadState);
   const hasSiteSelectionResolved = Boolean(
@@ -6465,6 +6484,7 @@ const App: React.FC = () => {
   const isAdminRoute = route === "admin";
   const isOperationsRoute = route === "operations";
   const isReadOnlyReport = isSharedReportRoute;
+  const isMonitoringWorkspace = isSiteSelectionRoute || isSiteSetupRoute || isReportRoute || route === "app";
   const allowAnonymousSharedReport = isSharedReportRoute && !internalOnlyMode;
   const hasLandingDashboardSelectIntent =
     getLandingDashboardSelectSiteIntent(locationSearch);
@@ -6487,6 +6507,35 @@ const App: React.FC = () => {
       : internalOnlyMode
         ? "Public access is temporarily closed. Approved internal operators can sign in."
         : "Use your Scanlark account to open the monitoring dashboard.";
+
+  const renderWorkspaceSwitcher = () =>
+    hasOperationsWorkspaceAccess ? (
+      <div className="app-workspace-switcher">
+        <button
+          type="button"
+          className={`app-workspace-tab ${isMonitoringWorkspace ? "active" : ""}`}
+          onClick={() => navigateTo("/dashboard")}
+        >
+          Monitoring
+        </button>
+        <button
+          type="button"
+          className={`app-workspace-tab ${
+            isOperationsRoute ? "active" : ""
+          }`}
+          onClick={() => navigateTo("/operations")}
+        >
+          Operations
+        </button>
+        <button
+          type="button"
+          className={`app-workspace-tab ${isAdminRoute ? "active" : ""}`}
+          onClick={() => navigateTo("/admin")}
+        >
+          System Admin
+        </button>
+      </div>
+    ) : null;
 
   const formatReportUrlLabel = (url: string) => {
     try {
@@ -9717,7 +9766,9 @@ const App: React.FC = () => {
   }
 
   function getDefaultAuthenticatedPath(user: AuthUser | null) {
-    return user?.isAdmin === true ? "/operations" : "/dashboard";
+    return hasInternalOperationsAccess(user, internalOnlyMode)
+      ? "/operations"
+      : "/dashboard";
   }
 
   function renderClosedAccess() {
@@ -13435,7 +13486,7 @@ const App: React.FC = () => {
         >
           Account settings
         </button>
-        {authUser?.isAdmin === true && (
+        {hasOperationsWorkspaceAccess && (
           <button
             onClick={() => {
               navigateTo("/admin");
@@ -16504,6 +16555,46 @@ const App: React.FC = () => {
           cursor: pointer;
         }
         .app-nav-tab.active {
+          background: color-mix(
+            in srgb,
+            var(--panel) 86%,
+            rgba(56, 189, 248, 0.08)
+          );
+          color: var(--text);
+          border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+          box-shadow: var(--soft-shadow);
+        }
+        .app-workspace-switcher {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+          padding: 4px;
+          border-radius: 999px;
+          background: color-mix(
+            in srgb,
+            var(--panel-elev) 82%,
+            rgba(255, 255, 255, 0.02)
+          );
+          border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+          margin-top: 8px;
+          margin-bottom: 2px;
+        }
+        .app-workspace-tab {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 28px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--muted);
+          font: inherit;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .app-workspace-tab.active {
           background: color-mix(
             in srgb,
             var(--panel) 86%,
@@ -19972,11 +20063,11 @@ const App: React.FC = () => {
           <MarketingPage
             isAuthenticated
             primaryLabel={
-              authUser?.isAdmin === true ? "Open operations" : "Open dashboard"
+              hasOperationsWorkspaceAccess ? "Open operations" : "Open dashboard"
             }
             secondaryLabel="Account"
             onOpenPrimary={() =>
-              authUser?.isAdmin === true
+              hasOperationsWorkspaceAccess
                 ? navigateTo("/operations")
                 : navigateTo("/dashboard", {
                     [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
@@ -19990,13 +20081,13 @@ const App: React.FC = () => {
             managedMode={internalOnlyMode}
           />
         ) : isOperationsRoute ? (
-          authUser?.isAdmin === true ? (
+          authUser && hasOperationsWorkspaceAccess ? (
             <OperationsPage
               apiBase={API_BASE}
               apiFetch={apiFetch}
               currentPath={locationPathname}
               currentSearch={locationSearch}
-              authEmail={authUser.email}
+              authEmail={authUser?.email ?? ""}
               onNavigate={navigateToHref}
               onLogout={() => {
                 void handleLogout();
@@ -20069,7 +20160,7 @@ const App: React.FC = () => {
             </div>
           )
         ) : isAdminRoute ? (
-          authUser?.isAdmin === true ? (
+          authUser && hasOperationsWorkspaceAccess ? (
             <AdminPage
               apiBase={API_BASE}
               apiFetch={apiFetch}
@@ -20158,6 +20249,7 @@ const App: React.FC = () => {
                   Choose a site to continue
                 </div>
               </div>
+              {renderWorkspaceSwitcher()}
 
               <div className="select-site-topbar-actions">
                 <button onClick={openAddSiteModal} className="secondary-button">
@@ -21059,6 +21151,7 @@ const App: React.FC = () => {
                       );
                     })}
                   </div>
+                  {renderWorkspaceSwitcher()}
                 </div>
 
                 <div className="app-site-switcher">
@@ -22017,11 +22110,12 @@ const App: React.FC = () => {
                         onClick={() => openAppSection(item.key)}
                       >
                         {item.label}
-                      </button>
-                    );
-                  })}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {renderWorkspaceSwitcher()}
                 </div>
-              </div>
 
               <div className="app-site-switcher">
                 <div style={{ minWidth: 0 }}>

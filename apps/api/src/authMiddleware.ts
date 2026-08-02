@@ -11,6 +11,7 @@ import { isAdminEmail } from "./adminAccess";
 import {
   isInternalOnlyMode,
   isTrustedWorkerNotifyRequest,
+  isInternalAdminEmail,
 } from "./internalAccess";
 
 type AuthUser = {
@@ -19,6 +20,7 @@ type AuthUser = {
   displayName?: string | null;
   name?: string;
   isAdmin?: boolean;
+  isInternalAdmin?: boolean;
 };
 
 const DEV_BYPASS_AUTH = process.env.DEV_BYPASS_AUTH === "true";
@@ -42,6 +44,8 @@ async function ensureDemoUser(): Promise<AuthUser> {
           displayName: existing.displayName ?? "Demo User",
           name: existing.displayName ?? "Demo User",
           isAdmin: isAdminEmail(existing.email),
+          isInternalAdmin:
+            isInternalOnlyMode() && isInternalAdminEmail(existing.email),
         };
       }
       const password = crypto.randomBytes(24).toString("base64url");
@@ -53,6 +57,8 @@ async function ensureDemoUser(): Promise<AuthUser> {
         displayName: created.displayName ?? "Demo User",
         name: created.displayName ?? "Demo User",
         isAdmin: isAdminEmail(created.email),
+        isInternalAdmin:
+          isInternalOnlyMode() && isInternalAdminEmail(created.email),
       };
     })();
   }
@@ -126,6 +132,8 @@ export async function authMiddleware(
       displayName: user.displayName,
       name: user.displayName ?? undefined,
       isAdmin: isAdminEmail(user.email),
+      isInternalAdmin:
+        isInternalOnlyMode() && isInternalAdminEmail(user.email),
     };
     return next();
   } catch (err) {

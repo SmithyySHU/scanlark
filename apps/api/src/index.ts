@@ -138,6 +138,8 @@ import { initEventRelay, mountEventStream } from "./events";
 import {
   getPublicConfig,
   internalOnlyGuard,
+  isInternalAdminEmail,
+  isInternalOnlyMode,
   isTrustedWorkerNotifyRequest,
 } from "./internalAccess";
 import {
@@ -1013,18 +1015,31 @@ app.get("/public/config", (_req, res) => {
 app.use("/public/reports", publicReportLimiter);
 app.use(authMiddleware);
 
+function getAuthenticatedUserPayload(
+  user: {
+    id: string;
+    email: string;
+    displayName?: string | null;
+    name?: string | null;
+    isAdmin?: boolean;
+  },
+) {
+  const displayName = user.displayName ?? user.name ?? null;
+  return {
+    id: user.id,
+    email: user.email,
+    displayName,
+    name: displayName,
+    isAdmin: user.isAdmin === true,
+    isInternalAdmin: isInternalOnlyMode() && isInternalAdminEmail(user.email),
+  };
+}
+
 app.get("/me", (req, res) => {
   if (!req.user) {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
-  const displayName = req.user.displayName ?? req.user.name ?? null;
-  return res.json({
-    id: req.user.id,
-    email: req.user.email,
-    displayName,
-    name: displayName,
-    isAdmin: req.user.isAdmin === true,
-  });
+  return res.json(getAuthenticatedUserPayload(req.user));
 });
 
 app.use(internalOnlyGuard);
@@ -1039,15 +1054,8 @@ app.get("/account/profile", (req, res) => {
   if (!req.user) {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
-  const displayName = req.user.displayName ?? req.user.name ?? null;
   return res.json({
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-      displayName,
-      name: displayName,
-      isAdmin: req.user.isAdmin === true,
-    },
+    user: getAuthenticatedUserPayload(req.user),
   });
 });
 
@@ -1106,11 +1114,9 @@ app.patch("/account/profile", async (req, res) => {
     if (!user) return sendNotFound(res);
     return res.json({
       user: {
-        id: user.id,
-        email: user.email,
-        displayName: user.displayName,
-        name: user.displayName,
-        isAdmin: req.user?.isAdmin === true,
+        ...getAuthenticatedUserPayload(user),
+        isInternalAdmin:
+          isInternalOnlyMode() && isInternalAdminEmail(user.email),
       },
     });
   } catch (err: unknown) {

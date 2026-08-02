@@ -10,6 +10,7 @@ declare module "express-serve-static-core" {
       displayName?: string | null;
       name?: string;
       isAdmin?: boolean;
+      isInternalAdmin?: boolean;
     };
   }
 }
