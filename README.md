@@ -115,6 +115,9 @@ Required for normal local development:
 - `OPERATIONS_SENDER_NAME` and `OPERATIONS_SENDER_EMAIL`: sender placeholder
   values for manual Operations communication drafts. These do not send email or
   configure SMTP; missing values remain unresolved in draft previews.
+- `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`: optional global default for
+  suggested Operations follow-up dates. Leave blank to use each template or
+  category default; valid values are `0` through `60`.
 
 Common development variables:
 

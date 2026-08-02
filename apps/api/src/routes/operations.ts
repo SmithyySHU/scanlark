@@ -6,11 +6,13 @@ import {
   cancelOperationsCommunication,
   cancelOperationsTask,
   completeOperationsTask,
+  completeOperationsCommunicationFollowUp,
   createOperationsCommunication,
   createOperationsCommunicationTemplate,
   createOperationsTask,
   createOperationsBusiness,
   deleteOperationsContact,
+  getOperationsCommunication,
   getOperationsCommunicationDraftContext,
   getOperationsCommunicationTemplate,
   getOperationsBusinessDetail,
@@ -22,7 +24,9 @@ import {
   listOperationsBusinesses,
   listOperationsPipeline,
   listOperationsTasks,
+  markOperationsCommunicationReceived,
   markOperationsCommunicationSent,
+  setOperationsCommunicationTemplateActive,
   setOperationsBusinessArchived,
   setPrimaryOperationsContact,
   snoozeOperationsTask,
@@ -35,13 +39,17 @@ import {
   type AdminActor,
   type OperationsBusinessInput,
   type OperationsCommunicationInput,
+  type OperationsCommunicationListOptions,
   type OperationsCommunicationTemplateCategory,
+  type OperationsCommunicationTemplateRow,
   type OperationsContactInput,
   type OperationsTaskStatus,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
 import {
   OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
+  addBusinessDays,
+  getConfiguredDefaultFollowUpBusinessDays,
   OPERATIONS_TASK_STATUSES,
   SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
   parseOperationsBusinessInput,
@@ -125,6 +133,101 @@ function parsePagination(req: Request) {
   return { limit, offset };
 }
 
+function parseQueryDate(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("invalid_date");
+  return date;
+}
+
+function parseCommunicationListOptions(
+  req: Request,
+): OperationsCommunicationListOptions {
+  const status =
+    typeof req.query.status === "string" &&
+    ["draft", "ready", "sent", "received", "cancelled"].includes(
+      req.query.status,
+    )
+      ? (req.query.status as OperationsCommunicationListOptions["status"])
+      : null;
+  const direction =
+    typeof req.query.direction === "string" &&
+    ["outbound", "inbound", "internal_note"].includes(req.query.direction)
+      ? (req.query.direction as OperationsCommunicationListOptions["direction"])
+      : null;
+  const channel =
+    typeof req.query.channel === "string" &&
+    ["email", "phone", "video_call", "in_person", "other"].includes(
+      req.query.channel,
+    )
+      ? (req.query.channel as OperationsCommunicationListOptions["channel"])
+      : null;
+  const templateCategory =
+    typeof req.query.templateCategory === "string" &&
+    OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES.includes(
+      req.query.templateCategory as OperationsCommunicationTemplateCategory,
+    )
+      ? (req.query.templateCategory as OperationsCommunicationTemplateCategory)
+      : null;
+  return {
+    ...parsePagination(req),
+    businessId:
+      typeof req.query.businessId === "string" ? req.query.businessId : null,
+    contactId:
+      typeof req.query.contactId === "string" ? req.query.contactId : null,
+    direction,
+    channel,
+    status,
+    templateCategory,
+    dateFrom: parseQueryDate(req.query.dateFrom),
+    dateTo: parseQueryDate(req.query.dateTo),
+    followUpDue: req.query.followUpDue === "true",
+    search: typeof req.query.search === "string" ? req.query.search : null,
+  };
+}
+
+async function getCommunicationOr404(res: Response, communicationId: string) {
+  const communication = await getOperationsCommunication(communicationId);
+  if (!communication) {
+    sendApiError(res, 404, "not_found", "Communication not found");
+    return null;
+  }
+  return communication;
+}
+
+function suggestedFollowUpDateForTemplate(
+  template: OperationsCommunicationTemplateRow,
+) {
+  const days =
+    template.default_follow_up_business_days ??
+    getConfiguredDefaultFollowUpBusinessDays(template.category);
+  if (days == null) return null;
+  return addBusinessDays(new Date(), days);
+}
+
+function groupTasks(tasks: Array<{ due_at: Date; completed_at: Date | null }>) {
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfTomorrow = new Date(startOfToday);
+  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+  return {
+    overdue: tasks.filter(
+      (task) => !task.completed_at && task.due_at < startOfToday,
+    ),
+    today: tasks.filter(
+      (task) =>
+        !task.completed_at &&
+        task.due_at >= startOfToday &&
+        task.due_at < startOfTomorrow,
+    ),
+    upcoming: tasks.filter(
+      (task) => !task.completed_at && task.due_at >= startOfTomorrow,
+    ),
+    completedRecently: tasks.filter((task) => task.completed_at),
+  };
+}
+
 function serializeOperationsBusinessDetail(
   detail: Awaited<ReturnType<typeof getOperationsBusinessDetail>>,
 ) {
@@ -197,9 +300,14 @@ function handleValidationError(res: Response, err: unknown) {
     message === "invalid_communication_direction" ||
     message === "invalid_communication_channel" ||
     message === "invalid_communication_status" ||
-    message === "invalid_task_status"
+    message === "invalid_task_status" ||
+    message === "invalid_preferred_channel" ||
+    message === "invalid_default_follow_up_business_days"
   ) {
     return sendApiError(res, 400, message, "Request value is invalid");
+  }
+  if (message === "invalid_date") {
+    return sendApiError(res, 400, message, "Date value is invalid");
   }
   if (
     message.startsWith("invalid_") ||
@@ -296,6 +404,7 @@ export function mountOperationsRoutes(app: express.Application) {
           category: OperationsCommunicationTemplateCategory;
           subjectTemplate: string;
           bodyTemplate: string;
+          defaultFollowUpBusinessDays?: number | null;
           isActive?: boolean;
         },
       );
@@ -312,6 +421,172 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/communication-templates/:templateId", async (req, res) => {
+    const templateId = getUuidParam(req, res, "templateId");
+    if (!templateId) return;
+    try {
+      const template = await getOperationsCommunicationTemplate(templateId);
+      if (!template)
+        return sendApiError(res, 404, "not_found", "Template not found");
+      return res.json({
+        template: serializeObject(template),
+        placeholders: SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
+        suggestedFollowUpAt: serializeDate(
+          suggestedFollowUpDateForTemplate(template),
+        ),
+      });
+    } catch (err) {
+      console.error("Operations communication template detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_template_failed",
+        "Failed to load communication template",
+      );
+    }
+  });
+
+  router.post(
+    "/communication-templates/:templateId/preview",
+    async (req, res) => {
+      const templateId = getUuidParam(req, res, "templateId");
+      if (!templateId) return;
+      try {
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const record = body as Record<string, unknown>;
+        const businessId = optionalUuidField(record, "businessId");
+        const contactId = optionalUuidField(record, "contactId");
+        const followUpAt = parseDateField(record, "followUpAt");
+        const reportName = optionalTextField(record, "reportName");
+        const template = await getOperationsCommunicationTemplate(templateId);
+        if (!template)
+          return sendApiError(res, 404, "not_found", "Template not found");
+        const context = businessId
+          ? await getOperationsCommunicationDraftContext(businessId, {
+              contactId,
+            })
+          : null;
+        if (businessId && !context) {
+          return sendApiError(res, 404, "not_found", "Business not found");
+        }
+        const suggestedFollowUpAt =
+          followUpAt ?? suggestedFollowUpDateForTemplate(template);
+        const rendered = renderClientCommunicationTemplate(template, context, {
+          ...getSenderDefaults(),
+          followUpDate: suggestedFollowUpAt,
+          reportName,
+        });
+        return res.json({
+          preview: {
+            subject: rendered.subject,
+            body: rendered.body,
+            unresolvedPlaceholders: rendered.unresolvedPlaceholders,
+            suggestedFollowUpAt: serializeDate(suggestedFollowUpAt),
+          },
+        });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations communication template preview failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_template_preview_failed",
+          "Failed to preview communication template",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/communication-templates/:templateId/archive",
+    async (req, res) => {
+      const templateId = getUuidParam(req, res, "templateId");
+      if (!templateId) return;
+      try {
+        const template = await setOperationsCommunicationTemplateActive(
+          getActor(req),
+          templateId,
+          false,
+        );
+        if (!template)
+          return sendApiError(res, 404, "not_found", "Template not found");
+        return res.json({ template: serializeObject(template) });
+      } catch (err) {
+        console.error("Operations archive communication template failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_template_archive_failed",
+          "Failed to archive communication template",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/communication-templates/:templateId/restore",
+    async (req, res) => {
+      const templateId = getUuidParam(req, res, "templateId");
+      if (!templateId) return;
+      try {
+        const template = await setOperationsCommunicationTemplateActive(
+          getActor(req),
+          templateId,
+          true,
+        );
+        if (!template)
+          return sendApiError(res, 404, "not_found", "Template not found");
+        return res.json({ template: serializeObject(template) });
+      } catch (err) {
+        console.error("Operations restore communication template failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_template_restore_failed",
+          "Failed to restore communication template",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/communication-templates/:templateId/duplicate",
+    async (req, res) => {
+      const templateId = getUuidParam(req, res, "templateId");
+      if (!templateId) return;
+      try {
+        const template = await getOperationsCommunicationTemplate(templateId);
+        if (!template)
+          return sendApiError(res, 404, "not_found", "Template not found");
+        const duplicate = await createOperationsCommunicationTemplate(
+          getActor(req),
+          {
+            name: `${template.name} copy`,
+            category: template.category,
+            subjectTemplate: template.subject_template,
+            bodyTemplate: template.body_template,
+            defaultFollowUpBusinessDays:
+              template.default_follow_up_business_days,
+            isActive: false,
+          },
+        );
+        return res.status(201).json({ template: serializeObject(duplicate) });
+      } catch (err) {
+        console.error(
+          "Operations duplicate communication template failed",
+          err,
+        );
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_template_duplicate_failed",
+          "Failed to duplicate communication template",
+        );
+      }
+    },
+  );
 
   router.patch("/communication-templates/:templateId", async (req, res) => {
     const templateId = getUuidParam(req, res, "templateId");
@@ -342,13 +617,14 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsCommunications({
-            limit: parsePagination(req).limit,
-            offset: parsePagination(req).offset,
-          }),
+          await listOperationsCommunications(
+            parseCommunicationListOptions(req),
+          ),
         ),
       );
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations communications list failed", err);
       return sendApiError(
         res,
@@ -359,6 +635,281 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.post("/communications", async (req, res) => {
+    try {
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const businessId = optionalUuidField(
+        body as Record<string, unknown>,
+        "businessId",
+      );
+      if (!businessId) throw new Error("invalid_businessId");
+      const input = parseOperationsCommunicationInput(req.body);
+      const communication = await createOperationsCommunication(
+        getActor(req),
+        businessId,
+        input as OperationsCommunicationInput,
+      );
+      if (communication === "business_not_found") {
+        return sendApiError(res, 404, "not_found", "Business not found");
+      }
+      if (communication === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (communication === "template_not_found") {
+        return sendApiError(res, 404, "not_found", "Template not found");
+      }
+      return res
+        .status(201)
+        .json({ communication: serializeObject(communication) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations create communication failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_create_failed",
+        "Failed to create communication",
+      );
+    }
+  });
+
+  router.get("/communications/:communicationId", async (req, res) => {
+    const communicationId = getUuidParam(req, res, "communicationId");
+    if (!communicationId) return;
+    try {
+      const communication = await getCommunicationOr404(res, communicationId);
+      if (!communication) return;
+      return res.json({ communication: serializeObject(communication) });
+    } catch (err) {
+      console.error("Operations communication detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_failed",
+        "Failed to load communication",
+      );
+    }
+  });
+
+  router.patch("/communications/:communicationId", async (req, res) => {
+    const communicationId = getUuidParam(req, res, "communicationId");
+    if (!communicationId) return;
+    try {
+      const existing = await getCommunicationOr404(res, communicationId);
+      if (!existing) return;
+      const communication = await updateOperationsCommunication(
+        getActor(req),
+        existing.business_id,
+        communicationId,
+        parseOperationsCommunicationInput(req.body, { partial: true }),
+      );
+      if (communication === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (communication === "template_not_found") {
+        return sendApiError(res, 404, "not_found", "Template not found");
+      }
+      if (!communication) {
+        return sendApiError(res, 404, "not_found", "Communication not found");
+      }
+      return res.json({ communication: serializeObject(communication) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations update communication failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_update_failed",
+        "Failed to update communication",
+      );
+    }
+  });
+
+  router.post(
+    "/communications/:communicationId/mark-sent",
+    async (req, res) => {
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!communicationId) return;
+      try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
+        const input = parseOperationsCommunicationInput(req.body, {
+          partial: true,
+        });
+        const communication = await markOperationsCommunicationSent(
+          getActor(req),
+          existing.business_id,
+          communicationId,
+          {
+            subject: input.subject,
+            body: input.body,
+            followUpAt: input.followUpAt,
+            taskTitle: input.taskTitle,
+            taskNotes: input.taskNotes,
+          },
+        );
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations mark communication sent failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_mark_sent_failed",
+          "Failed to mark communication sent",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/communications/:communicationId/mark-received",
+    async (req, res) => {
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!communicationId) return;
+      try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
+        const input = parseOperationsCommunicationInput(req.body, {
+          partial: true,
+        });
+        const communication = await markOperationsCommunicationReceived(
+          getActor(req),
+          existing.business_id,
+          communicationId,
+          {
+            subject: input.subject,
+            body: input.body,
+            followUpAt: input.followUpAt,
+            taskTitle: input.taskTitle,
+            taskNotes: input.taskNotes,
+          },
+        );
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations mark communication received failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_mark_received_failed",
+          "Failed to mark communication received",
+        );
+      }
+    },
+  );
+
+  router.post("/communications/:communicationId/cancel", async (req, res) => {
+    const communicationId = getUuidParam(req, res, "communicationId");
+    if (!communicationId) return;
+    try {
+      const existing = await getCommunicationOr404(res, communicationId);
+      if (!existing) return;
+      const communication = await cancelOperationsCommunication(
+        getActor(req),
+        existing.business_id,
+        communicationId,
+      );
+      if (!communication) {
+        return sendApiError(res, 404, "not_found", "Communication not found");
+      }
+      return res.json({ communication: serializeObject(communication) });
+    } catch (err) {
+      console.error("Operations cancel communication failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_cancel_failed",
+        "Failed to cancel communication",
+      );
+    }
+  });
+
+  router.post(
+    "/communications/:communicationId/schedule-follow-up",
+    async (req, res) => {
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!communicationId) return;
+      try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const followUpAt = parseRequiredDateField(
+          body as Record<string, unknown>,
+          "followUpAt",
+        );
+        const communication = await updateOperationsCommunication(
+          getActor(req),
+          existing.business_id,
+          communicationId,
+          {
+            followUpAt,
+            taskTitle: optionalTextField(
+              body as Record<string, unknown>,
+              "taskTitle",
+            ),
+            taskNotes: optionalTextField(
+              body as Record<string, unknown>,
+              "taskNotes",
+            ),
+          },
+        );
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations schedule follow-up failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_follow_up_failed",
+          "Failed to schedule follow-up",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/communications/:communicationId/complete-follow-up",
+    async (req, res) => {
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!communicationId) return;
+      try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
+        const result = await completeOperationsCommunicationFollowUp(
+          getActor(req),
+          communicationId,
+        );
+        return res.json({ ok: true, task: serializeObject(result) });
+      } catch (err) {
+        console.error(
+          "Operations complete communication follow-up failed",
+          err,
+        );
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_follow_up_complete_failed",
+          "Failed to complete follow-up",
+        );
+      }
+    },
+  );
+
   router.get("/tasks", async (req, res) => {
     try {
       const status =
@@ -368,13 +919,15 @@ export function mountOperationsRoutes(app: express.Application) {
           TASK_STATUS_SET.has(req.query.status))
           ? (req.query.status as OperationsTaskStatus | "active" | "due")
           : undefined;
+      const result = await listOperationsTasks({
+        status,
+        ...parsePagination(req),
+      });
       return res.json(
-        serializeObject(
-          await listOperationsTasks({
-            status,
-            ...parsePagination(req),
-          }),
-        ),
+        serializeObject({
+          ...result,
+          groups: groupTasks(result.tasks),
+        }),
       );
     } catch (err) {
       console.error("Operations tasks list failed", err);
@@ -644,8 +1197,8 @@ export function mountOperationsRoutes(app: express.Application) {
       return res.json(
         serializeObject(
           await listOperationsCommunications({
+            ...parseCommunicationListOptions(req),
             businessId,
-            ...parsePagination(req),
           }),
         ),
       );
@@ -661,7 +1214,10 @@ export function mountOperationsRoutes(app: express.Application) {
   });
 
   router.post(
-    "/businesses/:businessId/communications/draft",
+    [
+      "/businesses/:businessId/communications/draft",
+      "/businesses/:businessId/communication-drafts",
+    ],
     async (req, res) => {
       const businessId = getUuidParam(req, res, "businessId");
       if (!businessId) return;
@@ -681,9 +1237,11 @@ export function mountOperationsRoutes(app: express.Application) {
           return sendApiError(res, 404, "not_found", "Template not found");
         if (!context)
           return sendApiError(res, 404, "not_found", "Business not found");
+        const suggestedFollowUpAt =
+          followUpAt ?? suggestedFollowUpDateForTemplate(template);
         const rendered = renderClientCommunicationTemplate(template, context, {
           ...getSenderDefaults(),
-          followUpDate: followUpAt,
+          followUpDate: suggestedFollowUpAt,
           reportName,
         });
         return res.json({
@@ -691,6 +1249,14 @@ export function mountOperationsRoutes(app: express.Application) {
             templateId,
             contactId,
             followUpAt: serializeDate(followUpAt ?? null),
+            suggestedFollowUpAt: serializeDate(suggestedFollowUpAt),
+            contactWarning: context.contact?.do_not_contact
+              ? {
+                  doNotContact: true,
+                  reason: context.contact.do_not_contact_reason,
+                  preferredChannel: context.contact.preferred_channel,
+                }
+              : null,
             subject: rendered.subject,
             body: rendered.body,
             unresolvedPlaceholders: rendered.unresolvedPlaceholders,
