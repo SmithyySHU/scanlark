@@ -17,6 +17,19 @@ export const OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES = [
   "monthly_update",
   "testimonial_request",
   "referral_request",
+  "managed_service_proposal",
+  "service_activation",
+  "monitoring_started",
+  "monthly_report_delivery",
+  "website_issue_notification",
+  "client_action_required",
+  "allowance_nearing_limit",
+  "work_outside_plan",
+  "service_review",
+  "renewal_discussion",
+  "service_paused",
+  "cancellation_acknowledgement",
+  "service_ended",
   "custom",
 ] as const;
 
@@ -105,6 +118,9 @@ export type OperationsTaskRow = {
   business_id: string;
   contact_id: string | null;
   source_communication_id: string | null;
+  source_client_service_id?: string | null;
+  source_service_site_id?: string | null;
+  source_key?: string | null;
   title: string;
   notes: string | null;
   due_at: Date;

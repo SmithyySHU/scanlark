@@ -50,6 +50,10 @@ router package.
   `INTERNAL_ONLY_MODE=false`; requires an approved internal admin when
   `INTERNAL_ONLY_MODE=true`.
 - `/learn` and `/learn/:slug`: Scanlark Learn index and article pages.
+- `/operations`, `/operations/businesses`, `/operations/reports`,
+  `/operations/quotes`, `/operations/work`, `/operations/services`, and
+  `/operations/service-plans`: internal Operations workspace routes for
+  approved administrators only.
 
 Compatibility redirects/normalization exist for `/app...` and
 `/shared-results/:token`.
@@ -127,6 +131,18 @@ Required for normal local development:
 - `OPERATIONS_BUSINESS_VAT_REGISTERED` and `OPERATIONS_VAT_RATE_PERCENT`:
   quote VAT configuration. VAT is off by default, and client previews state
   that no VAT is charged when disabled.
+- `OPERATIONS_SERVICE_PREFIX`: managed-service document prefix, default
+  `SL-S`.
+- `OPERATIONS_DEFAULT_SERVICE_CURRENCY`: ISO currency used for new managed
+  services, default `GBP`.
+- `OPERATIONS_DEFAULT_REPORT_DAY`: monthly report target day for managed
+  services, default `1`.
+- `OPERATIONS_DEFAULT_REVIEW_INTERVAL_DAYS`: default service review interval,
+  default `90`.
+- `OPERATIONS_RENEWAL_REMINDER_DAYS`: days before renewal to surface renewal
+  reminders, default `30`.
+- `OPERATIONS_DEFAULT_ALLOWANCE_ROLLOVER`: whether support allowances roll over
+  by default, default `false`.
 
 Common development variables:
 
@@ -222,3 +238,6 @@ Known limits:
   codebase map.
 - Public crawling intentionally rejects localhost/private IPs and performs
   passive checks only.
+- Managed services are internal operational records only; there is no public
+  subscription portal, Stripe/payment flow, invoice model, or automated service
+  email sending.

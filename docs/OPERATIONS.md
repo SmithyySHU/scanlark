@@ -43,6 +43,18 @@ Auth:
   previews when `true`; default is `false`.
 - `OPERATIONS_VAT_RATE_PERCENT`: VAT percentage used only when VAT is enabled,
   default `20`.
+- `OPERATIONS_SERVICE_PREFIX`: managed-service document prefix, default
+  `SL-S`.
+- `OPERATIONS_DEFAULT_SERVICE_CURRENCY`: ISO currency for new managed services,
+  default `GBP`.
+- `OPERATIONS_DEFAULT_REPORT_DAY`: default monthly report day for managed
+  services, default `1`.
+- `OPERATIONS_DEFAULT_REVIEW_INTERVAL_DAYS`: default service review interval,
+  default `90`.
+- `OPERATIONS_RENEWAL_REMINDER_DAYS`: days before renewal to surface renewal
+  reminders, default `30`.
+- `OPERATIONS_DEFAULT_ALLOWANCE_ROLLOVER`: whether service support allowances
+  roll over by default, default `false`.
 - Production-like API startup rejects dev auth bypass, short secrets, missing
   share/internal secrets, localhost CORS origins, and non-HTTPS configured
   public origins.
@@ -129,6 +141,15 @@ and worker. The API accepts this token only for
 grant access to site, scan, report, export, account, SSE, or admin routes.
 Scheduler, scan processing, reaper recovery, and uptime checks run inside the
 worker through DB helpers and do not receive any broad HTTP authorization bypass.
+
+Managed service activation can opt a covered site into routine scan schedules by
+updating the existing `sites` schedule fields. It only takes over schedules that
+are disabled/manual or were already marked as service-owned in
+`operations_client_service_sites.schedule_managed_by_service`; existing
+non-service schedules are left unchanged and logged as Operations activity.
+Paused, cancelled, or ended services stop creating new routine obligations and
+pause only service-owned schedules. The worker scheduler continues to read the
+same `sites` schedule fields as before.
 
 ## Email And SMTP
 
@@ -238,6 +259,30 @@ PDF export is browser print based. The report view exposes print styling through
 `@media print` blocks in `apps/web/src/app.tsx`; `print=1` opens the report in a
 print-ready state and `handlePrintReport` calls `window.print()`.
 
+## Managed Services
+
+Managed service records live only in the internal Operations workspace:
+
+- Service plan templates define reusable commercial defaults such as cadence,
+  allowances, reporting frequency, and included scope.
+- Client services copy the agreed terms for a specific business and can link to
+  an accepted quote, completed work order, and one or more existing monitored
+  sites.
+- Service usage records track internal time/fix allowance consumption without
+  storing credentials or billing data.
+- Service reviews, amendments, incidents, activity, reports, communications,
+  and follow-up tasks stay linked to the service for operator context.
+
+This layer does not create public SaaS subscriptions, public service APIs,
+Stripe payments, invoices, automated email sending, or a client portal. Public
+configuration and public report APIs do not expose service data.
+
+Routine obligations use idempotent `operations_tasks.source_key` values so the
+same monthly report/review/renewal task can be generated safely more than once.
+Monthly service reports are created as internal Operations reports around
+existing completed scans; PDF delivery remains the existing browser
+print/save-PDF workflow.
+
 ## Deployment/Beta Checklist
 
 - Use a real `SESSION_SECRET` and disable `DEV_BYPASS_AUTH`.
@@ -247,7 +292,12 @@ print-ready state and `handlePrintReport` calls `window.print()`.
   `OPERATIONS_SENDER_NAME`, `OPERATIONS_SENDER_EMAIL`, and optionally
   `OPERATIONS_DEFAULT_FOLLOW_UP_BUSINESS_DAYS`. Also set the Operations
   quote/work prefixes, default currency, quote validity, and VAT variables
-  explicitly in production.
+  explicitly in production. Set managed-service defaults explicitly as well:
+  `OPERATIONS_SERVICE_PREFIX`, `OPERATIONS_DEFAULT_SERVICE_CURRENCY`,
+  `OPERATIONS_DEFAULT_REPORT_DAY`,
+  `OPERATIONS_DEFAULT_REVIEW_INTERVAL_DAYS`,
+  `OPERATIONS_RENEWAL_REMINDER_DAYS`, and
+  `OPERATIONS_DEFAULT_ALLOWANCE_ROLLOVER`.
 - Set production `WEB_ORIGIN`, `API_ORIGIN`, and `APP_URL`.
 - Run migrations against the target DB.
 - Start API and worker as separate long-running services.

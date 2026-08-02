@@ -5,9 +5,12 @@ import {
   addOperationsContact,
   addOperationsQuoteAccessRequirement,
   addOperationsQuoteItem,
+  addOperationsClientServiceSite,
   addOperationsWorkItem,
   addOperationsWorkOrderAccessRequirement,
+  activateOperationsClientService,
   cancelOperationsCommunication,
+  cancelOperationsClientService,
   cancelOperationsQuote,
   cancelOperationsTask,
   completeOperationsWorkOrder,
@@ -16,6 +19,10 @@ import {
   convertOperationsQuoteToWorkOrder,
   createOperationsCommunication,
   createOperationsCommunicationTemplate,
+  createOperationsClientService,
+  createOperationsClientServiceUsage,
+  createOperationsServiceMonthlyReport,
+  createOperationsServicePlan,
   createOperationsTask,
   createOperationsBusiness,
   createOperationsQuote,
@@ -24,8 +31,10 @@ import {
   createOperationsReportRetest,
   deleteOperationsQuoteAccessRequirement,
   deleteOperationsQuoteItem,
+  deleteOperationsClientServiceUsage,
   deleteOperationsWorkOrderAccessRequirement,
   deleteOperationsContact,
+  duplicateOperationsServicePlan,
   duplicateOperationsQuote,
   duplicateOperationsReport,
   freezeOperationsReportRender,
@@ -38,9 +47,15 @@ import {
   getOperationsQuotePreview,
   getOperationsReportDetail,
   getOperationsReportPreview,
+  getOperationsClientServiceDetail,
+  getOperationsServicePlan,
+  getOperationsServiceSchedule,
   getOperationsSummary,
   getOperationsWorkOrderDetail,
+  generateOperationsServiceTasks,
   linkOperationsBusinessSite,
+  listOperationsClientServices,
+  listOperationsClientServiceUsage,
   listOperationsCommunicationTemplates,
   listOperationsCommunications,
   listOperationsAvailableSites,
@@ -50,12 +65,14 @@ import {
   listOperationsQuoteServiceItems,
   listOperationsReportableScanRuns,
   listOperationsReports,
+  listOperationsServicePlans,
   listOperationsTasks,
   listOperationsWorkOrders,
   markOperationsCommunicationReceived,
   markOperationsCommunicationSent,
   markOperationsQuoteExpired,
   markOperationsQuoteReady,
+  markOperationsServiceReviewComplete,
   markOperationsReportStatus,
   recordOperationsQuoteAccepted,
   recordOperationsQuoteDeclined,
@@ -64,15 +81,23 @@ import {
   reorderOperationsQuoteItems,
   reorderOperationsReportFindings,
   reorderOperationsWorkItems,
+  renewOperationsClientService,
+  removeOperationsClientServiceSite,
+  requestOperationsClientServiceCancellation,
+  resumeOperationsClientService,
   setOperationsCommunicationTemplateActive,
   setOperationsBusinessArchived,
   setOperationsReportArchived,
+  setOperationsServicePlanArchived,
   setPrimaryOperationsContact,
   snoozeOperationsTask,
   unlinkOperationsBusinessSite,
   updateOperationsBusiness,
   updateOperationsCommunication,
   updateOperationsCommunicationTemplate,
+  updateOperationsClientService,
+  updateOperationsClientServiceSite,
+  updateOperationsClientServiceUsage,
   updateOperationsQuote,
   updateOperationsQuoteAccessRequirement,
   updateOperationsQuoteItem,
@@ -83,16 +108,23 @@ import {
   updateOperationsWorkItem,
   updateOperationsWorkOrder,
   updateOperationsWorkOrderAccessRequirement,
+  updateOperationsServicePlan,
+  changeOperationsClientServicePlan,
+  pauseOperationsClientService,
+  proposeOperationsClientService,
   updateOperationsTask,
   updateOperationsContact,
   type AdminActor,
   type OperationsBusinessInput,
+  type OperationsClientServiceStatus,
   type OperationsCommunicationInput,
   type OperationsCommunicationListOptions,
   type OperationsCommunicationTemplateCategory,
   type OperationsCommunicationTemplateRow,
   type OperationsContactInput,
   type OperationsReportListParams,
+  type OperationsServiceBillingCadence,
+  type OperationsServicePlanType,
   type OperationsTaskStatus,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
@@ -106,6 +138,13 @@ import {
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsClientServiceActivationInput,
+  parseOperationsClientServiceInput,
+  parseOperationsClientServiceReviewInput,
+  parseOperationsClientServiceSiteInput,
+  parseOperationsClientServiceStatus,
+  parseOperationsClientServiceTransitionInput,
+  parseOperationsClientServiceUsageInput,
   parseOperationsAccessRequirementInput,
   parseOperationsQuoteAcceptedInput,
   parseOperationsQuoteCreateInput,
@@ -125,6 +164,9 @@ import {
   parseOperationsReportType,
   parseOperationsReportUpdateInput,
   parseOperationsServiceItemInput,
+  parseOperationsServiceBillingCadence,
+  parseOperationsServicePlanInput,
+  parseOperationsServicePlanType,
   parseOperationsTaskInput,
   parseOperationsWorkItemInput,
   parseOperationsWorkItemStatus,
@@ -355,6 +397,53 @@ function parseWorkOrderListOptions(req: Request) {
   };
 }
 
+function parseServicePlanListOptions(req: Request) {
+  return {
+    ...parsePagination(req),
+    activeOnly: req.query.activeOnly === "true",
+    includeArchived: req.query.includeArchived === "true",
+    search: typeof req.query.search === "string" ? req.query.search : null,
+  };
+}
+
+function parseClientServiceListOptions(req: Request) {
+  const status =
+    typeof req.query.status === "string"
+      ? parseOperationsClientServiceStatus(req.query.status)
+      : null;
+  const planType =
+    typeof req.query.planType === "string"
+      ? parseOperationsServicePlanType(req.query.planType)
+      : null;
+  const billingCadence =
+    typeof req.query.billingCadence === "string"
+      ? parseOperationsServiceBillingCadence(req.query.billingCadence)
+      : null;
+  if (typeof req.query.status === "string" && !status) {
+    throw new Error("invalid_service_status");
+  }
+  if (typeof req.query.planType === "string" && !planType) {
+    throw new Error("invalid_plan_type");
+  }
+  if (typeof req.query.billingCadence === "string" && !billingCadence) {
+    throw new Error("invalid_billing_cadence");
+  }
+  return {
+    ...parsePagination(req),
+    businessId:
+      typeof req.query.businessId === "string" ? req.query.businessId : null,
+    status: status as OperationsClientServiceStatus | null,
+    planType: planType as OperationsServicePlanType | null,
+    billingCadence: billingCadence as OperationsServiceBillingCadence | null,
+    search: typeof req.query.search === "string" ? req.query.search : null,
+    reportsDue: req.query.reportsDue === "true",
+    reviewsDue: req.query.reviewsDue === "true",
+    renewalsApproaching: req.query.renewalsApproaching === "true",
+    siteAttention: req.query.siteAttention === "true",
+    includeEnded: req.query.includeEnded === "true",
+  };
+}
+
 async function getCommunicationOr404(res: Response, communicationId: string) {
   const communication = await getOperationsCommunication(communicationId);
   if (!communication) {
@@ -548,6 +637,617 @@ export function mountOperationsRoutes(app: express.Application) {
         500,
         "operations_sites_failed",
         "Failed to load available sites",
+      );
+    }
+  });
+
+  router.get("/service-plans", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsServicePlans(parseServicePlanListOptions(req)),
+        ),
+      );
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service plans failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_plans_failed",
+        "Failed to load service plans",
+      );
+    }
+  });
+
+  router.post("/service-plans", async (req, res) => {
+    try {
+      const servicePlan = await createOperationsServicePlan(
+        getActor(req),
+        parseOperationsServicePlanInput(req.body),
+      );
+      return res
+        .status(201)
+        .json({ servicePlan: serializeObject(servicePlan) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service plan create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_plan_create_failed",
+        "Failed to create service plan",
+      );
+    }
+  });
+
+  router.get("/service-plans/:planId", async (req, res) => {
+    const planId = getUuidParam(req, res, "planId");
+    if (!planId) return;
+    const servicePlan = await getOperationsServicePlan(planId);
+    if (!servicePlan) {
+      return sendApiError(res, 404, "not_found", "Service plan not found");
+    }
+    return res.json({ servicePlan: serializeObject(servicePlan) });
+  });
+
+  router.patch("/service-plans/:planId", async (req, res) => {
+    const planId = getUuidParam(req, res, "planId");
+    if (!planId) return;
+    try {
+      const servicePlan = await updateOperationsServicePlan(
+        getActor(req),
+        planId,
+        parseOperationsServicePlanInput(req.body, { partial: true }),
+      );
+      if (!servicePlan) {
+        return sendApiError(res, 404, "not_found", "Service plan not found");
+      }
+      return res.json({ servicePlan: serializeObject(servicePlan) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service plan update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_plan_update_failed",
+        "Failed to update service plan",
+      );
+    }
+  });
+
+  router.post("/service-plans/:planId/duplicate", async (req, res) => {
+    const planId = getUuidParam(req, res, "planId");
+    if (!planId) return;
+    const servicePlan = await duplicateOperationsServicePlan(
+      getActor(req),
+      planId,
+    );
+    if (!servicePlan) {
+      return sendApiError(res, 404, "not_found", "Service plan not found");
+    }
+    return res.status(201).json({ servicePlan: serializeObject(servicePlan) });
+  });
+
+  router.post("/service-plans/:planId/archive", async (req, res) => {
+    const planId = getUuidParam(req, res, "planId");
+    if (!planId) return;
+    const servicePlan = await setOperationsServicePlanArchived(
+      getActor(req),
+      planId,
+      true,
+    );
+    if (!servicePlan) {
+      return sendApiError(res, 404, "not_found", "Service plan not found");
+    }
+    return res.json({ servicePlan: serializeObject(servicePlan) });
+  });
+
+  router.post("/service-plans/:planId/restore", async (req, res) => {
+    const planId = getUuidParam(req, res, "planId");
+    if (!planId) return;
+    const servicePlan = await setOperationsServicePlanArchived(
+      getActor(req),
+      planId,
+      false,
+    );
+    if (!servicePlan) {
+      return sendApiError(res, 404, "not_found", "Service plan not found");
+    }
+    return res.json({ servicePlan: serializeObject(servicePlan) });
+  });
+
+  router.get("/services", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsClientServices(
+            parseClientServiceListOptions(req),
+          ),
+        ),
+      );
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations services failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_services_failed",
+        "Failed to load services",
+      );
+    }
+  });
+
+  router.post("/services", async (req, res) => {
+    try {
+      const service = await createOperationsClientService(
+        getActor(req),
+        parseOperationsClientServiceInput(req.body) as Parameters<
+          typeof createOperationsClientService
+        >[1],
+      );
+      if (typeof service === "string") {
+        return sendApiError(
+          res,
+          400,
+          service,
+          "Related service record is invalid",
+        );
+      }
+      return res.status(201).json({ service: serializeObject(service) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_create_failed",
+        "Failed to create service",
+      );
+    }
+  });
+
+  router.get("/services/:serviceId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    const service = await getOperationsClientServiceDetail(serviceId);
+    if (!service) {
+      return sendApiError(res, 404, "not_found", "Service not found");
+    }
+    return res.json({ service: serializeObject(service) });
+  });
+
+  router.patch("/services/:serviceId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const service = await updateOperationsClientService(
+        getActor(req),
+        serviceId,
+        parseOperationsClientServiceInput(req.body, {
+          partial: true,
+        }) as Parameters<typeof updateOperationsClientService>[2],
+      );
+      if (!service) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      if (typeof service === "string") {
+        return sendApiError(
+          res,
+          400,
+          service,
+          "Related service record is invalid",
+        );
+      }
+      return res.json({ service: serializeObject(service) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_update_failed",
+        "Failed to update service",
+      );
+    }
+  });
+
+  const serviceAction = (
+    path: string,
+    handler: (
+      actor: ReturnType<typeof getActor>,
+      serviceId: string,
+      body: unknown,
+    ) => Promise<unknown>,
+  ) => {
+    router.post(path, async (req, res) => {
+      const serviceId = getUuidParam(req, res, "serviceId");
+      if (!serviceId) return;
+      try {
+        const result = await handler(getActor(req), serviceId, req.body);
+        if (!result) {
+          return sendApiError(res, 404, "not_found", "Service not found");
+        }
+        if (
+          typeof result === "object" &&
+          result &&
+          "activationIssues" in result
+        ) {
+          return sendApiError(
+            res,
+            400,
+            "service_activation_blocked",
+            "Service is not ready for this action",
+            { activationIssues: result.activationIssues },
+          );
+        }
+        if (typeof result === "string") {
+          return sendApiError(res, 400, result, "Service action is invalid");
+        }
+        return res.json({ service: serializeObject(result) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error(`Operations service action failed: ${path}`, err);
+        return sendApiError(
+          res,
+          500,
+          "operations_service_action_failed",
+          "Failed to update service",
+        );
+      }
+    });
+  };
+
+  serviceAction("/services/:serviceId/propose", (actor, serviceId, body) =>
+    proposeOperationsClientService(
+      actor,
+      serviceId,
+      parseOperationsClientServiceTransitionInput(body),
+    ),
+  );
+  serviceAction("/services/:serviceId/activate", (actor, serviceId, body) =>
+    activateOperationsClientService(
+      actor,
+      serviceId,
+      parseOperationsClientServiceActivationInput(body),
+    ),
+  );
+  serviceAction("/services/:serviceId/pause", (actor, serviceId, body) =>
+    pauseOperationsClientService(
+      actor,
+      serviceId,
+      parseOperationsClientServiceTransitionInput(body),
+    ),
+  );
+  serviceAction("/services/:serviceId/resume", (actor, serviceId) =>
+    resumeOperationsClientService(actor, serviceId),
+  );
+  serviceAction(
+    "/services/:serviceId/request-cancellation",
+    (actor, serviceId, body) =>
+      requestOperationsClientServiceCancellation(
+        actor,
+        serviceId,
+        parseOperationsClientServiceTransitionInput(body),
+      ),
+  );
+  serviceAction("/services/:serviceId/cancel", (actor, serviceId, body) =>
+    cancelOperationsClientService(
+      actor,
+      serviceId,
+      parseOperationsClientServiceTransitionInput(body),
+    ),
+  );
+  serviceAction("/services/:serviceId/renew", (actor, serviceId, body) => {
+    const record = body && typeof body === "object" ? body : {};
+    return renewOperationsClientService(actor, serviceId, {
+      renewalDate: parseDateField(
+        record as Record<string, unknown>,
+        "renewalDate",
+      ),
+      nextReviewAt: parseDateField(
+        record as Record<string, unknown>,
+        "nextReviewAt",
+      ),
+      reason: optionalTextField(record as Record<string, unknown>, "reason"),
+    });
+  });
+  serviceAction(
+    "/services/:serviceId/change-plan",
+    (actor, serviceId, body) => {
+      const record = body && typeof body === "object" ? body : {};
+      return changeOperationsClientServicePlan(actor, serviceId, {
+        servicePlanId: optionalUuidField(
+          record as Record<string, unknown>,
+          "servicePlanId",
+        ),
+        effectiveDate: parseRequiredDateField(
+          record as Record<string, unknown>,
+          "effectiveDate",
+        ),
+        changeSummary:
+          textField(record as Record<string, unknown>, "changeSummary") ?? "",
+        reason: optionalTextField(record as Record<string, unknown>, "reason"),
+        clientAgreed: (record as Record<string, unknown>).clientAgreed === true,
+      });
+    },
+  );
+  serviceAction(
+    "/services/:serviceId/mark-review-complete",
+    (actor, serviceId, body) =>
+      markOperationsServiceReviewComplete(
+        actor,
+        serviceId,
+        parseOperationsClientServiceReviewInput(body),
+      ),
+  );
+
+  router.post("/services/:serviceId/run-review", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const review = await markOperationsServiceReviewComplete(
+        getActor(req),
+        serviceId,
+        parseOperationsClientServiceReviewInput(req.body),
+      );
+      if (!review) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      return res.status(201).json({ serviceReview: serializeObject(review) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service review failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_review_failed",
+        "Failed to record service review",
+      );
+    }
+  });
+
+  router.post("/services/:serviceId/sites", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const serviceSite = await addOperationsClientServiceSite(
+        getActor(req),
+        serviceId,
+        parseOperationsClientServiceSiteInput(req.body),
+      );
+      if (!serviceSite) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      if (serviceSite === "site_not_linked_to_business") {
+        return sendApiError(
+          res,
+          400,
+          "site_not_linked_to_business",
+          "Site is not linked to this business",
+        );
+      }
+      if (serviceSite === "duplicate_service_site") {
+        return sendApiError(
+          res,
+          409,
+          "duplicate_service_site",
+          "Site is already covered by this service",
+        );
+      }
+      return res
+        .status(201)
+        .json({ serviceSite: serializeObject(serviceSite) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service site add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_site_add_failed",
+        "Failed to add service site",
+      );
+    }
+  });
+
+  router.patch("/services/:serviceId/sites/:siteId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    const siteId = getUuidParam(req, res, "siteId");
+    if (!serviceId || !siteId) return;
+    try {
+      const serviceSite = await updateOperationsClientServiceSite(
+        getActor(req),
+        serviceId,
+        siteId,
+        parseOperationsClientServiceSiteInput(req.body, { partial: true }),
+      );
+      if (!serviceSite) {
+        return sendApiError(res, 404, "not_found", "Service site not found");
+      }
+      return res.json({ serviceSite: serializeObject(serviceSite) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service site update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_site_update_failed",
+        "Failed to update service site",
+      );
+    }
+  });
+
+  router.delete("/services/:serviceId/sites/:siteId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    const siteId = getUuidParam(req, res, "siteId");
+    if (!serviceId || !siteId) return;
+    const serviceSite = await removeOperationsClientServiceSite(
+      getActor(req),
+      serviceId,
+      siteId,
+      typeof req.query.reason === "string" ? req.query.reason : null,
+    );
+    if (!serviceSite) {
+      return sendApiError(res, 404, "not_found", "Service site not found");
+    }
+    return res.json({ serviceSite: serializeObject(serviceSite) });
+  });
+
+  router.get("/services/:serviceId/usage", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    return res.json({
+      usage: serializeObject(await listOperationsClientServiceUsage(serviceId)),
+    });
+  });
+
+  router.post("/services/:serviceId/usage", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const usage = await createOperationsClientServiceUsage(
+        getActor(req),
+        serviceId,
+        parseOperationsClientServiceUsageInput(req.body),
+      );
+      if (!usage) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      return res.status(201).json({ usage: serializeObject(usage) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service usage create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_usage_create_failed",
+        "Failed to record service usage",
+      );
+    }
+  });
+
+  router.patch("/services/:serviceId/usage/:usageId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    const usageId = getUuidParam(req, res, "usageId");
+    if (!serviceId || !usageId) return;
+    try {
+      const usage = await updateOperationsClientServiceUsage(
+        getActor(req),
+        serviceId,
+        usageId,
+        parseOperationsClientServiceUsageInput(req.body, { partial: true }),
+      );
+      if (!usage) {
+        return sendApiError(res, 404, "not_found", "Usage record not found");
+      }
+      return res.json({ usage: serializeObject(usage) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service usage update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_usage_update_failed",
+        "Failed to update service usage",
+      );
+    }
+  });
+
+  router.delete("/services/:serviceId/usage/:usageId", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    const usageId = getUuidParam(req, res, "usageId");
+    if (!serviceId || !usageId) return;
+    const usage = await deleteOperationsClientServiceUsage(
+      getActor(req),
+      serviceId,
+      usageId,
+    );
+    if (!usage) {
+      return sendApiError(res, 404, "not_found", "Usage record not found");
+    }
+    return res.json({ usage: serializeObject(usage) });
+  });
+
+  router.get("/services/:serviceId/schedule", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    const schedule = await getOperationsServiceSchedule(serviceId);
+    if (!schedule) {
+      return sendApiError(res, 404, "not_found", "Service not found");
+    }
+    return res.json({ schedule: serializeObject(schedule) });
+  });
+
+  router.post("/services/:serviceId/generate-tasks", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    const result = await generateOperationsServiceTasks(
+      getActor(req),
+      serviceId,
+    );
+    if (!result) {
+      return sendApiError(res, 404, "not_found", "Service not found");
+    }
+    return res.json(result);
+  });
+
+  router.post("/services/:serviceId/create-report", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const record = req.body && typeof req.body === "object" ? req.body : {};
+      const report = await createOperationsServiceMonthlyReport(
+        getActor(req),
+        serviceId,
+        {
+          siteId: optionalUuidField(
+            record as Record<string, unknown>,
+            "siteId",
+          ),
+          title: optionalTextField(record as Record<string, unknown>, "title"),
+          periodStart: parseDateField(
+            record as Record<string, unknown>,
+            "periodStart",
+          ),
+          periodEnd: parseDateField(
+            record as Record<string, unknown>,
+            "periodEnd",
+          ),
+        },
+      );
+      if (!report) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      if (typeof report === "string") {
+        return sendApiError(
+          res,
+          400,
+          report,
+          "Unable to create service report",
+        );
+      }
+      return res.status(201).json({ report: serializeObject(report) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations service report create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_report_create_failed",
+        "Failed to create service report",
       );
     }
   });

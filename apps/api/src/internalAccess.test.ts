@@ -22,6 +22,11 @@ import {
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportSentInput,
   parseOperationsReportUpdateInput,
+  parseOperationsClientServiceActivationInput,
+  parseOperationsClientServiceInput,
+  parseOperationsClientServiceSiteInput,
+  parseOperationsClientServiceUsageInput,
+  parseOperationsServicePlanInput,
   parseOperationsQuoteAcceptedInput,
   parseOperationsQuoteItemInput,
   parseOperationsTaskInput,
@@ -44,6 +49,11 @@ import {
   type OperationsQuoteItemRow,
   type OperationsQuoteRow,
 } from "../../../packages/db/src/operationsQuotesWork";
+import {
+  buildServiceTaskKeys,
+  calculateServicePeriod,
+  getOperationsServiceConfig,
+} from "../../../packages/db/src/operationsServices";
 
 async function withEnv<T>(
   env: Record<string, string | undefined>,
@@ -182,6 +192,16 @@ test("operations summary serialization returns a compact safe shape", () => {
       awaitingAccess: 0,
       blockedWork: 0,
       workReadyForTesting: 0,
+      activeServices: 0,
+      serviceReportsDue: 0,
+      serviceReviewsDue: 0,
+      managedSitesNeedingAttention: 0,
+      pausedServices: 0,
+      serviceRenewalsApproaching: 0,
+      cancellationsPending: 0,
+      activeServiceIncidents: 0,
+      monthlyReportsReadyToSend: 0,
+      clientActionsOutstanding: 0,
     },
     monitoringAttention: [
       {
@@ -900,6 +920,221 @@ test("operations quote validators reject invalid money, acceptance, and credenti
         secureStorageReference: "password=plain-text-value",
       }),
     /credential_values_not_allowed/,
+  );
+});
+
+test("operations managed service config parses defaults and placeholders", () => {
+  const config = getOperationsServiceConfig({
+    OPERATIONS_SERVICE_PREFIX: " SL-M ",
+    OPERATIONS_DEFAULT_SERVICE_CURRENCY: "usd",
+    OPERATIONS_DEFAULT_REPORT_DAY: "31",
+    OPERATIONS_DEFAULT_REVIEW_INTERVAL_DAYS: "120",
+    OPERATIONS_RENEWAL_REMINDER_DAYS: "45",
+    OPERATIONS_DEFAULT_ALLOWANCE_ROLLOVER: "true",
+  });
+
+  assert.equal(config.servicePrefix, "SL-M");
+  assert.equal(config.defaultCurrency, "USD");
+  assert.equal(config.defaultReportDay, 28);
+  assert.equal(config.defaultReviewIntervalDays, 120);
+  assert.equal(config.renewalReminderDays, 45);
+  assert.equal(config.defaultAllowanceRollover, true);
+
+  const fallback = getOperationsServiceConfig({
+    OPERATIONS_SERVICE_PREFIX: "",
+    OPERATIONS_DEFAULT_SERVICE_CURRENCY: "not-currency",
+    OPERATIONS_DEFAULT_REPORT_DAY: "99",
+    OPERATIONS_DEFAULT_REVIEW_INTERVAL_DAYS: "-1",
+    OPERATIONS_RENEWAL_REMINDER_DAYS: "bad",
+    OPERATIONS_DEFAULT_ALLOWANCE_ROLLOVER: "false",
+  });
+
+  assert.equal(fallback.servicePrefix, "SL-S");
+  assert.equal(fallback.defaultCurrency, "GBP");
+  assert.equal(fallback.defaultReportDay, 28);
+  assert.equal(fallback.defaultReviewIntervalDays, 1);
+  assert.equal(fallback.renewalReminderDays, 30);
+  assert.equal(fallback.defaultAllowanceRollover, false);
+});
+
+test("operations managed service validators reject invalid and credential-like values", () => {
+  const plan = parseOperationsServicePlanInput({
+    name: "Monitoring and care",
+    planType: "monitoring_and_support",
+    defaultBillingCadence: "monthly",
+    defaultPriceMinor: 9900,
+    defaultCurrency: "gbp",
+    defaultReportFrequency: "monthly",
+    defaultScanFrequency: "weekly",
+    defaultReviewFrequency: "quarterly",
+    includedSupportMinutes: 60,
+    includedFixCount: 2,
+    includesIssueAlerts: true,
+  });
+  assert.equal(plan.name, "Monitoring and care");
+  assert.equal(plan.defaultCurrency, "GBP");
+  assert.equal(plan.includedSupportMinutes, 60);
+
+  assert.throws(
+    () =>
+      parseOperationsServicePlanInput({
+        name: "Bad plan",
+        planType: "public_subscription",
+      }),
+    /invalid_plan_type/,
+  );
+
+  const service = parseOperationsClientServiceInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    name: "Monthly website care",
+    billingCadence: "monthly",
+    agreedPriceMinor: 15000,
+    currency: "GBP",
+    scanFrequency: "weekly",
+    reportFrequency: "monthly",
+    reviewFrequency: "quarterly",
+    includedSupportMinutes: 90,
+    includedFixCount: 3,
+    allowanceRollover: false,
+    includedScope: "Small website fixes and reporting.",
+  }) as ReturnType<typeof parseOperationsClientServiceInput> & {
+    businessId: string;
+    agreedPriceMinor: number;
+  };
+  assert.equal(service.businessId, "11111111-1111-4111-8111-111111111111");
+  assert.equal(service.agreedPriceMinor, 15000);
+
+  assert.throws(
+    () =>
+      parseOperationsClientServiceInput({
+        businessId: "11111111-1111-4111-8111-111111111111",
+        name: "Unsafe service",
+        agreedPriceMinor: -1,
+      }),
+    /invalid_agreedPriceMinor/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsClientServiceInput({
+        businessId: "11111111-1111-4111-8111-111111111111",
+        name: "Unsafe service",
+        internalNotes: "password=do-not-store",
+      }),
+    /credential_values_not_allowed/,
+  );
+});
+
+test("operations managed service activation and site validation are explicit", () => {
+  const activation = parseOperationsClientServiceActivationInput({
+    agreementConfirmed: true,
+    agreedAt: "2026-03-01T00:00:00.000Z",
+    acceptanceMethod: "email",
+    updateBusinessRelationship: true,
+    updatePipelineStage: true,
+  });
+  assert.equal(activation.acceptanceMethod, "email");
+  assert.equal(activation.updateBusinessRelationship, true);
+  assert(activation.agreedAt instanceof Date);
+
+  assert.throws(
+    () => parseOperationsClientServiceActivationInput({}),
+    /acceptance_method_required/,
+  );
+
+  const site = parseOperationsClientServiceSiteInput({
+    siteId: "22222222-2222-4222-8222-222222222222",
+    isPrimary: true,
+    monitoringEnabled: true,
+    uptimeMonitoringEnabled: true,
+    scanFrequencyOverride: "daily",
+    reportFrequencyOverride: "monthly",
+    notes: "Client approved monitoring.",
+  });
+  assert.equal(site.siteId, "22222222-2222-4222-8222-222222222222");
+  assert.equal(site.scanFrequencyOverride, "daily");
+
+  assert.throws(
+    () =>
+      parseOperationsClientServiceSiteInput({
+        siteId: "22222222-2222-4222-8222-222222222222",
+        scanFrequencyOverride: "hourly",
+      }),
+    /invalid_scan_frequency/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsClientServiceSiteInput({
+        siteId: "22222222-2222-4222-8222-222222222222",
+        notes: "api key=plain-text",
+      }),
+    /credential_values_not_allowed/,
+  );
+});
+
+test("operations managed service usage validation keeps allowance records internal", () => {
+  const usage = parseOperationsClientServiceUsageInput({
+    usageType: "small_fix",
+    description: "Updated a broken link after monthly review.",
+    minutesUsed: 25,
+    fixesUsed: 1,
+    isOutOfScope: false,
+  });
+  assert.equal(usage.usageType, "small_fix");
+  assert.equal(usage.minutesUsed, 25);
+
+  assert.throws(
+    () =>
+      parseOperationsClientServiceUsageInput({
+        usageType: "invoice",
+        description: "Not a service usage type",
+      }),
+    /invalid_usage_type/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsClientServiceUsageInput({
+        usageType: "small_fix",
+        description: "secret: should not be here",
+      }),
+    /credential_values_not_allowed/,
+  );
+});
+
+test("operations managed service task keys and periods are stable", () => {
+  const period = calculateServicePeriod(
+    {
+      billing_cadence: "monthly",
+      start_date: new Date("2026-02-01T00:00:00.000Z"),
+    },
+    new Date("2026-02-20T12:00:00.000Z"),
+  );
+  assert.equal(period.start.toISOString(), "2026-02-01T00:00:00.000Z");
+  assert.equal(period.end.toISOString(), "2026-02-28T09:00:00.000Z");
+
+  const annual = calculateServicePeriod(
+    {
+      billing_cadence: "annual",
+      start_date: new Date("2026-01-01T00:00:00.000Z"),
+    },
+    new Date("2026-08-02T12:00:00.000Z"),
+  );
+  assert.equal(annual.start.toISOString(), "2026-01-01T00:00:00.000Z");
+  assert.equal(annual.end.toISOString(), "2026-12-31T09:00:00.000Z");
+
+  const keys = buildServiceTaskKeys(
+    "11111111-1111-4111-8111-111111111111",
+    new Date("2026-02-20T12:00:00.000Z"),
+  );
+  assert.equal(
+    keys.prepareReport,
+    "service:11111111-1111-4111-8111-111111111111:prepare-report:2026-02",
+  );
+  assert.equal(
+    buildServiceTaskKeys(
+      "11111111-1111-4111-8111-111111111111",
+      new Date("2026-02-01T00:00:00.000Z"),
+    ).prepareReport,
+    keys.prepareReport,
   );
 });
 

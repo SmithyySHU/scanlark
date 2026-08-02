@@ -8,7 +8,9 @@ type OperationsRouteKey =
   | "communications"
   | "reports"
   | "quotes"
-  | "work";
+  | "work"
+  | "services"
+  | "servicePlans";
 
 type PipelineStage =
   | "discovered"
@@ -144,6 +146,56 @@ type OperationsRetestStatus =
   | "failed"
   | "unable_to_verify";
 
+type OperationsServicePlanType =
+  | "monitoring_only"
+  | "monitoring_and_support"
+  | "managed_care"
+  | "custom";
+type OperationsServiceBillingCadence =
+  | "monthly"
+  | "quarterly"
+  | "annual"
+  | "one_off"
+  | "custom";
+type OperationsServiceScanFrequency =
+  | "daily"
+  | "weekly"
+  | "fortnightly"
+  | "monthly"
+  | "manual"
+  | "custom";
+type OperationsServiceReportFrequency =
+  | "weekly"
+  | "monthly"
+  | "quarterly"
+  | "manual"
+  | "custom";
+type OperationsServiceReviewFrequency =
+  | "monthly"
+  | "quarterly"
+  | "annual"
+  | "manual"
+  | "custom";
+type OperationsClientServiceStatus =
+  | "draft"
+  | "proposed"
+  | "pending_start"
+  | "active"
+  | "paused"
+  | "review_due"
+  | "cancellation_pending"
+  | "cancelled"
+  | "expired"
+  | "completed";
+type OperationsServiceUsageType =
+  | "support"
+  | "small_fix"
+  | "review"
+  | "report"
+  | "incident_response"
+  | "consultation"
+  | "other";
+
 type BusinessListFilter =
   | "active"
   | "follow_up"
@@ -169,6 +221,16 @@ type OperationsSummary = {
     awaitingAccess: number;
     blockedWork: number;
     workReadyForTesting: number;
+    activeServices: number;
+    serviceReportsDue: number;
+    serviceReviewsDue: number;
+    managedSitesNeedingAttention: number;
+    pausedServices: number;
+    serviceRenewalsApproaching: number;
+    cancellationsPending: number;
+    activeServiceIncidents: number;
+    monthlyReportsReadyToSend: number;
+    clientActionsOutstanding: number;
   };
   monitoringAttention: Array<{
     id: string;
@@ -700,6 +762,218 @@ type OperationsWorkOrderDetail = {
   completionIssues: string[];
 };
 
+type OperationsServicePlanRow = {
+  id: string;
+  name: string;
+  code: string;
+  description: string | null;
+  plan_type: OperationsServicePlanType;
+  default_currency: string;
+  default_price_minor: number;
+  default_billing_cadence: OperationsServiceBillingCadence;
+  default_scan_frequency: OperationsServiceScanFrequency;
+  default_report_frequency: OperationsServiceReportFrequency;
+  default_review_frequency: OperationsServiceReviewFrequency;
+  includes_uptime_monitoring: boolean;
+  includes_issue_alerts: boolean;
+  includes_monthly_report: boolean;
+  includes_advice: boolean;
+  includes_small_fixes: boolean;
+  included_support_minutes: number | null;
+  included_fix_count: number | null;
+  response_target_text: string | null;
+  scope_summary: string | null;
+  included_scope: string | null;
+  excluded_scope: string | null;
+  is_active: boolean;
+  archived_at: string | null;
+  active_service_count?: number;
+};
+
+type OperationsClientServiceRow = {
+  id: string;
+  business_id: string;
+  contact_id: string | null;
+  service_plan_id: string | null;
+  source_quote_id: string | null;
+  source_work_order_id: string | null;
+  service_number: string;
+  name: string;
+  status: OperationsClientServiceStatus;
+  currency: string;
+  agreed_price_minor: number;
+  zero_cost_confirmed: boolean;
+  billing_cadence: OperationsServiceBillingCadence;
+  start_date: string | null;
+  next_report_at: string | null;
+  next_review_at: string | null;
+  renewal_date: string | null;
+  renewal_reminder_at: string | null;
+  scan_frequency: OperationsServiceScanFrequency;
+  report_frequency: OperationsServiceReportFrequency;
+  review_frequency: OperationsServiceReviewFrequency;
+  includes_uptime_monitoring: boolean;
+  includes_issue_alerts: boolean;
+  includes_monthly_report: boolean;
+  includes_advice: boolean;
+  includes_small_fixes: boolean;
+  included_support_minutes: number | null;
+  included_fix_count: number | null;
+  response_target_text: string | null;
+  scope_summary: string | null;
+  included_scope: string | null;
+  excluded_scope: string | null;
+  custom_terms: string | null;
+  internal_notes: string | null;
+  proposed_at: string | null;
+  activated_at: string | null;
+  paused_at: string | null;
+  cancellation_requested_at: string | null;
+  cancelled_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  business_website_url?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  contact_email?: string | null;
+  plan_name?: string | null;
+  plan_type?: OperationsServicePlanType | null;
+  covered_site_count?: number;
+  site_attention_count?: number;
+  open_task_count?: number;
+  last_activity_at?: string | null;
+};
+
+type OperationsClientServiceSite = {
+  id: string;
+  client_service_id: string;
+  site_id: string;
+  is_primary: boolean;
+  monitoring_enabled: boolean;
+  uptime_monitoring_enabled: boolean;
+  scan_frequency_override: OperationsServiceScanFrequency | null;
+  report_frequency_override: OperationsServiceReportFrequency | null;
+  schedule_managed_by_service: boolean;
+  added_at: string;
+  removed_at: string | null;
+  notes: string | null;
+  site_url?: string | null;
+  site_display_name?: string | null;
+  latest_scan_id?: string | null;
+  latest_scan_status?: string | null;
+  latest_scan_finished_at?: string | null;
+  latest_scan_score?: number | null;
+  critical_issue_count?: number;
+  high_issue_count?: number;
+  active_incident_count?: number;
+  next_scheduled_at?: string | null;
+  schedule_enabled?: boolean | null;
+  schedule_frequency?: string | null;
+};
+
+type OperationsClientServiceUsage = {
+  id: string;
+  usage_type: OperationsServiceUsageType;
+  description: string;
+  minutes_used: number | null;
+  fixes_used: number | null;
+  occurred_at: string;
+  service_period_start: string;
+  service_period_end: string;
+  is_out_of_scope: boolean;
+  outside_scope_reason: string | null;
+  internal_notes: string | null;
+};
+
+type OperationsClientServiceDetail = {
+  service: OperationsClientServiceRow;
+  sites: OperationsClientServiceSite[];
+  usage: OperationsClientServiceUsage[];
+  activities: Array<{
+    id: string;
+    activity_type: string;
+    title: string;
+    detail: string | null;
+    occurred_at: string;
+  }>;
+  reviews: Array<{
+    id: string;
+    outcome: string;
+    review_completed_at: string | null;
+    next_review_at: string | null;
+    renewal_recommendation: string | null;
+  }>;
+  incidents: Array<{
+    id: string;
+    title: string;
+    severity: "critical" | "warning" | "info";
+    review_state: string;
+    detected_at: string;
+  }>;
+  reports: Array<{
+    id: string;
+    title: string;
+    status: OperationsReportStatus;
+    report_type: OperationsReportType;
+    site_url: string | null;
+    updated_at: string;
+  }>;
+  tasks: Array<{
+    id: string;
+    title: string;
+    due_at: string;
+    status: TaskStatus;
+    source_key: string | null;
+  }>;
+  allowance: {
+    periodStart: string;
+    periodEnd: string;
+    minutesIncluded: number | null;
+    minutesUsed: number;
+    minutesRemaining: number | null;
+    fixesIncluded: number | null;
+    fixesUsed: number;
+    fixesRemaining: number | null;
+    rolloverEnabled: boolean;
+    warning: string | null;
+  };
+  activationIssues: string[];
+};
+
+type ServiceFormState = {
+  businessId: string;
+  contactId: string;
+  servicePlanId: string;
+  sourceQuoteId: string;
+  sourceWorkOrderId: string;
+  name: string;
+  currency: string;
+  agreedPriceMinor: string;
+  zeroCostConfirmed: boolean;
+  billingCadence: OperationsServiceBillingCadence;
+  startDate: string;
+  renewalDate: string;
+  scanFrequency: OperationsServiceScanFrequency;
+  reportFrequency: OperationsServiceReportFrequency;
+  reviewFrequency: OperationsServiceReviewFrequency;
+  includedScope: string;
+  excludedScope: string;
+  scopeSummary: string;
+  customTerms: string;
+  siteIds: string[];
+};
+
+type ServiceUsageFormState = {
+  usageType: OperationsServiceUsageType;
+  description: string;
+  minutesUsed: string;
+  fixesUsed: string;
+  isOutOfScope: boolean;
+  outsideScopeReason: string;
+};
+
 type QuoteFormState = {
   businessId: string;
   contactId: string;
@@ -927,6 +1201,34 @@ const workPriorityLabels: Record<OperationsWorkPriority, string> = {
   low: "Low",
 };
 
+const serviceStatusLabels: Record<OperationsClientServiceStatus, string> = {
+  draft: "Draft",
+  proposed: "Proposed",
+  pending_start: "Pending start",
+  active: "Active",
+  paused: "Paused",
+  review_due: "Review due",
+  cancellation_pending: "Cancellation pending",
+  cancelled: "Cancelled",
+  expired: "Expired",
+  completed: "Completed",
+};
+
+const servicePlanTypeLabels: Record<OperationsServicePlanType, string> = {
+  monitoring_only: "Monitoring only",
+  monitoring_and_support: "Monitoring and support",
+  managed_care: "Managed care",
+  custom: "Custom",
+};
+
+const serviceCadenceLabels: Record<OperationsServiceBillingCadence, string> = {
+  monthly: "Monthly",
+  quarterly: "Quarterly",
+  annual: "Annual",
+  one_off: "One-off",
+  custom: "Custom",
+};
+
 const routeItems: Array<{
   key: OperationsRouteKey;
   label: string;
@@ -944,12 +1246,25 @@ const routeItems: Array<{
   { key: "reports", label: "Reports", href: "/operations/reports" },
   { key: "quotes", label: "Quotes", href: "/operations/quotes" },
   { key: "work", label: "Work", href: "/operations/work" },
+  { key: "services", label: "Services", href: "/operations/services" },
+  {
+    key: "servicePlans",
+    label: "Service Plans",
+    href: "/operations/service-plans",
+  },
 ];
 
 const placeholderContent: Record<
   Exclude<
     OperationsRouteKey,
-    "home" | "businesses" | "pipeline" | "reports" | "quotes" | "work"
+    | "home"
+    | "businesses"
+    | "pipeline"
+    | "reports"
+    | "quotes"
+    | "work"
+    | "services"
+    | "servicePlans"
   >,
   {
     eyebrow: string;
@@ -1003,6 +1318,16 @@ const emptySummary: OperationsSummary = {
     awaitingAccess: 0,
     blockedWork: 0,
     workReadyForTesting: 0,
+    activeServices: 0,
+    serviceReportsDue: 0,
+    serviceReviewsDue: 0,
+    managedSitesNeedingAttention: 0,
+    pausedServices: 0,
+    serviceRenewalsApproaching: 0,
+    cancellationsPending: 0,
+    activeServiceIncidents: 0,
+    monthlyReportsReadyToSend: 0,
+    clientActionsOutstanding: 0,
   },
   monitoringAttention: [],
   recentActivity: [],
@@ -1099,6 +1424,38 @@ const emptyQuoteItemForm: QuoteItemFormState = {
   estimatedEffort: "",
 };
 
+const emptyServiceForm: ServiceFormState = {
+  businessId: "",
+  contactId: "",
+  servicePlanId: "",
+  sourceQuoteId: "",
+  sourceWorkOrderId: "",
+  name: "",
+  currency: "GBP",
+  agreedPriceMinor: "0",
+  zeroCostConfirmed: false,
+  billingCadence: "monthly",
+  startDate: "",
+  renewalDate: "",
+  scanFrequency: "weekly",
+  reportFrequency: "monthly",
+  reviewFrequency: "quarterly",
+  includedScope: "",
+  excludedScope: "",
+  scopeSummary: "",
+  customTerms: "",
+  siteIds: [],
+};
+
+const emptyServiceUsageForm: ServiceUsageFormState = {
+  usageType: "support",
+  description: "",
+  minutesUsed: "",
+  fixesUsed: "",
+  isOutOfScope: false,
+  outsideScopeReason: "",
+};
+
 function getRouteKey(path: string): OperationsRouteKey {
   const normalized = path.replace(/\/+$/, "") || "/operations";
   if (normalized === "/operations") return "home";
@@ -1120,6 +1477,15 @@ function getRouteKey(path: string): OperationsRouteKey {
     normalized.startsWith("/operations/work/")
   ) {
     return "work";
+  }
+  if (
+    normalized === "/operations/services" ||
+    normalized.startsWith("/operations/services/")
+  ) {
+    return "services";
+  }
+  if (normalized === "/operations/service-plans") {
+    return "servicePlans";
   }
   if (
     normalized === "/operations/businesses" ||
@@ -1155,6 +1521,14 @@ function isQuoteServiceItemsPath(path: string) {
 function getOperationsWorkOrderIdFromPath(path: string) {
   const normalized = path.replace(/\/+$/, "");
   const prefix = "/operations/work/";
+  if (!normalized.startsWith(prefix)) return null;
+  const id = normalized.slice(prefix.length);
+  return id || null;
+}
+
+function getOperationsClientServiceIdFromPath(path: string) {
+  const normalized = path.replace(/\/+$/, "");
+  const prefix = "/operations/services/";
   if (!normalized.startsWith(prefix)) return null;
   const id = normalized.slice(prefix.length);
   return id || null;
@@ -1288,6 +1662,12 @@ function localDateTimeToIso(value: string) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function localDateToIso(value: string) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
 function sanitizeFilenamePart(value: string) {
   return value
     .toLowerCase()
@@ -1408,6 +1788,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const operationsQuoteId = getOperationsQuoteIdFromPath(currentPath);
   const quoteServiceItemsPath = isQuoteServiceItemsPath(currentPath);
   const operationsWorkOrderId = getOperationsWorkOrderIdFromPath(currentPath);
+  const operationsClientServiceId =
+    getOperationsClientServiceIdFromPath(currentPath);
   const searchParams = useMemo(
     () => new URLSearchParams(currentSearch),
     [currentSearch],
@@ -1512,6 +1894,29 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [workDetail, setWorkDetail] =
     useState<OperationsWorkOrderDetail | null>(null);
   const [workDetailLoading, setWorkDetailLoading] = useState(false);
+  const [servicePlans, setServicePlans] = useState<OperationsServicePlanRow[]>(
+    [],
+  );
+  const [servicePlansLoading, setServicePlansLoading] = useState(false);
+  const [services, setServices] = useState<OperationsClientServiceRow[]>([]);
+  const [servicesSummary, setServicesSummary] = useState({
+    active: 0,
+    reportsDue: 0,
+    reviewsDue: 0,
+    attention: 0,
+    paused: 0,
+    renewals: 0,
+    cancellations: 0,
+  });
+  const [servicesLoading, setServicesLoading] = useState(false);
+  const [serviceDetail, setServiceDetail] =
+    useState<OperationsClientServiceDetail | null>(null);
+  const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
+  const [serviceFormOpen, setServiceFormOpen] = useState(false);
+  const [serviceForm, setServiceForm] =
+    useState<ServiceFormState>(emptyServiceForm);
+  const [serviceUsageForm, setServiceUsageForm] =
+    useState<ServiceUsageFormState>(emptyServiceUsageForm);
   const [addBusinessOpen, setAddBusinessOpen] = useState(false);
   const [businessForm, setBusinessForm] =
     useState<BusinessFormState>(emptyBusinessForm);
@@ -2002,6 +2407,107 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [apiBase, apiFetch, operationsWorkOrderId]);
 
+  const loadServicePlans = useCallback(async () => {
+    setServicePlansLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/service-plans?includeArchived=true&limit=100`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        servicePlans: OperationsServicePlanRow[];
+      };
+      setServicePlans(data.servicePlans);
+    } catch (err) {
+      console.warn("Failed to load service plans", err);
+      setServicePlans([]);
+    } finally {
+      setServicePlansLoading(false);
+    }
+  }, [apiBase, apiFetch]);
+
+  const loadServices = useCallback(async () => {
+    setServicesLoading(true);
+    const params: Record<string, string | null | undefined> = {
+      search: searchParams.get("search"),
+      status: searchParams.get("status"),
+      planType: searchParams.get("planType"),
+      billingCadence: searchParams.get("billingCadence"),
+      businessId:
+        businessId && activeRoute === "businesses" ? businessId : null,
+      reportsDue: searchParams.get("reportsDue"),
+      reviewsDue: searchParams.get("reviewsDue"),
+      renewalsApproaching: searchParams.get("renewalsApproaching"),
+      siteAttention: searchParams.get("siteAttention"),
+      includeEnded: searchParams.get("includeEnded"),
+      limit: "50",
+      offset: "0",
+    };
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/services${buildQuery(params)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        services: OperationsClientServiceRow[];
+      };
+      setServices(data.services);
+      setServicesSummary({
+        active: data.services.filter((item) =>
+          ["active", "pending_start", "review_due"].includes(item.status),
+        ).length,
+        reportsDue: data.services.filter(
+          (item) =>
+            item.next_report_at && new Date(item.next_report_at) <= new Date(),
+        ).length,
+        reviewsDue: data.services.filter(
+          (item) =>
+            item.next_review_at && new Date(item.next_review_at) <= new Date(),
+        ).length,
+        attention: data.services.filter(
+          (item) => (item.site_attention_count ?? 0) > 0,
+        ).length,
+        paused: data.services.filter((item) => item.status === "paused").length,
+        renewals: data.services.filter(
+          (item) =>
+            item.renewal_reminder_at &&
+            new Date(item.renewal_reminder_at) <= new Date(),
+        ).length,
+        cancellations: data.services.filter(
+          (item) => item.status === "cancellation_pending",
+        ).length,
+      });
+    } catch (err) {
+      console.warn("Failed to load services", err);
+      setServices([]);
+    } finally {
+      setServicesLoading(false);
+    }
+  }, [activeRoute, apiBase, apiFetch, businessId, searchParams]);
+
+  const loadServiceDetail = useCallback(async () => {
+    if (!operationsClientServiceId) return;
+    setServiceDetailLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/services/${encodeURIComponent(operationsClientServiceId)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        service: OperationsClientServiceDetail;
+      };
+      setServiceDetail(data.service);
+    } catch (err) {
+      console.warn("Failed to load service", err);
+      setServiceDetail(null);
+    } finally {
+      setServiceDetailLoading(false);
+    }
+  }, [apiBase, apiFetch, operationsClientServiceId]);
+
   useEffect(() => {
     void loadSummary();
   }, [loadSummary]);
@@ -2012,7 +2518,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       activeRoute === "communications" ||
       (activeRoute === "reports" && !operationsReportId) ||
       (activeRoute === "quotes" && !operationsQuoteId) ||
-      activeRoute === "work"
+      activeRoute === "work" ||
+      activeRoute === "services"
     ) {
       void loadBusinesses();
     }
@@ -2032,6 +2539,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       void loadCommunications();
       void loadQuotes();
       void loadWorkOrders();
+      void loadServices();
     }
   }, [
     businessId,
@@ -2040,6 +2548,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     loadCommunications,
     loadDetail,
     loadQuotes,
+    loadServices,
     loadWorkOrders,
   ]);
 
@@ -2070,11 +2579,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       void loadReportPreview();
       void loadQuotes();
       void loadWorkOrders();
+      void loadServices();
     }
   }, [
     loadQuotes,
     loadReportDetail,
     loadReportPreview,
+    loadServices,
     loadWorkOrders,
     operationsReportId,
   ]);
@@ -2111,6 +2622,24 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [loadWorkDetail, operationsWorkOrderId]);
 
+  useEffect(() => {
+    if (activeRoute === "servicePlans") void loadServicePlans();
+  }, [activeRoute, loadServicePlans]);
+
+  useEffect(() => {
+    if (activeRoute === "services" && !operationsClientServiceId) {
+      void loadServices();
+      void loadServicePlans();
+    }
+  }, [activeRoute, loadServicePlans, loadServices, operationsClientServiceId]);
+
+  useEffect(() => {
+    if (operationsClientServiceId) {
+      void loadServiceDetail();
+      void loadServicePlans();
+    }
+  }, [loadServiceDetail, loadServicePlans, operationsClientServiceId]);
+
   const attentionCards = useMemo(
     () => [
       {
@@ -2142,6 +2671,31 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         value: summary.counts.criticalClientSites,
         detail: "Latest reports with open critical or high-priority issues.",
         href: "/dashboard?selectSite=1",
+      },
+      {
+        label: "Active managed services",
+        value: summary.counts.activeServices,
+        detail: "Recurring monitoring clients currently under management.",
+        href: "/operations/services",
+      },
+      {
+        label: "Service reports due",
+        value: summary.counts.serviceReportsDue,
+        detail: "Managed-service reports that need preparation or delivery.",
+        href: "/operations/services?reportsDue=true",
+      },
+      {
+        label: "Service reviews due",
+        value: summary.counts.serviceReviewsDue,
+        detail: "Recurring client reviews that need attention.",
+        href: "/operations/services?reviewsDue=true",
+      },
+      {
+        label: "Managed sites needing attention",
+        value: summary.counts.managedSitesNeedingAttention,
+        detail:
+          "Active client sites with outages, failed scans or high-priority findings.",
+        href: "/operations/services?siteAttention=true",
       },
       {
         label: "Quotes awaiting response",
@@ -2938,6 +3492,167 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     );
     if (!res.ok) throw new Error("Failed to update work item");
     await Promise.all([loadWorkDetail(), loadWorkOrders(), loadSummary()]);
+  }
+
+  function openCreateService(overrides: Partial<ServiceFormState> = {}) {
+    const selectedBusinessId =
+      overrides.businessId ??
+      detail?.business.id ??
+      quoteDetail?.quote.business_id ??
+      "";
+    const plan = servicePlans.find(
+      (item) => item.id === overrides.servicePlanId,
+    );
+    setServiceForm({
+      ...emptyServiceForm,
+      businessId: selectedBusinessId,
+      contactId: overrides.contactId ?? detail?.primaryContact?.id ?? "",
+      servicePlanId: overrides.servicePlanId ?? "",
+      sourceQuoteId: overrides.sourceQuoteId ?? "",
+      sourceWorkOrderId: overrides.sourceWorkOrderId ?? "",
+      name:
+        overrides.name ??
+        plan?.name ??
+        (detail
+          ? `${detail.business.name} managed service`
+          : "Managed service"),
+      currency: overrides.currency ?? plan?.default_currency ?? "GBP",
+      agreedPriceMinor:
+        overrides.agreedPriceMinor ?? String(plan?.default_price_minor ?? 0),
+      billingCadence:
+        overrides.billingCadence ?? plan?.default_billing_cadence ?? "monthly",
+      scanFrequency:
+        overrides.scanFrequency ?? plan?.default_scan_frequency ?? "weekly",
+      reportFrequency:
+        overrides.reportFrequency ??
+        plan?.default_report_frequency ??
+        "monthly",
+      reviewFrequency:
+        overrides.reviewFrequency ??
+        plan?.default_review_frequency ??
+        "quarterly",
+      includedScope: overrides.includedScope ?? plan?.included_scope ?? "",
+      excludedScope: overrides.excludedScope ?? plan?.excluded_scope ?? "",
+      scopeSummary: overrides.scopeSummary ?? plan?.scope_summary ?? "",
+      customTerms: overrides.customTerms ?? "",
+      startDate: overrides.startDate ?? "",
+      renewalDate: overrides.renewalDate ?? "",
+      zeroCostConfirmed: overrides.zeroCostConfirmed ?? false,
+      siteIds:
+        overrides.siteIds ??
+        (detail?.linkedSites[0]?.site_id
+          ? [detail.linkedSites[0].site_id]
+          : []),
+    });
+    setServiceFormOpen(true);
+  }
+
+  async function submitService(event: React.FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    try {
+      const res = await apiFetch(`${apiBase}/operations/services`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...serviceForm,
+          contactId: serviceForm.contactId || null,
+          servicePlanId: serviceForm.servicePlanId || null,
+          sourceQuoteId: serviceForm.sourceQuoteId || null,
+          sourceWorkOrderId: serviceForm.sourceWorkOrderId || null,
+          agreedPriceMinor: Number(serviceForm.agreedPriceMinor || 0),
+          startDate: localDateToIso(serviceForm.startDate),
+          renewalDate: localDateToIso(serviceForm.renewalDate),
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(data?.message ?? "Failed to create service");
+      }
+      const data = (await res.json()) as {
+        service: OperationsClientServiceDetail;
+      };
+      setServiceFormOpen(false);
+      setServiceForm(emptyServiceForm);
+      await Promise.all([loadServices(), loadSummary(), loadDetail()]);
+      onNavigate(`/operations/services/${data.service.service.id}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create service",
+      );
+    }
+  }
+
+  async function runServiceAction(endpoint: string, body?: unknown) {
+    if (!serviceDetail) return;
+    setActionError(null);
+    const res = await apiFetch(
+      `${apiBase}/operations/services/${encodeURIComponent(
+        serviceDetail.service.id,
+      )}/${endpoint}`,
+      {
+        method: "POST",
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as {
+        message?: string;
+        activationIssues?: string[];
+      } | null;
+      throw new Error(
+        data?.activationIssues?.join(", ") ??
+          data?.message ??
+          "Service action failed",
+      );
+    }
+    await Promise.all([loadServiceDetail(), loadServices(), loadSummary()]);
+  }
+
+  async function activateService() {
+    if (!serviceDetail) return;
+    if (
+      !window.confirm("Activate this managed service as explicitly agreed?")
+    ) {
+      return;
+    }
+    await runServiceAction("activate", {
+      agreedAt: new Date().toISOString(),
+      acceptanceMethod: "manual_confirmation",
+      agreementConfirmed: true,
+      updateBusinessRelationship: true,
+      updatePipelineStage: true,
+    });
+  }
+
+  async function addServiceUsage(event: React.FormEvent) {
+    event.preventDefault();
+    if (!serviceDetail) return;
+    setActionError(null);
+    const res = await apiFetch(
+      `${apiBase}/operations/services/${encodeURIComponent(
+        serviceDetail.service.id,
+      )}/usage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...serviceUsageForm,
+          minutesUsed: serviceUsageForm.minutesUsed
+            ? Number(serviceUsageForm.minutesUsed)
+            : null,
+          fixesUsed: serviceUsageForm.fixesUsed
+            ? Number(serviceUsageForm.fixesUsed)
+            : null,
+        }),
+      },
+    );
+    if (!res.ok) throw new Error("Failed to record usage");
+    setServiceUsageForm(emptyServiceUsageForm);
+    await Promise.all([loadServiceDetail(), loadServices(), loadSummary()]);
   }
 
   async function generateDraft() {
@@ -4731,6 +5446,23 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             >
               Convert to work
             </button>
+            {quote.status === "accepted" && (
+              <button
+                className="ops-button"
+                onClick={() =>
+                  openCreateService({
+                    businessId: quote.business_id,
+                    contactId: quote.contact_id ?? "",
+                    sourceQuoteId: quote.id,
+                    name: `${quote.business_name ?? "Client"} managed service`,
+                    currency: quote.currency,
+                    includedScope: quote.scope_summary ?? "",
+                  })
+                }
+              >
+                Create service
+              </button>
+            )}
             <button
               className="ops-button"
               onClick={() => void generateQuotePdf()}
@@ -4925,6 +5657,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             ))}
           </div>
         </section>
+        {renderServiceCreateModal()}
       </>
     );
   }
@@ -5052,6 +5785,23 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             >
               Mark completed
             </button>
+            {work.status === "completed" && (
+              <button
+                className="ops-button"
+                onClick={() =>
+                  openCreateService({
+                    businessId: work.business_id,
+                    contactId: work.contact_id ?? "",
+                    sourceWorkOrderId: work.id,
+                    name: `${work.business_name ?? "Client"} managed service`,
+                    currency: work.currency,
+                    includedScope: work.scope_summary ?? "",
+                  })
+                }
+              >
+                Offer service
+              </button>
+            )}
           </div>
         </section>
         {actionError && <div className="ops-error">{actionError}</div>}
@@ -5151,6 +5901,758 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+        {renderServiceCreateModal()}
+      </>
+    );
+  }
+
+  function renderServiceCreateModal() {
+    if (!serviceFormOpen) return null;
+    const selectedPlan = servicePlans.find(
+      (plan) => plan.id === serviceForm.servicePlanId,
+    );
+    const businessOptions = detail ? [detail.business] : businesses;
+    const siteOptions =
+      detail?.business.id === serviceForm.businessId ? detail.linkedSites : [];
+    return (
+      <div className="ops-modal">
+        <div className="ops-modal__panel ops-modal__panel--wide">
+          <div className="ops-panel__header">
+            <h2>Create managed service</h2>
+            <button
+              className="ops-button"
+              onClick={() => setServiceFormOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+          <form className="ops-form" onSubmit={submitService}>
+            <div className="ops-form-grid">
+              <label>
+                Business
+                <select
+                  value={serviceForm.businessId}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      businessId: event.target.value,
+                    }))
+                  }
+                  required
+                >
+                  <option value="">Select business</option>
+                  {businessOptions.map((business) => (
+                    <option key={business.id} value={business.id}>
+                      {business.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Plan template
+                <select
+                  value={serviceForm.servicePlanId}
+                  onChange={(event) => {
+                    const plan = servicePlans.find(
+                      (item) => item.id === event.target.value,
+                    );
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      servicePlanId: event.target.value,
+                      name: plan?.name ?? prev.name,
+                      currency: plan?.default_currency ?? prev.currency,
+                      agreedPriceMinor: String(
+                        plan?.default_price_minor ?? prev.agreedPriceMinor,
+                      ),
+                      billingCadence:
+                        plan?.default_billing_cadence ?? prev.billingCadence,
+                      scanFrequency:
+                        plan?.default_scan_frequency ?? prev.scanFrequency,
+                      reportFrequency:
+                        plan?.default_report_frequency ?? prev.reportFrequency,
+                      reviewFrequency:
+                        plan?.default_review_frequency ?? prev.reviewFrequency,
+                      scopeSummary: plan?.scope_summary ?? prev.scopeSummary,
+                      includedScope: plan?.included_scope ?? prev.includedScope,
+                      excludedScope: plan?.excluded_scope ?? prev.excludedScope,
+                    }));
+                  }}
+                >
+                  <option value="">No template</option>
+                  {servicePlans
+                    .filter((plan) => plan.is_active && !plan.archived_at)
+                    .map((plan) => (
+                      <option key={plan.id} value={plan.id}>
+                        {plan.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                Service name
+                <input
+                  value={serviceForm.name}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      name: event.target.value,
+                    }))
+                  }
+                  required
+                />
+              </label>
+              <label>
+                Price minor units
+                <input
+                  type="number"
+                  min="0"
+                  value={serviceForm.agreedPriceMinor}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      agreedPriceMinor: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Billing cadence
+                <select
+                  value={serviceForm.billingCadence}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      billingCadence: event.target
+                        .value as OperationsServiceBillingCadence,
+                    }))
+                  }
+                >
+                  {Object.entries(serviceCadenceLabels).map(
+                    ([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label>
+                Start date
+                <input
+                  type="date"
+                  value={serviceForm.startDate}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      startDate: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Scan frequency
+                <select
+                  value={serviceForm.scanFrequency}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      scanFrequency: event.target
+                        .value as OperationsServiceScanFrequency,
+                    }))
+                  }
+                >
+                  {[
+                    "daily",
+                    "weekly",
+                    "fortnightly",
+                    "monthly",
+                    "manual",
+                    "custom",
+                  ].map((value) => (
+                    <option key={value} value={value}>
+                      {value.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Report frequency
+                <select
+                  value={serviceForm.reportFrequency}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      reportFrequency: event.target
+                        .value as OperationsServiceReportFrequency,
+                    }))
+                  }
+                >
+                  {["weekly", "monthly", "quarterly", "manual", "custom"].map(
+                    (value) => (
+                      <option key={value} value={value}>
+                        {value.replace(/_/g, " ")}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label>
+                Renewal date
+                <input
+                  type="date"
+                  value={serviceForm.renewalDate}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      renewalDate: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            {siteOptions.length > 0 && (
+              <fieldset className="ops-fieldset">
+                <legend>Covered websites</legend>
+                {siteOptions.map((site) => (
+                  <label key={site.site_id} className="ops-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={serviceForm.siteIds.includes(site.site_id)}
+                      onChange={(event) =>
+                        setServiceForm((prev) => ({
+                          ...prev,
+                          siteIds: event.target.checked
+                            ? Array.from(
+                                new Set([...prev.siteIds, site.site_id]),
+                              )
+                            : prev.siteIds.filter((id) => id !== site.site_id),
+                        }))
+                      }
+                    />
+                    {site.site_display_name ?? site.url}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            <label>
+              Included scope
+              <textarea
+                value={serviceForm.includedScope}
+                onChange={(event) =>
+                  setServiceForm((prev) => ({
+                    ...prev,
+                    includedScope: event.target.value,
+                  }))
+                }
+                required
+              />
+            </label>
+            <label>
+              Excluded scope
+              <textarea
+                value={serviceForm.excludedScope}
+                onChange={(event) =>
+                  setServiceForm((prev) => ({
+                    ...prev,
+                    excludedScope: event.target.value,
+                  }))
+                }
+                required
+              />
+            </label>
+            {selectedPlan && (
+              <div className="ops-empty-card">
+                Defaults copied from {selectedPlan.name}. Review price, scope
+                and covered sites before activation.
+              </div>
+            )}
+            <label className="ops-checkbox">
+              <input
+                type="checkbox"
+                checked={serviceForm.zeroCostConfirmed}
+                onChange={(event) =>
+                  setServiceForm((prev) => ({
+                    ...prev,
+                    zeroCostConfirmed: event.target.checked,
+                  }))
+                }
+              />
+              Explicit zero-cost or internal arrangement
+            </label>
+            <div className="ops-form-actions">
+              <button className="ops-button ops-button--primary">
+                Save draft service
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  function renderServicePlansPage() {
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Reusable templates</div>
+            <h1>Service Plan Templates</h1>
+            <p>
+              Define editable managed-service defaults before client agreement.
+            </p>
+          </div>
+          <button
+            className="ops-button"
+            onClick={() => void loadServicePlans()}
+          >
+            Refresh
+          </button>
+        </section>
+        <section className="ops-panel">
+          {servicePlansLoading ? (
+            <div className="ops-empty-card">Loading service plans...</div>
+          ) : servicePlans.length === 0 ? (
+            <div className="ops-empty-card">
+              No service plan templates are available yet.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {servicePlans.map((plan) => (
+                <div key={plan.id} className="ops-list-card">
+                  <strong>{plan.name}</strong>
+                  <span>
+                    {servicePlanTypeLabels[plan.plan_type]} ·{" "}
+                    {formatMoney(
+                      plan.default_price_minor,
+                      plan.default_currency,
+                    )}{" "}
+                    {serviceCadenceLabels[plan.default_billing_cadence]}
+                  </span>
+                  <small>
+                    {plan.default_scan_frequency} scans ·{" "}
+                    {plan.default_report_frequency} reports ·{" "}
+                    {plan.active_service_count ?? 0} active services
+                  </small>
+                  <p>{plan.scope_summary}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </>
+    );
+  }
+
+  function renderServicesPage() {
+    if (operationsClientServiceId) return renderServiceDetail();
+    const cards = [
+      ["Active", servicesSummary.active],
+      ["Reports due", servicesSummary.reportsDue],
+      ["Reviews due", servicesSummary.reviewsDue],
+      ["Site attention", servicesSummary.attention],
+      ["Paused", servicesSummary.paused],
+      ["Renewals", servicesSummary.renewals],
+      ["Cancellations", servicesSummary.cancellations],
+    ];
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Recurring clients</div>
+            <h1>Managed Services</h1>
+            <p>
+              Manage recurring monitoring, reports, support and client reviews.
+            </p>
+          </div>
+          <div className="ops-inline-actions">
+            <button
+              className="ops-button ops-button--primary"
+              onClick={() => openCreateService()}
+            >
+              Create service
+            </button>
+            {renderLink(
+              "/operations/service-plans",
+              "Service Plan Templates",
+              "ops-button",
+            )}
+          </div>
+        </section>
+        <section className="ops-card-grid">
+          {cards.map(([label, value]) => (
+            <div key={label} className="ops-summary-card">
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>Managed service workflow</small>
+            </div>
+          ))}
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>{services.length} services</h2>
+            <button className="ops-button" onClick={() => void loadServices()}>
+              Refresh
+            </button>
+          </div>
+          {servicesLoading ? (
+            <div className="ops-empty-card">Loading services...</div>
+          ) : services.length === 0 ? (
+            <div className="ops-empty-card">
+              No managed services match the current filters.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {services.map((service) => (
+                <div key={service.id} className="ops-list-card">
+                  <strong>
+                    {service.service_number} · {service.name}
+                  </strong>
+                  <span>
+                    {service.business_name ?? "Business"} ·{" "}
+                    {serviceStatusLabels[service.status]} ·{" "}
+                    {service.plan_name ?? "Custom plan"}
+                  </span>
+                  <small>
+                    {formatMoney(service.agreed_price_minor, service.currency)}{" "}
+                    · {serviceCadenceLabels[service.billing_cadence]} ·{" "}
+                    {service.covered_site_count ?? 0} sites ·{" "}
+                    {service.site_attention_count ?? 0} attention items
+                  </small>
+                  <small>
+                    Next report {formatDateTime(service.next_report_at)} · next
+                    review {formatDateTime(service.next_review_at)} · renewal{" "}
+                    {formatDateTime(service.renewal_date)}
+                  </small>
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      `/operations/services/${service.id}`,
+                      "Open service",
+                      "ops-button ops-button--primary",
+                    )}
+                    {renderLink(
+                      `/operations/businesses/${service.business_id}`,
+                      "Business",
+                      "ops-button",
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        {renderServiceCreateModal()}
+      </>
+    );
+  }
+
+  function renderServiceDetail() {
+    if (serviceDetailLoading) {
+      return <section className="ops-panel">Loading service...</section>;
+    }
+    if (!serviceDetail) {
+      return <section className="ops-panel">Service not found.</section>;
+    }
+    const service = serviceDetail.service;
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Managed service</div>
+            <h1>{service.service_number}</h1>
+            <p>{service.name}</p>
+            <span className="ops-muted">
+              {service.business_name} · {serviceStatusLabels[service.status]} ·{" "}
+              {service.plan_name ?? "Custom plan"}
+            </span>
+          </div>
+          <div className="ops-inline-actions">
+            {service.status === "draft" && (
+              <button
+                className="ops-button"
+                onClick={() => void runServiceAction("propose")}
+              >
+                Mark proposed
+              </button>
+            )}
+            {["draft", "proposed", "pending_start"].includes(
+              service.status,
+            ) && (
+              <button
+                className="ops-button ops-button--primary"
+                onClick={() =>
+                  void activateService().catch((err) =>
+                    setActionError(String(err.message ?? err)),
+                  )
+                }
+              >
+                Activate
+              </button>
+            )}
+            {service.status === "active" && (
+              <button
+                className="ops-button"
+                onClick={() =>
+                  void runServiceAction("pause", {
+                    reason: "Paused from Operations workspace.",
+                  })
+                }
+              >
+                Pause
+              </button>
+            )}
+            {service.status === "paused" && (
+              <button
+                className="ops-button"
+                onClick={() => void runServiceAction("resume")}
+              >
+                Resume
+              </button>
+            )}
+            <button
+              className="ops-button"
+              onClick={() => void runServiceAction("generate-tasks")}
+            >
+              Generate tasks
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void runServiceAction("create-report")}
+            >
+              Create monthly report
+            </button>
+          </div>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        {serviceDetail.activationIssues.length > 0 && (
+          <section className="ops-warning">
+            {serviceDetail.activationIssues.map((issue) => (
+              <div key={issue}>{issue.replace(/_/g, " ")}</div>
+            ))}
+          </section>
+        )}
+        <section className="ops-card-grid">
+          {[
+            [
+              "Covered sites",
+              serviceDetail.sites.filter((site) => !site.removed_at).length,
+            ],
+            [
+              "Open obligations",
+              serviceDetail.tasks.filter((task) => task.status !== "completed")
+                .length,
+            ],
+            [
+              "Incidents",
+              serviceDetail.incidents.filter(
+                (incident) =>
+                  !["resolved", "dismissed"].includes(incident.review_state),
+              ).length,
+            ],
+            ["Usage minutes", serviceDetail.allowance.minutesUsed],
+          ].map(([label, value]) => (
+            <div key={label} className="ops-summary-card">
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>Current service state</small>
+            </div>
+          ))}
+        </section>
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <h2>Plan and scope</h2>
+            <dl className="ops-definition-grid">
+              <dt>Price</dt>
+              <dd>
+                {formatMoney(service.agreed_price_minor, service.currency)} ·{" "}
+                {serviceCadenceLabels[service.billing_cadence]}
+              </dd>
+              <dt>Scan frequency</dt>
+              <dd>{service.scan_frequency}</dd>
+              <dt>Report frequency</dt>
+              <dd>{service.report_frequency}</dd>
+              <dt>Next report</dt>
+              <dd>{formatDateTime(service.next_report_at)}</dd>
+              <dt>Next review</dt>
+              <dd>{formatDateTime(service.next_review_at)}</dd>
+              <dt>Renewal</dt>
+              <dd>{formatDateTime(service.renewal_date)}</dd>
+            </dl>
+            <h3>Included</h3>
+            <p>{service.included_scope ?? "No included scope recorded."}</p>
+            <h3>Excluded</h3>
+            <p>{service.excluded_scope ?? "No excluded scope recorded."}</p>
+          </div>
+          <div className="ops-panel">
+            <h2>Usage allowance</h2>
+            {serviceDetail.allowance.warning && (
+              <div className="ops-warning">
+                {serviceDetail.allowance.warning}
+              </div>
+            )}
+            <dl className="ops-definition-grid">
+              <dt>Period</dt>
+              <dd>
+                {formatDateTime(serviceDetail.allowance.periodStart)} to{" "}
+                {formatDateTime(serviceDetail.allowance.periodEnd)}
+              </dd>
+              <dt>Minutes</dt>
+              <dd>
+                {serviceDetail.allowance.minutesUsed}/
+                {serviceDetail.allowance.minutesIncluded ?? "unlimited"}
+              </dd>
+              <dt>Fixes</dt>
+              <dd>
+                {serviceDetail.allowance.fixesUsed}/
+                {serviceDetail.allowance.fixesIncluded ?? "unlimited"}
+              </dd>
+              <dt>Rollover</dt>
+              <dd>
+                {serviceDetail.allowance.rolloverEnabled
+                  ? "Enabled"
+                  : "No rollover"}
+              </dd>
+            </dl>
+            <form className="ops-form" onSubmit={addServiceUsage}>
+              <label>
+                Usage description
+                <input
+                  value={serviceUsageForm.description}
+                  onChange={(event) =>
+                    setServiceUsageForm((prev) => ({
+                      ...prev,
+                      description: event.target.value,
+                    }))
+                  }
+                  required
+                />
+              </label>
+              <div className="ops-form-grid">
+                <label>
+                  Minutes
+                  <input
+                    type="number"
+                    min="0"
+                    value={serviceUsageForm.minutesUsed}
+                    onChange={(event) =>
+                      setServiceUsageForm((prev) => ({
+                        ...prev,
+                        minutesUsed: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Fixes
+                  <input
+                    type="number"
+                    min="0"
+                    value={serviceUsageForm.fixesUsed}
+                    onChange={(event) =>
+                      setServiceUsageForm((prev) => ({
+                        ...prev,
+                        fixesUsed: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+              <label className="ops-checkbox">
+                <input
+                  type="checkbox"
+                  checked={serviceUsageForm.isOutOfScope}
+                  onChange={(event) =>
+                    setServiceUsageForm((prev) => ({
+                      ...prev,
+                      isOutOfScope: event.target.checked,
+                    }))
+                  }
+                />
+                This may be outside the agreed allowance
+              </label>
+              <button className="ops-button">Record usage</button>
+            </form>
+          </div>
+        </section>
+        <section className="ops-panel">
+          <h2>Coverage</h2>
+          {serviceDetail.sites.length === 0 ? (
+            <div className="ops-empty-card">No websites covered yet.</div>
+          ) : (
+            <div className="ops-list">
+              {serviceDetail.sites.map((site) => (
+                <div key={site.id} className="ops-list-card">
+                  <strong>{site.site_display_name ?? site.site_url}</strong>
+                  <small>
+                    {site.removed_at ? "Removed" : "Covered"} · schedule{" "}
+                    {site.schedule_managed_by_service
+                      ? "managed by service"
+                      : "unchanged"}{" "}
+                    · next scan {formatDateTime(site.next_scheduled_at ?? null)}
+                  </small>
+                  <small>
+                    {site.critical_issue_count ?? 0} critical ·{" "}
+                    {site.high_issue_count ?? 0} high ·{" "}
+                    {site.active_incident_count ?? 0} active incidents
+                  </small>
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      "/dashboard?selectSite=1",
+                      "Open monitoring",
+                      "ops-button",
+                    )}
+                    {site.latest_scan_id &&
+                      renderLink(
+                        `/report?scanRunId=${site.latest_scan_id}`,
+                        "Technical report",
+                        "ops-button",
+                      )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <h2>Reports</h2>
+            {serviceDetail.reports.length === 0 ? (
+              <div className="ops-empty-card">No service reports yet.</div>
+            ) : (
+              <div className="ops-list">
+                {serviceDetail.reports.map((report) => (
+                  <div key={report.id} className="ops-list-card">
+                    <strong>{report.title}</strong>
+                    <small>
+                      {reportStatusLabel(report.status)} ·{" "}
+                      {report.site_url ?? "site"}
+                    </small>
+                    {renderLink(
+                      `/operations/reports/${report.id}`,
+                      "Open report",
+                      "ops-button",
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="ops-panel">
+            <h2>Activity</h2>
+            {serviceDetail.activities.length === 0 ? (
+              <div className="ops-empty-card">No service activity yet.</div>
+            ) : (
+              <div className="ops-timeline">
+                {serviceDetail.activities.map((item) => (
+                  <div key={item.id} className="ops-note">
+                    <small>{formatDateTime(item.occurred_at)}</small>
+                    <strong>{item.title}</strong>
+                    {item.detail && <p>{item.detail}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </section>
       </>
@@ -6386,6 +7888,52 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             )}
           </div>
         </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Managed Services</h2>
+            <button
+              className="ops-button"
+              onClick={() => openCreateService({ businessId: b.id })}
+            >
+              Create service
+            </button>
+          </div>
+          {services.filter((service) => service.business_id === b.id).length ===
+          0 ? (
+            <div className="ops-empty-card">
+              No managed services have been set up for this business yet.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {services
+                .filter((service) => service.business_id === b.id)
+                .map((service) => (
+                  <div key={service.id} className="ops-list-card">
+                    <strong>
+                      {service.service_number} · {service.name}
+                    </strong>
+                    <small>
+                      {serviceStatusLabels[service.status]} ·{" "}
+                      {formatMoney(
+                        service.agreed_price_minor,
+                        service.currency,
+                      )}{" "}
+                      · {service.covered_site_count ?? 0} sites
+                    </small>
+                    <small>
+                      Next report {formatDateTime(service.next_report_at)} ·
+                      review {formatDateTime(service.next_review_at)}
+                    </small>
+                    {renderLink(
+                      `/operations/services/${service.id}`,
+                      "Open service",
+                      "ops-button ops-button--primary",
+                    )}
+                  </div>
+                ))}
+            </div>
+          )}
+        </section>
         <section className="ops-two-column">
           <div className="ops-panel">
             <div className="ops-panel__header">
@@ -6848,6 +8396,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         {renderCommunicationModal()}
         {renderReportCreateModal()}
         {renderQuoteCreateModal()}
+        {renderServiceCreateModal()}
       </>
     );
   }
@@ -6954,7 +8503,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   function renderPlaceholder(
     route: Exclude<
       OperationsRouteKey,
-      "home" | "businesses" | "pipeline" | "reports" | "quotes" | "work"
+      | "home"
+      | "businesses"
+      | "pipeline"
+      | "reports"
+      | "quotes"
+      | "work"
+      | "services"
+      | "servicePlans"
     >,
   ) {
     const content = placeholderContent[route];
@@ -7042,7 +8598,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         ? renderQuotesPage()
                         : activeRoute === "work"
                           ? renderWorkPage()
-                          : renderPlaceholder(activeRoute)}
+                          : activeRoute === "services"
+                            ? renderServicesPage()
+                            : activeRoute === "servicePlans"
+                              ? renderServicePlansPage()
+                              : renderPlaceholder(activeRoute)}
         </main>
       </div>
     </div>

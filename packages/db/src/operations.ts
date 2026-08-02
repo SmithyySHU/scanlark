@@ -2,6 +2,7 @@ import { ensureConnected } from "./client";
 import { getOperationsBusinessCounts } from "./operationsCrm";
 import { getOperationsCommercialCounts } from "./operationsQuotesWork";
 import { getOperationsReportCountsForSummary } from "./operationsReports";
+import { getOperationsManagedServiceCounts } from "./operationsServices";
 
 export type OperationsSummaryCounts = {
   followUpsDue: number;
@@ -19,6 +20,16 @@ export type OperationsSummaryCounts = {
   awaitingAccess: number;
   blockedWork: number;
   workReadyForTesting: number;
+  activeServices: number;
+  serviceReportsDue: number;
+  serviceReviewsDue: number;
+  managedSitesNeedingAttention: number;
+  pausedServices: number;
+  serviceRenewalsApproaching: number;
+  cancellationsPending: number;
+  activeServiceIncidents: number;
+  monthlyReportsReadyToSend: number;
+  clientActionsOutstanding: number;
 };
 
 export type OperationsMonitoringAttentionItem = {
@@ -143,6 +154,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     crmCounts,
     reportCounts,
     commercialCounts,
+    serviceCounts,
   ] = await Promise.all([
     client.query<DownSiteRow>(
       `
@@ -278,6 +290,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     getOperationsBusinessCounts(),
     getOperationsReportCountsForSummary(),
     getOperationsCommercialCounts(),
+    getOperationsManagedServiceCounts(),
   ]);
 
   const monitoringAttention: OperationsMonitoringAttentionItem[] = [
@@ -395,6 +408,16 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
       awaitingAccess: commercialCounts.awaitingAccess,
       blockedWork: commercialCounts.blockedWork,
       workReadyForTesting: commercialCounts.workReadyForTesting,
+      activeServices: serviceCounts.activeServices,
+      serviceReportsDue: serviceCounts.serviceReportsDue,
+      serviceReviewsDue: serviceCounts.serviceReviewsDue,
+      managedSitesNeedingAttention: serviceCounts.managedSitesNeedingAttention,
+      pausedServices: serviceCounts.pausedServices,
+      serviceRenewalsApproaching: serviceCounts.serviceRenewalsApproaching,
+      cancellationsPending: serviceCounts.cancellationsPending,
+      activeServiceIncidents: serviceCounts.activeServiceIncidents,
+      monthlyReportsReadyToSend: serviceCounts.monthlyReportsReadyToSend,
+      clientActionsOutstanding: serviceCounts.clientActionsOutstanding,
     },
     monitoringAttention,
     recentActivity,

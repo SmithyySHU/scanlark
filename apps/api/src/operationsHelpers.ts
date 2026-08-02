@@ -10,11 +10,24 @@ import type {
   OperationsAccessRequirementInput,
   OperationsAccessRequirementStatus,
   OperationsPipelineStage,
+  OperationsClientServiceInput,
+  OperationsClientServiceSiteInput,
+  OperationsClientServiceStatus,
+  OperationsClientServiceUpdateInput,
+  OperationsClientServiceUsageInput,
+  OperationsClientServiceReviewInput,
   OperationsQuoteInput,
   OperationsQuoteItemInput,
   OperationsQuoteItemType,
   OperationsQuoteStatus,
   OperationsQuoteUpdateInput,
+  OperationsServiceBillingCadence,
+  OperationsServicePlanInput,
+  OperationsServicePlanType,
+  OperationsServiceReportFrequency,
+  OperationsServiceReviewFrequency,
+  OperationsServiceScanFrequency,
+  OperationsServiceUsageType,
   OperationsRetestStatus,
   OperationsReportClientPriority,
   OperationsReportComparisonStatus,
@@ -72,6 +85,19 @@ export const OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES = [
   "monthly_update",
   "testimonial_request",
   "referral_request",
+  "managed_service_proposal",
+  "service_activation",
+  "monitoring_started",
+  "monthly_report_delivery",
+  "website_issue_notification",
+  "client_action_required",
+  "allowance_nearing_limit",
+  "work_outside_plan",
+  "service_review",
+  "renewal_discussion",
+  "service_paused",
+  "cancellation_acknowledgement",
+  "service_ended",
   "custom",
 ] as const;
 
@@ -211,6 +237,79 @@ export const OPERATIONS_RETEST_STATUSES = [
   "unable_to_verify",
 ] as const;
 
+export const OPERATIONS_SERVICE_PLAN_TYPES = [
+  "monitoring_only",
+  "monitoring_and_support",
+  "managed_care",
+  "custom",
+] as const;
+
+export const OPERATIONS_SERVICE_BILLING_CADENCES = [
+  "monthly",
+  "quarterly",
+  "annual",
+  "one_off",
+  "custom",
+] as const;
+
+export const OPERATIONS_SERVICE_SCAN_FREQUENCIES = [
+  "daily",
+  "weekly",
+  "fortnightly",
+  "monthly",
+  "manual",
+  "custom",
+] as const;
+
+export const OPERATIONS_SERVICE_REPORT_FREQUENCIES = [
+  "weekly",
+  "monthly",
+  "quarterly",
+  "manual",
+  "custom",
+] as const;
+
+export const OPERATIONS_SERVICE_REVIEW_FREQUENCIES = [
+  "monthly",
+  "quarterly",
+  "annual",
+  "manual",
+  "custom",
+] as const;
+
+export const OPERATIONS_CLIENT_SERVICE_STATUSES = [
+  "draft",
+  "proposed",
+  "pending_start",
+  "active",
+  "paused",
+  "review_due",
+  "cancellation_pending",
+  "cancelled",
+  "expired",
+  "completed",
+] as const;
+
+export const OPERATIONS_SERVICE_USAGE_TYPES = [
+  "support",
+  "small_fix",
+  "review",
+  "report",
+  "incident_response",
+  "consultation",
+  "other",
+] as const;
+
+export const OPERATIONS_SERVICE_REVIEW_OUTCOMES = [
+  "continue_unchanged",
+  "change_plan",
+  "change_price",
+  "add_remove_site",
+  "quote_additional_work",
+  "pause",
+  "end_service",
+] as const;
+
 export const SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS = [
   "firstName",
   "lastName",
@@ -291,6 +390,26 @@ const WORK_ORDER_PRIORITY_SET = new Set<string>(
 );
 const WORK_ITEM_STATUS_SET = new Set<string>(OPERATIONS_WORK_ITEM_STATUSES);
 const RETEST_STATUS_SET = new Set<string>(OPERATIONS_RETEST_STATUSES);
+const SERVICE_PLAN_TYPE_SET = new Set<string>(OPERATIONS_SERVICE_PLAN_TYPES);
+const SERVICE_BILLING_CADENCE_SET = new Set<string>(
+  OPERATIONS_SERVICE_BILLING_CADENCES,
+);
+const SERVICE_SCAN_FREQUENCY_SET = new Set<string>(
+  OPERATIONS_SERVICE_SCAN_FREQUENCIES,
+);
+const SERVICE_REPORT_FREQUENCY_SET = new Set<string>(
+  OPERATIONS_SERVICE_REPORT_FREQUENCIES,
+);
+const SERVICE_REVIEW_FREQUENCY_SET = new Set<string>(
+  OPERATIONS_SERVICE_REVIEW_FREQUENCIES,
+);
+const CLIENT_SERVICE_STATUS_SET = new Set<string>(
+  OPERATIONS_CLIENT_SERVICE_STATUSES,
+);
+const SERVICE_USAGE_TYPE_SET = new Set<string>(OPERATIONS_SERVICE_USAGE_TYPES);
+const SERVICE_REVIEW_OUTCOME_SET = new Set<string>(
+  OPERATIONS_SERVICE_REVIEW_OUTCOMES,
+);
 
 const DEFAULT_FOLLOW_UP_BUSINESS_DAYS_BY_CATEGORY: Partial<
   Record<OperationsCommunicationTemplateCategory, number>
@@ -598,6 +717,78 @@ export function parseOperationsRetestStatus(
   if (typeof value !== "string") return null;
   return RETEST_STATUS_SET.has(value)
     ? (value as OperationsRetestStatus)
+    : null;
+}
+
+export function parseOperationsServicePlanType(
+  value: unknown,
+): OperationsServicePlanType | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_PLAN_TYPE_SET.has(value)
+    ? (value as OperationsServicePlanType)
+    : null;
+}
+
+export function parseOperationsServiceBillingCadence(
+  value: unknown,
+): OperationsServiceBillingCadence | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_BILLING_CADENCE_SET.has(value)
+    ? (value as OperationsServiceBillingCadence)
+    : null;
+}
+
+export function parseOperationsServiceScanFrequency(
+  value: unknown,
+): OperationsServiceScanFrequency | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_SCAN_FREQUENCY_SET.has(value)
+    ? (value as OperationsServiceScanFrequency)
+    : null;
+}
+
+export function parseOperationsServiceReportFrequency(
+  value: unknown,
+): OperationsServiceReportFrequency | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_REPORT_FREQUENCY_SET.has(value)
+    ? (value as OperationsServiceReportFrequency)
+    : null;
+}
+
+export function parseOperationsServiceReviewFrequency(
+  value: unknown,
+): OperationsServiceReviewFrequency | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_REVIEW_FREQUENCY_SET.has(value)
+    ? (value as OperationsServiceReviewFrequency)
+    : null;
+}
+
+export function parseOperationsClientServiceStatus(
+  value: unknown,
+): OperationsClientServiceStatus | null {
+  if (typeof value !== "string") return null;
+  return CLIENT_SERVICE_STATUS_SET.has(value)
+    ? (value as OperationsClientServiceStatus)
+    : null;
+}
+
+export function parseOperationsServiceUsageType(
+  value: unknown,
+): OperationsServiceUsageType | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_USAGE_TYPE_SET.has(value)
+    ? (value as OperationsServiceUsageType)
+    : null;
+}
+
+export function parseOperationsServiceReviewOutcome(
+  value: unknown,
+): OperationsClientServiceReviewInput["outcome"] | null {
+  if (typeof value !== "string") return null;
+  return SERVICE_REVIEW_OUTCOME_SET.has(value)
+    ? (value as OperationsClientServiceReviewInput["outcome"])
     : null;
 }
 
@@ -1643,6 +1834,420 @@ export function parseOperationsWorkItemInput(
     parsed.internalNotes = optionalClientTextField(record, "internalNotes");
   }
   return parsed as OperationsWorkItemInput;
+}
+
+function parseAllowance(record: Record<string, unknown>, key: string) {
+  if (!(key in record)) return undefined;
+  const value = record[key];
+  if (value == null || value === "") return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`invalid_${key}`);
+  }
+  return value;
+}
+
+function rejectCredentialText(value: string | null | undefined, field: string) {
+  if (!value) return;
+  if (/(password|secret|token|api[_ -]?key)\s*[:=]/i.test(value)) {
+    throw new Error(`credential_values_not_allowed_in_${field}`);
+  }
+}
+
+function parseOptionalUuidArray(value: unknown, key: string) {
+  if (value == null) return undefined;
+  if (!Array.isArray(value)) throw new Error(`invalid_${key}`);
+  const ids = value.map((item) => {
+    if (typeof item !== "string" || !UUID_RE.test(item)) {
+      throw new Error(`invalid_${key}`);
+    }
+    return item;
+  });
+  return Array.from(new Set(ids));
+}
+
+export function parseOperationsServicePlanInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsServicePlanInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsServicePlanInput> = {};
+  if ("name" in record || !options.partial) {
+    parsed.name = options.partial
+      ? (optionalClientTextField(record, "name") ?? undefined)
+      : requiredClientTextField(record, "name");
+  }
+  if ("code" in record) parsed.code = optionalClientTextField(record, "code");
+  if ("description" in record) {
+    parsed.description = optionalClientTextField(record, "description");
+  }
+  if ("planType" in record || !options.partial) {
+    const planType = parseOperationsServicePlanType(
+      record.planType ?? "custom",
+    );
+    if (!planType) throw new Error("invalid_plan_type");
+    parsed.planType = planType;
+  }
+  if ("defaultCurrency" in record) {
+    parsed.defaultCurrency = parseCurrency(record.defaultCurrency);
+  }
+  if ("defaultPriceMinor" in record || !options.partial) {
+    parsed.defaultPriceMinor = parseMinorMoney(record, "defaultPriceMinor", 0);
+  }
+  if ("defaultBillingCadence" in record || !options.partial) {
+    const cadence = parseOperationsServiceBillingCadence(
+      record.defaultBillingCadence ?? "monthly",
+    );
+    if (!cadence) throw new Error("invalid_billing_cadence");
+    parsed.defaultBillingCadence = cadence;
+  }
+  if ("defaultScanFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceScanFrequency(
+      record.defaultScanFrequency ?? "weekly",
+    );
+    if (!frequency) throw new Error("invalid_scan_frequency");
+    parsed.defaultScanFrequency = frequency;
+  }
+  if ("defaultReportFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceReportFrequency(
+      record.defaultReportFrequency ?? "monthly",
+    );
+    if (!frequency) throw new Error("invalid_report_frequency");
+    parsed.defaultReportFrequency = frequency;
+  }
+  if ("defaultReviewFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceReviewFrequency(
+      record.defaultReviewFrequency ?? "quarterly",
+    );
+    if (!frequency) throw new Error("invalid_review_frequency");
+    parsed.defaultReviewFrequency = frequency;
+  }
+  for (const [key, target] of [
+    ["includesUptimeMonitoring", "includesUptimeMonitoring"],
+    ["includesIssueAlerts", "includesIssueAlerts"],
+    ["includesMonthlyReport", "includesMonthlyReport"],
+    ["includesAdvice", "includesAdvice"],
+    ["includesSmallFixes", "includesSmallFixes"],
+    ["isActive", "isActive"],
+  ] as const) {
+    if (key in record) parsed[target] = record[key] === true;
+  }
+  if ("includesIssueAlerts" in record) {
+    parsed.includesIssueAlerts = record.includesIssueAlerts !== false;
+  }
+  if ("includesMonthlyReport" in record) {
+    parsed.includesMonthlyReport = record.includesMonthlyReport !== false;
+  }
+  if ("includesAdvice" in record) {
+    parsed.includesAdvice = record.includesAdvice !== false;
+  }
+  const support = parseAllowance(record, "includedSupportMinutes");
+  if (support !== undefined) parsed.includedSupportMinutes = support;
+  const fixes = parseAllowance(record, "includedFixCount");
+  if (fixes !== undefined) parsed.includedFixCount = fixes;
+  for (const key of [
+    "responseTargetText",
+    "scopeSummary",
+    "includedScope",
+    "excludedScope",
+  ] as const) {
+    if (key in record) parsed[key] = optionalClientTextField(record, key);
+  }
+  return parsed as OperationsServicePlanInput;
+}
+
+export function parseOperationsClientServiceInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsClientServiceInput | OperationsClientServiceUpdateInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsClientServiceInput> = {};
+  if ("businessId" in record || !options.partial) {
+    const businessId = optionalUuidField(record, "businessId");
+    if (!businessId) throw new Error("invalid_businessId");
+    parsed.businessId = businessId;
+  }
+  for (const key of [
+    "contactId",
+    "servicePlanId",
+    "sourceQuoteId",
+    "sourceWorkOrderId",
+  ] as const) {
+    if (key in record) parsed[key] = optionalUuidField(record, key);
+  }
+  if ("name" in record || !options.partial) {
+    parsed.name = options.partial
+      ? (optionalClientTextField(record, "name") ?? undefined)
+      : requiredClientTextField(record, "name");
+  }
+  if ("currency" in record) parsed.currency = parseCurrency(record.currency);
+  if ("agreedPriceMinor" in record || !options.partial) {
+    parsed.agreedPriceMinor = parseMinorMoney(record, "agreedPriceMinor", 0);
+  }
+  if ("zeroCostConfirmed" in record) {
+    parsed.zeroCostConfirmed = record.zeroCostConfirmed === true;
+  }
+  if ("billingCadence" in record || !options.partial) {
+    const cadence = parseOperationsServiceBillingCadence(
+      record.billingCadence ?? "monthly",
+    );
+    if (!cadence) throw new Error("invalid_billing_cadence");
+    parsed.billingCadence = cadence;
+  }
+  if ("scanFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceScanFrequency(
+      record.scanFrequency ?? "weekly",
+    );
+    if (!frequency) throw new Error("invalid_scan_frequency");
+    parsed.scanFrequency = frequency;
+  }
+  if ("reportFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceReportFrequency(
+      record.reportFrequency ?? "monthly",
+    );
+    if (!frequency) throw new Error("invalid_report_frequency");
+    parsed.reportFrequency = frequency;
+  }
+  if ("reviewFrequency" in record || !options.partial) {
+    const frequency = parseOperationsServiceReviewFrequency(
+      record.reviewFrequency ?? "quarterly",
+    );
+    if (!frequency) throw new Error("invalid_review_frequency");
+    parsed.reviewFrequency = frequency;
+  }
+  for (const key of [
+    "startDate",
+    "minimumTermEndDate",
+    "nextReviewAt",
+    "renewalDate",
+  ] as const) {
+    if (key in record) parsed[key] = parseDateField(record, key);
+  }
+  for (const [key, target] of [
+    ["includesUptimeMonitoring", "includesUptimeMonitoring"],
+    ["includesIssueAlerts", "includesIssueAlerts"],
+    ["includesMonthlyReport", "includesMonthlyReport"],
+    ["includesAdvice", "includesAdvice"],
+    ["includesSmallFixes", "includesSmallFixes"],
+  ] as const) {
+    if (key in record) parsed[target] = record[key] === true;
+  }
+  if ("includesIssueAlerts" in record) {
+    parsed.includesIssueAlerts = record.includesIssueAlerts !== false;
+  }
+  if ("includesMonthlyReport" in record) {
+    parsed.includesMonthlyReport = record.includesMonthlyReport !== false;
+  }
+  if ("includesAdvice" in record) {
+    parsed.includesAdvice = record.includesAdvice !== false;
+  }
+  const support = parseAllowance(record, "includedSupportMinutes");
+  if (support !== undefined) parsed.includedSupportMinutes = support;
+  const fixes = parseAllowance(record, "includedFixCount");
+  if (fixes !== undefined) parsed.includedFixCount = fixes;
+  for (const key of [
+    "noticePeriodText",
+    "responseTargetText",
+    "scopeSummary",
+    "includedScope",
+    "excludedScope",
+    "customTerms",
+    "internalNotes",
+  ] as const) {
+    if (key in record) {
+      const value = optionalClientTextField(record, key);
+      rejectCredentialText(value, key);
+      parsed[key] = value;
+    }
+  }
+  const siteIds = parseOptionalUuidArray(record.siteIds, "siteIds");
+  if (siteIds !== undefined) parsed.siteIds = siteIds;
+  return parsed as
+    | OperationsClientServiceInput
+    | OperationsClientServiceUpdateInput;
+}
+
+export function parseOperationsClientServiceSiteInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsClientServiceSiteInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsClientServiceSiteInput> = {};
+  if ("siteId" in record || !options.partial) {
+    const siteId = optionalUuidField(record, "siteId");
+    if (!siteId) throw new Error("invalid_siteId");
+    parsed.siteId = siteId;
+  }
+  if ("isPrimary" in record) parsed.isPrimary = record.isPrimary === true;
+  if ("monitoringEnabled" in record) {
+    parsed.monitoringEnabled = record.monitoringEnabled !== false;
+  }
+  if ("uptimeMonitoringEnabled" in record) {
+    parsed.uptimeMonitoringEnabled = record.uptimeMonitoringEnabled === true;
+  }
+  if ("scanFrequencyOverride" in record) {
+    if (
+      record.scanFrequencyOverride == null ||
+      record.scanFrequencyOverride === ""
+    ) {
+      parsed.scanFrequencyOverride = null;
+    } else {
+      const value = parseOperationsServiceScanFrequency(
+        record.scanFrequencyOverride,
+      );
+      if (!value) throw new Error("invalid_scan_frequency");
+      parsed.scanFrequencyOverride = value;
+    }
+  }
+  if ("reportFrequencyOverride" in record) {
+    if (
+      record.reportFrequencyOverride == null ||
+      record.reportFrequencyOverride === ""
+    ) {
+      parsed.reportFrequencyOverride = null;
+    } else {
+      const value = parseOperationsServiceReportFrequency(
+        record.reportFrequencyOverride,
+      );
+      if (!value) throw new Error("invalid_report_frequency");
+      parsed.reportFrequencyOverride = value;
+    }
+  }
+  if ("notes" in record) {
+    const notes = optionalClientTextField(record, "notes");
+    rejectCredentialText(notes, "notes");
+    parsed.notes = notes;
+  }
+  return parsed as OperationsClientServiceSiteInput;
+}
+
+export function parseOperationsClientServiceUsageInput(
+  body: unknown,
+  options: { partial?: boolean } = {},
+): OperationsClientServiceUsageInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: Partial<OperationsClientServiceUsageInput> = {};
+  for (const key of [
+    "workOrderId",
+    "communicationId",
+    "operationsReportId",
+  ] as const) {
+    if (key in record) parsed[key] = optionalUuidField(record, key);
+  }
+  if ("usageType" in record || !options.partial) {
+    const usageType = parseOperationsServiceUsageType(
+      record.usageType ?? "other",
+    );
+    if (!usageType) throw new Error("invalid_usage_type");
+    parsed.usageType = usageType;
+  }
+  if ("description" in record || !options.partial) {
+    const description = options.partial
+      ? (optionalClientTextField(record, "description") ?? undefined)
+      : requiredClientTextField(record, "description");
+    rejectCredentialText(description, "description");
+    parsed.description = description;
+  }
+  const minutes = parseAllowance(record, "minutesUsed");
+  if (minutes !== undefined) parsed.minutesUsed = minutes;
+  const fixes = parseAllowance(record, "fixesUsed");
+  if (fixes !== undefined) parsed.fixesUsed = fixes;
+  for (const key of [
+    "occurredAt",
+    "servicePeriodStart",
+    "servicePeriodEnd",
+  ] as const) {
+    if (key in record) parsed[key] = parseDateField(record, key);
+  }
+  if ("isOutOfScope" in record) {
+    parsed.isOutOfScope = record.isOutOfScope === true;
+  }
+  for (const key of ["outsideScopeReason", "internalNotes"] as const) {
+    if (key in record) {
+      const value = optionalClientTextField(record, key);
+      rejectCredentialText(value, key);
+      parsed[key] = value;
+    }
+  }
+  return parsed as OperationsClientServiceUsageInput;
+}
+
+export function parseOperationsClientServiceReviewInput(
+  body: unknown,
+): OperationsClientServiceReviewInput {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const parsed: OperationsClientServiceReviewInput = {};
+  if ("outcome" in record) {
+    const outcome = parseOperationsServiceReviewOutcome(record.outcome);
+    if (!outcome) throw new Error("invalid_review_outcome");
+    parsed.outcome = outcome;
+  }
+  for (const key of ["periodStart", "periodEnd", "nextReviewAt"] as const) {
+    if (key in record) parsed[key] = parseDateField(record, key);
+  }
+  for (const key of [
+    "websiteHealthSummary",
+    "incidentsSummary",
+    "reportsSummary",
+    "workCompletedSummary",
+    "usageSummary",
+    "outstandingClientActions",
+    "pricingOrScopeNotes",
+    "renewalRecommendation",
+    "internalNotes",
+  ] as const) {
+    if (key in record) {
+      const value = optionalClientTextField(record, key);
+      rejectCredentialText(value, key);
+      parsed[key] = value;
+    }
+  }
+  return parsed;
+}
+
+export function parseOperationsClientServiceActivationInput(body: unknown) {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  const acceptanceMethod = optionalClientTextField(record, "acceptanceMethod");
+  if (!acceptanceMethod) throw new Error("acceptance_method_required");
+  if (record.agreementConfirmed !== true) {
+    throw new Error("agreement_confirmation_required");
+  }
+  return {
+    agreedAt: parseRequiredDateField(record, "agreedAt"),
+    acceptanceMethod,
+    updateBusinessRelationship: record.updateBusinessRelationship === true,
+    updatePipelineStage: record.updatePipelineStage === true,
+  };
+}
+
+export function parseOperationsClientServiceTransitionInput(body: unknown) {
+  const record =
+    body && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  return {
+    reason: optionalClientTextField(record, "reason"),
+    notes: optionalClientTextField(record, "notes"),
+    plannedResumeAt: parseDateField(record, "plannedResumeAt"),
+    requestedEndDate: parseDateField(record, "requestedEndDate"),
+  };
 }
 
 export function serializeOperationsSummary(summary: OperationsSummary) {
