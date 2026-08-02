@@ -297,6 +297,7 @@ type Contact = {
   do_not_contact: boolean;
   do_not_contact_reason: string | null;
   preferred_channel: CommunicationChannel | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -831,6 +832,7 @@ type OperationsClientServiceRow = {
   cancellation_requested_at: string | null;
   cancelled_at: string | null;
   ended_at: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
   business_name?: string | null;
@@ -950,7 +952,7 @@ type ServiceFormState = {
   sourceWorkOrderId: string;
   name: string;
   currency: string;
-  agreedPriceMinor: string;
+  agreedPrice: string;
   zeroCostConfirmed: boolean;
   billingCadence: OperationsServiceBillingCadence;
   startDate: string;
@@ -1432,7 +1434,7 @@ const emptyServiceForm: ServiceFormState = {
   sourceWorkOrderId: "",
   name: "",
   currency: "GBP",
-  agreedPriceMinor: "0",
+  agreedPrice: "0.00",
   zeroCostConfirmed: false,
   billingCadence: "monthly",
   startDate: "",
@@ -1690,6 +1692,19 @@ function formatMoney(minor: number, currency: string) {
   }).format((minor || 0) / 100);
 }
 
+function formatMajorMoneyInput(minor: number | null | undefined) {
+  return ((minor ?? 0) / 100).toFixed(2);
+}
+
+async function apiErrorMessage(res: Response, fallback: string) {
+  const data = (await res.json().catch(() => null)) as {
+    message?: string;
+    reasons?: string[];
+  } | null;
+  const reasons = data?.reasons?.length ? `: ${data.reasons.join(", ")}` : "";
+  return `${data?.message ?? fallback}${reasons}`;
+}
+
 function quoteStatusLabel(value: OperationsQuoteStatus) {
   return quoteStatusLabels[value] ?? value;
 }
@@ -1912,6 +1927,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [serviceDetail, setServiceDetail] =
     useState<OperationsClientServiceDetail | null>(null);
   const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
+  const [serviceCreateDetail, setServiceCreateDetail] =
+    useState<BusinessDetail | null>(null);
   const [serviceFormOpen, setServiceFormOpen] = useState(false);
   const [serviceForm, setServiceForm] =
     useState<ServiceFormState>(emptyServiceForm);
@@ -2242,6 +2259,32 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       } catch (err) {
         console.warn("Failed to load report business context", err);
         setReportCreateDetail(null);
+      }
+    },
+    [apiBase, apiFetch, detail],
+  );
+
+  const loadServiceCreateBusiness = useCallback(
+    async (businessIdValue: string) => {
+      if (!businessIdValue) {
+        setServiceCreateDetail(null);
+        return;
+      }
+      if (detail?.business.id === businessIdValue) {
+        setServiceCreateDetail(detail);
+        return;
+      }
+      try {
+        const res = await apiFetch(
+          `${apiBase}/operations/businesses/${encodeURIComponent(businessIdValue)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        const data = (await res.json()) as { business: BusinessDetail };
+        setServiceCreateDetail(data.business);
+      } catch (err) {
+        console.warn("Failed to load service business context", err);
+        setServiceCreateDetail(null);
       }
     },
     [apiBase, apiFetch, detail],
@@ -3500,25 +3543,29 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       detail?.business.id ??
       quoteDetail?.quote.business_id ??
       "";
+    const selectedBusinessDetail =
+      detail?.business.id === selectedBusinessId ? detail : null;
     const plan = servicePlans.find(
       (item) => item.id === overrides.servicePlanId,
     );
     setServiceForm({
       ...emptyServiceForm,
       businessId: selectedBusinessId,
-      contactId: overrides.contactId ?? detail?.primaryContact?.id ?? "",
+      contactId:
+        overrides.contactId ?? selectedBusinessDetail?.primaryContact?.id ?? "",
       servicePlanId: overrides.servicePlanId ?? "",
       sourceQuoteId: overrides.sourceQuoteId ?? "",
       sourceWorkOrderId: overrides.sourceWorkOrderId ?? "",
       name:
         overrides.name ??
         plan?.name ??
-        (detail
-          ? `${detail.business.name} managed service`
+        (selectedBusinessDetail
+          ? `${selectedBusinessDetail.business.name} managed service`
           : "Managed service"),
       currency: overrides.currency ?? plan?.default_currency ?? "GBP",
-      agreedPriceMinor:
-        overrides.agreedPriceMinor ?? String(plan?.default_price_minor ?? 0),
+      agreedPrice:
+        overrides.agreedPrice ??
+        formatMajorMoneyInput(plan?.default_price_minor),
       billingCadence:
         overrides.billingCadence ?? plan?.default_billing_cadence ?? "monthly",
       scanFrequency:
@@ -3540,11 +3587,15 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       zeroCostConfirmed: overrides.zeroCostConfirmed ?? false,
       siteIds:
         overrides.siteIds ??
-        (detail?.linkedSites[0]?.site_id
-          ? [detail.linkedSites[0].site_id]
+        (selectedBusinessDetail?.linkedSites[0]?.site_id
+          ? [selectedBusinessDetail.linkedSites[0].site_id]
           : []),
     });
+    setServiceCreateDetail(selectedBusinessDetail);
     setServiceFormOpen(true);
+    if (selectedBusinessId && !selectedBusinessDetail) {
+      void loadServiceCreateBusiness(selectedBusinessId);
+    }
   }
 
   async function submitService(event: React.FormEvent) {
@@ -3560,7 +3611,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           servicePlanId: serviceForm.servicePlanId || null,
           sourceQuoteId: serviceForm.sourceQuoteId || null,
           sourceWorkOrderId: serviceForm.sourceWorkOrderId || null,
-          agreedPriceMinor: Number(serviceForm.agreedPriceMinor || 0),
+          agreedPrice: serviceForm.agreedPrice,
           startDate: localDateToIso(serviceForm.startDate),
           renewalDate: localDateToIso(serviceForm.renewalDate),
         }),
@@ -3863,6 +3914,105 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }
 
+  async function runBusinessListAction(action: () => Promise<void>) {
+    setBusinessesError(null);
+    setActionError(null);
+    try {
+      await action();
+      await Promise.all([loadBusinesses(), loadSummary()]);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Business action failed";
+      setBusinessesError(message);
+      setActionError(message);
+    }
+  }
+
+  async function archiveBusinessListItem(business: BusinessListRow) {
+    const endpoint = business.is_archived ? "restore" : "archive";
+    if (
+      !business.is_archived &&
+      !window.confirm(
+        "Archive this business? Operational history is preserved.",
+      )
+    ) {
+      return;
+    }
+    const res = await apiFetch(
+      `${apiBase}/operations/businesses/${encodeURIComponent(business.id)}/${endpoint}`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      throw new Error(
+        await apiErrorMessage(res, "Failed to update business lifecycle"),
+      );
+    }
+  }
+
+  async function deleteBusinessListItem(business: BusinessListRow) {
+    if (
+      !window.confirm(
+        "Delete this unused test business? Contacts, sites, reports, quotes, work orders and services will block deletion.",
+      )
+    ) {
+      return;
+    }
+    const res = await apiFetch(
+      `${apiBase}/operations/businesses/${encodeURIComponent(business.id)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      throw new Error(await apiErrorMessage(res, "Failed to delete business"));
+    }
+  }
+
+  async function runReportListAction(action: () => Promise<void>) {
+    setActionError(null);
+    try {
+      await action();
+      await Promise.all([loadReports(), loadSummary()]);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Report action failed",
+      );
+    }
+  }
+
+  async function runServiceListAction(action: () => Promise<void>) {
+    setActionError(null);
+    try {
+      await action();
+      await Promise.all([loadServices(), loadSummary()]);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Managed service action failed",
+      );
+    }
+  }
+
+  async function runContactLifecycle(
+    contact: Contact,
+    endpoint: "archive" | "restore" | "delete",
+    body?: Record<string, unknown>,
+  ) {
+    if (!detail) return;
+    const method = endpoint === "delete" ? "DELETE" : "POST";
+    const res = await apiFetch(
+      `${apiBase}/operations/businesses/${encodeURIComponent(detail.business.id)}/contacts/${encodeURIComponent(
+        contact.id,
+      )}${endpoint === "delete" ? "" : `/${endpoint}`}`,
+      {
+        method,
+        headers: body ? { "content-type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      },
+    );
+    if (!res.ok) {
+      throw new Error(await apiErrorMessage(res, "Contact action failed"));
+    }
+    await loadDetail();
+  }
+
   function openEditBusiness() {
     if (!detail) return;
     const b = detail.business;
@@ -4149,7 +4299,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (!communicationFormOpen) return null;
     const contactOptions =
       detail?.business.id === communicationForm.businessId
-        ? detail.contacts
+        ? detail.contacts.filter((contact) => !contact.archived_at)
         : [];
     const selectedContact = selectedCommunicationContact();
     return (
@@ -4773,7 +4923,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           ? reportCreateDetail
           : null;
     const linkedSites = selectedBusiness?.linkedSites ?? [];
-    const contacts = selectedBusiness?.contacts ?? [];
+    const contacts =
+      selectedBusiness?.contacts.filter((contact) => !contact.archived_at) ??
+      [];
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -4803,6 +4955,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       preparedContactId: "",
                       preparedFor: "",
                     }));
+                    setReportableScans([]);
                     void loadReportCreateBusiness(nextBusinessId);
                   }}
                 >
@@ -4825,6 +4978,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       siteId: siteIdValue,
                       scanRunId: "",
                     }));
+                    setReportableScans([]);
                     void loadReportableScans(
                       reportForm.businessId,
                       siteIdValue,
@@ -4850,6 +5004,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       scanRunId: event.target.value,
                     }))
                   }
+                  disabled={!reportForm.siteId}
                 >
                   <option value="">Select scan</option>
                   {reportableScans.map((scan) => (
@@ -4974,7 +5129,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     const selectedBusiness =
       detail?.business.id === quoteForm.businessId
         ? detail
-        : reportCreateDetail;
+        : reportCreateDetail?.business.id === quoteForm.businessId
+          ? reportCreateDetail
+          : null;
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -4999,6 +5156,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       ...prev,
                       businessId: nextBusinessId,
                       contactId: "",
+                      operationsReportId: "",
                     }));
                     void loadReportCreateBusiness(nextBusinessId);
                   }}
@@ -5023,11 +5181,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   }
                 >
                   <option value="">No contact selected</option>
-                  {(selectedBusiness?.contacts ?? []).map((contact) => (
-                    <option key={contact.id} value={contact.id}>
-                      {contactName(contact)}
-                    </option>
-                  ))}
+                  {(selectedBusiness?.contacts ?? [])
+                    .filter((contact) => !contact.archived_at)
+                    .map((contact) => (
+                      <option key={contact.id} value={contact.id}>
+                        {contactName(contact)}
+                      </option>
+                    ))}
                 </select>
               </label>
               <label>
@@ -5195,6 +5355,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </div>
           ))}
         </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
         <section className="ops-panel">
           <div className="ops-panel__header">
             <h2>{quotes.length} quotes</h2>
@@ -5696,6 +5857,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </div>
           ))}
         </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
         <section className="ops-panel">
           <h2>{workOrders.length} work orders</h2>
           {workLoading ? (
@@ -5913,9 +6075,16 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     const selectedPlan = servicePlans.find(
       (plan) => plan.id === serviceForm.servicePlanId,
     );
-    const businessOptions = detail ? [detail.business] : businesses;
-    const siteOptions =
-      detail?.business.id === serviceForm.businessId ? detail.linkedSites : [];
+    const businessOptions = businesses;
+    const selectedBusinessDetail =
+      serviceCreateDetail?.business.id === serviceForm.businessId
+        ? serviceCreateDetail
+        : null;
+    const contactOptions =
+      selectedBusinessDetail?.contacts.filter(
+        (contact) => !contact.archived_at,
+      ) ?? [];
+    const siteOptions = selectedBusinessDetail?.linkedSites ?? [];
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -5934,18 +6103,51 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 Business
                 <select
                   value={serviceForm.businessId}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const nextBusinessId = event.target.value;
                     setServiceForm((prev) => ({
                       ...prev,
-                      businessId: event.target.value,
-                    }))
-                  }
+                      businessId: nextBusinessId,
+                      contactId: "",
+                      sourceQuoteId: "",
+                      sourceWorkOrderId: "",
+                      siteIds: [],
+                    }));
+                    setServiceCreateDetail(null);
+                    void loadServiceCreateBusiness(nextBusinessId);
+                  }}
                   required
                 >
                   <option value="">Select business</option>
                   {businessOptions.map((business) => (
                     <option key={business.id} value={business.id}>
                       {business.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Contact
+                <select
+                  value={serviceForm.contactId}
+                  onChange={(event) =>
+                    setServiceForm((prev) => ({
+                      ...prev,
+                      contactId: event.target.value,
+                    }))
+                  }
+                  disabled={!serviceForm.businessId || !selectedBusinessDetail}
+                >
+                  <option value="">
+                    {selectedBusinessDetail
+                      ? "No contact selected"
+                      : "Select business first"}
+                  </option>
+                  {contactOptions.map((contact) => (
+                    <option key={contact.id} value={contact.id}>
+                      {contactName(contact) ||
+                        contact.email ||
+                        "Unnamed contact"}
                     </option>
                   ))}
                 </select>
@@ -5963,8 +6165,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       servicePlanId: event.target.value,
                       name: plan?.name ?? prev.name,
                       currency: plan?.default_currency ?? prev.currency,
-                      agreedPriceMinor: String(
-                        plan?.default_price_minor ?? prev.agreedPriceMinor,
+                      agreedPrice: formatMajorMoneyInput(
+                        plan?.default_price_minor ??
+                          Math.round(Number(prev.agreedPrice || 0) * 100),
                       ),
                       billingCadence:
                         plan?.default_billing_cadence ?? prev.billingCadence,
@@ -6004,15 +6207,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 />
               </label>
               <label>
-                Price minor units
+                Agreed price ({serviceForm.currency})
                 <input
                   type="number"
                   min="0"
-                  value={serviceForm.agreedPriceMinor}
+                  step="0.01"
+                  inputMode="decimal"
+                  value={serviceForm.agreedPrice}
                   onChange={(event) =>
                     setServiceForm((prev) => ({
                       ...prev,
-                      agreedPriceMinor: event.target.value,
+                      agreedPrice: event.target.value,
                     }))
                   }
                 />
@@ -6330,6 +6535,116 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       `/operations/services/${service.id}`,
                       "Open service",
                       "ops-button ops-button--primary",
+                    )}
+                    {service.status === "draft" &&
+                      renderLink(
+                        `/operations/services/${service.id}`,
+                        "Edit draft",
+                        "ops-button",
+                      )}
+                    {service.status === "draft" && (
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          openCreateService({
+                            businessId: service.business_id,
+                            contactId: service.contact_id ?? "",
+                            servicePlanId: service.service_plan_id ?? "",
+                            sourceQuoteId: service.source_quote_id ?? "",
+                            sourceWorkOrderId:
+                              service.source_work_order_id ?? "",
+                            name: `${service.name} copy`,
+                            currency: service.currency,
+                            agreedPrice: formatMajorMoneyInput(
+                              service.agreed_price_minor,
+                            ),
+                            billingCadence: service.billing_cadence,
+                            scanFrequency: service.scan_frequency,
+                            reportFrequency: service.report_frequency,
+                            reviewFrequency: service.review_frequency,
+                            includedScope: service.included_scope ?? "",
+                            excludedScope: service.excluded_scope ?? "",
+                            scopeSummary: service.scope_summary ?? "",
+                            customTerms: service.custom_terms ?? "",
+                            zeroCostConfirmed: service.zero_cost_confirmed,
+                          })
+                        }
+                      >
+                        Duplicate draft
+                      </button>
+                    )}
+                    {service.status === "draft" && (
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          void runServiceListAction(async () => {
+                            const endpoint = service.archived_at
+                              ? "restore"
+                              : "archive";
+                            if (
+                              !service.archived_at &&
+                              !window.confirm(
+                                "Archive this unused draft service?",
+                              )
+                            ) {
+                              return;
+                            }
+                            const res = await apiFetch(
+                              `${apiBase}/operations/services/${encodeURIComponent(service.id)}/${endpoint}`,
+                              { method: "POST" },
+                            );
+                            if (!res.ok) {
+                              throw new Error(
+                                await apiErrorMessage(
+                                  res,
+                                  "Failed to update service lifecycle",
+                                ),
+                              );
+                            }
+                          })
+                        }
+                      >
+                        {service.archived_at ? "Restore" : "Archive"}
+                      </button>
+                    )}
+                    {["proposed", "pending_start", "active", "paused"].includes(
+                      service.status,
+                    ) && (
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          void runServiceListAction(async () => {
+                            if (
+                              !window.confirm(
+                                "Cancel this managed service using the existing lifecycle rules?",
+                              )
+                            ) {
+                              return;
+                            }
+                            const res = await apiFetch(
+                              `${apiBase}/operations/services/${encodeURIComponent(service.id)}/cancel`,
+                              {
+                                method: "POST",
+                                headers: { "content-type": "application/json" },
+                                body: JSON.stringify({
+                                  reason:
+                                    "Cancelled from managed services list.",
+                                }),
+                              },
+                            );
+                            if (!res.ok) {
+                              throw new Error(
+                                await apiErrorMessage(
+                                  res,
+                                  "Failed to cancel service",
+                                ),
+                              );
+                            }
+                          })
+                        }
+                      >
+                        Cancel
+                      </button>
                     )}
                     {renderLink(
                       `/operations/businesses/${service.business_id}`,
@@ -6732,10 +7047,96 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       "ops-button ops-button--primary",
                     )}
                     {renderLink(
+                      `/operations/reports/${report.id}`,
+                      "Client preview",
+                      "ops-button",
+                    )}
+                    {renderLink(
                       `/report?scanRunId=${report.scan_run_id}`,
                       "Technical report",
                       "ops-button",
                     )}
+                    <button
+                      className="ops-button"
+                      onClick={() =>
+                        void runReportListAction(async () => {
+                          const res = await apiFetch(
+                            `${apiBase}/operations/reports/${encodeURIComponent(report.id)}/duplicate`,
+                            { method: "POST" },
+                          );
+                          if (!res.ok) {
+                            throw new Error(
+                              await apiErrorMessage(
+                                res,
+                                "Failed to duplicate report",
+                              ),
+                            );
+                          }
+                        })
+                      }
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      className="ops-button"
+                      onClick={() =>
+                        void runReportListAction(async () => {
+                          const endpoint = report.archived_at
+                            ? "restore"
+                            : "archive";
+                          if (
+                            !report.archived_at &&
+                            !window.confirm(
+                              "Archive this Operations report? The technical scan and scan findings are preserved.",
+                            )
+                          ) {
+                            return;
+                          }
+                          const res = await apiFetch(
+                            `${apiBase}/operations/reports/${encodeURIComponent(report.id)}/${endpoint}`,
+                            { method: "POST" },
+                          );
+                          if (!res.ok) {
+                            throw new Error(
+                              await apiErrorMessage(
+                                res,
+                                "Failed to update report lifecycle",
+                              ),
+                            );
+                          }
+                        })
+                      }
+                    >
+                      {report.archived_at ? "Restore" : "Archive"}
+                    </button>
+                    <button
+                      className="ops-button"
+                      onClick={() =>
+                        void runReportListAction(async () => {
+                          if (
+                            !window.confirm(
+                              "Delete this unused draft Operations report? This removes only the Operations report wrapper; the technical scan and source scan findings remain intact.",
+                            )
+                          ) {
+                            return;
+                          }
+                          const res = await apiFetch(
+                            `${apiBase}/operations/reports/${encodeURIComponent(report.id)}`,
+                            { method: "DELETE" },
+                          );
+                          if (!res.ok) {
+                            throw new Error(
+                              await apiErrorMessage(
+                                res,
+                                "Failed to delete report",
+                              ),
+                            );
+                          }
+                        })
+                      }
+                    >
+                      Delete
+                    </button>
                   </div>
                 </div>
               ))}
@@ -7528,17 +7929,24 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <span>Updated</span>
               </div>
               {businesses.map((business) => (
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   className="ops-table__row"
                   key={business.id}
                   onClick={() =>
                     onNavigate(`/operations/businesses/${business.id}`)
                   }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      onNavigate(`/operations/businesses/${business.id}`);
+                    }
+                  }}
                 >
                   <span>
                     <strong>{business.name}</strong>
                     <small>
+                      {business.is_archived ? "Archived · " : ""}
                       {business.website_url ??
                         `${business.linked_site_count} linked site${business.linked_site_count === 1 ? "" : "s"}`}
                     </small>
@@ -7586,8 +7994,56 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         : "No warnings"}
                     <small>{business.latest_scan_status ?? "No scans"}</small>
                   </span>
-                  <span>{formatDateTime(business.updated_at)}</span>
-                </button>
+                  <span>
+                    {formatDateTime(business.updated_at)}
+                    <small className="ops-inline-actions">
+                      <button
+                        type="button"
+                        className="ops-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onNavigate(`/operations/businesses/${business.id}`);
+                        }}
+                      >
+                        Open
+                      </button>
+                      <button
+                        type="button"
+                        className="ops-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onNavigate(`/operations/businesses/${business.id}`);
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="ops-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void runBusinessListAction(() =>
+                            archiveBusinessListItem(business),
+                          );
+                        }}
+                      >
+                        {business.is_archived ? "Restore" : "Archive"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ops-button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void runBusinessListAction(() =>
+                            deleteBusinessListItem(business),
+                          );
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </small>
+                  </span>
+                </div>
               ))}
             </div>
           )}
@@ -7799,7 +8255,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           <div className="ops-panel">
             <h2>Contacts</h2>
             {detail.contacts.length === 0 ? (
-              <div className="ops-empty-card">No contacts yet.</div>
+              <div className="ops-empty-card">
+                <strong>No contacts yet.</strong>
+                <button
+                  className="ops-button"
+                  onClick={() => {
+                    setEditingContactId(null);
+                    setContactForm(emptyContactForm);
+                    setContactFormOpen(true);
+                  }}
+                >
+                  Add contact
+                </button>
+              </div>
             ) : (
               <div className="ops-list">
                 {detail.contacts.map((contact) => (
@@ -7807,6 +8275,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     <strong>
                       {contactName(contact)}{" "}
                       {contact.is_primary ? "· Primary" : ""}
+                      {contact.archived_at ? " · Archived" : ""}
                     </strong>
                     <span>{contact.job_title ?? ""}</span>
                     <span>
@@ -7840,7 +8309,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       >
                         Edit
                       </button>
-                      {!contact.is_primary && (
+                      {!contact.is_primary && !contact.archived_at && (
                         <button
                           className="ops-button"
                           onClick={() =>
@@ -7865,21 +8334,87 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       <button
                         className="ops-button"
                         onClick={() =>
-                          window.confirm("Remove this contact?") &&
                           void runDetailAction(async () => {
+                            const reason = contact.do_not_contact
+                              ? ""
+                              : window.prompt(
+                                  "Reason for do-not-contact",
+                                  contact.do_not_contact_reason ?? "",
+                                );
+                            if (reason === null) return;
                             const res = await apiFetch(
                               `${apiBase}/operations/businesses/${encodeURIComponent(b.id)}/contacts/${encodeURIComponent(
                                 contact.id,
                               )}`,
-                              { method: "DELETE" },
+                              {
+                                method: "PATCH",
+                                headers: { "content-type": "application/json" },
+                                body: JSON.stringify({
+                                  firstName: contact.first_name,
+                                  lastName: contact.last_name,
+                                  email: contact.email,
+                                  phone: contact.phone,
+                                  jobTitle: contact.job_title,
+                                  notes: contact.notes,
+                                  isPrimary: contact.is_primary,
+                                  doNotContact: !contact.do_not_contact,
+                                  doNotContactReason: contact.do_not_contact
+                                    ? null
+                                    : reason,
+                                  preferredChannel: contact.preferred_channel,
+                                }),
+                              },
                             );
-                            if (!res.ok)
-                              throw new Error("Failed to remove contact");
+                            if (!res.ok) {
+                              throw new Error(
+                                await apiErrorMessage(
+                                  res,
+                                  "Failed to update contact preference",
+                                ),
+                              );
+                            }
                             await loadDetail();
                           })
                         }
                       >
-                        Remove
+                        {contact.do_not_contact
+                          ? "Allow contact"
+                          : "Do not contact"}
+                      </button>
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          void runDetailAction(async () => {
+                            if (contact.archived_at) {
+                              await runContactLifecycle(contact, "restore");
+                              return;
+                            }
+                            const allowNoPrimary =
+                              contact.is_primary &&
+                              window.confirm(
+                                "Archive the primary contact and leave this business without a primary contact?",
+                              );
+                            if (contact.is_primary && !allowNoPrimary) return;
+                            await runContactLifecycle(contact, "archive", {
+                              allowNoPrimary,
+                            });
+                          })
+                        }
+                      >
+                        {contact.archived_at ? "Restore" : "Archive"}
+                      </button>
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          window.confirm(
+                            "Delete this unused contact? Referenced contacts must be archived instead.",
+                          ) &&
+                          void runDetailAction(async () => {
+                            await runContactLifecycle(contact, "delete");
+                          })
+                        }
+                      >
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -8990,12 +9525,34 @@ const operationsStyles = `
     place-items: center;
     padding: 18px;
     background: rgba(0, 0, 0, 0.58);
+    overflow: hidden;
   }
   .ops-modal__panel {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     width: min(760px, 100%);
-    max-height: min(760px, calc(100vh - 36px));
-    overflow: auto;
+    max-height: calc(100vh - 36px);
+    overflow: hidden;
     padding: 18px;
+  }
+  .ops-modal__panel > .ops-form {
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+  }
+  .ops-modal__panel > .ops-panel__header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--panel);
+    padding-bottom: 10px;
+  }
+  .ops-modal__panel .ops-form-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
   }
   .ops-modal__panel--wide {
     width: min(1120px, 100%);

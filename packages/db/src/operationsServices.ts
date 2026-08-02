@@ -481,8 +481,25 @@ export type OperationsManagedServiceCounts = {
 
 type CountRow = { count: string };
 
+export type OperationsClientServiceArchiveEligibility = {
+  allowed: boolean;
+  reasons: string[];
+  dependencyCounts: Record<string, number>;
+};
+
 function countValue(row: CountRow | undefined): number {
   return Number.parseInt(row?.count ?? "0", 10) || 0;
+}
+
+function addDependencyReason(
+  reasons: string[],
+  dependencyCounts: Record<string, number>,
+  key: string,
+  count: number,
+  label: string,
+) {
+  dependencyCounts[key] = count;
+  if (count > 0) reasons.push(`${label}: ${count}`);
 }
 
 function textValue(value: string | null | undefined) {
@@ -793,7 +810,7 @@ async function validateServiceRelationships(input: {
   if (!business.rows[0]) return "business_not_found" as const;
   if (input.contactId) {
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
       [input.contactId, input.businessId],
     );
     if (!contact.rows[0]) return "contact_not_found" as const;
@@ -1294,6 +1311,9 @@ export async function listOperationsClientServices(options: {
   const client = await ensureConnected();
   const where: string[] = [];
   const values: unknown[] = [];
+  if (!options.includeEnded) {
+    where.push(`s.archived_at IS NULL`);
+  }
   if (options.businessId) {
     values.push(options.businessId);
     where.push(`s.business_id = $${values.length}`);
@@ -1628,14 +1648,24 @@ export async function updateOperationsClientService(
 ) {
   const detail = await getOperationsClientServiceDetail(serviceId);
   if (!detail) return null;
-  if (input.contactId) {
-    const valid = await validateServiceRelationships({
-      businessId: detail.service.business_id,
-      contactId: input.contactId,
-      servicePlanId: input.servicePlanId ?? detail.service.service_plan_id,
-    });
-    if (valid !== "ok") return valid;
-  }
+  const valid = await validateServiceRelationships({
+    businessId: detail.service.business_id,
+    contactId:
+      "contactId" in input ? input.contactId : detail.service.contact_id,
+    servicePlanId:
+      "servicePlanId" in input
+        ? input.servicePlanId
+        : detail.service.service_plan_id,
+    sourceQuoteId:
+      "sourceQuoteId" in input
+        ? input.sourceQuoteId
+        : detail.service.source_quote_id,
+    sourceWorkOrderId:
+      "sourceWorkOrderId" in input
+        ? input.sourceWorkOrderId
+        : detail.service.source_work_order_id,
+  });
+  if (valid !== "ok") return valid;
   const current = detail.service;
   const config = getOperationsServiceConfig();
   const renewalDate =
@@ -1765,6 +1795,112 @@ export async function updateOperationsClientService(
     metadata: { fields: Object.keys(input) },
   });
   return getOperationsClientServiceDetail(res.rows[0].id);
+}
+
+export async function getOperationsClientServiceArchiveEligibility(
+  serviceId: string,
+): Promise<OperationsClientServiceArchiveEligibility | null> {
+  const detail = await getOperationsClientServiceDetail(serviceId);
+  if (!detail) return null;
+  const client = await ensureConnected();
+  const [usage, activities, reports, tasks] = await Promise.all([
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_client_service_usage WHERE client_service_id = $1`,
+      [serviceId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_client_service_activity WHERE client_service_id = $1 AND activity_type <> 'service_created'`,
+      [serviceId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_reports WHERE client_service_id = $1`,
+      [serviceId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_tasks WHERE source_client_service_id = $1`,
+      [serviceId],
+    ),
+  ]);
+  const reasons: string[] = [];
+  const dependencyCounts: Record<string, number> = {};
+  if (detail.service.status !== "draft") {
+    reasons.push(`status is ${detail.service.status}`);
+  }
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "usage",
+    countValue(usage.rows[0]),
+    "usage records",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "activity",
+    countValue(activities.rows[0]),
+    "activity records",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "reports",
+    countValue(reports.rows[0]),
+    "reports",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "tasks",
+    countValue(tasks.rows[0]),
+    "tasks",
+  );
+  return { allowed: reasons.length === 0, reasons, dependencyCounts };
+}
+
+export async function setOperationsClientServiceArchived(
+  actor: AdminActor,
+  serviceId: string,
+  archived: boolean,
+): Promise<
+  | OperationsClientServiceDetail
+  | OperationsClientServiceArchiveEligibility
+  | null
+> {
+  if (archived) {
+    const eligibility =
+      await getOperationsClientServiceArchiveEligibility(serviceId);
+    if (!eligibility) return null;
+    if (!eligibility.allowed) return eligibility;
+  }
+  const client = await ensureConnected();
+  const res = await client.query<OperationsClientServiceRow>(
+    `
+      UPDATE operations_client_services
+      SET archived_at = CASE WHEN $2 THEN now() ELSE NULL END,
+          updated_at = now()
+      WHERE id = $1
+        AND status = 'draft'
+      RETURNING *
+    `,
+    [serviceId, archived],
+  );
+  const service = res.rows[0] ?? null;
+  if (!service) return null;
+  await addActivity(actor, {
+    clientServiceId: serviceId,
+    businessId: service.business_id,
+    activityType: archived ? "service_archived" : "service_restored",
+    title: archived ? "Draft service archived" : "Draft service restored",
+  });
+  await recordAdminAuditLog(actor, {
+    action: archived
+      ? "operations_client_service_archived"
+      : "operations_client_service_restored",
+    targetType: "operations_client_service",
+    targetId: serviceId,
+    metadata: { businessId: service.business_id },
+  });
+  return getOperationsClientServiceDetail(serviceId);
 }
 
 async function configureServiceSchedules(

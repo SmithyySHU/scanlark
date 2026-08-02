@@ -239,7 +239,7 @@ async function validateBusinessChildIds(input: {
 
   if (input.contactId) {
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
       [input.contactId, input.businessId],
     );
     if (!contact.rows[0]) return "contact_not_found" as const;
@@ -608,6 +608,7 @@ export async function getOperationsCommunicationDraftContext(
         preferred_channel
       FROM operations_contacts
       WHERE business_id = $1
+        AND archived_at IS NULL
         AND ($2::uuid IS NULL OR id = $2::uuid)
       ORDER BY
         CASE WHEN $2::uuid IS NOT NULL AND id = $2::uuid THEN 0 ELSE 1 END,

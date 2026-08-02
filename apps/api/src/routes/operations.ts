@@ -29,9 +29,11 @@ import {
   createOperationsQuoteServiceItem,
   createOperationsReport,
   createOperationsReportRetest,
+  deleteOperationsBusiness,
   deleteOperationsQuoteAccessRequirement,
   deleteOperationsQuoteItem,
   deleteOperationsClientServiceUsage,
+  deleteOperationsReport,
   deleteOperationsWorkOrderAccessRequirement,
   deleteOperationsContact,
   duplicateOperationsServicePlan,
@@ -85,8 +87,10 @@ import {
   removeOperationsClientServiceSite,
   requestOperationsClientServiceCancellation,
   resumeOperationsClientService,
+  setOperationsClientServiceArchived,
   setOperationsCommunicationTemplateActive,
   setOperationsBusinessArchived,
+  setOperationsContactArchived,
   setOperationsReportArchived,
   setOperationsServicePlanArchived,
   setPrimaryOperationsContact,
@@ -854,6 +858,66 @@ export function mountOperationsRoutes(app: express.Application) {
         500,
         "operations_service_update_failed",
         "Failed to update service",
+      );
+    }
+  });
+
+  router.post("/services/:serviceId/archive", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const result = await setOperationsClientServiceArchived(
+        getActor(req),
+        serviceId,
+        true,
+      );
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      if ("allowed" in result && result.allowed === false) {
+        return sendApiError(
+          res,
+          409,
+          "service_archive_blocked",
+          "Managed service has operational history and cannot be archived as an unused draft",
+          {
+            reasons: result.reasons,
+            dependencyCounts: result.dependencyCounts,
+          },
+        );
+      }
+      return res.json({ service: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations service archive failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_archive_failed",
+        "Failed to archive service",
+      );
+    }
+  });
+
+  router.post("/services/:serviceId/restore", async (req, res) => {
+    const serviceId = getUuidParam(req, res, "serviceId");
+    if (!serviceId) return;
+    try {
+      const service = await setOperationsClientServiceArchived(
+        getActor(req),
+        serviceId,
+        false,
+      );
+      if (!service) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      return res.json({ service: serializeObject(service) });
+    } catch (err) {
+      console.error("Operations service restore failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_restore_failed",
+        "Failed to restore service",
       );
     }
   });
@@ -2611,6 +2675,38 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.delete("/reports/:reportId", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await deleteOperationsReport(getActor(req), reportId);
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      if ("allowed" in result && result.allowed === false) {
+        return sendApiError(
+          res,
+          409,
+          "report_delete_blocked",
+          "Report has delivery or commercial history and cannot be hard deleted",
+          {
+            reasons: result.reasons,
+            dependencyCounts: result.dependencyCounts,
+          },
+        );
+      }
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations report delete failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_delete_failed",
+        "Failed to delete report",
+      );
+    }
+  });
+
   router.post("/reports/:reportId/duplicate", async (req, res) => {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
@@ -4228,6 +4324,38 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.delete("/businesses/:businessId", async (req, res) => {
+    const businessId = getUuidParam(req, res, "businessId");
+    if (!businessId) return;
+    try {
+      const result = await deleteOperationsBusiness(getActor(req), businessId);
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Business not found");
+      }
+      if ("allowed" in result && result.allowed === false) {
+        return sendApiError(
+          res,
+          409,
+          "business_delete_blocked",
+          "Business has operational history and cannot be hard deleted",
+          {
+            reasons: result.reasons,
+            dependencyCounts: result.dependencyCounts,
+          },
+        );
+      }
+      return res.json({ business: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations delete business failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_business_delete_failed",
+        "Failed to delete business",
+      );
+    }
+  });
+
   router.post("/businesses/:businessId/contacts", async (req, res) => {
     const businessId = getUuidParam(req, res, "businessId");
     if (!businessId) return;
@@ -4297,6 +4425,18 @@ export function mountOperationsRoutes(app: express.Application) {
         );
         if (!deleted)
           return sendApiError(res, 404, "not_found", "Contact not found");
+        if (typeof deleted === "object" && deleted.allowed === false) {
+          return sendApiError(
+            res,
+            409,
+            "contact_delete_blocked",
+            "Contact has operational history and cannot be hard deleted",
+            {
+              reasons: deleted.reasons,
+              dependencyCounts: deleted.dependencyCounts,
+            },
+          );
+        }
         return res.json({ ok: true });
       } catch (err) {
         console.error("Operations delete contact failed", err);
@@ -4305,6 +4445,77 @@ export function mountOperationsRoutes(app: express.Application) {
           500,
           "operations_contact_delete_failed",
           "Failed to remove contact",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/businesses/:businessId/contacts/:contactId/archive",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      const contactId = getUuidParam(req, res, "contactId");
+      if (!businessId || !contactId) return;
+      try {
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const contact = await setOperationsContactArchived(
+          getActor(req),
+          businessId,
+          contactId,
+          true,
+          {
+            allowNoPrimary:
+              (body as Record<string, unknown>).allowNoPrimary === true,
+          },
+        );
+        if (contact === "primary_contact_requires_confirmation") {
+          return sendApiError(
+            res,
+            409,
+            "primary_contact_requires_confirmation",
+            "Choose another primary contact or confirm this business will have no primary contact",
+          );
+        }
+        if (!contact) {
+          return sendApiError(res, 404, "not_found", "Contact not found");
+        }
+        return res.json({ contact: serializeObject(contact) });
+      } catch (err) {
+        console.error("Operations archive contact failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_contact_archive_failed",
+          "Failed to archive contact",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/businesses/:businessId/contacts/:contactId/restore",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      const contactId = getUuidParam(req, res, "contactId");
+      if (!businessId || !contactId) return;
+      try {
+        const contact = await setOperationsContactArchived(
+          getActor(req),
+          businessId,
+          contactId,
+          false,
+        );
+        if (!contact || contact === "primary_contact_requires_confirmation") {
+          return sendApiError(res, 404, "not_found", "Contact not found");
+        }
+        return res.json({ contact: serializeObject(contact) });
+      } catch (err) {
+        console.error("Operations restore contact failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_contact_restore_failed",
+          "Failed to restore contact",
         );
       }
     },

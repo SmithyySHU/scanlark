@@ -1004,6 +1004,21 @@ test("operations managed service validators reject invalid and credential-like v
   assert.equal(service.businessId, "11111111-1111-4111-8111-111111111111");
   assert.equal(service.agreedPriceMinor, 15000);
 
+  const decimalPriceService = parseOperationsClientServiceInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    name: "Starter care",
+    billingCadence: "monthly",
+    agreedPrice: "25.00",
+    currency: "GBP",
+    scanFrequency: "weekly",
+    reportFrequency: "monthly",
+    reviewFrequency: "quarterly",
+    includedScope: "Monthly monitoring.",
+  }) as ReturnType<typeof parseOperationsClientServiceInput> & {
+    agreedPriceMinor: number;
+  };
+  assert.equal(decimalPriceService.agreedPriceMinor, 2500);
+
   assert.throws(
     () =>
       parseOperationsClientServiceInput({

@@ -62,6 +62,7 @@ export type OperationsContactRow = {
   do_not_contact: boolean;
   do_not_contact_reason: string | null;
   preferred_channel: string | null;
+  archived_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -168,6 +169,12 @@ export type OperationsContactInput = {
   preferredChannel?: string | null;
 };
 
+export type OperationsDeleteEligibility = {
+  allowed: boolean;
+  reasons: string[];
+  dependencyCounts: Record<string, number>;
+};
+
 export type OperationsBusinessListParams = {
   search?: string | null;
   pipelineStage?: OperationsPipelineStage | null;
@@ -183,6 +190,17 @@ type CountRow = { count: string };
 
 function countValue(row: CountRow | undefined): number {
   return Number.parseInt(row?.count ?? "0", 10) || 0;
+}
+
+function addDependencyReason(
+  reasons: string[],
+  dependencyCounts: Record<string, number>,
+  key: string,
+  count: number,
+  label: string,
+) {
+  dependencyCounts[key] = count;
+  if (count > 0) reasons.push(`${label}: ${count}`);
 }
 
 function textValue(value: string | null | undefined) {
@@ -269,6 +287,7 @@ function buildBusinessFilters(params: OperationsBusinessListParams) {
         SELECT 1
         FROM operations_contacts c
         WHERE c.business_id = b.id
+          AND c.archived_at IS NULL
           AND (
             lower(COALESCE(c.first_name, '') || ' ' || COALESCE(c.last_name, '')) LIKE ${searchPlaceholder}
             OR lower(COALESCE(c.email, '')) LIKE ${searchPlaceholder}
@@ -304,7 +323,7 @@ function businessListSelect() {
 function businessListJoins() {
   return `
     LEFT JOIN operations_contacts pc
-      ON pc.business_id = b.id AND pc.is_primary = true
+      ON pc.business_id = b.id AND pc.is_primary = true AND pc.archived_at IS NULL
     LEFT JOIN LATERAL (
       SELECT COUNT(*)::int AS linked_site_count
       FROM operations_business_sites obs
@@ -401,7 +420,7 @@ export async function getOperationsBusinessDetail(
         SELECT *
         FROM operations_contacts
         WHERE business_id = $1
-        ORDER BY is_primary DESC, created_at ASC
+        ORDER BY archived_at ASC NULLS FIRST, is_primary DESC, created_at ASC
       `,
       [businessId],
     ),
@@ -524,7 +543,9 @@ export async function getOperationsBusinessDetail(
   ]);
 
   const primaryContact =
-    contacts.rows.find((contact) => contact.is_primary) ?? null;
+    contacts.rows.find(
+      (contact) => contact.is_primary && !contact.archived_at,
+    ) ?? null;
 
   return {
     business,
@@ -803,6 +824,147 @@ export async function setOperationsBusinessArchived(
   return business;
 }
 
+export async function getOperationsBusinessDeleteEligibility(
+  businessId: string,
+): Promise<OperationsDeleteEligibility | null> {
+  const client = await ensureConnected();
+  const exists = await client.query<{ id: string }>(
+    `SELECT id FROM operations_businesses WHERE id = $1`,
+    [businessId],
+  );
+  if (!exists.rows[0]) return null;
+
+  const [
+    contacts,
+    sites,
+    notes,
+    reports,
+    communications,
+    quotes,
+    workOrders,
+    services,
+  ] = await Promise.all([
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_contacts WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_business_sites WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_business_notes WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_reports WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_communications WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_quotes WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_work_orders WHERE business_id = $1`,
+      [businessId],
+    ),
+    client.query<CountRow>(
+      `SELECT COUNT(*)::text AS count FROM operations_client_services WHERE business_id = $1`,
+      [businessId],
+    ),
+  ]);
+
+  const reasons: string[] = [];
+  const dependencyCounts: Record<string, number> = {};
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "contacts",
+    countValue(contacts.rows[0]),
+    "contacts",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "sites",
+    countValue(sites.rows[0]),
+    "linked sites",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "notes",
+    countValue(notes.rows[0]),
+    "notes",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "reports",
+    countValue(reports.rows[0]),
+    "reports",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "communications",
+    countValue(communications.rows[0]),
+    "communications",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "quotes",
+    countValue(quotes.rows[0]),
+    "quotes",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "workOrders",
+    countValue(workOrders.rows[0]),
+    "work orders",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "services",
+    countValue(services.rows[0]),
+    "managed services",
+  );
+
+  return { allowed: reasons.length === 0, reasons, dependencyCounts };
+}
+
+export async function deleteOperationsBusiness(
+  actor: AdminActor,
+  businessId: string,
+): Promise<OperationsBusinessRow | null | OperationsDeleteEligibility> {
+  const eligibility = await getOperationsBusinessDeleteEligibility(businessId);
+  if (!eligibility) return null;
+  if (!eligibility.allowed) return eligibility;
+
+  const client = await ensureConnected();
+  const res = await client.query<OperationsBusinessRow>(
+    `DELETE FROM operations_businesses WHERE id = $1 RETURNING *`,
+    [businessId],
+  );
+  const business = res.rows[0] ?? null;
+  if (business) {
+    await recordAdminAuditLog(actor, {
+      action: "operations.business.delete",
+      targetType: "operations_business",
+      targetId: businessId,
+      metadata: { name: business.name },
+    });
+  }
+  return business;
+}
+
 export async function addOperationsContact(
   actor: AdminActor,
   businessId: string,
@@ -816,7 +978,7 @@ export async function addOperationsContact(
     await client.query("BEGIN");
     if (contact.isPrimary) {
       await client.query(
-        `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1`,
+        `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1 AND archived_at IS NULL`,
         [businessId],
       );
     }
@@ -882,12 +1044,13 @@ export async function updateOperationsContact(
     [contactId, businessId],
   );
   if (!existing.rows[0]) return null;
+  if (input.isPrimary === true && existing.rows[0].archived_at) return null;
   const contact = contactValues(input);
   try {
     await client.query("BEGIN");
     if (input.isPrimary === true) {
       await client.query(
-        `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1 AND id <> $2`,
+        `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1 AND id <> $2 AND archived_at IS NULL`,
         [businessId, contactId],
       );
     }
@@ -949,12 +1112,135 @@ export async function updateOperationsContact(
   }
 }
 
+export async function setOperationsContactArchived(
+  actor: AdminActor,
+  businessId: string,
+  contactId: string,
+  archived: boolean,
+  options: { allowNoPrimary?: boolean } = {},
+): Promise<
+  OperationsContactRow | null | "primary_contact_requires_confirmation"
+> {
+  const client = await ensureConnected();
+  const existing = await client.query<OperationsContactRow>(
+    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+    [contactId, businessId],
+  );
+  const contact = existing.rows[0];
+  if (!contact) return null;
+  if (archived && contact.is_primary && options.allowNoPrimary !== true) {
+    return "primary_contact_requires_confirmation";
+  }
+
+  const res = await client.query<OperationsContactRow>(
+    `
+      UPDATE operations_contacts
+      SET archived_at = CASE WHEN $3 THEN now() ELSE NULL END,
+          is_primary = CASE WHEN $3 THEN false ELSE is_primary END,
+          updated_at = now()
+      WHERE id = $1
+        AND business_id = $2
+      RETURNING *
+    `,
+    [contactId, businessId, archived],
+  );
+  const updated = res.rows[0] ?? null;
+  if (updated) {
+    await client.query(
+      `UPDATE operations_businesses SET updated_at = now() WHERE id = $1`,
+      [businessId],
+    );
+    await recordAdminAuditLog(actor, {
+      action: archived
+        ? "operations.contact.archive"
+        : "operations.contact.restore",
+      targetType: "operations_contact",
+      targetId: contactId,
+      metadata: { businessId, wasPrimary: contact.is_primary },
+    });
+  }
+  return updated;
+}
+
 export async function deleteOperationsContact(
   actor: AdminActor,
   businessId: string,
   contactId: string,
-): Promise<boolean> {
+): Promise<boolean | OperationsDeleteEligibility | null> {
   const client = await ensureConnected();
+  const existing = await client.query<OperationsContactRow>(
+    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+    [contactId, businessId],
+  );
+  const contact = existing.rows[0];
+  if (!contact) return null;
+
+  const [reports, communications, quotes, workOrders, services] =
+    await Promise.all([
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_reports WHERE prepared_contact_id = $1`,
+        [contactId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_communications WHERE contact_id = $1`,
+        [contactId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_quotes WHERE contact_id = $1`,
+        [contactId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_work_orders WHERE contact_id = $1`,
+        [contactId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_client_services WHERE contact_id = $1`,
+        [contactId],
+      ),
+    ]);
+  const reasons = contact.is_primary
+    ? ["primary contact must be replaced before removal"]
+    : [];
+  const dependencyCounts: Record<string, number> = {};
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "reports",
+    countValue(reports.rows[0]),
+    "reports",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "communications",
+    countValue(communications.rows[0]),
+    "communications",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "quotes",
+    countValue(quotes.rows[0]),
+    "quotes",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "workOrders",
+    countValue(workOrders.rows[0]),
+    "work orders",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "services",
+    countValue(services.rows[0]),
+    "managed services",
+  );
+  if (reasons.length > 0) {
+    return { allowed: false, reasons, dependencyCounts };
+  }
+
   const res = await client.query(
     `
       DELETE FROM operations_contacts
@@ -985,14 +1271,14 @@ export async function setPrimaryOperationsContact(
 ): Promise<OperationsContactRow | null> {
   const client = await ensureConnected();
   const existing = await client.query<OperationsContactRow>(
-    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
     [contactId, businessId],
   );
   if (!existing.rows[0]) return null;
   try {
     await client.query("BEGIN");
     await client.query(
-      `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1`,
+      `UPDATE operations_contacts SET is_primary = false, updated_at = now() WHERE business_id = $1 AND archived_at IS NULL`,
       [businessId],
     );
     const res = await client.query<OperationsContactRow>(

@@ -293,6 +293,12 @@ export type OperationsClientReportPayload = {
 
 type CountRow = { count: string };
 
+export type OperationsReportDeleteEligibility = {
+  allowed: boolean;
+  reasons: string[];
+  dependencyCounts: Record<string, number>;
+};
+
 type ReportRelationshipRow = {
   business_id: string;
   business_name: string;
@@ -322,6 +328,17 @@ const DEFAULT_DISPLAY_SETTINGS: OperationsReportDisplaySettings = {
 
 function countValue(row: CountRow | undefined): number {
   return Number.parseInt(row?.count ?? "0", 10) || 0;
+}
+
+function addDependencyReason(
+  reasons: string[],
+  dependencyCounts: Record<string, number>,
+  key: string,
+  count: number,
+  label: string,
+) {
+  dependencyCounts[key] = count;
+  if (count > 0) reasons.push(`${label}: ${count}`);
 }
 
 function textValue(value: string | null | undefined): string | null {
@@ -472,6 +489,7 @@ async function getReportRelationship(input: {
       LEFT JOIN operations_contacts c
         ON c.business_id = b.id
        AND c.id = $4
+       AND c.archived_at IS NULL
       WHERE b.id = $1
         AND s.id = $2
         AND r.id = $3
@@ -941,7 +959,7 @@ export async function updateOperationsReport(
   if (input.preparedContactId) {
     const client = await ensureConnected();
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
       [input.preparedContactId, existing.business_id],
     );
     if (!contact.rows[0]) return "contact_not_found";
@@ -1387,6 +1405,127 @@ export async function setOperationsReportArchived(
   return getOperationsReportDetail(reportId);
 }
 
+export async function getOperationsReportDeleteEligibility(
+  reportId: string,
+): Promise<OperationsReportDeleteEligibility | null> {
+  const report = await getReportById(reportId);
+  if (!report) return null;
+  const client = await ensureConnected();
+  const [quotes, workOrders, serviceUsage, serviceActivity, communications] =
+    await Promise.all([
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_quotes WHERE operations_report_id = $1`,
+        [reportId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_work_orders WHERE operations_report_id = $1`,
+        [reportId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_client_service_usage WHERE operations_report_id = $1`,
+        [reportId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_client_service_activity WHERE related_report_id = $1`,
+        [reportId],
+      ),
+      client.query<CountRow>(
+        `SELECT COUNT(*)::text AS count FROM operations_communications WHERE operations_report_id = $1`,
+        [reportId],
+      ),
+    ]);
+
+  const reasons: string[] = [];
+  const dependencyCounts: Record<string, number> = {};
+  if (!["draft", "needs_review"].includes(report.status)) {
+    reasons.push(`status is ${report.status}`);
+  }
+  if (report.sent_at || report.frozen_at || report.delivery_communication_id) {
+    reasons.push("report has delivery or frozen history");
+  }
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "quotes",
+    countValue(quotes.rows[0]),
+    "quotes",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "workOrders",
+    countValue(workOrders.rows[0]),
+    "work orders",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "serviceUsage",
+    countValue(serviceUsage.rows[0]),
+    "service usage",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "serviceActivity",
+    countValue(serviceActivity.rows[0]),
+    "service activity",
+  );
+  addDependencyReason(
+    reasons,
+    dependencyCounts,
+    "communications",
+    countValue(communications.rows[0]),
+    "communications",
+  );
+
+  return { allowed: reasons.length === 0, reasons, dependencyCounts };
+}
+
+export async function deleteOperationsReport(
+  actor: AdminActor,
+  reportId: string,
+): Promise<OperationsReportRow | null | OperationsReportDeleteEligibility> {
+  const eligibility = await getOperationsReportDeleteEligibility(reportId);
+  if (!eligibility) return null;
+  if (!eligibility.allowed) return eligibility;
+
+  const client = await ensureConnected();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `DELETE FROM operations_report_comparison_items WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query(
+      `DELETE FROM operations_report_findings WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    const res = await client.query<OperationsReportRow>(
+      `DELETE FROM operations_reports WHERE id = $1 RETURNING *`,
+      [reportId],
+    );
+    await client.query("COMMIT");
+    const report = res.rows[0] ?? null;
+    if (report) {
+      await recordAdminAuditLog(actor, {
+        action: "operations_report_deleted",
+        targetType: "operations_report",
+        targetId: reportId,
+        metadata: {
+          businessId: report.business_id,
+          siteId: report.site_id,
+          scanRunId: report.scan_run_id,
+        },
+      });
+    }
+    return report;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  }
+}
+
 export async function duplicateOperationsReport(
   actor: AdminActor,
   reportId: string,
@@ -1425,7 +1564,7 @@ export async function recordOperationsReportSent(
       detail.report.prepared_contact_id === input.contactId
         ? true
         : (await ensureConnected()).query<{ id: string }>(
-            `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2`,
+            `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
             [input.contactId, detail.report.business_id],
           );
     if (contact !== true && !(await contact).rows[0])

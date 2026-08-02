@@ -1399,6 +1399,35 @@ function parseMinorMoney(
   return parsed;
 }
 
+function parseMajorMoneyToMinor(
+  input: Record<string, unknown>,
+  key: string,
+  fallback = 0,
+) {
+  if (!(key in input)) return fallback;
+  const value = input[key];
+  if (value == null || value === "") return fallback;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`invalid_${key}`);
+    const minor = Math.round(value * 100);
+    if (!Number.isInteger(minor) || minor > 100_000_000) {
+      throw new Error(`invalid_${key}`);
+    }
+    return minor;
+  }
+  if (typeof value !== "string") throw new Error(`invalid_${key}`);
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) throw new Error(`invalid_${key}`);
+  const [majorPart, minorPart = ""] = trimmed.split(".");
+  const minor =
+    Number.parseInt(majorPart, 10) * 100 +
+    Number.parseInt(minorPart.padEnd(2, "0") || "0", 10);
+  if (!Number.isInteger(minor) || minor < 0 || minor > 100_000_000) {
+    throw new Error(`invalid_${key}`);
+  }
+  return minor;
+}
+
 function parseQuantity(input: Record<string, unknown>, key: string) {
   if (!(key in input)) return 1;
   const value = input[key];
@@ -1986,7 +2015,9 @@ export function parseOperationsClientServiceInput(
       : requiredClientTextField(record, "name");
   }
   if ("currency" in record) parsed.currency = parseCurrency(record.currency);
-  if ("agreedPriceMinor" in record || !options.partial) {
+  if ("agreedPrice" in record) {
+    parsed.agreedPriceMinor = parseMajorMoneyToMinor(record, "agreedPrice", 0);
+  } else if ("agreedPriceMinor" in record || !options.partial) {
     parsed.agreedPriceMinor = parseMinorMoney(record, "agreedPriceMinor", 0);
   }
   if ("zeroCostConfirmed" in record) {
