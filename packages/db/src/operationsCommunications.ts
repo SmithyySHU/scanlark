@@ -731,7 +731,12 @@ export async function listOperationsCommunications(
   if (search) {
     values.push(`%${search.toLowerCase()}%`);
     filters.push(
-      `(lower(c.subject) LIKE $${values.length} OR lower(b.name) LIKE $${values.length})`,
+      `(
+        lower(COALESCE(c.subject, '')) LIKE $${values.length}
+        OR lower(b.name) LIKE $${values.length}
+        OR lower(COALESCE(contact.first_name, '') || ' ' || COALESCE(contact.last_name, '')) LIKE $${values.length}
+        OR lower(COALESCE(contact.email, '')) LIKE $${values.length}
+      )`,
     );
   }
   values.push(options.limit);
@@ -765,6 +770,7 @@ export async function listOperationsCommunications(
         SELECT COUNT(*)::text AS count
         FROM operations_communications c
         JOIN operations_businesses b ON b.id = c.business_id
+        LEFT JOIN operations_contacts contact ON contact.id = c.contact_id
         LEFT JOIN operations_client_communication_templates template
           ON template.id = c.template_id
         ${where}
@@ -930,6 +936,21 @@ export async function updateOperationsCommunication(
   communicationId: string,
   input: Partial<OperationsCommunicationInput>,
 ) {
+  const existing = await getOperationsCommunication(communicationId);
+  if (!existing || existing.business_id !== businessId) return null;
+  if (
+    (existing.status === "sent" || existing.status === "received") &&
+    (input.subject !== undefined ||
+      input.body !== undefined ||
+      input.status !== undefined ||
+      input.direction !== undefined ||
+      input.channel !== undefined ||
+      input.sentAt !== undefined ||
+      input.receivedAt !== undefined ||
+      input.occurredAt !== undefined)
+  ) {
+    throw new Error("communication_sent_locked");
+  }
   const valid = await validateBusinessChildIds({
     businessId,
     contactId: input.contactId,

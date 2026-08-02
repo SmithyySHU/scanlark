@@ -328,6 +328,49 @@ export const SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS = [
 
 type ClientTemplatePlaceholder =
   (typeof SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS)[number];
+const CLIENT_TEMPLATE_TOKEN_RE = /{{[^{}]*}}/g;
+
+export function findClientCommunicationPlaceholders(
+  value: string | null | undefined,
+) {
+  if (!value) return [];
+  const placeholders = new Set<string>();
+  for (const match of value.matchAll(CLIENT_TEMPLATE_TOKEN_RE)) {
+    const parsed = match[0].match(/^{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}$/);
+    placeholders.add(parsed?.[1] ?? match[0]);
+  }
+  return Array.from(placeholders).sort();
+}
+
+function assertSupportedPlaceholderSyntax(value: string | null | undefined) {
+  if (!value) return;
+  for (const match of value.matchAll(CLIENT_TEMPLATE_TOKEN_RE)) {
+    if (!match[0].match(/^{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}$/)) {
+      throw new Error("invalid_communication_placeholder_syntax");
+    }
+  }
+  if (/{{|}}/.test(value.replace(CLIENT_TEMPLATE_TOKEN_RE, ""))) {
+    throw new Error("invalid_communication_placeholder_syntax");
+  }
+}
+
+export function findUnresolvedClientCommunicationPlaceholders(input: {
+  subject?: string | null;
+  body?: string | null;
+}) {
+  const supported = new Set<string>(SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS);
+  const unresolved = new Set<string>();
+  for (const value of [input.subject, input.body]) {
+    assertSupportedPlaceholderSyntax(value);
+    if (!value) continue;
+    for (const match of value.matchAll(CLIENT_TEMPLATE_TOKEN_RE)) {
+      const parsed = match[0].match(/^{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}$/);
+      const placeholder = parsed?.[1] ?? match[0];
+      if (!supported.has(placeholder) || parsed) unresolved.add(placeholder);
+    }
+  }
+  return Array.from(unresolved).sort();
+}
 
 const EMAIL_MAX_LENGTH = 254;
 const EMAIL_LOCAL_MAX_LENGTH = 64;
@@ -867,8 +910,13 @@ export function renderClientCommunicationTemplate(
   };
   const unresolved = new Set<string>();
   const supported = new Set<string>(SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS);
-  const render = (value: string) =>
-    value.replace(/{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}/g, (match, key) => {
+  const render = (value: string) => {
+    if (/{{|}}/.test(value.replace(CLIENT_TEMPLATE_TOKEN_RE, ""))) {
+      unresolved.add("invalidSyntax");
+    }
+    return value.replace(CLIENT_TEMPLATE_TOKEN_RE, (match) => {
+      const parsed = match.match(/^{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}$/);
+      const key = parsed?.[1] ?? match;
       if (!supported.has(key)) {
         unresolved.add(key);
         return match;
@@ -880,6 +928,7 @@ export function renderClientCommunicationTemplate(
       }
       return rendered;
     });
+  };
   return {
     subject: render(template.subject_template),
     body: render(template.body_template),
@@ -1081,6 +1130,27 @@ export function parseOperationsCommunicationInput(
   }
   if ("taskNotes" in record) {
     parsed.taskNotes = optionalTextField(record, "taskNotes");
+  }
+  const status = parsed.status;
+  if (status === "ready" || status === "sent") {
+    const unresolved = findUnresolvedClientCommunicationPlaceholders({
+      subject: parsed.subject,
+      body: parsed.body,
+    });
+    if (unresolved.length > 0) {
+      const override =
+        status === "sent" &&
+        record.unresolvedPlaceholderOverride === true &&
+        optionalTextField(record, "unresolvedPlaceholderOverrideReason");
+      if (!override) {
+        throw new Error("unresolved_communication_placeholders");
+      }
+    }
+  } else {
+    findUnresolvedClientCommunicationPlaceholders({
+      subject: parsed.subject,
+      body: parsed.body,
+    });
   }
   return parsed;
 }

@@ -1053,6 +1053,15 @@ type CommunicationFormState = {
   unresolvedPlaceholders: string[];
 };
 
+type CommunicationFilterStatus =
+  | "all"
+  | "draft"
+  | "ready"
+  | "sent"
+  | "received"
+  | "cancelled"
+  | "follow_up_due";
+
 type TemplateFormState = {
   name: string;
   category: CommunicationTemplateCategory;
@@ -1403,6 +1412,25 @@ const emptyTemplateForm: TemplateFormState = {
   defaultFollowUpBusinessDays: "",
   isActive: true,
 };
+
+const operationsWebmailUrl =
+  import.meta.env.VITE_OPERATIONS_WEBMAIL_URL ?? "https://mail.ionos.co.uk/";
+const communicationPlaceholderTokenRe = /{{[^{}]*}}/g;
+const supportedCommunicationPlaceholders = [
+  "firstName",
+  "lastName",
+  "contactName",
+  "businessName",
+  "websiteUrl",
+  "websiteDomain",
+  "senderName",
+  "senderEmail",
+  "reportName",
+  "criticalIssueCount",
+  "highIssueCount",
+  "topFinding",
+  "followUpDate",
+];
 
 const emptyReportForm: ReportFormState = {
   businessId: "",
@@ -1842,6 +1870,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   >([]);
   const [communications, setCommunications] = useState<Communication[]>([]);
   const [communicationsLoading, setCommunicationsLoading] = useState(false);
+  const [communicationSearch, setCommunicationSearch] = useState("");
+  const [communicationStatusFilter, setCommunicationStatusFilter] =
+    useState<CommunicationFilterStatus>("all");
   const [tasks, setTasks] = useState<OperationsTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [reports, setReports] = useState<OperationsReportRow[]>([]);
@@ -2118,9 +2149,20 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const loadCommunications = useCallback(async () => {
     setCommunicationsLoading(true);
     try {
+      const params = buildQuery({
+        limit: "50",
+        search: communicationSearch || undefined,
+        status:
+          communicationStatusFilter !== "all" &&
+          communicationStatusFilter !== "follow_up_due"
+            ? communicationStatusFilter
+            : undefined,
+        followUpDue:
+          communicationStatusFilter === "follow_up_due" ? "true" : undefined,
+      });
       const url = businessId
-        ? `${apiBase}/operations/businesses/${encodeURIComponent(businessId)}/communications?limit=50`
-        : `${apiBase}/operations/communications?limit=50`;
+        ? `${apiBase}/operations/businesses/${encodeURIComponent(businessId)}/communications${params}`
+        : `${apiBase}/operations/communications${params}`;
       const res = await apiFetch(url, { cache: "no-store" });
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as {
@@ -2133,7 +2175,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     } finally {
       setCommunicationsLoading(false);
     }
-  }, [apiBase, apiFetch, businessId]);
+  }, [
+    apiBase,
+    apiFetch,
+    businessId,
+    communicationSearch,
+    communicationStatusFilter,
+  ]);
 
   const loadTasks = useCallback(async () => {
     setTasksLoading(true);
@@ -3036,17 +3084,76 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       unresolvedPlaceholders: [],
     });
     setCommunicationFormOpen(true);
+    if (selectedBusinessId && detail?.business.id !== selectedBusinessId) {
+      void loadReportCreateBusiness(selectedBusinessId);
+    }
+  }
+
+  function communicationBusinessContext() {
+    return detail?.business.id === communicationForm.businessId
+      ? detail
+      : reportCreateDetail?.business.id === communicationForm.businessId
+        ? reportCreateDetail
+        : null;
+  }
+
+  function findEditorPlaceholders(subject: string, body: string) {
+    const placeholders = new Set<string>();
+    for (const value of [subject, body]) {
+      for (const match of value.matchAll(communicationPlaceholderTokenRe)) {
+        const parsed = match[0].match(/^{{\s*([A-Za-z][A-Za-z0-9_]*)\s*}}$/);
+        placeholders.add(parsed?.[1] ?? match[0]);
+      }
+    }
+    return Array.from(placeholders).sort();
+  }
+
+  function setCommunicationSubject(subject: string) {
+    setCommunicationForm((prev) => ({
+      ...prev,
+      subject,
+      unresolvedPlaceholders: findEditorPlaceholders(subject, prev.body),
+    }));
+  }
+
+  function setCommunicationBody(body: string) {
+    setCommunicationForm((prev) => ({
+      ...prev,
+      body,
+      unresolvedPlaceholders: findEditorPlaceholders(prev.subject, body),
+    }));
+  }
+
+  function communicationBodyPreview(body: string) {
+    const firstLine = body.replace(/\s+/g, " ").trim();
+    if (!firstLine) return "No body yet.";
+    return firstLine.length > 180 ? `${firstLine.slice(0, 180)}...` : firstLine;
+  }
+
+  function communicationFollowUpState(item: Communication) {
+    if (!item.follow_up_at) return "No follow-up";
+    if (item.follow_up_completed_at) return "Follow-up completed";
+    const due = new Date(item.follow_up_at);
+    if (Number.isNaN(due.getTime())) return "Follow-up scheduled";
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    if (due < today) return "Follow-up overdue";
+    if (due < tomorrow) return "Follow-up due today";
+    return `Follow-up ${formatDateTime(item.follow_up_at)}`;
   }
 
   function communicationRecipientEmail() {
-    if (detail?.business.id === communicationForm.businessId) {
-      const contact = detail.contacts.find(
+    const context = communicationBusinessContext();
+    if (context) {
+      const contact = context.contacts.find(
         (item) => item.id === communicationForm.contactId,
       );
       return (
         contact?.email ??
-        detail.primaryContact?.email ??
-        detail.business.general_email ??
+        context.primaryContact?.email ??
+        context.business.general_email ??
         ""
       );
     }
@@ -3057,10 +3164,12 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function selectedCommunicationContact() {
-    if (detail?.business.id !== communicationForm.businessId) return null;
+    const context = communicationBusinessContext();
+    if (!context) return null;
     return (
-      detail.contacts.find((item) => item.id === communicationForm.contactId) ??
-      detail.primaryContact
+      context.contacts.find(
+        (item) => item.id === communicationForm.contactId,
+      ) ?? null
     );
   }
 
@@ -3764,6 +3873,41 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   async function saveCommunication(status: CommunicationStatus) {
     if (!communicationForm.businessId || !communicationForm.body.trim()) return;
+    const unresolved = findEditorPlaceholders(
+      communicationForm.subject,
+      communicationForm.body,
+    );
+    if (status === "ready" && unresolved.length > 0) {
+      setActionError(
+        `Resolve unresolved placeholders before marking ready: ${unresolved.join(
+          ", ",
+        )}`,
+      );
+      return;
+    }
+    let unresolvedPlaceholderOverride = false;
+    let unresolvedPlaceholderOverrideReason = "";
+    if (status === "sent") {
+      const recipient = communicationRecipientEmail();
+      if (
+        communicationForm.channel === "email" &&
+        !window.confirm(
+          `Confirm this email was sent to ${recipient || "the reviewed recipient"}?`,
+        )
+      ) {
+        return;
+      }
+      if (unresolved.length > 0) {
+        const reason = window.prompt(
+          `This communication still contains unresolved placeholders: ${unresolved.join(
+            ", ",
+          )}\n\nEnter an exceptional override reason to mark it sent, or cancel.`,
+        );
+        if (!reason?.trim()) return;
+        unresolvedPlaceholderOverride = true;
+        unresolvedPlaceholderOverrideReason = reason.trim();
+      }
+    }
     if (status === "sent" && !confirmDoNotContactOverride("mark this sent")) {
       return;
     }
@@ -3787,6 +3931,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             followUpAt: localDateTimeToIso(communicationForm.followUpAt),
             taskTitle: communicationForm.taskTitle,
             taskNotes: communicationForm.taskNotes,
+            unresolvedPlaceholderOverride,
+            unresolvedPlaceholderOverrideReason,
           }),
         },
       );
@@ -3812,14 +3958,37 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     await navigator.clipboard.writeText(text);
   }
 
+  async function copyCommunicationPart(kind: "recipient" | "subject" | "body") {
+    const value =
+      kind === "recipient"
+        ? communicationRecipientEmail()
+        : kind === "subject"
+          ? communicationForm.subject
+          : communicationForm.body;
+    await navigator.clipboard.writeText(value);
+  }
+
   function openEmailClient() {
     if (!confirmDoNotContactOverride("open the email client")) return;
     const to = communicationRecipientEmail();
+    if (communicationForm.channel === "email" && !to) {
+      setActionError(
+        "Select a contact with an email or use the business email.",
+      );
+      return;
+    }
     const params = new URLSearchParams({
       subject: communicationForm.subject,
       body: communicationForm.body,
     });
     window.location.href = `mailto:${encodeURIComponent(to)}?${params.toString()}`;
+    setActionError("Did you send this email? If yes, use Mark sent.");
+  }
+
+  function openWebmail() {
+    if (!confirmDoNotContactOverride("open webmail")) return;
+    window.open(operationsWebmailUrl, "_blank", "noopener,noreferrer");
+    setActionError("Did you send this email? If yes, use Mark sent.");
   }
 
   async function submitTemplate(event: React.FormEvent) {
@@ -4305,11 +4474,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   function renderCommunicationModal() {
     if (!communicationFormOpen) return null;
+    const businessContext = communicationBusinessContext();
     const contactOptions =
-      detail?.business.id === communicationForm.businessId
-        ? detail.contacts.filter((contact) => !contact.archived_at)
-        : [];
+      businessContext?.contacts.filter((contact) => !contact.archived_at) ?? [];
     const selectedContact = selectedCommunicationContact();
+    const recipientEmail = communicationRecipientEmail();
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -4338,13 +4507,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   Business
                   <select
                     value={communicationForm.businessId}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      const nextBusinessId = event.target.value;
                       setCommunicationForm((prev) => ({
                         ...prev,
-                        businessId: event.target.value,
+                        businessId: nextBusinessId,
                         contactId: "",
-                      }))
-                    }
+                        unresolvedPlaceholders: findEditorPlaceholders(
+                          prev.subject,
+                          prev.body,
+                        ),
+                      }));
+                      void loadReportCreateBusiness(nextBusinessId);
+                    }}
                     disabled={Boolean(detail)}
                   >
                     <option value="">Select business</option>
@@ -4372,9 +4547,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     }
                   >
                     <option value="">No contact selected</option>
+                    {businessContext?.business.general_email && (
+                      <option value="">Use business email</option>
+                    )}
                     {contactOptions.map((contact) => (
                       <option key={contact.id} value={contact.id}>
                         {contactName(contact)}
+                        {contact.email ? ` · ${contact.email}` : " · no email"}
                       </option>
                     ))}
                   </select>
@@ -4457,23 +4636,16 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <input
                   value={communicationForm.subject}
                   onChange={(event) =>
-                    setCommunicationForm((prev) => ({
-                      ...prev,
-                      subject: event.target.value,
-                    }))
+                    setCommunicationSubject(event.target.value)
                   }
                 />
               </label>
               <label>
                 Body
                 <textarea
+                  className="ops-communication-body"
                   value={communicationForm.body}
-                  onChange={(event) =>
-                    setCommunicationForm((prev) => ({
-                      ...prev,
-                      body: event.target.value,
-                    }))
-                  }
+                  onChange={(event) => setCommunicationBody(event.target.value)}
                 />
               </label>
               <div className="ops-form-grid">
@@ -4504,10 +4676,27 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               </div>
               {communicationForm.unresolvedPlaceholders.length > 0 && (
                 <div className="ops-warning">
-                  Unresolved placeholders:{" "}
+                  <strong>Resolve placeholders before marking ready:</strong>{" "}
                   {communicationForm.unresolvedPlaceholders.join(", ")}
                 </div>
               )}
+              <div className="ops-empty-card">
+                <strong>Recipient review</strong>
+                <span>
+                  {recipientEmail
+                    ? `Email to ${recipientEmail}`
+                    : communicationForm.channel === "email"
+                      ? "No recipient email selected. Choose a contact with email or use the business email."
+                      : "Non-email communication."}
+                </span>
+                {businessContext?.business.general_email &&
+                  !communicationForm.contactId && (
+                    <small>
+                      Using business email:{" "}
+                      {businessContext.business.general_email}
+                    </small>
+                  )}
+              </div>
               {selectedContact?.do_not_contact &&
                 communicationForm.direction === "outbound" && (
                   <div className="ops-warning">
@@ -4538,10 +4727,34 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <button
                   type="button"
                   className="ops-button"
+                  onClick={() => void copyCommunicationPart("recipient")}
+                  disabled={!recipientEmail}
+                >
+                  Copy recipient
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void copyCommunicationPart("subject")}
+                  disabled={!communicationForm.subject.trim()}
+                >
+                  Copy subject
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void copyCommunicationPart("body")}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Copy body
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
                   onClick={() => void copyCommunication()}
                   disabled={!communicationForm.body.trim()}
                 >
-                  Copy email
+                  Copy full email
                 </button>
                 <button
                   type="button"
@@ -4554,10 +4767,26 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <button
                   type="button"
                   className="ops-button"
+                  onClick={openWebmail}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Open IONOS Webmail
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
                   onClick={() => void saveCommunication("draft")}
                   disabled={!communicationForm.body.trim()}
                 >
                   Save draft
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void saveCommunication("ready")}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Mark ready
                 </button>
                 <button
                   type="button"
@@ -4580,7 +4809,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             <div className="ops-preview">
               <div className="ops-section-label">Preview</div>
               <strong>{communicationForm.subject || "No subject"}</strong>
-              <p>{communicationForm.body || "Generate or write a draft."}</p>
+              <pre>
+                {communicationForm.body || "Generate or write a draft."}
+              </pre>
+              <small>
+                Opening mailto or webmail does not mark this communication sent.
+                Attach PDFs manually where required.
+              </small>
             </div>
           </div>
         </div>
@@ -4619,6 +4854,37 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 Refresh
               </button>
             </div>
+            <div className="ops-form-grid">
+              <label>
+                Search
+                <input
+                  value={communicationSearch}
+                  onChange={(event) =>
+                    setCommunicationSearch(event.target.value)
+                  }
+                  placeholder="Business, contact, email, subject"
+                />
+              </label>
+              <label>
+                Filter
+                <select
+                  value={communicationStatusFilter}
+                  onChange={(event) =>
+                    setCommunicationStatusFilter(
+                      event.target.value as CommunicationFilterStatus,
+                    )
+                  }
+                >
+                  <option value="all">All</option>
+                  <option value="draft">Drafts</option>
+                  <option value="ready">Ready to send</option>
+                  <option value="sent">Sent</option>
+                  <option value="received">Replies</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="follow_up_due">Follow-ups due</option>
+                </select>
+              </label>
+            </div>
             {communicationsLoading ? (
               <div className="ops-empty-card">Loading communications...</div>
             ) : communications.length === 0 ? (
@@ -4646,7 +4912,20 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         ? `· ${communicationContactName(item)}`
                         : ""}
                     </span>
-                    <small>{formatDateTime(item.occurred_at)}</small>
+                    <small>
+                      {communicationChannelLabel(item.channel)} ·{" "}
+                      {formatDateTime(item.occurred_at)} ·{" "}
+                      {communicationFollowUpState(item)}
+                    </small>
+                    <small>
+                      {findEditorPlaceholders(item.subject ?? "", item.body)
+                        .length > 0
+                        ? `Contains unresolved placeholders: ${findEditorPlaceholders(
+                            item.subject ?? "",
+                            item.body,
+                          ).join(", ")}`
+                        : communicationBodyPreview(item.body)}
+                    </small>
                   </button>
                 ))}
               </div>
@@ -4690,6 +4969,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </div>
             <form className="ops-form" onSubmit={submitTemplate}>
               <div className="ops-section-label">Add custom template</div>
+              <div className="ops-empty-card">
+                <strong>Supported placeholders</strong>
+                <span>
+                  {supportedCommunicationPlaceholders
+                    .map((item) => `{{${item}}}`)
+                    .join(", ")}
+                </span>
+              </div>
               <div className="ops-form-grid">
                 <label>
                   Name
@@ -8770,7 +9057,20 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       : ""}
                   </small>
                   <strong>{item.subject || "No subject"}</strong>
-                  <p>{item.body}</p>
+                  {findEditorPlaceholders(item.subject ?? "", item.body)
+                    .length > 0 && (
+                    <div className="ops-warning">
+                      Stored content contains unresolved placeholders:{" "}
+                      {findEditorPlaceholders(
+                        item.subject ?? "",
+                        item.body,
+                      ).join(", ")}
+                    </div>
+                  )}
+                  <details>
+                    <summary>{communicationBodyPreview(item.body)}</summary>
+                    <pre>{item.body}</pre>
+                  </details>
                   {item.follow_up_at && (
                     <small>
                       Follow-up: {formatDateTime(item.follow_up_at)}

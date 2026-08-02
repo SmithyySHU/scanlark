@@ -138,6 +138,7 @@ import {
   getConfiguredDefaultFollowUpBusinessDays,
   OPERATIONS_TASK_STATUSES,
   SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
+  findUnresolvedClientCommunicationPlaceholders,
   parseOperationsBusinessInput,
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
@@ -457,6 +458,30 @@ async function getCommunicationOr404(res: Response, communicationId: string) {
   return communication;
 }
 
+function assertCommunicationCanTransition(input: {
+  status?: string | null;
+  subject?: string | null;
+  body?: string | null;
+  allowUnresolvedOverride?: boolean;
+  overrideReason?: string | null;
+}) {
+  if (input.status !== "ready" && input.status !== "sent") return;
+  const unresolved = findUnresolvedClientCommunicationPlaceholders({
+    subject: input.subject,
+    body: input.body,
+  });
+  if (
+    unresolved.length > 0 &&
+    !(
+      input.status === "sent" &&
+      input.allowUnresolvedOverride === true &&
+      input.overrideReason?.trim()
+    )
+  ) {
+    throw new Error("unresolved_communication_placeholders");
+  }
+}
+
 function suggestedFollowUpDateForTemplate(
   template: OperationsCommunicationTemplateRow,
 ) {
@@ -562,11 +587,28 @@ function handleValidationError(res: Response, err: unknown) {
     message === "invalid_communication_direction" ||
     message === "invalid_communication_channel" ||
     message === "invalid_communication_status" ||
+    message === "invalid_communication_placeholder_syntax" ||
     message === "invalid_task_status" ||
     message === "invalid_preferred_channel" ||
     message === "invalid_default_follow_up_business_days"
   ) {
     return sendApiError(res, 400, message, "Request value is invalid");
+  }
+  if (message === "unresolved_communication_placeholders") {
+    return sendApiError(
+      res,
+      400,
+      "unresolved_communication_placeholders",
+      "Resolve unresolved placeholders before this communication can be marked ready or sent.",
+    );
+  }
+  if (message === "communication_sent_locked") {
+    return sendApiError(
+      res,
+      409,
+      "communication_sent_locked",
+      "Sent or received communications cannot be silently rewritten.",
+    );
   }
   if (message === "invalid_date") {
     return sendApiError(res, 400, message, "Date value is invalid");
@@ -3584,11 +3626,19 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const existing = await getCommunicationOr404(res, communicationId);
       if (!existing) return;
+      const input = parseOperationsCommunicationInput(req.body, {
+        partial: true,
+      });
+      assertCommunicationCanTransition({
+        status: input.status ?? existing.status,
+        subject: input.subject ?? existing.subject,
+        body: input.body ?? existing.body,
+      });
       const communication = await updateOperationsCommunication(
         getActor(req),
         existing.business_id,
         communicationId,
-        parseOperationsCommunicationInput(req.body, { partial: true }),
+        input,
       );
       if (communication === "contact_not_found") {
         return sendApiError(res, 404, "not_found", "Contact not found");
@@ -3623,6 +3673,19 @@ export function mountOperationsRoutes(app: express.Application) {
         if (!existing) return;
         const input = parseOperationsCommunicationInput(req.body, {
           partial: true,
+        });
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const record = body as Record<string, unknown>;
+        assertCommunicationCanTransition({
+          status: "sent",
+          subject: input.subject ?? existing.subject,
+          body: input.body ?? existing.body,
+          allowUnresolvedOverride:
+            record.unresolvedPlaceholderOverride === true,
+          overrideReason:
+            typeof record.unresolvedPlaceholderOverrideReason === "string"
+              ? record.unresolvedPlaceholderOverrideReason
+              : null,
         });
         const communication = await markOperationsCommunicationSent(
           getActor(req),
@@ -4204,11 +4267,23 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!businessId || !communicationId) return;
       try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
         const communication = await updateOperationsCommunication(
           getActor(req),
           businessId,
           communicationId,
-          parseOperationsCommunicationInput(req.body, { partial: true }),
+          (() => {
+            const input = parseOperationsCommunicationInput(req.body, {
+              partial: true,
+            });
+            assertCommunicationCanTransition({
+              status: input.status ?? existing.status,
+              subject: input.subject ?? existing.subject,
+              body: input.body ?? existing.body,
+            });
+            return input;
+          })(),
         );
         if (communication === "business_not_found") {
           return sendApiError(res, 404, "not_found", "Business not found");
@@ -4244,8 +4319,23 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!businessId || !communicationId) return;
       try {
+        const existing = await getCommunicationOr404(res, communicationId);
+        if (!existing) return;
         const input = parseOperationsCommunicationInput(req.body, {
           partial: true,
+        });
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const record = body as Record<string, unknown>;
+        assertCommunicationCanTransition({
+          status: "sent",
+          subject: input.subject ?? existing.subject,
+          body: input.body ?? existing.body,
+          allowUnresolvedOverride:
+            record.unresolvedPlaceholderOverride === true,
+          overrideReason:
+            typeof record.unresolvedPlaceholderOverrideReason === "string"
+              ? record.unresolvedPlaceholderOverrideReason
+              : null,
         });
         const communication = await markOperationsCommunicationSent(
           getActor(req),

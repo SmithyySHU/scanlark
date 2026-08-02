@@ -12,6 +12,7 @@ import {
 import { adminGuard } from "./adminAccess";
 import {
   addBusinessDays,
+  findUnresolvedClientCommunicationPlaceholders,
   getConfiguredDefaultFollowUpBusinessDays,
   parseOperationsBusinessInput,
   parseOperationsCommunicationInput,
@@ -433,6 +434,71 @@ test("operations client communication rendering reports unresolved placeholders"
     "senderEmail",
     "unknownThing",
   ]);
+});
+
+test("operations communication placeholder safety blocks ready and sent lifecycle states", () => {
+  assert.deepEqual(
+    findUnresolvedClientCommunicationPlaceholders({
+      subject: "Hello {{ businessName }}",
+      body: "Hi {{firstName}}, {{unknownThing}}",
+    }),
+    ["businessName", "firstName", "unknownThing"],
+  );
+
+  assert.throws(
+    () =>
+      parseOperationsCommunicationInput({
+        status: "ready",
+        body: "Hi {{firstName}},",
+      }),
+    /unresolved_communication_placeholders/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsCommunicationInput({
+        status: "sent",
+        body: "Hi {{firstName}},",
+      }),
+    /unresolved_communication_placeholders/,
+  );
+
+  const exceptionalSent = parseOperationsCommunicationInput({
+    status: "sent",
+    body: "Hi {{firstName}},",
+    unresolvedPlaceholderOverride: true,
+    unresolvedPlaceholderOverrideReason: "Historical import of stored source.",
+  });
+  assert.equal(exceptionalSent.status, "sent");
+});
+
+test("operations communication missing first name stays visible until resolved", () => {
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "Hello {{businessName}}",
+      body_template: "Hi {{firstName}},",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://example.com",
+        general_email: "hello@example.com",
+      },
+      contact: {
+        id: "contact_1",
+        first_name: null,
+        last_name: "Smith",
+        email: "client@example.com",
+        do_not_contact: false,
+        do_not_contact_reason: null,
+        preferred_channel: null,
+      },
+      site: null,
+    },
+  );
+
+  assert.equal(rendered.body, "Hi {{firstName}},");
+  assert.deepEqual(rendered.unresolvedPlaceholders, ["firstName"]);
 });
 
 test("operations communication validation distinguishes drafts from sent records", () => {
