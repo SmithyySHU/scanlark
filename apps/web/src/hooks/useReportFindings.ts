@@ -48,14 +48,14 @@ export function useReportFindings(
     for (const finding of findings) {
       const included = finding.is_included && !finding.is_false_positive;
       if (included) counts.included += 1;
-      if (!finding.is_included || finding.is_false_positive)
+      if (!finding.is_included && !finding.is_false_positive)
         counts.excluded += 1;
       if (included && missingFindingReadinessFields(finding).length > 0) {
         counts.needs_editing += 1;
       }
       if (isFindingReady(finding)) counts.ready += 1;
       if (finding.is_false_positive) counts.possible_false_positive += 1;
-      counts[finding.client_priority] += 1;
+      if (included) counts[finding.client_priority] += 1;
       categories.set(
         finding.category,
         (categories.get(finding.category) ?? 0) + 1,
@@ -65,7 +65,12 @@ export function useReportFindings(
     const filtered = findings.filter((finding) => {
       const included = finding.is_included && !finding.is_false_positive;
       if (filter === "included" && !included) return false;
-      if (filter === "excluded" && included) return false;
+      if (
+        filter === "excluded" &&
+        (finding.is_included || finding.is_false_positive)
+      ) {
+        return false;
+      }
       if (
         filter === "needs_editing" &&
         (!included || missingFindingReadinessFields(finding).length === 0)
@@ -80,7 +85,7 @@ export function useReportFindings(
         ["critical", "important", "improvement", "informational"].includes(
           filter,
         ) &&
-        finding.client_priority !== filter
+        (!included || finding.client_priority !== filter)
       ) {
         return false;
       }

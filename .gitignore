@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local-only rebrand notes
 REBRAND_NOTES.md
+
+# Local AI session handoff notes
+docs/AI_HANDOFF.md

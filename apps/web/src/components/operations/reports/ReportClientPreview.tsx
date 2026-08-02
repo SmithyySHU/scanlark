@@ -13,6 +13,37 @@ function actionPlanLabel(value: string) {
   return "Consider later";
 }
 
+function reportTypeLabel(value: string) {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatReportDate(value: string | null) {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+function priorityDefinition(value: string) {
+  if (value === "critical") {
+    return "Confirmed issues that may seriously disrupt access, trust or an important visitor journey.";
+  }
+  if (value === "important") {
+    return "Issues worth addressing soon because they can materially affect visitors or website quality.";
+  }
+  if (value === "improvement") {
+    return "Practical improvements that can strengthen clarity, maintainability or visitor experience.";
+  }
+  return "Useful context or lower-impact housekeeping that does not require urgent action.";
+}
+
 export function ReportClientPreview({
   payload,
   stale,
@@ -37,21 +68,34 @@ export function ReportClientPreview({
           <div className="ops-client-brand">
             {payload.settings.displayLogo ? "Scanlark" : ""}
           </div>
-          <h1>{payload.report.title}</h1>
-          <p>{payload.business.name}</p>
+          <h1>Website Health Report</h1>
+          <h2>{payload.report.title}</h2>
+          <p>
+            <strong>{payload.business.name}</strong>
+          </p>
           <p>{payload.site.displayName ?? payload.site.url}</p>
+          {payload.report.preparedFor && (
+            <small>Prepared for {payload.report.preparedFor}</small>
+          )}
           <small>
-            Prepared for {payload.report.preparedFor ?? "Client"} ·{" "}
-            {payload.report.coverDate}
+            Prepared by {payload.report.preparedBy ?? "Scanlark"} ·{" "}
+            {formatReportDate(payload.report.coverDate)} ·{" "}
+            {reportTypeLabel(payload.report.reportType)}
           </small>
+          {payload.settings.confidentialNotice && (
+            <small>{payload.settings.confidentialNotice}</small>
+          )}
         </section>
         <section>
           <h2>Executive summary</h2>
-          {payload.summaries.executiveSummary && (
-            <p>{payload.summaries.executiveSummary}</p>
-          )}
           {payload.summaries.overallSummary && (
             <p>{payload.summaries.overallSummary}</p>
+          )}
+          {payload.summaries.executiveSummary && (
+            <p>
+              <strong>Overall website condition: </strong>
+              {payload.summaries.executiveSummary}
+            </p>
           )}
           {payload.summaries.mainStrengths && (
             <p>
@@ -65,14 +109,22 @@ export function ReportClientPreview({
               {payload.summaries.mainConcerns}
             </p>
           )}
+          {payload.summaries.recommendedFirstSteps && (
+            <p>
+              <strong>Recommended immediate action: </strong>
+              {payload.summaries.recommendedFirstSteps}
+            </p>
+          )}
         </section>
         <section className="ops-card-grid">
-          {Object.entries(payload.priorityCounts).map(([key, value]) => (
-            <div key={key} className="ops-empty-card">
-              <strong>{value}</strong>
-              <p>{priorityLabel(key)}</p>
-            </div>
-          ))}
+          {Object.entries(payload.priorityCounts).map(([key, value]) =>
+            key === "informational" && value === 0 ? null : (
+              <div key={key} className="ops-empty-card">
+                <strong>{value}</strong>
+                <p>{priorityLabel(key)}</p>
+              </div>
+            ),
+          )}
         </section>
         <section>
           <h2>Review scope</h2>
@@ -80,12 +132,35 @@ export function ReportClientPreview({
             Website scanned: <span>{payload.site.url}</span>
           </p>
           <p>
-            Pages and links checked: {payload.scan.checkedLinks} checked links
-            from {payload.scan.totalLinks} discovered links.
+            Selected scan date: {formatReportDate(payload.scan.finishedAt)}.
+          </p>
+          <p>
+            Public links/resources checked: {payload.scan.checkedLinks} of{" "}
+            {payload.scan.totalLinks} discovered.
           </p>
           {payload.summaries.scopeLimitations && (
             <p>{payload.summaries.scopeLimitations}</p>
           )}
+        </section>
+        <section>
+          <h2>Priority overview</h2>
+          <p>
+            Priorities reflect the reviewed client impact and recommended order
+            of attention. Labels and descriptions are provided so the overview
+            does not rely on colour alone.
+          </p>
+          <div className="ops-list">
+            {Object.entries(payload.priorityCounts).map(([priority, count]) =>
+              priority === "informational" && count === 0 ? null : (
+                <article key={priority} className="ops-list-card">
+                  <strong>
+                    {priorityLabel(priority)} · {count} included
+                  </strong>
+                  <p>{priorityDefinition(priority)}</p>
+                </article>
+              ),
+            )}
+          </div>
         </section>
         {payload.findings.length > 0 && (
           <section>
@@ -177,6 +252,19 @@ export function ReportClientPreview({
               </ul>
             </section>
           )}
+        {payload.settings.displayTechnicalAppendix && (
+          <section>
+            <h2>Technical appendix</h2>
+            <p>
+              Selected scan date: {formatReportDate(payload.scan.finishedAt)}
+            </p>
+            <p>
+              Links/resources checked: {payload.scan.checkedLinks} of{" "}
+              {payload.scan.totalLinks} discovered.
+            </p>
+            <p>Included reviewed findings: {payload.findings.length}</p>
+          </section>
+        )}
       </div>
     </div>
   );

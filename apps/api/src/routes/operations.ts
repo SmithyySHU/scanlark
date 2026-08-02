@@ -49,6 +49,7 @@ import {
   getOperationsQuoteDetail,
   getOperationsQuotePreview,
   getOperationsReportDetail,
+  getOperationsReportPdfRender,
   getOperationsReportPreview,
   getOperationsClientServiceDetail,
   getOperationsServicePlan,
@@ -93,6 +94,7 @@ import {
   setOperationsBusinessArchived,
   setOperationsContactArchived,
   setOperationsReportArchived,
+  saveOperationsReportPdfRender,
   setOperationsServicePlanArchived,
   setPrimaryOperationsContact,
   snoozeOperationsTask,
@@ -3269,18 +3271,45 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const payload = await freezeOperationsReportRender(
+      const preview = await getOperationsReportPreview(reportId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      if (preview.frozen) {
+        const storedPdf = await getOperationsReportPdfRender(reportId);
+        if (storedPdf) {
+          res.setHeader("content-type", "application/pdf");
+          res.setHeader(
+            "content-disposition",
+            `attachment; filename="${storedPdf.filename}"`,
+          );
+          return res.send(storedPdf.pdf_bytes);
+        }
+      }
+      const blockingIssues = preview.readinessIssues.filter(
+        (issue) => issue.code !== "pdf_not_generated",
+      );
+      if (blockingIssues.length > 0) {
+        return sendApiError(
+          res,
+          400,
+          "report_not_ready_for_pdf",
+          "Complete the report review before generating the final PDF",
+          { readinessIssues: blockingIssues },
+        );
+      }
+      const pdf = await renderOperationsReportPdf(preview.payload);
+      const filename = operationsReportPdfFilename(preview.payload);
+      await freezeOperationsReportRender(
         getActor(req),
         reportId,
         "operations_report_pdf_generated",
+        preview.payload,
       );
-      if (!payload)
-        return sendApiError(res, 404, "not_found", "Report not found");
-      const pdf = await renderOperationsReportPdf(payload);
+      await saveOperationsReportPdfRender(reportId, filename, pdf);
       res.setHeader("content-type", "application/pdf");
       res.setHeader(
         "content-disposition",
-        `attachment; filename="${operationsReportPdfFilename(payload)}"`,
+        `attachment; filename="${filename}"`,
       );
       return res.send(pdf);
     } catch (err) {
@@ -3298,6 +3327,15 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
+      const storedPdf = await getOperationsReportPdfRender(reportId);
+      if (storedPdf) {
+        res.setHeader("content-type", "application/pdf");
+        res.setHeader(
+          "content-disposition",
+          `attachment; filename="${storedPdf.filename}"`,
+        );
+        return res.send(storedPdf.pdf_bytes);
+      }
       const preview = await getOperationsReportPreview(reportId);
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");

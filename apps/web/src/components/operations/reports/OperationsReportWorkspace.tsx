@@ -25,6 +25,7 @@ import type {
   OperationsReportFinding,
   OperationsReportPositiveObservation,
   OperationsReportPriority,
+  OperationsReportReadinessIssue,
 } from "./types";
 
 type ReportTab =
@@ -80,7 +81,7 @@ function clientReportFilename(payload: ClientReportPayload | null) {
 type Props = {
   detail: OperationsReportDetail;
   preview: ClientReportPayload | null;
-  readinessIssues: string[];
+  readinessIssues: OperationsReportReadinessIssue[];
   actionError: string | null;
   onPatchReport: (input: Record<string, unknown>) => Promise<void>;
   onPatchFinding: (
@@ -130,6 +131,9 @@ export function OperationsReportWorkspace({
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [previewMode, setPreviewMode] = useState<"desktop" | "a4">("a4");
+  const [dirtyChildKeys, setDirtyChildKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const reportDraft = useOperationsReportDraft(detail.report);
   const selectedFinding = detail.findings.find(
     (finding) => finding.id === selectedFindingId,
@@ -146,7 +150,12 @@ export function OperationsReportWorkspace({
   const includedCount = detail.findings.filter(
     (finding) => finding.is_included && !finding.is_false_positive,
   ).length;
-  const excludedCount = detail.findings.length - includedCount;
+  const falsePositiveCount = detail.findings.filter(
+    (finding) => finding.is_false_positive,
+  ).length;
+  const excludedCount = detail.findings.filter(
+    (finding) => !finding.is_included && !finding.is_false_positive,
+  ).length;
   const readyCount = detail.findings.filter(isFindingReady).length;
   const incomplete = detail.findings.filter(
     (finding) =>
@@ -154,7 +163,33 @@ export function OperationsReportWorkspace({
       !finding.is_false_positive &&
       !isFindingReady(finding),
   );
-  const previewStale = reportDraft.dirty || findingDraft.dirty;
+  const previewStale =
+    reportDraft.dirty || findingDraft.dirty || dirtyChildKeys.size > 0;
+  const priorityCounts = priorityOptions.map((priority) => ({
+    ...priority,
+    count: detail.findings.filter(
+      (finding) =>
+        finding.is_included &&
+        !finding.is_false_positive &&
+        finding.client_priority === priority.value,
+    ).length,
+  }));
+  const pdfBlockingIssues = readinessIssues.filter(
+    (issue) => issue.code !== "pdf_not_generated",
+  );
+  const includedFindingIds = new Set(
+    detail.findings
+      .filter((finding) => finding.is_included && !finding.is_false_positive)
+      .map((finding) => finding.id),
+  );
+  const visibleActionPlanItems = detail.actionPlanItems.filter(
+    (item) =>
+      item.report_finding_id == null ||
+      includedFindingIds.has(item.report_finding_id),
+  );
+  const clientOutputFrozen =
+    Boolean(detail.report.frozen_at) &&
+    !["draft", "needs_review"].includes(detail.report.status);
 
   useEffect(() => {
     if (!selectedFindingId && detail.findings[0]) {
@@ -212,6 +247,7 @@ export function OperationsReportWorkspace({
       clientExplanation: findingDraft.draft.client_explanation,
       whyItMatters: findingDraft.draft.why_it_matters,
       recommendedAction: findingDraft.draft.recommended_action,
+      affectedUrl: findingDraft.draft.affected_url,
       clientEvidence: findingDraft.draft.client_evidence,
       affectedUrlNote: findingDraft.draft.affected_url_note,
       internalNote: findingDraft.draft.internal_note,
@@ -256,6 +292,25 @@ export function OperationsReportWorkspace({
     });
   }
 
+  function setChildDirty(key: string, dirty: boolean) {
+    setDirtyChildKeys((current) => {
+      const next = new Set(current);
+      if (dirty) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+
+  function openReadinessIssue(issue: OperationsReportReadinessIssue) {
+    setTab(issue.section);
+    if (issue.findingId) {
+      setSelectedFindingId(issue.findingId);
+      setFilter("all");
+      setCategory("");
+      setSearch("");
+    }
+  }
+
   const currentIncompleteIndex = selectedFinding
     ? incomplete.findIndex((finding) => finding.id === selectedFinding.id)
     : -1;
@@ -274,8 +329,9 @@ export function OperationsReportWorkspace({
           </p>
           <span className="ops-muted">
             {reportStatusLabel(detail.report.status)} · {includedCount} included
-            · {excludedCount} excluded · {readyCount}/{includedCount} ready ·
-            last saved {formatOperationsDateTime(detail.report.updated_at)}
+            · {excludedCount} excluded · {falsePositiveCount} false positive ·{" "}
+            {readyCount}/{includedCount} ready · last saved{" "}
+            {formatOperationsDateTime(detail.report.updated_at)}
           </span>
         </div>
         <div className="ops-inline-actions">
@@ -288,10 +344,22 @@ export function OperationsReportWorkspace({
           <button className="ops-button" onClick={() => setTab("preview")}>
             Preview
           </button>
-          <button className="ops-button" onClick={() => void onGeneratePdf()}>
+          <button
+            className="ops-button"
+            disabled={pdfBlockingIssues.length > 0 || previewStale}
+            onClick={() => void onGeneratePdf()}
+          >
             Generate PDF
           </button>
-          <button className="ops-button" onClick={() => void onMarkReady()}>
+          <button
+            className="ops-button"
+            disabled={
+              detail.report.status === "ready_to_send" ||
+              readinessIssues.length > 0 ||
+              previewStale
+            }
+            onClick={() => void onMarkReady()}
+          >
             Mark ready
           </button>
           <button className="ops-button" onClick={() => void onRecordSent()}>
@@ -303,10 +371,23 @@ export function OperationsReportWorkspace({
         </div>
       </section>
       {actionError && <div className="ops-error">{actionError}</div>}
+      {clientOutputFrozen && (
+        <div className="ops-warning">
+          The approved client output is frozen. Later review-record edits do not
+          change the saved preview or PDF.
+        </div>
+      )}
       {readinessIssues.length > 0 && (
-        <section className="ops-warning">
+        <section className="ops-warning ops-readiness-list">
           {readinessIssues.map((issue) => (
-            <div key={issue}>{issue}</div>
+            <button
+              key={`${issue.code}-${issue.findingId ?? issue.message}`}
+              type="button"
+              onClick={() => openReadinessIssue(issue)}
+            >
+              <span>{issue.message}</span>
+              <strong>Resolve</strong>
+            </button>
           ))}
         </section>
       )}
@@ -336,6 +417,8 @@ export function OperationsReportWorkspace({
               <dd>{includedCount}</dd>
               <dt>Excluded</dt>
               <dd>{excludedCount}</dd>
+              <dt>False positive</dt>
+              <dd>{falsePositiveCount}</dd>
               <dt>Sent</dt>
               <dd>{formatOperationsDateTime(detail.report.sent_at)}</dd>
               <dt>Frozen</dt>
@@ -379,6 +462,15 @@ export function OperationsReportWorkspace({
                 </strong>
                 <small>{clientReportFilename(preview)}</small>
               </div>
+            </div>
+            <div className="ops-card-grid">
+              {priorityCounts.map((priority) => (
+                <div key={priority.value} className="ops-summary-card">
+                  <span>{priority.label}</span>
+                  <strong>{priority.count}</strong>
+                  <small>Included findings</small>
+                </div>
+              ))}
             </div>
           </div>
         </section>
@@ -604,12 +696,14 @@ export function OperationsReportWorkspace({
       {tab === "action_plan" && (
         <section className="ops-two-column">
           <ReportActionPlan
-            items={detail.actionPlanItems}
+            items={visibleActionPlanItems}
             onPatch={onPatchActionPlanItem}
+            onDirty={setChildDirty}
           />
           <ReportPositiveObservations
             observations={detail.positiveObservations}
             onPatch={onPatchObservation}
+            onDirty={setChildDirty}
           />
         </section>
       )}
@@ -803,10 +897,6 @@ function FindingEditor({
           <dd>{finding.original_severity}</dd>
           <dt>Category</dt>
           <dd>{finding.category}</dd>
-          <dt>Source issue</dt>
-          <dd>{finding.source_issue_id ?? "-"}</dd>
-          <dt>Source link</dt>
-          <dd>{finding.source_link_id ?? "-"}</dd>
         </dl>
         {finding.technical_summary && <p>{finding.technical_summary}</p>}
       </section>
@@ -865,7 +955,10 @@ function FindingEditor({
         </label>
         <label>
           Affected page
-          <input value={finding.affected_url ?? ""} readOnly />
+          <input
+            value={finding.affected_url ?? ""}
+            onChange={(event) => onChange({ affected_url: event.target.value })}
+          />
         </label>
         <label>
           No-URL reason or affected URL note
@@ -940,27 +1033,38 @@ function FindingEditor({
         <button
           className="ops-button"
           onClick={() =>
-            void onPatchFinding(finding.id, {
-              isIncluded: true,
-              isFalsePositive: false,
-            })
+            void (async () => {
+              await onSave();
+              await onPatchFinding(finding.id, {
+                isIncluded: true,
+                isFalsePositive: false,
+              });
+            })()
           }
         >
           Include
         </button>
         <button
           className="ops-button"
-          onClick={() => void onPatchFinding(finding.id, { isIncluded: false })}
+          onClick={() =>
+            void (async () => {
+              await onSave();
+              await onPatchFinding(finding.id, { isIncluded: false });
+            })()
+          }
         >
           Exclude
         </button>
         <button
           className="ops-button"
           onClick={() =>
-            void onPatchFinding(finding.id, {
-              isIncluded: false,
-              isFalsePositive: true,
-            })
+            void (async () => {
+              await onSave();
+              await onPatchFinding(finding.id, {
+                isIncluded: false,
+                isFalsePositive: true,
+              });
+            })()
           }
         >
           Mark false positive
@@ -997,9 +1101,11 @@ function FindingEditor({
 function ReportActionPlan({
   items,
   onPatch,
+  onDirty,
 }: {
   items: OperationsReportActionPlanItem[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
+  onDirty: (key: string, dirty: boolean) => void;
 }) {
   const groups: OperationsReportActionPlanGroup[] = [
     "address_now",
@@ -1015,44 +1121,13 @@ function ReportActionPlan({
           {items
             .filter((item) => item.group_key === group)
             .map((item) => (
-              <article key={item.id} className="ops-list-card">
-                <label className="ops-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={item.is_included}
-                    onChange={(event) =>
-                      void onPatch(item.id, {
-                        isIncluded: event.target.checked,
-                      })
-                    }
-                  />
-                  Include in action plan
-                </label>
-                <input
-                  value={item.title}
-                  onChange={(event) =>
-                    void onPatch(item.id, { title: event.target.value })
-                  }
-                />
-                <textarea
-                  value={item.summary ?? ""}
-                  onChange={(event) =>
-                    void onPatch(item.id, { summary: event.target.value })
-                  }
-                />
-                <select
-                  value={item.group_key}
-                  onChange={(event) =>
-                    void onPatch(item.id, { groupKey: event.target.value })
-                  }
-                >
-                  {groups.map((option) => (
-                    <option key={option} value={option}>
-                      {actionPlanLabel(option)}
-                    </option>
-                  ))}
-                </select>
-              </article>
+              <ActionPlanItemEditor
+                key={item.id}
+                item={item}
+                groups={groups}
+                onPatch={onPatch}
+                onDirty={onDirty}
+              />
             ))}
         </section>
       ))}
@@ -1060,62 +1135,253 @@ function ReportActionPlan({
   );
 }
 
+function ActionPlanItemEditor({
+  item,
+  groups,
+  onPatch,
+  onDirty,
+}: {
+  item: OperationsReportActionPlanItem;
+  groups: OperationsReportActionPlanGroup[];
+  onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
+  onDirty: (key: string, dirty: boolean) => void;
+}) {
+  const draft = useOperationsReportDraft(item);
+  const dirtyKey = `action-${item.id}`;
+
+  useEffect(() => {
+    onDirty(dirtyKey, false);
+  }, [dirtyKey, item.updated_at]);
+
+  function update(patch: Partial<OperationsReportActionPlanItem>) {
+    draft.updateDraft(patch);
+    onDirty(dirtyKey, true);
+  }
+
+  async function save() {
+    await onPatch(item.id, {
+      title: draft.draft.title,
+      summary: draft.draft.summary,
+      groupKey: draft.draft.group_key,
+      isIncluded: draft.draft.is_included,
+      reviewedAt: draft.draft.reviewed_at,
+      displayOrder: draft.draft.display_order,
+    });
+    draft.setDirty(false);
+    onDirty(dirtyKey, false);
+  }
+
+  return (
+    <article className="ops-list-card ops-form">
+      <div className="ops-inline-actions">
+        <label className="ops-checkbox">
+          <input
+            type="checkbox"
+            checked={draft.draft.is_included}
+            onChange={(event) => update({ is_included: event.target.checked })}
+          />
+          Include
+        </label>
+        <label className="ops-checkbox">
+          <input
+            type="checkbox"
+            checked={Boolean(draft.draft.reviewed_at)}
+            onChange={(event) =>
+              update({
+                reviewed_at: event.target.checked
+                  ? new Date().toISOString()
+                  : null,
+              })
+            }
+          />
+          Reviewed
+        </label>
+      </div>
+      <label>
+        Action
+        <input
+          value={draft.draft.title}
+          onChange={(event) => update({ title: event.target.value })}
+        />
+      </label>
+      <label>
+        Short client summary
+        <textarea
+          value={draft.draft.summary ?? ""}
+          onChange={(event) => update({ summary: event.target.value })}
+        />
+      </label>
+      <div className="ops-form-grid">
+        <label>
+          Timing
+          <select
+            value={draft.draft.group_key}
+            onChange={(event) =>
+              update({
+                group_key: event.target
+                  .value as OperationsReportActionPlanGroup,
+              })
+            }
+          >
+            {groups.map((option) => (
+              <option key={option} value={option}>
+                {actionPlanLabel(option)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Order
+          <input
+            type="number"
+            min="0"
+            value={draft.draft.display_order}
+            onChange={(event) =>
+              update({ display_order: Number(event.target.value) || 0 })
+            }
+          />
+        </label>
+      </div>
+      <button
+        className="ops-button ops-button--primary"
+        disabled={!draft.dirty}
+        onClick={() => void save()}
+      >
+        Save action
+      </button>
+    </article>
+  );
+}
+
 function ReportPositiveObservations({
   observations,
   onPatch,
+  onDirty,
 }: {
   observations: OperationsReportPositiveObservation[];
   onPatch: (
     observationId: string,
     input: Record<string, unknown>,
   ) => Promise<void>;
+  onDirty: (key: string, dirty: boolean) => void;
 }) {
   return (
     <div className="ops-panel">
       <h2>Positive observations</h2>
       <div className="ops-list">
+        {observations.length === 0 && (
+          <div className="ops-empty-card">
+            No scan-supported positive observations are available.
+          </div>
+        )}
         {observations.map((item) => (
-          <article key={item.id} className="ops-list-card">
-            <label className="ops-checkbox">
-              <input
-                type="checkbox"
-                checked={item.is_included}
-                onChange={(event) =>
-                  void onPatch(item.id, { isIncluded: event.target.checked })
-                }
-              />
-              Include in report
-            </label>
-            <label className="ops-checkbox">
-              <input
-                type="checkbox"
-                checked={Boolean(item.reviewed_at)}
-                onChange={(event) =>
-                  void onPatch(item.id, {
-                    reviewedAt: event.target.checked
-                      ? new Date().toISOString()
-                      : null,
-                  })
-                }
-              />
-              Reviewed
-            </label>
-            <input
-              value={item.title}
-              onChange={(event) =>
-                void onPatch(item.id, { title: event.target.value })
-              }
-            />
-            <textarea
-              value={item.description ?? ""}
-              onChange={(event) =>
-                void onPatch(item.id, { description: event.target.value })
-              }
-            />
-            {item.source_key && <small>Supported by {item.source_key}</small>}
-          </article>
+          <PositiveObservationEditor
+            key={item.id}
+            item={item}
+            onPatch={onPatch}
+            onDirty={onDirty}
+          />
         ))}
       </div>
     </div>
+  );
+}
+
+function PositiveObservationEditor({
+  item,
+  onPatch,
+  onDirty,
+}: {
+  item: OperationsReportPositiveObservation;
+  onPatch: (
+    observationId: string,
+    input: Record<string, unknown>,
+  ) => Promise<void>;
+  onDirty: (key: string, dirty: boolean) => void;
+}) {
+  const draft = useOperationsReportDraft(item);
+  const dirtyKey = `positive-${item.id}`;
+
+  useEffect(() => {
+    onDirty(dirtyKey, false);
+  }, [dirtyKey, item.updated_at]);
+
+  function update(patch: Partial<OperationsReportPositiveObservation>) {
+    draft.updateDraft(patch);
+    onDirty(dirtyKey, true);
+  }
+
+  async function save() {
+    await onPatch(item.id, {
+      title: draft.draft.title,
+      description: draft.draft.description,
+      isIncluded: draft.draft.is_included,
+      reviewedAt: draft.draft.reviewed_at,
+      displayOrder: draft.draft.display_order,
+    });
+    draft.setDirty(false);
+    onDirty(dirtyKey, false);
+  }
+
+  return (
+    <article className="ops-list-card ops-form">
+      <div className="ops-inline-actions">
+        <label className="ops-checkbox">
+          <input
+            type="checkbox"
+            checked={draft.draft.is_included}
+            onChange={(event) => update({ is_included: event.target.checked })}
+          />
+          Include
+        </label>
+        <label className="ops-checkbox">
+          <input
+            type="checkbox"
+            checked={Boolean(draft.draft.reviewed_at)}
+            onChange={(event) =>
+              update({
+                reviewed_at: event.target.checked
+                  ? new Date().toISOString()
+                  : null,
+              })
+            }
+          />
+          Reviewed
+        </label>
+      </div>
+      <label>
+        Observation
+        <input
+          value={draft.draft.title}
+          onChange={(event) => update({ title: event.target.value })}
+        />
+      </label>
+      <label>
+        Client description
+        <textarea
+          value={draft.draft.description ?? ""}
+          onChange={(event) => update({ description: event.target.value })}
+        />
+      </label>
+      <label>
+        Order
+        <input
+          type="number"
+          min="0"
+          value={draft.draft.display_order}
+          onChange={(event) =>
+            update({ display_order: Number(event.target.value) || 0 })
+          }
+        />
+      </label>
+      {item.source_key && <small>Supported by scan data</small>}
+      <button
+        className="ops-button ops-button--primary"
+        disabled={!draft.dirty}
+        onClick={() => void save()}
+      >
+        Save observation
+      </button>
+    </article>
   );
 }

@@ -93,6 +93,7 @@ export type OperationsReportRow = {
   display_settings_json: Partial<OperationsReportDisplaySettings>;
   frozen_render_json: OperationsClientReportPayload | null;
   frozen_at: Date | null;
+  last_preview_generated_at: Date | null;
   last_pdf_generated_at: Date | null;
   created_by_user_id: string | null;
   created_at: Date;
@@ -108,6 +109,7 @@ export type OperationsReportRow = {
   scan_total_links?: number;
   included_findings?: number;
   excluded_findings?: number;
+  incomplete_findings?: number;
   critical_findings?: number;
   important_findings?: number;
   improvement_findings?: number;
@@ -172,6 +174,7 @@ export type OperationsReportActionPlanItemRow = {
   title: string;
   summary: string | null;
   is_included: boolean;
+  reviewed_at: Date | null;
   display_order: number;
   created_at: Date;
   updated_at: Date;
@@ -199,6 +202,13 @@ export type OperationsReportActivityRow = {
   target_id: string;
   metadata_json: Record<string, unknown>;
   created_at: Date;
+};
+
+export type OperationsReportPdfRenderRow = {
+  operations_report_id: string;
+  filename: string;
+  pdf_bytes: Buffer;
+  generated_at: Date;
 };
 
 export type OperationsReportDetail = {
@@ -250,6 +260,7 @@ export type OperationsReportFindingUpdateInput = {
   clientExplanation?: string | null;
   whyItMatters?: string | null;
   recommendedAction?: string | null;
+  affectedUrl?: string | null;
   clientEvidence?: string | null;
   affectedUrlNote?: string | null;
   internalNote?: string | null;
@@ -276,7 +287,22 @@ export type OperationsReportActionPlanItemUpdateInput = {
   title?: string;
   summary?: string | null;
   isIncluded?: boolean;
+  reviewedAt?: Date | null;
   displayOrder?: number;
+};
+
+export type OperationsReportReadinessSection =
+  | "settings"
+  | "summary"
+  | "findings"
+  | "action_plan"
+  | "preview";
+
+export type OperationsReportReadinessIssue = {
+  code: string;
+  message: string;
+  section: OperationsReportReadinessSection;
+  findingId?: string;
 };
 
 export type OperationsReportFindingBulkInput = {
@@ -306,7 +332,6 @@ export type OperationsReportListParams = {
 
 export type OperationsClientReportPayload = {
   report: {
-    id: string;
     title: string;
     status: OperationsReportStatus;
     reportType: OperationsReportType;
@@ -318,17 +343,14 @@ export type OperationsClientReportPayload = {
     sentAt: string | null;
   };
   business: {
-    id: string;
     name: string;
   };
   site: {
-    id: string;
     url: string;
     displayName: string | null;
     domain: string;
   };
   scan: {
-    id: string;
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
@@ -406,7 +428,7 @@ const DEFAULT_DISPLAY_SETTINGS: OperationsReportDisplaySettings = {
   displayScanlarkContact: true,
   displayWebsiteHealthScore: false,
   displayPositiveObservations: true,
-  displayTechnicalAppendix: true,
+  displayTechnicalAppendix: false,
   displayMethodologyLimitations: true,
   displayNextSteps: true,
   displayContactDetails: true,
@@ -498,6 +520,15 @@ function actionPlanGroupForPriority(
   return "consider_later";
 }
 
+function clientFriendlyStarterText(value: string) {
+  return value
+    .replace(/\bcrawler safety\b/gi, "automated-check safety")
+    .replace(/\bcrawlers\b/gi, "automated services")
+    .replace(/\bcrawler\b/gi, "automated check")
+    .replace(/\bcrawled\b/gi, "reviewed")
+    .replace(/\bcrawling\b/gi, "reviewing");
+}
+
 function mergeDisplaySettings(
   settings: Partial<OperationsReportDisplaySettings> | null | undefined,
 ): OperationsReportDisplaySettings {
@@ -535,6 +566,7 @@ function reportSelect() {
     c.email AS contact_email,
     COALESCE(finding_counts.included_findings, 0)::int AS included_findings,
     COALESCE(finding_counts.excluded_findings, 0)::int AS excluded_findings,
+    COALESCE(finding_counts.incomplete_findings, 0)::int AS incomplete_findings,
     COALESCE(finding_counts.critical_findings, 0)::int AS critical_findings,
     COALESCE(finding_counts.important_findings, 0)::int AS important_findings,
     COALESCE(finding_counts.improvement_findings, 0)::int AS improvement_findings,
@@ -552,6 +584,21 @@ function reportJoins() {
       SELECT
         COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false)::int AS included_findings,
         COUNT(*) FILTER (WHERE f.is_included = false OR f.is_false_positive = true)::int AS excluded_findings,
+        COUNT(*) FILTER (
+          WHERE f.is_included = true
+            AND f.is_false_positive = false
+            AND (
+              f.reviewed_at IS NULL
+              OR length(trim(f.title)) = 0
+              OR f.client_explanation IS NULL OR length(trim(f.client_explanation)) = 0
+              OR f.why_it_matters IS NULL OR length(trim(f.why_it_matters)) = 0
+              OR f.recommended_action IS NULL OR length(trim(f.recommended_action)) = 0
+              OR (
+                (f.affected_url IS NULL OR length(trim(f.affected_url)) = 0)
+                AND (f.affected_url_note IS NULL OR length(trim(f.affected_url_note)) = 0)
+              )
+            )
+        )::int AS incomplete_findings,
         COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false AND f.client_priority = 'critical')::int AS critical_findings,
         COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false AND f.client_priority = 'important')::int AS important_findings,
         COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false AND f.client_priority = 'improvement')::int AS improvement_findings,
@@ -712,6 +759,30 @@ async function listReportActivity(
   return res.rows;
 }
 
+async function invalidateEditableReportRender(reportId: string) {
+  const client = await ensureConnected();
+  const invalidated = await client.query<{ id: string }>(
+    `
+      UPDATE operations_reports
+      SET frozen_render_json = NULL,
+          frozen_at = NULL,
+          last_preview_generated_at = NULL,
+          last_pdf_generated_at = NULL,
+          updated_at = now()
+      WHERE id = $1
+        AND status IN ('draft', 'needs_review')
+      RETURNING id
+    `,
+    [reportId],
+  );
+  if (invalidated.rows[0]) {
+    await client.query(
+      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1`,
+      [reportId],
+    );
+  }
+}
+
 async function insertFindingsForScan(
   client: Awaited<ReturnType<typeof ensureConnected>>,
   reportId: string,
@@ -769,11 +840,13 @@ async function insertFindingsForScan(
         issue.category,
         issue.severity,
         priorityFromSeverity(issue.severity),
-        presentation.userTitle,
+        clientFriendlyStarterText(presentation.userTitle),
         presentation.technicalDetail,
-        presentation.whatItMeans || presentation.shortSummary,
-        presentation.whyItMatters,
-        presentation.suggestedFix,
+        clientFriendlyStarterText(
+          presentation.whatItMeans || presentation.shortSummary,
+        ),
+        clientFriendlyStarterText(presentation.whyItMatters),
+        clientFriendlyStarterText(presentation.suggestedFix),
         issue.affected_url,
         {
           issueType: issue.issue_type,
@@ -793,10 +866,27 @@ async function insertFindingsForScan(
 async function insertDefaultReportReviewSections(
   client: Awaited<ReturnType<typeof ensureConnected>>,
   reportId: string,
+  scanRunId: string,
   siteUrl: string,
 ) {
+  const supportedChecks = await client.query<{
+    check_type: string;
+    ok: boolean;
+  }>(
+    `
+      SELECT check_type, bool_or(ok) AS ok
+      FROM scan_site_checks
+      WHERE scan_run_id = $1
+      GROUP BY check_type
+    `,
+    [scanRunId],
+  );
+  const checkPassed = (checkType: string) =>
+    supportedChecks.rows.some(
+      (check) => check.check_type === checkType && check.ok,
+    );
   let observationOrder = 0;
-  if (siteUrl.startsWith("https://")) {
+  if (siteUrl.startsWith("https://") && checkPassed("https_root")) {
     await client.query(
       `
         INSERT INTO operations_report_positive_observations (
@@ -809,6 +899,23 @@ async function insertDefaultReportReviewSections(
         "HTTPS is active",
         "The reviewed website address uses HTTPS, which helps protect normal visitor browsing sessions.",
         "https_active",
+        observationOrder++,
+      ],
+    );
+  }
+  if (checkPassed("sitemap_xml") || checkPassed("sitemap_index_xml")) {
+    await client.query(
+      `
+        INSERT INTO operations_report_positive_observations (
+          operations_report_id, title, description, source_key, display_order
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [
+        reportId,
+        "A sitemap was available",
+        "A sitemap was detected during the selected check, helping automated services discover public pages.",
+        "sitemap_detected",
         observationOrder++,
       ],
     );
@@ -878,6 +985,45 @@ async function insertDefaultReportReviewSections(
       ],
     );
   }
+
+  const priorityCounts = findings.rows.reduce(
+    (counts, finding) => {
+      counts[finding.client_priority] += 1;
+      return counts;
+    },
+    {
+      critical: 0,
+      important: 0,
+      improvement: 0,
+      informational: 0,
+    } satisfies Record<OperationsReportClientPriority, number>,
+  );
+  const urgentCount = priorityCounts.critical + priorityCounts.important;
+  await client.query(
+    `
+      UPDATE operations_reports
+      SET executive_summary = $2,
+          overall_summary = $3,
+          main_strengths = $4,
+          main_concerns = $5,
+          recommended_first_steps = $6,
+          scope_limitations = $7
+      WHERE id = $1
+    `,
+    [
+      reportId,
+      `This website health review identified ${findings.rows.length} candidate finding${findings.rows.length === 1 ? "" : "s"}. Each item should be confirmed and edited before the report is shared.`,
+      urgentCount > 0
+        ? `The selected check found ${urgentCount} candidate item${urgentCount === 1 ? "" : "s"} that may deserve earlier attention, alongside lower-priority improvements.`
+        : "The selected check did not identify any candidate critical or important items, but the remaining improvements should still be reviewed.",
+      "The website was reachable during the selected check and public pages were available for review.",
+      urgentCount > 0
+        ? "The main concern is to confirm the higher-priority candidate findings and address the items that affect visitor journeys first."
+        : "The main concerns are the included improvement items that could affect clarity, maintainability or visitor experience over time.",
+      "Confirm the included findings, address the highest client priority first, and run a fresh check after changes are completed.",
+      "This automated review covers publicly accessible pages reached during the selected check. Logged-in areas, forms and third-party systems may require separate manual testing.",
+    ],
+  );
 }
 
 export async function createOperationsReport(
@@ -988,6 +1134,7 @@ export async function createOperationsReport(
     await insertDefaultReportReviewSections(
       client,
       report.id,
+      input.scanRunId,
       relationship.site_url,
     );
     await client.query("COMMIT");
@@ -1243,6 +1390,10 @@ export async function updateOperationsReport(
           valid_until = CASE WHEN $24::boolean THEN $25 ELSE valid_until END,
           no_major_findings_waived = COALESCE($26, no_major_findings_waived),
           display_settings_json = $27,
+          frozen_render_json = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_render_json END,
+          frozen_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_at END,
+          last_preview_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_preview_generated_at END,
+          last_pdf_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_pdf_generated_at END,
           updated_at = now()
       WHERE id = $1
     `,
@@ -1278,6 +1429,7 @@ export async function updateOperationsReport(
       settings,
     ],
   );
+  await invalidateEditableReportRender(reportId);
   await recordAdminAuditLog(actor, {
     action: "operations_report_updated",
     targetType: "operations_report",
@@ -1313,6 +1465,7 @@ export async function updateOperationsReportFinding(
           is_false_positive = COALESCE($26, is_false_positive),
           display_order = COALESCE($27, display_order),
           comparison_status = CASE WHEN $28::boolean THEN $29 ELSE comparison_status END,
+          affected_url = CASE WHEN $30::boolean THEN $31 ELSE affected_url END,
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
@@ -1350,10 +1503,13 @@ export async function updateOperationsReportFinding(
       input.displayOrder,
       input.comparisonStatus !== undefined,
       input.comparisonStatus ?? null,
+      input.affectedUrl !== undefined,
+      textValue(input.affectedUrl),
     ],
   );
   const finding = res.rows[0] ?? null;
   if (finding) {
+    await invalidateEditableReportRender(reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_finding_updated",
       targetType: "operations_report_finding",
@@ -1400,6 +1556,7 @@ export async function updateOperationsReportPositiveObservation(
   );
   const observation = res.rows[0] ?? null;
   if (observation) {
+    await invalidateEditableReportRender(reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_positive_observation_updated",
       targetType: "operations_report",
@@ -1424,7 +1581,8 @@ export async function updateOperationsReportActionPlanItem(
           title = COALESCE($4, title),
           summary = CASE WHEN $5::boolean THEN $6 ELSE summary END,
           is_included = COALESCE($7, is_included),
-          display_order = COALESCE($8, display_order),
+          reviewed_at = CASE WHEN $8::boolean THEN $9 ELSE reviewed_at END,
+          display_order = COALESCE($10, display_order),
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
@@ -1440,11 +1598,14 @@ export async function updateOperationsReportActionPlanItem(
       input.summary !== undefined,
       textValue(input.summary),
       input.isIncluded,
+      input.reviewedAt !== undefined,
+      input.reviewedAt ?? null,
       input.displayOrder,
     ],
   );
   const item = res.rows[0] ?? null;
   if (item) {
+    await invalidateEditableReportRender(reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_action_plan_item_updated",
       targetType: "operations_report",
@@ -1485,6 +1646,7 @@ export async function bulkUpdateOperationsReportFindings(
     `,
     values,
   );
+  if (res.rows.length > 0) await invalidateEditableReportRender(reportId);
   await recordAdminAuditLog(actor, {
     action: "operations_report_findings_bulk_updated",
     targetType: "operations_report",
@@ -1520,6 +1682,7 @@ export async function reorderOperationsReportFindings(
       );
     }
     await client.query("COMMIT");
+    await invalidateEditableReportRender(reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_findings_reordered",
       targetType: "operations_report",
@@ -1533,23 +1696,67 @@ export async function reorderOperationsReportFindings(
   }
 }
 
-function readinessIssues(
+const PLACEHOLDER_PATTERN = /(?:\{\{|\}\}|\[insert\]|\b(?:todo|tbc|tbd)\b)/i;
+
+function clientTextProblem(
+  value: string | null | undefined,
+): "placeholder" | "unsafe_html" | null {
+  if (!value) return null;
+  if (/[<>]/.test(value)) return "unsafe_html";
+  if (PLACEHOLDER_PATTERN.test(value)) return "placeholder";
+  return null;
+}
+
+export function getOperationsReportReadinessIssues(
   report: OperationsReportRow,
   findings: OperationsReportFindingRow[],
-) {
-  const issues: string[] = [];
-  if (!textValue(report.title)) issues.push("Report title is required.");
+  positiveObservations: OperationsReportPositiveObservationRow[] = [],
+  actionPlanItems: OperationsReportActionPlanItemRow[] = [],
+  options: { requirePreview?: boolean; requirePdf?: boolean } = {},
+): OperationsReportReadinessIssue[] {
+  const issues: OperationsReportReadinessIssue[] = [];
+  const add = (
+    code: string,
+    message: string,
+    section: OperationsReportReadinessSection,
+    findingId?: string,
+  ) => issues.push({ code, message, section, findingId });
+  if (!textValue(report.title)) {
+    add("report_title_missing", "Add a report title.", "settings");
+  }
   if (!report.business_id || !report.site_id || !report.scan_run_id) {
-    issues.push("Business, website and source scan must be valid.");
+    add(
+      "report_relationship_invalid",
+      "Confirm the business, website and source scan relationships.",
+      "settings",
+    );
   }
   const included = findings.filter(
     (finding) => finding.is_included && !finding.is_false_positive,
   );
   if (included.length === 0 && !report.no_major_findings_waived) {
-    issues.push("Include at least one finding or waive major findings.");
+    add(
+      "finding_required",
+      "Include at least one finding or save an explicit no-major-findings summary.",
+      "findings",
+    );
   }
-  if (!textValue(report.executive_summary)) {
-    issues.push("Executive summary must be reviewed and saved.");
+  const summaryFields: Array<[string, string | null]> = [
+    ["introductory summary", report.overall_summary],
+    ["overall website condition", report.executive_summary],
+    ["main strengths", report.main_strengths],
+    ["main concerns", report.main_concerns],
+    ["recommended immediate actions", report.recommended_first_steps],
+    ["scope and limitations", report.scope_limitations],
+  ];
+  for (const [label, value] of summaryFields) {
+    if (!textValue(value)) {
+      add(
+        `summary_${label.replace(/\W+/g, "_")}_missing`,
+        `Complete the ${label} field.`,
+        "summary",
+      );
+    }
   }
   for (const finding of included) {
     const missing: string[] = [];
@@ -1565,9 +1772,100 @@ function readinessIssues(
     if (!hasClientUsableAffectedUrl(finding)) {
       missing.push("affected URL or no-URL reason");
     }
+    if (!finding.reviewed_at) missing.push("administrator review");
     if (missing.length > 0) {
-      issues.push(`"${finding.title}" needs ${missing.join(", ")}.`);
+      add(
+        "finding_incomplete",
+        `Complete ${missing.join(", ")} for "${finding.title || "Untitled finding"}".`,
+        "findings",
+        finding.id,
+      );
     }
+  }
+  for (const finding of findings.filter((item) => item.is_false_positive)) {
+    if (!textValue(finding.false_positive_reason)) {
+      add(
+        "false_positive_reason_missing",
+        `Record why "${finding.title || "Untitled finding"}" is a false positive.`,
+        "findings",
+        finding.id,
+      );
+    }
+  }
+  for (const observation of positiveObservations) {
+    if (!observation.reviewed_at) {
+      add(
+        "positive_observation_unreviewed",
+        `Review the positive observation "${observation.title}".`,
+        "action_plan",
+      );
+    }
+  }
+  const includedFindingIds = new Set(included.map((finding) => finding.id));
+  for (const item of actionPlanItems.filter(
+    (action) =>
+      action.report_finding_id == null ||
+      includedFindingIds.has(action.report_finding_id),
+  )) {
+    if (!item.reviewed_at) {
+      add(
+        "action_plan_item_unreviewed",
+        `Review the action-plan item "${item.title}".`,
+        "action_plan",
+      );
+    }
+  }
+  const clientTextValues = [
+    report.title,
+    report.prepared_for,
+    report.prepared_by,
+    report.executive_summary,
+    report.overall_summary,
+    report.main_strengths,
+    report.main_concerns,
+    report.recommended_first_steps,
+    report.scope_limitations,
+    report.display_settings_json.confidentialNotice,
+    report.display_settings_json.footerText,
+    ...included.flatMap((finding) => [
+      finding.title,
+      finding.client_explanation,
+      finding.why_it_matters,
+      finding.recommended_action,
+      finding.client_evidence,
+      finding.affected_url_note,
+      finding.estimated_effort,
+    ]),
+    ...positiveObservations.flatMap((item) => [item.title, item.description]),
+    ...actionPlanItems.flatMap((item) => [item.title, item.summary]),
+  ];
+  if (
+    clientTextValues.some((value) => clientTextProblem(value) === "placeholder")
+  ) {
+    add(
+      "unresolved_placeholder",
+      "Remove unresolved TODO, TBC, TBD, [insert] or template placeholders.",
+      "preview",
+    );
+  }
+  if (
+    clientTextValues.some((value) => clientTextProblem(value) === "unsafe_html")
+  ) {
+    add(
+      "unsafe_html",
+      "Remove HTML-like markup from client-visible wording.",
+      "preview",
+    );
+  }
+  if (options.requirePreview && !report.last_preview_generated_at) {
+    add(
+      "preview_not_generated",
+      "Open the saved client preview successfully.",
+      "preview",
+    );
+  }
+  if (options.requirePdf && !report.last_pdf_generated_at) {
+    add("pdf_not_generated", "Generate and inspect the server PDF.", "preview");
   }
   return issues;
 }
@@ -1627,7 +1925,14 @@ export function buildOperationsClientReportPayload(
     priorityCounts[finding.client_priority] += 1;
   });
   const actionPlan = emptyActionPlan();
-  for (const item of actionPlanItemRows.filter((row) => row.is_included)) {
+  const includedFindingIds = new Set(included.map((finding) => finding.id));
+  for (const item of actionPlanItemRows.filter(
+    (row) =>
+      row.is_included &&
+      row.reviewed_at &&
+      (row.report_finding_id == null ||
+        includedFindingIds.has(row.report_finding_id)),
+  )) {
     actionPlan[item.group_key].push({
       title: item.title,
       summary: item.summary,
@@ -1635,7 +1940,6 @@ export function buildOperationsClientReportPayload(
   }
   return {
     report: {
-      id: report.id,
       title: report.title,
       status: report.status,
       reportType: report.report_type,
@@ -1648,17 +1952,14 @@ export function buildOperationsClientReportPayload(
       sentAt: iso(report.sent_at),
     },
     business: {
-      id: report.business_id,
       name: report.business_name ?? "Client",
     },
     site: {
-      id: report.site_id,
       url: report.site_url ?? "",
       displayName: report.site_display_name ?? null,
       domain: siteDomain(report.site_url ?? ""),
     },
     scan: {
-      id: report.scan_run_id,
       finishedAt: iso(report.scan_finished_at ?? null),
       checkedLinks: report.scan_checked_links ?? 0,
       totalLinks: report.scan_total_links ?? 0,
@@ -1688,7 +1989,7 @@ export function buildOperationsClientReportPayload(
     })),
     actionPlan,
     positiveObservations: positiveObservationRows
-      .filter((row) => row.is_included)
+      .filter((row) => row.is_included && row.reviewed_at)
       .map((row) => ({
         title: row.title,
         description: row.description,
@@ -1716,11 +2017,24 @@ export function buildOperationsClientReportPayload(
 export async function getOperationsReportPreview(reportId: string) {
   const detail = await getOperationsReportDetail(reportId);
   if (!detail) return null;
+  const client = await ensureConnected();
+  const previewGeneratedAt = new Date();
+  await client.query(
+    `UPDATE operations_reports SET last_preview_generated_at = $2 WHERE id = $1`,
+    [reportId, previewGeneratedAt],
+  );
+  detail.report.last_preview_generated_at = previewGeneratedAt;
   if (isCurrentClientReportPayload(detail.report.frozen_render_json)) {
     return {
       payload: detail.report.frozen_render_json,
       frozen: true,
-      readinessIssues: readinessIssues(detail.report, detail.findings),
+      readinessIssues: getOperationsReportReadinessIssues(
+        detail.report,
+        detail.findings,
+        detail.positiveObservations,
+        detail.actionPlanItems,
+        { requirePreview: true, requirePdf: true },
+      ),
     };
   }
   return {
@@ -1732,7 +2046,13 @@ export async function getOperationsReportPreview(reportId: string) {
       detail.comparisonItems,
     ),
     frozen: false,
-    readinessIssues: readinessIssues(detail.report, detail.findings),
+    readinessIssues: getOperationsReportReadinessIssues(
+      detail.report,
+      detail.findings,
+      detail.positiveObservations,
+      detail.actionPlanItems,
+      { requirePreview: true, requirePdf: true },
+    ),
   };
 }
 
@@ -1740,16 +2060,19 @@ export async function freezeOperationsReportRender(
   actor: AdminActor,
   reportId: string,
   action: string,
+  renderedPayload?: OperationsClientReportPayload,
 ) {
   const detail = await getOperationsReportDetail(reportId);
   if (!detail) return null;
-  const payload = buildOperationsClientReportPayload(
-    detail.report,
-    detail.findings,
-    detail.positiveObservations,
-    detail.actionPlanItems,
-    detail.comparisonItems,
-  );
+  const payload =
+    renderedPayload ??
+    buildOperationsClientReportPayload(
+      detail.report,
+      detail.findings,
+      detail.positiveObservations,
+      detail.actionPlanItems,
+      detail.comparisonItems,
+    );
   const client = await ensureConnected();
   await client.query(
     `
@@ -1771,6 +2094,46 @@ export async function freezeOperationsReportRender(
   return payload;
 }
 
+export async function saveOperationsReportPdfRender(
+  reportId: string,
+  filename: string,
+  pdfBytes: Buffer,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportPdfRenderRow>(
+    `
+      INSERT INTO operations_report_pdf_renders (
+        operations_report_id,
+        filename,
+        pdf_bytes,
+        generated_at
+      )
+      VALUES ($1, $2, $3, now())
+      ON CONFLICT (operations_report_id)
+      DO UPDATE SET
+        filename = EXCLUDED.filename,
+        pdf_bytes = EXCLUDED.pdf_bytes,
+        generated_at = now()
+      RETURNING *
+    `,
+    [reportId, requiredText(filename, "pdf_filename"), pdfBytes],
+  );
+  return res.rows[0];
+}
+
+export async function getOperationsReportPdfRender(reportId: string) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportPdfRenderRow>(
+    `
+      SELECT operations_report_id, filename, pdf_bytes, generated_at
+      FROM operations_report_pdf_renders
+      WHERE operations_report_id = $1
+    `,
+    [reportId],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function markOperationsReportStatus(
   actor: AdminActor,
   reportId: string,
@@ -1779,13 +2142,21 @@ export async function markOperationsReportStatus(
   const detail = await getOperationsReportDetail(reportId);
   if (!detail) return null;
   if (status === "ready_to_send") {
-    const issues = readinessIssues(detail.report, detail.findings);
-    if (issues.length > 0) return { readinessIssues: issues };
-    await freezeOperationsReportRender(
-      actor,
-      reportId,
-      "operations_report_ready_render_frozen",
+    const issues = getOperationsReportReadinessIssues(
+      detail.report,
+      detail.findings,
+      detail.positiveObservations,
+      detail.actionPlanItems,
+      { requirePreview: true, requirePdf: true },
     );
+    if (issues.length > 0) return { readinessIssues: issues };
+    if (!isCurrentClientReportPayload(detail.report.frozen_render_json)) {
+      await freezeOperationsReportRender(
+        actor,
+        reportId,
+        "operations_report_ready_render_frozen",
+      );
+    }
   }
   const client = await ensureConnected();
   const completedAt = status === "completed" ? new Date() : null;
@@ -2012,13 +2383,15 @@ export async function recordOperationsReportSent(
     if (contact !== true && !(await contact).rows[0])
       return "contact_not_found";
   }
-  const payload = buildOperationsClientReportPayload(
-    detail.report,
-    detail.findings,
-    detail.positiveObservations,
-    detail.actionPlanItems,
-    detail.comparisonItems,
-  );
+  const payload = isCurrentClientReportPayload(detail.report.frozen_render_json)
+    ? detail.report.frozen_render_json
+    : buildOperationsClientReportPayload(
+        detail.report,
+        detail.findings,
+        detail.positiveObservations,
+        detail.actionPlanItems,
+        detail.comparisonItems,
+      );
   const client = await ensureConnected();
   try {
     await client.query("BEGIN");

@@ -44,6 +44,7 @@ export function missingFindingReadinessFields(finding: ReviewFinding) {
   if (!hasUsableAffectedUrl(finding)) {
     missing.push("affected URL or no-URL reason");
   }
+  if (!finding.reviewed_at) missing.push("administrator review");
   return missing;
 }
 

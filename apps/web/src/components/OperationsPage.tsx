@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { OperationsReportWorkspace } from "./operations/reports/OperationsReportWorkspace";
+import type { OperationsReportReadinessIssue } from "./operations/reports/types";
 
 type OperationsRouteKey =
   | "home"
@@ -452,6 +453,7 @@ type OperationsReportRow = {
   no_major_findings_waived: boolean;
   display_settings_json: Record<string, unknown>;
   frozen_at: string | null;
+  last_preview_generated_at: string | null;
   last_pdf_generated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -463,6 +465,7 @@ type OperationsReportRow = {
   contact_email?: string | null;
   included_findings?: number;
   excluded_findings?: number;
+  incomplete_findings?: number;
   critical_findings?: number;
   important_findings?: number;
   improvement_findings?: number;
@@ -523,6 +526,7 @@ type OperationsReportActionPlanItem = {
   title: string;
   summary: string | null;
   is_included: boolean;
+  reviewed_at: string | null;
   display_order: number;
   updated_at: string;
 };
@@ -566,7 +570,6 @@ type OperationsReportDetail = {
 
 type ClientReportPayload = {
   report: {
-    id: string;
     title: string;
     status: OperationsReportStatus;
     reportType: OperationsReportType;
@@ -577,10 +580,9 @@ type ClientReportPayload = {
     validUntil: string | null;
     sentAt: string | null;
   };
-  business: { id: string; name: string };
-  site: { id: string; url: string; displayName: string | null; domain: string };
+  business: { name: string };
+  site: { url: string; displayName: string | null; domain: string };
   scan: {
-    id: string;
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
@@ -1976,9 +1978,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [reportDetailLoading, setReportDetailLoading] = useState(false);
   const [reportPreview, setReportPreview] =
     useState<ClientReportPayload | null>(null);
-  const [reportReadinessIssues, setReportReadinessIssues] = useState<string[]>(
-    [],
-  );
+  const [reportReadinessIssues, setReportReadinessIssues] = useState<
+    OperationsReportReadinessIssue[]
+  >([]);
   const [reportFormOpen, setReportFormOpen] = useState(false);
   const [reportForm, setReportForm] =
     useState<ReportFormState>(emptyReportForm);
@@ -2358,7 +2360,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as {
         payload: ClientReportPayload;
-        readinessIssues: string[];
+        readinessIssues: OperationsReportReadinessIssue[];
       };
       setReportPreview(data.payload);
       setReportReadinessIssues(data.readinessIssues ?? []);
@@ -3461,7 +3463,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as {
           message?: string;
-          readinessIssues?: string[];
+          readinessIssues?: OperationsReportReadinessIssue[];
         } | null;
         if (data?.readinessIssues)
           setReportReadinessIssues(data.readinessIssues);
@@ -3512,7 +3514,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         { method: "POST" },
       );
       if (!res.ok) {
-        throw new Error(await apiErrorMessage(res, "Failed to generate PDF"));
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+          readinessIssues?: OperationsReportReadinessIssue[];
+        } | null;
+        if (data?.readinessIssues) {
+          setReportReadinessIssues(data.readinessIssues);
+        }
+        throw new Error(data?.message ?? "Failed to generate PDF");
       }
       const blob = await res.blob();
       const disposition = res.headers.get("content-disposition") ?? "";
@@ -3534,6 +3543,36 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : "Failed to generate PDF",
+      );
+    }
+  }
+
+  async function downloadSavedReportPdf(reportId: string) {
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(reportId)}/download`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        throw new Error(await apiErrorMessage(res, "Failed to download PDF"));
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") ?? "";
+      const filename =
+        disposition.match(/filename="([^"]+)"/)?.[1] ??
+        "scanlark-website-health-report.pdf";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to download PDF",
       );
     }
   }
@@ -7975,14 +8014,37 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   </small>
                   <small>
                     {report.included_findings ?? 0} included ·{" "}
+                    {report.incomplete_findings ?? 0} incomplete ·{" "}
                     {report.critical_findings ?? 0} critical ·{" "}
-                    {report.important_findings ?? 0} important
+                    {report.important_findings ?? 0} important ·{" "}
+                    {report.improvement_findings ?? 0} improvement
+                  </small>
+                  <small>
+                    Updated {formatDateTime(report.updated_at)}
+                    {report.sent_at
+                      ? ` · sent ${formatDateTime(report.sent_at)}`
+                      : ""}
                   </small>
                   <div className="ops-inline-actions">
-                    {renderLink(
-                      `/operations/reports/${report.id}`,
-                      "Continue review",
-                      "ops-button ops-button--primary",
+                    {report.status === "sent" ? (
+                      <button
+                        className="ops-button ops-button--primary"
+                        onClick={() => void downloadSavedReportPdf(report.id)}
+                      >
+                        Download PDF
+                      </button>
+                    ) : (
+                      renderLink(
+                        `/operations/reports/${report.id}`,
+                        report.status === "needs_review"
+                          ? (report.incomplete_findings ?? 0) > 0
+                            ? `Resolve ${report.incomplete_findings} incomplete`
+                            : "Continue review"
+                          : report.status === "ready_to_send"
+                            ? "Preview"
+                            : "Open report",
+                        "ops-button ops-button--primary",
+                      )
                     )}
                     {renderLink(
                       `/operations/reports/${report.id}`,
@@ -8269,7 +8331,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         {reportReadinessIssues.length > 0 && (
           <section className="ops-warning">
             {reportReadinessIssues.map((issue) => (
-              <div key={issue}>{issue}</div>
+              <div key={`${issue.code}-${issue.findingId ?? "report"}`}>
+                {issue.message}
+              </div>
             ))}
           </section>
         )}
@@ -10728,8 +10792,17 @@ const operationsStyles = `
     color: #53627a;
     font-size: 13px;
     font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0;
+  }
+  .ops-client-cover h2 {
+    border: 0;
+    color: #53627a;
+    font-size: 18px;
+    font-weight: 650;
+  }
+  .ops-client-cover small {
+    display: block;
+    overflow-wrap: anywhere;
   }
   .ops-report-workspace {
     display: grid;
@@ -10780,6 +10853,26 @@ const operationsStyles = `
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, var(--panel));
     color: var(--text);
+  }
+  .ops-readiness-list {
+    display: grid;
+    gap: 6px;
+  }
+  .ops-readiness-list button {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 3px 0;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ops-readiness-list strong {
+    color: var(--text);
+    white-space: nowrap;
   }
   .ops-report-findings-layout {
     display: grid;

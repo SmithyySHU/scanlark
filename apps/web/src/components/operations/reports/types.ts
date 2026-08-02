@@ -76,6 +76,7 @@ export type OperationsReportRow = {
   no_major_findings_waived: boolean;
   display_settings_json: Partial<OperationsReportDisplaySettings>;
   frozen_at: string | null;
+  last_preview_generated_at: string | null;
   last_pdf_generated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -84,6 +85,11 @@ export type OperationsReportRow = {
   site_display_name?: string | null;
   included_findings?: number;
   excluded_findings?: number;
+  incomplete_findings?: number;
+  critical_findings?: number;
+  important_findings?: number;
+  improvement_findings?: number;
+  informational_findings?: number;
 };
 
 export type OperationsReportFinding = {
@@ -135,6 +141,7 @@ export type OperationsReportActionPlanItem = {
   title: string;
   summary: string | null;
   is_included: boolean;
+  reviewed_at: string | null;
   display_order: number;
   updated_at: string;
 };
@@ -165,7 +172,6 @@ export type OperationsReportDetail = {
 
 export type ClientReportPayload = {
   report: {
-    id: string;
     title: string;
     status: OperationsReportStatus;
     reportType: OperationsReportType;
@@ -176,10 +182,9 @@ export type ClientReportPayload = {
     validUntil: string | null;
     sentAt: string | null;
   };
-  business: { id: string; name: string };
-  site: { id: string; url: string; displayName: string | null; domain: string };
+  business: { name: string };
+  site: { url: string; displayName: string | null; domain: string };
   scan: {
-    id: string;
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
@@ -219,4 +224,11 @@ export type ClientReportPayload = {
     summary: string | null;
   }>;
   generatedAt: string;
+};
+
+export type OperationsReportReadinessIssue = {
+  code: string;
+  message: string;
+  section: "settings" | "summary" | "findings" | "action_plan" | "preview";
+  findingId?: string;
 };

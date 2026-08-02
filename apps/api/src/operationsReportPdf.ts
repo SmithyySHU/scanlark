@@ -41,6 +41,37 @@ function actionPlanLabel(value: string) {
   return "Consider later";
 }
 
+function reportTypeLabel(value: string) {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatDate(value: string | null) {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+function priorityDefinition(value: string) {
+  if (value === "critical") {
+    return "Confirmed issues that may seriously disrupt access, trust or an important visitor journey.";
+  }
+  if (value === "important") {
+    return "Issues worth addressing soon because they can materially affect visitors or website quality.";
+  }
+  if (value === "improvement") {
+    return "Practical improvements that can strengthen clarity, maintainability or visitor experience.";
+  }
+  return "Useful context or lower-impact housekeeping that does not require urgent action.";
+}
+
 function listItems(items: string[]) {
   return items.length
     ? `<ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
@@ -50,6 +81,17 @@ function listItems(items: string[]) {
 export function renderOperationsReportHtml(
   payload: OperationsClientReportPayload,
 ) {
+  const priorities = Object.entries(payload.priorityCounts)
+    .filter(([priority, count]) => priority !== "informational" || count > 0)
+    .map(
+      ([priority, count]) => `
+        <article class="priority-item avoid-break">
+          <div><strong>${priorityLabel(priority)}</strong><span>${count} included</span></div>
+          <p>${priorityDefinition(priority)}</p>
+        </article>
+      `,
+    )
+    .join("");
   const actionGroups = Object.entries(payload.actionPlan)
     .filter(([, items]) => items.length > 0)
     .map(
@@ -59,7 +101,7 @@ export function renderOperationsReportHtml(
           ${items
             .map(
               (item) => `
-                <article class="action-item">
+                <article class="action-item avoid-break">
                   <strong>${escapeHtml(item.title)}</strong>
                   ${item.summary ? `<p>${escapeHtml(item.summary)}</p>` : ""}
                 </article>
@@ -70,6 +112,29 @@ export function renderOperationsReportHtml(
       `,
     )
     .join("");
+
+  const technicalAppendix = payload.settings.displayTechnicalAppendix
+    ? `<section class="report-section page-start">
+        <h2>Technical appendix</h2>
+        <dl class="scope-grid">
+          <dt>Selected scan date</dt><dd>${escapeHtml(formatDate(payload.scan.finishedAt))}</dd>
+          <dt>Links/resources checked</dt><dd>${payload.scan.checkedLinks}</dd>
+          <dt>Links/resources discovered</dt><dd>${payload.scan.totalLinks}</dd>
+          <dt>Included reviewed findings</dt><dd>${payload.findings.length}</dd>
+        </dl>
+      </section>`
+    : "";
+  const closingSections = [
+    payload.settings.displayNextSteps
+      ? `<section><h2>Next steps</h2>${listItems(payload.nextSteps)}</section>`
+      : "",
+    payload.settings.displayMethodologyLimitations
+      ? `<section><h2>Methodology and limitations</h2>${listItems(payload.methodology)}</section>`
+      : "",
+  ].filter(Boolean);
+  const closingContent = closingSections.length
+    ? `<div class="report-section closing-grid ${closingSections.length === 1 ? "closing-grid--single" : ""}">${closingSections.join("")}</div>`
+    : "";
 
   const positives = payload.positiveObservations
     .map(
@@ -124,23 +189,38 @@ export function renderOperationsReportHtml(
       print-color-adjust: exact;
     }
     h1, h2, h3, h4, p { margin-top: 0; }
-    h1 { font-size: 30pt; line-height: 1.05; margin-bottom: 12mm; }
-    h2 { font-size: 18pt; border-bottom: 1px solid #d6deea; padding-bottom: 4mm; }
-    h3 { font-size: 13pt; margin-bottom: 3mm; }
+    h1 { font-size: 30pt; line-height: 1.05; margin-bottom: 5mm; }
+    h2 { font-size: 18pt; border-bottom: 1px solid #d6deea; padding-bottom: 4mm; break-after: avoid-page; page-break-after: avoid; }
+    h3 { font-size: 13pt; margin-bottom: 3mm; break-after: avoid-page; page-break-after: avoid; }
     h4 { font-size: 9pt; margin: 5mm 0 1.5mm; color: #4d5b73; text-transform: uppercase; letter-spacing: .04em; }
     .cover { min-height: 246mm; display: grid; align-content: center; gap: 7mm; page-break-after: always; }
-    .brand { color: #315178; font-size: 12pt; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .brand { color: #315178; font-size: 16pt; font-weight: 800; letter-spacing: 0; }
+    .report-title { color: #526176; font-size: 13pt; font-weight: 650; }
     .cover-meta { display: grid; gap: 2mm; color: #526176; font-size: 12pt; }
     .confidential { margin-top: 14mm; color: #526176; font-size: 10pt; }
     .report-section { margin: 0 0 10mm; }
-    .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4mm; margin: 6mm 0 10mm; }
+    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; margin: 6mm 0 10mm; }
     .summary-card { border: 1px solid #d6deea; border-radius: 3mm; padding: 4mm; background: #f7f9fc; }
     .summary-card strong { display: block; font-size: 18pt; }
     .summary-card span { color: #526176; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }
-    .finding, .action-item, .positive-item { border: 1px solid #d6deea; border-radius: 3mm; padding: 5mm; margin-bottom: 5mm; background: #fff; }
+    .finding, .action-item, .positive-item, .priority-item { border: 1px solid #d6deea; border-radius: 2mm; padding: 5mm; margin-bottom: 5mm; background: #fff; }
+    .action-item, .positive-item { padding: 3.5mm; margin-bottom: 3mm; }
     .finding__meta { display: inline-block; margin-bottom: 3mm; padding: 1.5mm 2.5mm; border-radius: 999px; background: #edf3fb; color: #214b76; font-size: 8.5pt; font-weight: 800; }
     .url { overflow-wrap: anywhere; word-break: break-word; color: #526176; }
     .effort { color: #526176; font-size: 9pt; }
+    .priority-item div { display: flex; justify-content: space-between; gap: 5mm; }
+    .priority-item span { color: #526176; font-size: 9pt; }
+    .priority-item p { margin: 2mm 0 0; }
+    .scope-grid { display: grid; grid-template-columns: 52mm 1fr; gap: 2mm 5mm; }
+    .scope-grid dt { color: #526176; }
+    .scope-grid dd { margin: 0; }
+    .page-start { break-before: page; page-break-before: always; }
+    .closing-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8mm; align-items: start; }
+    .closing-grid--single { grid-template-columns: 1fr; }
+    .closing-grid { font-size: 9.5pt; line-height: 1.3; }
+    .closing-grid h2 { font-size: 13pt; padding-bottom: 2.5mm; }
+    .closing-grid ul { margin: 0; }
+    .closing-grid li { margin-bottom: 1mm; }
     .avoid-break { break-inside: avoid; page-break-inside: avoid; }
     ul { padding-left: 5mm; }
     li { margin-bottom: 2mm; }
@@ -149,25 +229,30 @@ export function renderOperationsReportHtml(
 <body>
   <section class="cover">
     <div class="brand">${payload.settings.displayLogo ? "Scanlark" : ""}</div>
-    <h1>${escapeHtml(payload.report.title)}</h1>
+    <h1>Website Health Report</h1>
+    <div class="report-title">${escapeHtml(payload.report.title)}</div>
     <div class="cover-meta">
       <strong>${escapeHtml(payload.business.name)}</strong>
-      <span>${escapeHtml(payload.site.displayName ?? payload.site.url)}</span>
-      <span>Prepared for ${escapeHtml(payload.report.preparedFor ?? "Client")}</span>
+      <span class="url">${escapeHtml(payload.site.displayName ?? payload.site.url)}</span>
+      ${payload.report.preparedFor ? `<span>Prepared for ${escapeHtml(payload.report.preparedFor)}</span>` : ""}
       <span>Prepared by ${escapeHtml(payload.report.preparedBy ?? "Scanlark")}</span>
-      <span>${escapeHtml(payload.report.coverDate)}</span>
+      <span>Report date ${escapeHtml(formatDate(payload.report.coverDate))}</span>
+      <span>${escapeHtml(reportTypeLabel(payload.report.reportType))}</span>
     </div>
     ${payload.settings.confidentialNotice ? `<p class="confidential">${escapeHtml(payload.settings.confidentialNotice)}</p>` : ""}
   </section>
   <section class="report-section">
     <h2>Executive summary</h2>
-    ${payload.summaries.executiveSummary ? `<p>${escapeHtml(payload.summaries.executiveSummary)}</p>` : ""}
     ${payload.summaries.overallSummary ? `<p>${escapeHtml(payload.summaries.overallSummary)}</p>` : ""}
+    ${payload.summaries.executiveSummary ? `<h3>Overall website condition</h3><p>${escapeHtml(payload.summaries.executiveSummary)}</p>` : ""}
     ${payload.summaries.mainStrengths ? `<h3>Main strengths</h3><p>${escapeHtml(payload.summaries.mainStrengths)}</p>` : ""}
     ${payload.summaries.mainConcerns ? `<h3>Main concerns</h3><p>${escapeHtml(payload.summaries.mainConcerns)}</p>` : ""}
     ${payload.summaries.recommendedFirstSteps ? `<h3>Recommended immediate action</h3><p>${escapeHtml(payload.summaries.recommendedFirstSteps)}</p>` : ""}
     <div class="summary-grid">
       ${Object.entries(payload.priorityCounts)
+        .filter(
+          ([priority, count]) => count > 0 || priority !== "informational",
+        )
         .map(
           ([priority, count]) =>
             `<div class="summary-card"><span>${priorityLabel(priority)}</span><strong>${count}</strong></div>`,
@@ -177,13 +262,21 @@ export function renderOperationsReportHtml(
   </section>
   <section class="report-section">
     <h2>Review scope</h2>
-    <p>Website scanned: <span class="url">${escapeHtml(payload.site.url)}</span></p>
-    <p>Pages and links checked: ${payload.scan.checkedLinks} checked links from ${payload.scan.totalLinks} discovered links.</p>
+    <dl class="scope-grid">
+      <dt>Website</dt><dd class="url">${escapeHtml(payload.site.url)}</dd>
+      <dt>Selected scan date</dt><dd>${escapeHtml(formatDate(payload.scan.finishedAt))}</dd>
+      <dt>Public links/resources checked</dt><dd>${payload.scan.checkedLinks} of ${payload.scan.totalLinks} discovered</dd>
+    </dl>
     ${payload.summaries.scopeLimitations ? `<p>${escapeHtml(payload.summaries.scopeLimitations)}</p>` : ""}
+  </section>
+  <section class="report-section">
+    <h2>Priority overview</h2>
+    <p>Priorities reflect the reviewed client impact and recommended order of attention. Labels and descriptions are provided so the overview does not rely on colour alone.</p>
+    ${priorities}
   </section>
   ${
     findings
-      ? `<section class="report-section"><h2>Key findings</h2>${findings}</section>`
+      ? `<section class="report-section page-start"><h2>Key findings</h2>${findings}</section>`
       : ""
   }
   ${
@@ -196,16 +289,8 @@ export function renderOperationsReportHtml(
       ? `<section class="report-section"><h2>Positive observations</h2>${positives}</section>`
       : ""
   }
-  ${
-    payload.settings.displayNextSteps
-      ? `<section class="report-section"><h2>Next steps</h2>${listItems(payload.nextSteps)}</section>`
-      : ""
-  }
-  ${
-    payload.settings.displayMethodologyLimitations
-      ? `<section class="report-section"><h2>Methodology and limitations</h2>${listItems(payload.methodology)}</section>`
-      : ""
-  }
+  ${closingContent}
+  ${technicalAppendix}
 </body>
 </html>`;
 }
@@ -230,8 +315,7 @@ export async function renderOperationsReportPdf(
       printBackground: true,
       displayHeaderFooter: true,
       headerTemplate: "<div></div>",
-      footerTemplate:
-        '<div style="width:100%;font-size:8px;color:#6b7688;padding:0 16mm;display:flex;justify-content:space-between;"><span>Scanlark</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
+      footerTemplate: `<div style="width:100%;font-size:8px;color:#6b7688;padding:0 16mm;display:flex;justify-content:space-between;gap:10mm;"><span>${escapeHtml(payload.settings.footerText ?? "Scanlark")}</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`,
       margin: { top: "18mm", right: "16mm", bottom: "20mm", left: "16mm" },
       preferCSSPageSize: true,
       tagged: true,

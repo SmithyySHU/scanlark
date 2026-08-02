@@ -1378,6 +1378,9 @@ export function parseOperationsReportFindingUpdateInput(
       "recommendedAction",
     );
   }
+  if ("affectedUrl" in record) {
+    parsed.affectedUrl = optionalClientTextField(record, "affectedUrl");
+  }
   if ("clientEvidence" in record) {
     parsed.clientEvidence = optionalClientTextField(record, "clientEvidence");
   }
@@ -1483,6 +1486,9 @@ export function parseOperationsReportActionPlanItemUpdateInput(
   }
   if ("isIncluded" in record) {
     parsed.isIncluded = record.isIncluded === true;
+  }
+  if ("reviewedAt" in record) {
+    parsed.reviewedAt = parseDateField(record, "reviewedAt");
   }
   parsed.displayOrder = optionalDisplayOrder(record);
   return parsed;

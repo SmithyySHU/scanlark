@@ -20,6 +20,7 @@ import {
   parseOperationsContactInput,
   parseOperationsAccessRequirementInput,
   parseOperationsReportCreateInput,
+  parseOperationsReportActionPlanItemUpdateInput,
   parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportPositiveObservationUpdateInput,
@@ -39,12 +40,17 @@ import {
 } from "./operationsHelpers";
 import {
   buildOperationsClientReportPayload,
+  getOperationsReportReadinessIssues,
   type OperationsReportComparisonItemRow,
   type OperationsReportFindingRow,
   type OperationsReportPositiveObservationRow,
   type OperationsReportActionPlanItemRow,
   type OperationsReportRow,
 } from "../../../packages/db/src/operationsReports";
+import {
+  operationsReportPdfFilename,
+  renderOperationsReportHtml,
+} from "./operationsReportPdf";
 import {
   buildOperationsQuotePreviewPayload,
   calculateQuoteTotals,
@@ -646,6 +652,15 @@ test("operations report editing validation rejects unsafe client copy and invali
   });
   assert.equal(observationPatch.title, "HTTPS is active");
 
+  const actionPlanPatch = parseOperationsReportActionPlanItemUpdateInput({
+    title: "Repair the broken link",
+    groupKey: "address_now",
+    reviewedAt: "2026-01-22T09:00:00.000Z",
+    displayOrder: 2,
+  });
+  assert.equal(actionPlanPatch.groupKey, "address_now");
+  assert(actionPlanPatch.reviewedAt instanceof Date);
+
   const bulkPatch = parseOperationsReportFindingBulkInput({
     action: "change_priority",
     clientPriority: "critical",
@@ -729,6 +744,7 @@ test("operations client report payload excludes internal-only finding data", () 
     display_settings_json: {},
     frozen_render_json: null,
     frozen_at: null,
+    last_preview_generated_at: now,
     last_pdf_generated_at: null,
     created_by_user_id: null,
     created_at: now,
@@ -827,6 +843,7 @@ test("operations client report payload excludes internal-only finding data", () 
       title: "Repair important broken link",
       summary: "Update or remove the link.",
       is_included: true,
+      reviewed_at: now,
       display_order: 0,
       created_at: now,
       updated_at: now,
@@ -860,6 +877,109 @@ test("operations client report payload excludes internal-only finding data", () 
   assert(!serialized.includes("Excluded issue"));
   assert(!serialized.includes("source_issue_id"));
   assert(!serialized.includes("contact_email"));
+  assert(!serialized.includes("report_1"));
+  assert(!serialized.includes("business_1"));
+
+  const unreviewedPayload = buildOperationsClientReportPayload(
+    report,
+    findings,
+    observations.map((item) => ({ ...item, reviewed_at: null })),
+    actionPlanItems.map((item) => ({ ...item, reviewed_at: null })),
+    [],
+  );
+  assert.equal(unreviewedPayload.positiveObservations.length, 0);
+  assert.equal(unreviewedPayload.actionPlan.address_soon.length, 0);
+  const legacyPayload = buildOperationsClientReportPayload(report, findings);
+  assert.deepEqual(legacyPayload.positiveObservations, []);
+  assert.deepEqual(legacyPayload.actionPlan, {
+    address_now: [],
+    address_soon: [],
+    consider_later: [],
+  });
+
+  const completeReport: OperationsReportRow = {
+    ...report,
+    executive_summary: "The reviewed website needs a small number of fixes.",
+    overall_summary: "This report summarises the selected public-page check.",
+    main_strengths: "The website was reachable during the check.",
+    main_concerns: "One broken visitor journey needs attention.",
+    recommended_first_steps: "Repair the broken link and run a re-test.",
+    scope_limitations: "Logged-in areas and forms were not tested.",
+    last_pdf_generated_at: now,
+  };
+  assert.deepEqual(
+    getOperationsReportReadinessIssues(
+      completeReport,
+      findings,
+      observations,
+      actionPlanItems,
+      { requirePreview: true, requirePdf: true },
+    ),
+    [],
+  );
+
+  const incompleteIssues = getOperationsReportReadinessIssues(
+    { ...completeReport, executive_summary: "TODO" },
+    [
+      {
+        ...findings[0],
+        client_explanation: null,
+        reviewed_at: null,
+      },
+      findings[1],
+    ],
+    observations.map((item) => ({ ...item, reviewed_at: null })),
+    actionPlanItems.map((item) => ({ ...item, reviewed_at: null })),
+    { requirePreview: true, requirePdf: true },
+  );
+  assert(incompleteIssues.some((issue) => issue.code === "finding_incomplete"));
+  assert(
+    incompleteIssues.some(
+      (issue) => issue.code === "positive_observation_unreviewed",
+    ),
+  );
+  assert(
+    incompleteIssues.some(
+      (issue) => issue.code === "action_plan_item_unreviewed",
+    ),
+  );
+  assert(
+    incompleteIssues.some((issue) => issue.code === "unresolved_placeholder"),
+  );
+  assert(
+    incompleteIssues.every(
+      (issue) => typeof issue.section === "string" && issue.message.length > 0,
+    ),
+  );
+  assert(
+    getOperationsReportReadinessIssues(
+      { ...completeReport, main_concerns: "<strong>Unsafe</strong>" },
+      findings,
+      observations,
+      actionPlanItems,
+    ).some((issue) => issue.code === "unsafe_html"),
+  );
+
+  const longUrl = `https://www.example.com/${"very-long-segment-".repeat(20)}?source=client&value=<reviewed>`;
+  const html = renderOperationsReportHtml({
+    ...payload,
+    findings: [{ ...payload.findings[0]!, affectedUrl: longUrl }],
+  });
+  assert(html.includes("overflow-wrap: anywhere"));
+  assert(html.includes("&amp;value=&lt;reviewed&gt;"));
+  assert(!html.includes("value=<reviewed>"));
+  assert(html.includes("Repair important broken link"));
+  assert(html.includes("HTTPS is active"));
+  assert(html.includes("The website needs a few fixes."));
+  assert.equal(
+    operationsReportPdfFilename(payload),
+    "scanlark-website-health-report-example-co-www-example-com-2026-01-20.pdf",
+  );
+
+  const frozenSnapshot = JSON.stringify(payload);
+  findings[0]!.title = "Later mutable title";
+  actionPlanItems[0]!.title = "Later mutable action";
+  assert.equal(JSON.stringify(payload), frozenSnapshot);
 });
 
 function makeQuoteDetail(
