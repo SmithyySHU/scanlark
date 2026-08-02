@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { recordAdminAuditLog, type AdminActor } from "./admin";
+import { getOperationsTaskCounts } from "./operationsCommunications";
 
 export const OPERATIONS_PIPELINE_STAGES = [
   "discovered",
@@ -1144,16 +1145,8 @@ export async function listOperationsAvailableSites(options: {
 
 export async function getOperationsBusinessCounts() {
   const client = await ensureConnected();
-  const [followUpsDue, prospectsAwaitingContact] = await Promise.all([
-    client.query<CountRow>(
-      `
-        SELECT COUNT(*)::text AS count
-        FROM operations_businesses
-        WHERE is_archived = false
-          AND next_follow_up_at IS NOT NULL
-          AND next_follow_up_at <= NOW()
-      `,
-    ),
+  const [taskCounts, prospectsAwaitingContact] = await Promise.all([
+    getOperationsTaskCounts(),
     client.query<CountRow>(
       `
         SELECT COUNT(*)::text AS count
@@ -1165,7 +1158,8 @@ export async function getOperationsBusinessCounts() {
     ),
   ]);
   return {
-    followUpsDue: countValue(followUpsDue.rows[0]),
+    followUpsDue: taskCounts.followUpsDue,
     prospectsAwaitingContact: countValue(prospectsAwaitingContact.rows[0]),
+    openWorkItems: taskCounts.openWorkItems,
   };
 }

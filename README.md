@@ -112,6 +112,9 @@ Required for normal local development:
   closed.
 - `PUBLIC_CONTACT_EMAIL`: public contact address returned by `/public/config`
   and used by the managed-service landing CTA.
+- `OPERATIONS_SENDER_NAME` and `OPERATIONS_SENDER_EMAIL`: sender placeholder
+  values for manual Operations communication drafts. These do not send email or
+  configure SMTP; missing values remain unresolved in draft previews.
 
 Common development variables:
 

@@ -378,7 +378,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
       reportsAwaitingReview: countValue(reportReviewCandidates.rows[0]),
       criticalClientSites: countValue(highPrioritySiteCount.rows[0]),
       quotesAwaitingResponse: 0,
-      openWorkItems: 0,
+      openWorkItems: crmCounts.openWorkItems,
     },
     monitoringAttention,
     recentActivity,

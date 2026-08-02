@@ -275,6 +275,43 @@ export type {
   OperationsPipelineStage,
   OperationsRelationshipType,
 } from "./operationsCrm";
+export {
+  cancelOperationsCommunication,
+  cancelOperationsTask,
+  completeOperationsTask,
+  createOperationsCommunication,
+  createOperationsCommunicationTemplate,
+  createOperationsTask,
+  getOperationsCommunicationDraftContext,
+  getOperationsCommunicationTemplate,
+  getOperationsTaskCounts,
+  listOperationsCommunicationTemplates,
+  listOperationsCommunications,
+  listOperationsTasks,
+  markOperationsCommunicationSent,
+  OPERATIONS_COMMUNICATION_CHANNELS,
+  OPERATIONS_COMMUNICATION_DIRECTIONS,
+  OPERATIONS_COMMUNICATION_STATUSES,
+  OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
+  OPERATIONS_TASK_STATUSES,
+  snoozeOperationsTask,
+  updateOperationsCommunication,
+  updateOperationsCommunicationTemplate,
+  updateOperationsTask,
+} from "./operationsCommunications";
+export type {
+  OperationsCommunicationChannel,
+  OperationsCommunicationDirection,
+  OperationsCommunicationDraftContext,
+  OperationsCommunicationInput,
+  OperationsCommunicationRow,
+  OperationsCommunicationStatus,
+  OperationsCommunicationTemplateCategory,
+  OperationsCommunicationTemplateRow,
+  OperationsTaskInput,
+  OperationsTaskRow,
+  OperationsTaskStatus,
+} from "./operationsCommunications";
 
 export {
   createOrRotateReportShareForRunForUser,

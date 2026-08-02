@@ -3,42 +3,70 @@ import type { Request, Response } from "express";
 import {
   addOperationsBusinessNote,
   addOperationsContact,
+  cancelOperationsCommunication,
+  cancelOperationsTask,
+  completeOperationsTask,
+  createOperationsCommunication,
+  createOperationsCommunicationTemplate,
+  createOperationsTask,
   createOperationsBusiness,
   deleteOperationsContact,
+  getOperationsCommunicationDraftContext,
+  getOperationsCommunicationTemplate,
   getOperationsBusinessDetail,
   getOperationsSummary,
-  isValidEmailAddress,
   linkOperationsBusinessSite,
+  listOperationsCommunicationTemplates,
+  listOperationsCommunications,
   listOperationsAvailableSites,
   listOperationsBusinesses,
   listOperationsPipeline,
-  OPERATIONS_PIPELINE_STAGES,
-  OPERATIONS_RELATIONSHIP_TYPES,
+  listOperationsTasks,
+  markOperationsCommunicationSent,
   setOperationsBusinessArchived,
   setPrimaryOperationsContact,
+  snoozeOperationsTask,
   unlinkOperationsBusinessSite,
   updateOperationsBusiness,
+  updateOperationsCommunication,
+  updateOperationsCommunicationTemplate,
+  updateOperationsTask,
   updateOperationsContact,
   type AdminActor,
   type OperationsBusinessInput,
+  type OperationsCommunicationInput,
+  type OperationsCommunicationTemplateCategory,
   type OperationsContactInput,
-  type OperationsPipelineStage,
-  type OperationsRelationshipType,
+  type OperationsTaskStatus,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
-import { normalizeSiteUrlInput } from "../siteUrl";
+import {
+  OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
+  OPERATIONS_TASK_STATUSES,
+  SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
+  parseOperationsBusinessInput,
+  parseOperationsCommunicationInput,
+  parseOperationsCommunicationTemplateInput,
+  parseOperationsContactInput,
+  parseOperationsTaskInput,
+  optionalTextField,
+  optionalUuidField,
+  parseDateField,
+  parsePipelineStage,
+  parseRelationshipType,
+  parseRequiredDateField,
+  renderClientCommunicationTemplate,
+  serializeDate,
+  serializeOperationsSummary,
+  textField,
+} from "../operationsHelpers";
 
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 50;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PIPELINE_STAGE_SET = new Set<string>(OPERATIONS_PIPELINE_STAGES);
-const RELATIONSHIP_TYPE_SET = new Set<string>(OPERATIONS_RELATIONSHIP_TYPES);
+const TASK_STATUS_SET = new Set<string>(OPERATIONS_TASK_STATUSES);
 const SORT_SET = new Set(["name", "updated_desc", "next_follow_up"]);
-
-function serializeDate(value: Date | null) {
-  return value instanceof Date ? value.toISOString() : value;
-}
 
 function serializeObject(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -77,143 +105,11 @@ function getUuidParam(req: Request, res: Response, key: string) {
   return value;
 }
 
-function textField(input: Record<string, unknown>, key: string) {
-  const value = input[key];
-  if (value == null) return null;
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function optionalTextField(input: Record<string, unknown>, key: string) {
-  if (!(key in input)) return undefined;
-  return textField(input, key);
-}
-
-function parseDateField(input: Record<string, unknown>, key: string) {
-  if (!(key in input)) return undefined;
-  const value = input[key];
-  if (value == null || value === "") return null;
-  if (typeof value !== "string") throw new Error(`${key}_invalid`);
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error(`${key}_invalid`);
-  return date;
-}
-
-function parsePipelineStage(value: unknown): OperationsPipelineStage | null {
-  if (typeof value !== "string") return null;
-  return PIPELINE_STAGE_SET.has(value)
-    ? (value as OperationsPipelineStage)
-    : null;
-}
-
-function parseRelationshipType(
-  value: unknown,
-): OperationsRelationshipType | null {
-  if (typeof value !== "string") return null;
-  return RELATIONSHIP_TYPE_SET.has(value)
-    ? (value as OperationsRelationshipType)
-    : null;
-}
-
-export function parseOperationsBusinessInput(
-  body: unknown,
-  options: { partial?: boolean } = {},
-): Partial<OperationsBusinessInput> & {
-  primaryContact?: OperationsContactInput | null;
-  initialNote?: string | null;
-  markContactedNow?: boolean;
-  clearNextFollowUp?: boolean;
-} {
-  const input = body && typeof body === "object" ? body : {};
-  const record = input as Record<string, unknown>;
-  const name = optionalTextField(record, "name");
-  if (!options.partial && !name) throw new Error("business_name_required");
-  if (options.partial && "name" in record && !name) {
-    throw new Error("business_name_required");
-  }
-
-  let pipelineStage: OperationsPipelineStage | undefined;
-  if ("pipelineStage" in record) {
-    const parsed = parsePipelineStage(record.pipelineStage);
-    if (!parsed) throw new Error("invalid_pipeline_stage");
-    pipelineStage = parsed;
-  }
-
-  let relationshipType: OperationsRelationshipType | undefined;
-  if ("relationshipType" in record) {
-    const parsed = parseRelationshipType(record.relationshipType);
-    if (!parsed) throw new Error("invalid_relationship_type");
-    relationshipType = parsed;
-  }
-
-  const generalEmail = optionalTextField(record, "generalEmail");
-  if (generalEmail && !isValidEmailAddress(generalEmail)) {
-    throw new Error("invalid_email");
-  }
-
-  let websiteUrl = optionalTextField(record, "websiteUrl");
-  if (websiteUrl) {
-    websiteUrl = normalizeSiteUrlInput(websiteUrl);
-  }
-
-  const primaryContactRecord =
-    record.primaryContact && typeof record.primaryContact === "object"
-      ? (record.primaryContact as Record<string, unknown>)
-      : null;
-  const primaryContact = primaryContactRecord
-    ? parseOperationsContactInput(primaryContactRecord, { allowEmpty: true })
-    : null;
-
+function getSenderDefaults() {
   return {
-    ...(name ? { name } : {}),
-    ...(pipelineStage !== undefined ? { pipelineStage } : {}),
-    ...(relationshipType !== undefined ? { relationshipType } : {}),
-    source: optionalTextField(record, "source"),
-    businessType: optionalTextField(record, "businessType"),
-    location: optionalTextField(record, "location"),
-    phone: optionalTextField(record, "phone"),
-    generalEmail,
-    websiteUrl,
-    lastContactedAt: parseDateField(record, "lastContactedAt"),
-    nextFollowUpAt: parseDateField(record, "nextFollowUpAt"),
-    nextAction: optionalTextField(record, "nextAction"),
-    primaryContact,
-    initialNote: optionalTextField(record, "initialNote"),
-    markContactedNow: record.markContactedNow === true,
-    clearNextFollowUp: record.clearNextFollowUp === true,
+    senderName: process.env.OPERATIONS_SENDER_NAME ?? "",
+    senderEmail: process.env.OPERATIONS_SENDER_EMAIL ?? "",
   };
-}
-
-export function parseOperationsContactInput(
-  body: unknown,
-  options: { allowEmpty?: boolean } = {},
-): OperationsContactInput {
-  const input = body && typeof body === "object" ? body : {};
-  const record = input as Record<string, unknown>;
-  const email = optionalTextField(record, "email");
-  if (email && !isValidEmailAddress(email)) {
-    throw new Error("invalid_contact_email");
-  }
-  const contact = {
-    firstName: optionalTextField(record, "firstName"),
-    lastName: optionalTextField(record, "lastName"),
-    email,
-    phone: optionalTextField(record, "phone"),
-    jobTitle: optionalTextField(record, "jobTitle"),
-    notes: optionalTextField(record, "notes"),
-    isPrimary: record.isPrimary === true,
-  };
-  if (
-    !options.allowEmpty &&
-    !contact.firstName &&
-    !contact.lastName &&
-    !contact.email &&
-    !contact.phone
-  ) {
-    throw new Error("contact_details_required");
-  }
-  return contact;
 }
 
 function parsePagination(req: Request) {
@@ -233,23 +129,6 @@ function serializeOperationsBusinessDetail(
   detail: Awaited<ReturnType<typeof getOperationsBusinessDetail>>,
 ) {
   return serializeObject(detail);
-}
-
-export function serializeOperationsSummary(
-  summary: Awaited<ReturnType<typeof getOperationsSummary>>,
-) {
-  return {
-    counts: summary.counts,
-    monitoringAttention: summary.monitoringAttention.map((item) => ({
-      ...item,
-      occurredAt: serializeDate(item.occurredAt),
-    })),
-    recentActivity: summary.recentActivity.map((item) => ({
-      ...item,
-      occurredAt: item.occurredAt.toISOString(),
-    })),
-    generatedAt: summary.generatedAt.toISOString(),
-  };
 }
 
 function handleValidationError(res: Response, err: unknown) {
@@ -313,6 +192,26 @@ function handleValidationError(res: Response, err: unknown) {
       "Note body is required",
     );
   }
+  if (
+    message === "invalid_template_category" ||
+    message === "invalid_communication_direction" ||
+    message === "invalid_communication_channel" ||
+    message === "invalid_communication_status" ||
+    message === "invalid_task_status"
+  ) {
+    return sendApiError(res, 400, message, "Request value is invalid");
+  }
+  if (
+    message.startsWith("invalid_") ||
+    message === "template_name_required" ||
+    message === "template_subject_required" ||
+    message === "template_body_required" ||
+    message === "communication_body_required" ||
+    message === "task_title_required" ||
+    message.endsWith("_required")
+  ) {
+    return sendApiError(res, 400, message, "Required request value is invalid");
+  }
   return null;
 }
 
@@ -361,6 +260,248 @@ export function mountOperationsRoutes(app: express.Application) {
         500,
         "operations_sites_failed",
         "Failed to load available sites",
+      );
+    }
+  });
+
+  router.get("/communication-templates", async (req, res) => {
+    try {
+      return res.json({
+        templates: serializeObject(
+          await listOperationsCommunicationTemplates({
+            activeOnly: req.query.activeOnly === "true",
+          }),
+        ),
+        categories: OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
+        placeholders: SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
+      });
+    } catch (err) {
+      console.error("Operations communication templates failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_templates_failed",
+        "Failed to load communication templates",
+      );
+    }
+  });
+
+  router.post("/communication-templates", async (req, res) => {
+    try {
+      const input = parseOperationsCommunicationTemplateInput(req.body);
+      const template = await createOperationsCommunicationTemplate(
+        getActor(req),
+        input as {
+          name: string;
+          category: OperationsCommunicationTemplateCategory;
+          subjectTemplate: string;
+          bodyTemplate: string;
+          isActive?: boolean;
+        },
+      );
+      return res.status(201).json({ template: serializeObject(template) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations create communication template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_template_create_failed",
+        "Failed to create communication template",
+      );
+    }
+  });
+
+  router.patch("/communication-templates/:templateId", async (req, res) => {
+    const templateId = getUuidParam(req, res, "templateId");
+    if (!templateId) return;
+    try {
+      const template = await updateOperationsCommunicationTemplate(
+        getActor(req),
+        templateId,
+        parseOperationsCommunicationTemplateInput(req.body, { partial: true }),
+      );
+      if (!template)
+        return sendApiError(res, 404, "not_found", "Template not found");
+      return res.json({ template: serializeObject(template) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations update communication template failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_template_update_failed",
+        "Failed to update communication template",
+      );
+    }
+  });
+
+  router.get("/communications", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsCommunications({
+            limit: parsePagination(req).limit,
+            offset: parsePagination(req).offset,
+          }),
+        ),
+      );
+    } catch (err) {
+      console.error("Operations communications list failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communications_failed",
+        "Failed to load communications",
+      );
+    }
+  });
+
+  router.get("/tasks", async (req, res) => {
+    try {
+      const status =
+        typeof req.query.status === "string" &&
+        (req.query.status === "active" ||
+          req.query.status === "due" ||
+          TASK_STATUS_SET.has(req.query.status))
+          ? (req.query.status as OperationsTaskStatus | "active" | "due")
+          : undefined;
+      return res.json(
+        serializeObject(
+          await listOperationsTasks({
+            status,
+            ...parsePagination(req),
+          }),
+        ),
+      );
+    } catch (err) {
+      console.error("Operations tasks list failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_tasks_failed",
+        "Failed to load tasks",
+      );
+    }
+  });
+
+  router.post("/tasks", async (req, res) => {
+    try {
+      const input = parseOperationsTaskInput(req.body);
+      const task = await createOperationsTask(getActor(req), {
+        businessId: input.businessId as string,
+        contactId: input.contactId,
+        title: input.title as string,
+        notes: input.notes,
+        dueAt: input.dueAt as Date,
+      });
+      if (task === "business_not_found") {
+        return sendApiError(res, 404, "not_found", "Business not found");
+      }
+      if (task === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      return res.status(201).json({ task: serializeObject(task) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations create task failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_task_create_failed",
+        "Failed to create task",
+      );
+    }
+  });
+
+  router.patch("/tasks/:taskId", async (req, res) => {
+    const taskId = getUuidParam(req, res, "taskId");
+    if (!taskId) return;
+    try {
+      const task = await updateOperationsTask(
+        getActor(req),
+        taskId,
+        parseOperationsTaskInput(req.body, { partial: true }),
+      );
+      if (!task) return sendApiError(res, 404, "not_found", "Task not found");
+      return res.json({ task: serializeObject(task) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations update task failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_task_update_failed",
+        "Failed to update task",
+      );
+    }
+  });
+
+  router.post("/tasks/:taskId/complete", async (req, res) => {
+    const taskId = getUuidParam(req, res, "taskId");
+    if (!taskId) return;
+    try {
+      const task = await completeOperationsTask(getActor(req), taskId);
+      if (!task) return sendApiError(res, 404, "not_found", "Task not found");
+      return res.json({ task: serializeObject(task) });
+    } catch (err) {
+      console.error("Operations complete task failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_task_complete_failed",
+        "Failed to complete task",
+      );
+    }
+  });
+
+  router.post("/tasks/:taskId/snooze", async (req, res) => {
+    const taskId = getUuidParam(req, res, "taskId");
+    if (!taskId) return;
+    try {
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const snoozedUntil = parseRequiredDateField(
+        body as Record<string, unknown>,
+        "snoozedUntil",
+      );
+      const task = await snoozeOperationsTask(
+        getActor(req),
+        taskId,
+        snoozedUntil,
+      );
+      if (!task) return sendApiError(res, 404, "not_found", "Task not found");
+      return res.json({ task: serializeObject(task) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations snooze task failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_task_snooze_failed",
+        "Failed to snooze task",
+      );
+    }
+  });
+
+  router.post("/tasks/:taskId/cancel", async (req, res) => {
+    const taskId = getUuidParam(req, res, "taskId");
+    if (!taskId) return;
+    try {
+      const task = await cancelOperationsTask(getActor(req), taskId);
+      if (!task) return sendApiError(res, 404, "not_found", "Task not found");
+      return res.json({ task: serializeObject(task) });
+    } catch (err) {
+      console.error("Operations cancel task failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_task_cancel_failed",
+        "Failed to cancel task",
       );
     }
   });
@@ -495,6 +636,222 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/businesses/:businessId/communications", async (req, res) => {
+    const businessId = getUuidParam(req, res, "businessId");
+    if (!businessId) return;
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsCommunications({
+            businessId,
+            ...parsePagination(req),
+          }),
+        ),
+      );
+    } catch (err) {
+      console.error("Operations business communications failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_business_communications_failed",
+        "Failed to load business communications",
+      );
+    }
+  });
+
+  router.post(
+    "/businesses/:businessId/communications/draft",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      if (!businessId) return;
+      try {
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const record = body as Record<string, unknown>;
+        const templateId = optionalUuidField(record, "templateId");
+        if (!templateId) throw new Error("invalid_templateId");
+        const contactId = optionalUuidField(record, "contactId");
+        const followUpAt = parseDateField(record, "followUpAt");
+        const reportName = optionalTextField(record, "reportName");
+        const [template, context] = await Promise.all([
+          getOperationsCommunicationTemplate(templateId),
+          getOperationsCommunicationDraftContext(businessId, { contactId }),
+        ]);
+        if (!template)
+          return sendApiError(res, 404, "not_found", "Template not found");
+        if (!context)
+          return sendApiError(res, 404, "not_found", "Business not found");
+        const rendered = renderClientCommunicationTemplate(template, context, {
+          ...getSenderDefaults(),
+          followUpDate: followUpAt,
+          reportName,
+        });
+        return res.json({
+          draft: {
+            templateId,
+            contactId,
+            followUpAt: serializeDate(followUpAt ?? null),
+            subject: rendered.subject,
+            body: rendered.body,
+            unresolvedPlaceholders: rendered.unresolvedPlaceholders,
+          },
+        });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations communication draft failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_draft_failed",
+          "Failed to render communication draft",
+        );
+      }
+    },
+  );
+
+  router.post("/businesses/:businessId/communications", async (req, res) => {
+    const businessId = getUuidParam(req, res, "businessId");
+    if (!businessId) return;
+    try {
+      const input = parseOperationsCommunicationInput(req.body);
+      const communication = await createOperationsCommunication(
+        getActor(req),
+        businessId,
+        input as OperationsCommunicationInput,
+      );
+      if (communication === "business_not_found") {
+        return sendApiError(res, 404, "not_found", "Business not found");
+      }
+      if (communication === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (communication === "template_not_found") {
+        return sendApiError(res, 404, "not_found", "Template not found");
+      }
+      return res
+        .status(201)
+        .json({ communication: serializeObject(communication) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations create communication failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_communication_create_failed",
+        "Failed to create communication",
+      );
+    }
+  });
+
+  router.patch(
+    "/businesses/:businessId/communications/:communicationId",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!businessId || !communicationId) return;
+      try {
+        const communication = await updateOperationsCommunication(
+          getActor(req),
+          businessId,
+          communicationId,
+          parseOperationsCommunicationInput(req.body, { partial: true }),
+        );
+        if (communication === "business_not_found") {
+          return sendApiError(res, 404, "not_found", "Business not found");
+        }
+        if (communication === "contact_not_found") {
+          return sendApiError(res, 404, "not_found", "Contact not found");
+        }
+        if (communication === "template_not_found") {
+          return sendApiError(res, 404, "not_found", "Template not found");
+        }
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations update communication failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_update_failed",
+          "Failed to update communication",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/businesses/:businessId/communications/:communicationId/mark-sent",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!businessId || !communicationId) return;
+      try {
+        const input = parseOperationsCommunicationInput(req.body, {
+          partial: true,
+        });
+        const communication = await markOperationsCommunicationSent(
+          getActor(req),
+          businessId,
+          communicationId,
+          {
+            subject: input.subject,
+            body: input.body,
+            followUpAt: input.followUpAt,
+            taskTitle: input.taskTitle,
+            taskNotes: input.taskNotes,
+          },
+        );
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations mark communication sent failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_mark_sent_failed",
+          "Failed to mark communication sent",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/businesses/:businessId/communications/:communicationId/cancel",
+    async (req, res) => {
+      const businessId = getUuidParam(req, res, "businessId");
+      const communicationId = getUuidParam(req, res, "communicationId");
+      if (!businessId || !communicationId) return;
+      try {
+        const communication = await cancelOperationsCommunication(
+          getActor(req),
+          businessId,
+          communicationId,
+        );
+        if (!communication) {
+          return sendApiError(res, 404, "not_found", "Communication not found");
+        }
+        return res.json({ communication: serializeObject(communication) });
+      } catch (err) {
+        console.error("Operations cancel communication failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_communication_cancel_failed",
+          "Failed to cancel communication",
+        );
+      }
+    },
+  );
 
   router.post("/businesses/:businessId/archive", async (req, res) => {
     const businessId = getUuidParam(req, res, "businessId");
