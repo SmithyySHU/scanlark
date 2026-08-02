@@ -11,11 +11,17 @@ import {
   createOperationsCommunicationTemplate,
   createOperationsTask,
   createOperationsBusiness,
+  createOperationsReport,
+  createOperationsReportRetest,
   deleteOperationsContact,
+  duplicateOperationsReport,
+  freezeOperationsReportRender,
   getOperationsCommunication,
   getOperationsCommunicationDraftContext,
   getOperationsCommunicationTemplate,
   getOperationsBusinessDetail,
+  getOperationsReportDetail,
+  getOperationsReportPreview,
   getOperationsSummary,
   linkOperationsBusinessSite,
   listOperationsCommunicationTemplates,
@@ -23,17 +29,26 @@ import {
   listOperationsAvailableSites,
   listOperationsBusinesses,
   listOperationsPipeline,
+  listOperationsReportableScanRuns,
+  listOperationsReports,
   listOperationsTasks,
   markOperationsCommunicationReceived,
   markOperationsCommunicationSent,
+  markOperationsReportStatus,
+  recordOperationsReportSent,
+  reorderOperationsReportFindings,
   setOperationsCommunicationTemplateActive,
   setOperationsBusinessArchived,
+  setOperationsReportArchived,
   setPrimaryOperationsContact,
   snoozeOperationsTask,
   unlinkOperationsBusinessSite,
   updateOperationsBusiness,
   updateOperationsCommunication,
   updateOperationsCommunicationTemplate,
+  updateOperationsReport,
+  updateOperationsReportComparisonItem,
+  updateOperationsReportFinding,
   updateOperationsTask,
   updateOperationsContact,
   type AdminActor,
@@ -43,6 +58,7 @@ import {
   type OperationsCommunicationTemplateCategory,
   type OperationsCommunicationTemplateRow,
   type OperationsContactInput,
+  type OperationsReportListParams,
   type OperationsTaskStatus,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
@@ -56,6 +72,16 @@ import {
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsReportClientPriority,
+  parseOperationsReportComparisonStatus,
+  parseOperationsReportComparisonUpdateInput,
+  parseOperationsReportCreateInput,
+  parseOperationsReportFindingUpdateInput,
+  parseOperationsReportRetestInput,
+  parseOperationsReportSentInput,
+  parseOperationsReportStatus,
+  parseOperationsReportType,
+  parseOperationsReportUpdateInput,
   parseOperationsTaskInput,
   optionalTextField,
   optionalUuidField,
@@ -95,8 +121,9 @@ function sendApiError(
   status: number,
   error: string,
   message: string,
+  details?: Record<string, unknown>,
 ) {
-  return res.status(status).json({ error, message });
+  return res.status(status).json({ error, message, ...(details ?? {}) });
 }
 
 function getActor(req: Request): AdminActor {
@@ -183,6 +210,42 @@ function parseCommunicationListOptions(
     dateTo: parseQueryDate(req.query.dateTo),
     followUpDue: req.query.followUpDue === "true",
     search: typeof req.query.search === "string" ? req.query.search : null,
+  };
+}
+
+function parseReportListOptions(req: Request): OperationsReportListParams {
+  const status =
+    typeof req.query.status === "string"
+      ? parseOperationsReportStatus(req.query.status)
+      : null;
+  const reportType =
+    typeof req.query.reportType === "string"
+      ? parseOperationsReportType(req.query.reportType)
+      : null;
+  if (typeof req.query.status === "string" && !status) {
+    throw new Error("invalid_report_status");
+  }
+  if (typeof req.query.reportType === "string" && !reportType) {
+    throw new Error("invalid_report_type");
+  }
+  const archived =
+    req.query.archived === "true"
+      ? true
+      : req.query.archived === "false"
+        ? false
+        : null;
+  return {
+    ...parsePagination(req),
+    search: typeof req.query.search === "string" ? req.query.search : null,
+    status,
+    reportType,
+    businessId:
+      typeof req.query.businessId === "string" ? req.query.businessId : null,
+    siteId: typeof req.query.siteId === "string" ? req.query.siteId : null,
+    dateFrom: parseQueryDate(req.query.dateFrom),
+    dateTo: parseQueryDate(req.query.dateTo),
+    awaitingFollowUp: req.query.awaitingFollowUp === "true",
+    archived,
   };
 }
 
@@ -309,6 +372,17 @@ function handleValidationError(res: Response, err: unknown) {
   if (message === "invalid_date") {
     return sendApiError(res, 400, message, "Date value is invalid");
   }
+  if (message === "unsafe_html") {
+    return sendApiError(
+      res,
+      400,
+      "unsafe_html",
+      "Report text must be plain text",
+    );
+  }
+  if (message.endsWith("_too_long")) {
+    return sendApiError(res, 400, message, "Report text is too long");
+  }
   if (
     message.startsWith("invalid_") ||
     message === "template_name_required" ||
@@ -371,6 +445,729 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/reports/reportable-scan-runs", async (req, res) => {
+    try {
+      const businessId =
+        typeof req.query.businessId === "string" ? req.query.businessId : "";
+      const siteId =
+        typeof req.query.siteId === "string" ? req.query.siteId : "";
+      if (!UUID_RE.test(businessId)) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_businessId",
+          "Business is invalid",
+        );
+      }
+      if (!UUID_RE.test(siteId)) {
+        return sendApiError(res, 400, "invalid_siteId", "Site is invalid");
+      }
+      const result = await listOperationsReportableScanRuns({
+        businessId,
+        siteId,
+        limit: 50,
+      });
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Linked site not found");
+      }
+      return res.json(serializeObject(result));
+    } catch (err) {
+      console.error("Operations reportable scan runs failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_reportable_scans_failed",
+        "Failed to load reportable scan runs",
+      );
+    }
+  });
+
+  router.get("/reports", async (req, res) => {
+    try {
+      return res.json(
+        serializeObject(
+          await listOperationsReports(parseReportListOptions(req)),
+        ),
+      );
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations reports list failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_reports_failed",
+        "Failed to load reports",
+      );
+    }
+  });
+
+  router.post("/reports", async (req, res) => {
+    try {
+      const result = await createOperationsReport(
+        getActor(req),
+        parseOperationsReportCreateInput(req.body),
+      );
+      if (result === "business_site_scan_invalid") {
+        return sendApiError(
+          res,
+          400,
+          "business_site_scan_invalid",
+          "Business, site and scan relationship is invalid",
+        );
+      }
+      if (result === "scan_not_reportable") {
+        return sendApiError(
+          res,
+          400,
+          "scan_not_reportable",
+          "Only completed scan runs can be used for Operations reports",
+        );
+      }
+      if (result === "duplicate_report") {
+        return sendApiError(
+          res,
+          409,
+          "duplicate_report",
+          "A report already exists for this scan",
+        );
+      }
+      if (result === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      return res.status(201).json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report create failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_create_failed",
+        "Failed to create report",
+      );
+    }
+  });
+
+  router.get("/reports/:reportId", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const detail = await getOperationsReportDetail(reportId);
+      if (!detail) {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      return res.json({ report: serializeObject(detail) });
+    } catch (err) {
+      console.error("Operations report detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_failed",
+        "Failed to load report",
+      );
+    }
+  });
+
+  router.patch("/reports/:reportId", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await updateOperationsReport(
+        getActor(req),
+        reportId,
+        parseOperationsReportUpdateInput(req.body),
+      );
+      if (result === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_update_failed",
+        "Failed to update report",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/archive", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const report = await setOperationsReportArchived(
+        getActor(req),
+        reportId,
+        true,
+      );
+      if (!report)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(report) });
+    } catch (err) {
+      console.error("Operations report archive failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_archive_failed",
+        "Failed to archive report",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/restore", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const report = await setOperationsReportArchived(
+        getActor(req),
+        reportId,
+        false,
+      );
+      if (!report)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(report) });
+    } catch (err) {
+      console.error("Operations report restore failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_restore_failed",
+        "Failed to restore report",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/duplicate", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const report = await duplicateOperationsReport(getActor(req), reportId);
+      if (!report)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.status(201).json({ report: serializeObject(report) });
+    } catch (err) {
+      console.error("Operations report duplicate failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_duplicate_failed",
+        "Failed to duplicate report",
+      );
+    }
+  });
+
+  router.get("/reports/:reportId/findings", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const detail = await getOperationsReportDetail(reportId);
+      if (!detail)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      let findings = detail.findings;
+      const included = req.query.included;
+      if (included === "true")
+        findings = findings.filter((item) => item.is_included);
+      if (included === "false")
+        findings = findings.filter((item) => !item.is_included);
+      if (req.query.falsePositive === "true") {
+        findings = findings.filter((item) => item.is_false_positive);
+      }
+      const priority =
+        typeof req.query.clientPriority === "string"
+          ? parseOperationsReportClientPriority(req.query.clientPriority)
+          : null;
+      if (typeof req.query.clientPriority === "string" && !priority) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_client_priority",
+          "Client priority is invalid",
+        );
+      }
+      if (priority) {
+        findings = findings.filter((item) => item.client_priority === priority);
+      }
+      if (typeof req.query.category === "string") {
+        findings = findings.filter(
+          (item) => item.category === req.query.category,
+        );
+      }
+      if (typeof req.query.search === "string" && req.query.search.trim()) {
+        const search = req.query.search.trim().toLowerCase();
+        findings = findings.filter(
+          (item) =>
+            item.title.toLowerCase().includes(search) ||
+            (item.affected_url ?? "").toLowerCase().includes(search) ||
+            (item.client_explanation ?? "").toLowerCase().includes(search),
+        );
+      }
+      return res.json({
+        findings: serializeObject(findings),
+        totalMatching: findings.length,
+      });
+    } catch (err) {
+      console.error("Operations report findings failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_findings_failed",
+        "Failed to load findings",
+      );
+    }
+  });
+
+  router.patch("/reports/:reportId/findings/:findingId", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    const findingId = getUuidParam(req, res, "findingId");
+    if (!reportId || !findingId) return;
+    try {
+      const finding = await updateOperationsReportFinding(
+        getActor(req),
+        reportId,
+        findingId,
+        parseOperationsReportFindingUpdateInput(req.body),
+      );
+      if (!finding)
+        return sendApiError(res, 404, "not_found", "Finding not found");
+      return res.json({ finding: serializeObject(finding) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report finding update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_finding_update_failed",
+        "Failed to update finding",
+      );
+    }
+  });
+
+  router.post(
+    "/reports/:reportId/findings/:findingId/include",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const findingId = getUuidParam(req, res, "findingId");
+      if (!reportId || !findingId) return;
+      try {
+        const finding = await updateOperationsReportFinding(
+          getActor(req),
+          reportId,
+          findingId,
+          {
+            isIncluded: true,
+            isFalsePositive: false,
+          },
+        );
+        if (!finding)
+          return sendApiError(res, 404, "not_found", "Finding not found");
+        return res.json({ finding: serializeObject(finding) });
+      } catch (err) {
+        console.error("Operations report finding include failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_report_finding_include_failed",
+          "Failed to include finding",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/reports/:reportId/findings/:findingId/exclude",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const findingId = getUuidParam(req, res, "findingId");
+      if (!reportId || !findingId) return;
+      try {
+        const finding = await updateOperationsReportFinding(
+          getActor(req),
+          reportId,
+          findingId,
+          {
+            isIncluded: false,
+          },
+        );
+        if (!finding)
+          return sendApiError(res, 404, "not_found", "Finding not found");
+        return res.json({ finding: serializeObject(finding) });
+      } catch (err) {
+        console.error("Operations report finding exclude failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_report_finding_exclude_failed",
+          "Failed to exclude finding",
+        );
+      }
+    },
+  );
+
+  router.post(
+    "/reports/:reportId/findings/:findingId/mark-false-positive",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const findingId = getUuidParam(req, res, "findingId");
+      if (!reportId || !findingId) return;
+      try {
+        const finding = await updateOperationsReportFinding(
+          getActor(req),
+          reportId,
+          findingId,
+          { isIncluded: false, isFalsePositive: true },
+        );
+        if (!finding)
+          return sendApiError(res, 404, "not_found", "Finding not found");
+        return res.json({ finding: serializeObject(finding) });
+      } catch (err) {
+        console.error("Operations report finding false positive failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_report_finding_false_positive_failed",
+          "Failed to mark finding false positive",
+        );
+      }
+    },
+  );
+
+  router.post("/reports/:reportId/findings/reorder", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const findingIds = Array.isArray(
+        (body as Record<string, unknown>).findingIds,
+      )
+        ? ((body as Record<string, unknown>).findingIds as unknown[])
+        : [];
+      if (
+        findingIds.length === 0 ||
+        !findingIds.every((id) => typeof id === "string" && UUID_RE.test(id))
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "invalid_finding_order",
+          "Finding order is invalid",
+        );
+      }
+      const findings = await reorderOperationsReportFindings(
+        getActor(req),
+        reportId,
+        findingIds as string[],
+      );
+      return res.json({ findings: serializeObject(findings) });
+    } catch (err) {
+      console.error("Operations report reorder failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_reorder_failed",
+        "Failed to reorder findings",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/mark-needs-review", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await markOperationsReportStatus(
+        getActor(req),
+        reportId,
+        "needs_review",
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations report mark needs review failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_status_failed",
+        "Failed to update report status",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/mark-ready", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await markOperationsReportStatus(
+        getActor(req),
+        reportId,
+        "ready_to_send",
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      if ("readinessIssues" in result) {
+        return sendApiError(
+          res,
+          400,
+          "report_not_ready",
+          "Report is not ready to send",
+          { readinessIssues: result.readinessIssues },
+        );
+      }
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations report mark ready failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_status_failed",
+        "Failed to update report status",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/record-sent", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await recordOperationsReportSent(
+        getActor(req),
+        reportId,
+        parseOperationsReportSentInput(req.body),
+      );
+      if (result === "contact_not_found") {
+        return sendApiError(res, 404, "not_found", "Contact not found");
+      }
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report sent failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_sent_failed",
+        "Failed to record report as sent",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/record-client-reply", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await markOperationsReportStatus(
+        getActor(req),
+        reportId,
+        "client_replied",
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations report client reply failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_status_failed",
+        "Failed to update report status",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/mark-completed", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await markOperationsReportStatus(
+        getActor(req),
+        reportId,
+        "completed",
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      console.error("Operations report completed failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_status_failed",
+        "Failed to update report status",
+      );
+    }
+  });
+
+  router.get("/reports/:reportId/preview", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const preview = await getOperationsReportPreview(reportId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json(serializeObject(preview));
+    } catch (err) {
+      console.error("Operations report preview failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_preview_failed",
+        "Failed to build report preview",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/generate-pdf", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const payload = await freezeOperationsReportRender(
+        getActor(req),
+        reportId,
+        "operations_report_pdf_generated",
+      );
+      if (!payload)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({
+        payload: serializeObject(payload),
+        pdfMode: "browser_print",
+      });
+    } catch (err) {
+      console.error("Operations report PDF generation failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_pdf_failed",
+        "Failed to prepare report PDF",
+      );
+    }
+  });
+
+  router.get("/reports/:reportId/download", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const preview = await getOperationsReportPreview(reportId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      const serializedPreview = serializeObject(preview) as Record<
+        string,
+        unknown
+      >;
+      return res.json({
+        ...serializedPreview,
+        pdfMode: "browser_print",
+      });
+    } catch (err) {
+      console.error("Operations report download failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_download_failed",
+        "Failed to build report download",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/create-retest", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const input = parseOperationsReportRetestInput(req.body);
+      const result = await createOperationsReportRetest(
+        getActor(req),
+        reportId,
+        input.scanRunId,
+        input.reportType,
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      if (typeof result === "string") {
+        return sendApiError(
+          res,
+          400,
+          result,
+          "Re-test report could not be created",
+        );
+      }
+      return res.status(201).json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report retest failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_retest_failed",
+        "Failed to create re-test report",
+      );
+    }
+  });
+
+  router.get("/reports/:reportId/comparison", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const detail = await getOperationsReportDetail(reportId);
+      if (!detail)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      return res.json({
+        comparisonItems: serializeObject(detail.comparisonItems),
+      });
+    } catch (err) {
+      console.error("Operations report comparison failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_comparison_failed",
+        "Failed to load report comparison",
+      );
+    }
+  });
+
+  router.patch(
+    "/reports/:reportId/comparison/:comparisonItemId",
+    async (req, res) => {
+      const reportId = getUuidParam(req, res, "reportId");
+      const comparisonItemId = getUuidParam(req, res, "comparisonItemId");
+      if (!reportId || !comparisonItemId) return;
+      try {
+        const item = await updateOperationsReportComparisonItem(
+          getActor(req),
+          reportId,
+          comparisonItemId,
+          parseOperationsReportComparisonUpdateInput(req.body),
+        );
+        if (!item)
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Comparison item not found",
+          );
+        return res.json({ comparisonItem: serializeObject(item) });
+      } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
+        console.error("Operations report comparison update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_report_comparison_update_failed",
+          "Failed to update comparison item",
+        );
+      }
+    },
+  );
 
   router.get("/communication-templates", async (req, res) => {
     try {

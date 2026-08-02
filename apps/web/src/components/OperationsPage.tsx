@@ -61,6 +61,35 @@ type CommunicationStatus =
   | "received"
   | "cancelled";
 type TaskStatus = "open" | "completed" | "snoozed" | "cancelled";
+type OperationsReportStatus =
+  | "draft"
+  | "needs_review"
+  | "ready_to_send"
+  | "sent"
+  | "client_replied"
+  | "fixes_quoted"
+  | "work_in_progress"
+  | "completed"
+  | "archived";
+type OperationsReportType =
+  | "initial_health_check"
+  | "follow_up"
+  | "post_fix_retest"
+  | "monthly_monitoring"
+  | "incident"
+  | "custom";
+type OperationsReportPriority =
+  | "critical"
+  | "important"
+  | "improvement"
+  | "informational";
+type OperationsComparisonStatus =
+  | "resolved"
+  | "still_present"
+  | "improved"
+  | "worsened"
+  | "new"
+  | "unable_to_compare";
 
 type BusinessListFilter =
   | "active"
@@ -75,6 +104,9 @@ type OperationsSummary = {
     followUpsDue: number;
     prospectsAwaitingContact: number;
     reportsAwaitingReview: number;
+    reportsReadyToSend: number;
+    reportsAwaitingClientResponse: number;
+    reportFollowUpsDue: number;
     criticalClientSites: number;
     quotesAwaitingResponse: number;
     openWorkItems: number;
@@ -176,15 +208,24 @@ type BusinessNote = {
 };
 
 type BusinessReport = {
+  id: string;
+  title: string;
+  report_type: OperationsReportType;
+  status: OperationsReportStatus;
+  version_number: number;
   scan_run_id: string;
   site_id: string;
   site_url: string;
   site_display_name: string | null;
-  status: string;
+  included_findings: number;
+  critical_findings: number;
+  important_findings: number;
+  created_at: string;
+  updated_at: string;
+  sent_at: string | null;
   finished_at: string | null;
-  share_id: string | null;
-  share_enabled: boolean | null;
-  share_created_at: string | null;
+  follow_up_at: string | null;
+  archived_at: string | null;
 };
 
 type BusinessDetail = {
@@ -259,6 +300,151 @@ type OperationsTask = {
   contact_first_name?: string | null;
   contact_last_name?: string | null;
   contact_email?: string | null;
+};
+
+type OperationsReportRow = {
+  id: string;
+  business_id: string;
+  site_id: string;
+  scan_run_id: string;
+  prepared_contact_id: string | null;
+  title: string;
+  status: OperationsReportStatus;
+  report_type: OperationsReportType;
+  version_number: number;
+  executive_summary: string | null;
+  overall_summary: string | null;
+  main_strengths: string | null;
+  main_concerns: string | null;
+  recommended_first_steps: string | null;
+  scope_limitations: string | null;
+  prepared_for: string | null;
+  prepared_by: string | null;
+  cover_date: string;
+  valid_until: string | null;
+  sent_at: string | null;
+  completed_at: string | null;
+  archived_at: string | null;
+  follow_up_at: string | null;
+  no_major_findings_waived: boolean;
+  display_settings_json: Record<string, unknown>;
+  frozen_at: string | null;
+  last_pdf_generated_at: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  site_url?: string | null;
+  site_display_name?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  contact_email?: string | null;
+  included_findings?: number;
+  excluded_findings?: number;
+  critical_findings?: number;
+  important_findings?: number;
+  improvement_findings?: number;
+  informational_findings?: number;
+};
+
+type OperationsReportFinding = {
+  id: string;
+  operations_report_id: string;
+  source_issue_id: string | null;
+  source_link_id: string | null;
+  source_type: string;
+  source_fingerprint: string | null;
+  category: string;
+  original_severity: string;
+  client_priority: OperationsReportPriority;
+  title: string;
+  technical_summary: string | null;
+  client_explanation: string | null;
+  why_it_matters: string | null;
+  recommended_action: string | null;
+  affected_url: string | null;
+  evidence_json: Record<string, unknown>;
+  is_included: boolean;
+  is_false_positive: boolean;
+  internal_note: string | null;
+  display_order: number;
+  estimated_effort: string | null;
+  comparison_status: OperationsComparisonStatus | null;
+  updated_at: string;
+};
+
+type OperationsReportComparisonItem = {
+  id: string;
+  comparison_status: OperationsComparisonStatus;
+  summary: string | null;
+  manual_note: string | null;
+};
+
+type OperationsReportActivity = {
+  id: string;
+  admin_email: string;
+  action: string;
+  target_type: string;
+  created_at: string;
+};
+
+type OperationsReportDetail = {
+  report: OperationsReportRow;
+  findings: OperationsReportFinding[];
+  comparisonItems: OperationsReportComparisonItem[];
+  activity: OperationsReportActivity[];
+};
+
+type ClientReportPayload = {
+  report: {
+    title: string;
+    versionNumber: number;
+    preparedFor: string | null;
+    preparedBy: string | null;
+    coverDate: string;
+  };
+  business: { name: string };
+  site: { url: string; displayName: string | null; domain: string };
+  summaries: {
+    executiveSummary: string | null;
+    overallSummary: string | null;
+    mainStrengths: string | null;
+    mainConcerns: string | null;
+    recommendedFirstSteps: string | null;
+    scopeLimitations: string | null;
+  };
+  priorityCounts: Record<OperationsReportPriority, number>;
+  findings: Array<{
+    id: string;
+    priority: OperationsReportPriority;
+    title: string;
+    affectedUrl: string | null;
+    whatWasFound: string | null;
+    whyItMatters: string | null;
+    recommendedAction: string | null;
+    evidence: Record<string, unknown>;
+    estimatedEffort: string | null;
+    comparisonStatus: OperationsComparisonStatus | null;
+  }>;
+  positiveObservations: string[];
+  methodology: string[];
+  nextSteps: string[];
+  comparison: Array<{
+    id: string;
+    status: OperationsComparisonStatus;
+    summary: string | null;
+  }>;
+  generatedAt: string;
+};
+
+type ReportFormState = {
+  businessId: string;
+  siteId: string;
+  scanRunId: string;
+  reportType: OperationsReportType;
+  title: string;
+  preparedContactId: string;
+  preparedFor: string;
+  allowDuplicate: boolean;
 };
 
 type BusinessFormState = {
@@ -384,6 +570,40 @@ const communicationChannelOptions: Array<{
   { value: "other", label: "Other" },
 ];
 
+const operationsReportTypeOptions: Array<{
+  value: OperationsReportType;
+  label: string;
+}> = [
+  { value: "initial_health_check", label: "Initial health check" },
+  { value: "follow_up", label: "Follow-up" },
+  { value: "post_fix_retest", label: "Post-fix re-test" },
+  { value: "monthly_monitoring", label: "Monthly monitoring" },
+  { value: "incident", label: "Incident" },
+  { value: "custom", label: "Custom" },
+];
+
+const operationsReportPriorityOptions: Array<{
+  value: OperationsReportPriority;
+  label: string;
+}> = [
+  { value: "critical", label: "Critical" },
+  { value: "important", label: "Important" },
+  { value: "improvement", label: "Improvement" },
+  { value: "informational", label: "Informational" },
+];
+
+const operationsReportStatusLabels: Record<OperationsReportStatus, string> = {
+  draft: "Draft",
+  needs_review: "Needs review",
+  ready_to_send: "Ready to send",
+  sent: "Sent",
+  client_replied: "Client replied",
+  fixes_quoted: "Fixes quoted",
+  work_in_progress: "Work in progress",
+  completed: "Completed",
+  archived: "Archived",
+};
+
 const routeItems: Array<{
   key: OperationsRouteKey;
   label: string;
@@ -471,6 +691,9 @@ const emptySummary: OperationsSummary = {
     followUpsDue: 0,
     prospectsAwaitingContact: 0,
     reportsAwaitingReview: 0,
+    reportsReadyToSend: 0,
+    reportsAwaitingClientResponse: 0,
+    reportFollowUpsDue: 0,
     criticalClientSites: 0,
     quotesAwaitingResponse: 0,
     openWorkItems: 0,
@@ -535,10 +758,27 @@ const emptyTemplateForm: TemplateFormState = {
   isActive: true,
 };
 
+const emptyReportForm: ReportFormState = {
+  businessId: "",
+  siteId: "",
+  scanRunId: "",
+  reportType: "initial_health_check",
+  title: "",
+  preparedContactId: "",
+  preparedFor: "",
+  allowDuplicate: false,
+};
+
 function getRouteKey(path: string): OperationsRouteKey {
   const normalized = path.replace(/\/+$/, "") || "/operations";
   if (normalized === "/operations") return "home";
   if (normalized === "/operations/pipeline") return "pipeline";
+  if (
+    normalized === "/operations/reports" ||
+    normalized.startsWith("/operations/reports/")
+  ) {
+    return "reports";
+  }
   if (
     normalized === "/operations/businesses" ||
     normalized.startsWith("/operations/businesses/")
@@ -547,6 +787,14 @@ function getRouteKey(path: string): OperationsRouteKey {
   }
   const found = routeItems.find((item) => item.href === normalized);
   return found?.key ?? "home";
+}
+
+function getOperationsReportIdFromPath(path: string) {
+  const normalized = path.replace(/\/+$/, "");
+  const prefix = "/operations/reports/";
+  if (!normalized.startsWith(prefix)) return null;
+  const id = normalized.slice(prefix.length);
+  return id || null;
 }
 
 function getBusinessIdFromPath(path: string) {
@@ -677,6 +925,21 @@ function localDateTimeToIso(value: string) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function sanitizeFilenamePart(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/https?:\/\//g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function reportFilename(payload: ClientReportPayload) {
+  const business = sanitizeFilenamePart(payload.business.name) || "business";
+  const domain = sanitizeFilenamePart(payload.site.domain) || "website";
+  return `scanlark-website-health-report-${business}-${domain}-${payload.report.coverDate}.pdf`;
+}
+
 function templateCategoryLabel(value: CommunicationTemplateCategory) {
   return (
     communicationTemplateCategoryOptions.find((item) => item.value === value)
@@ -688,6 +951,24 @@ function communicationChannelLabel(value: CommunicationChannel) {
   return (
     communicationChannelOptions.find((item) => item.value === value)?.label ??
     value
+  );
+}
+
+function reportTypeLabel(value: OperationsReportType) {
+  return (
+    operationsReportTypeOptions.find((item) => item.value === value)?.label ??
+    value
+  );
+}
+
+function reportStatusLabel(value: OperationsReportStatus) {
+  return operationsReportStatusLabels[value] ?? value;
+}
+
+function reportPriorityLabel(value: OperationsReportPriority) {
+  return (
+    operationsReportPriorityOptions.find((item) => item.value === value)
+      ?.label ?? value
   );
 }
 
@@ -730,6 +1011,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 }) => {
   const activeRoute = getRouteKey(currentPath);
   const businessId = getBusinessIdFromPath(currentPath);
+  const operationsReportId = getOperationsReportIdFromPath(currentPath);
   const searchParams = useMemo(
     () => new URLSearchParams(currentSearch),
     [currentSearch],
@@ -756,6 +1038,39 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [communicationsLoading, setCommunicationsLoading] = useState(false);
   const [tasks, setTasks] = useState<OperationsTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
+  const [reports, setReports] = useState<OperationsReportRow[]>([]);
+  const [reportsSummary, setReportsSummary] = useState({
+    draft: 0,
+    needsReview: 0,
+    readyToSend: 0,
+    sentThisMonth: 0,
+    awaitingClientResponse: 0,
+    completed: 0,
+  });
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportDetail, setReportDetail] =
+    useState<OperationsReportDetail | null>(null);
+  const [reportCreateDetail, setReportCreateDetail] =
+    useState<BusinessDetail | null>(null);
+  const [reportDetailLoading, setReportDetailLoading] = useState(false);
+  const [reportPreview, setReportPreview] =
+    useState<ClientReportPayload | null>(null);
+  const [reportReadinessIssues, setReportReadinessIssues] = useState<string[]>(
+    [],
+  );
+  const [reportFormOpen, setReportFormOpen] = useState(false);
+  const [reportForm, setReportForm] =
+    useState<ReportFormState>(emptyReportForm);
+  const [reportableScans, setReportableScans] = useState<
+    Array<{
+      id: string;
+      finished_at: string | null;
+      checked_links: number;
+      total_links: number;
+      open_issues: number;
+      high_priority: number;
+    }>
+  >([]);
   const [addBusinessOpen, setAddBusinessOpen] = useState(false);
   const [businessForm, setBusinessForm] =
     useState<BusinessFormState>(emptyBusinessForm);
@@ -962,6 +1277,130 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [apiBase, apiFetch, searchParams]);
 
+  const loadReports = useCallback(async () => {
+    setReportsLoading(true);
+    const params: Record<string, string | null | undefined> = {
+      search: searchParams.get("search"),
+      status: searchParams.get("status"),
+      reportType: searchParams.get("reportType"),
+      awaitingFollowUp: searchParams.get("awaitingFollowUp"),
+      archived: searchParams.get("archived") ?? "false",
+      limit: "50",
+      offset: "0",
+    };
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports${buildQuery(params)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        reports: OperationsReportRow[];
+        summary: typeof reportsSummary;
+      };
+      setReports(data.reports);
+      setReportsSummary(data.summary);
+    } catch (err) {
+      console.warn("Failed to load reports", err);
+      setReports([]);
+    } finally {
+      setReportsLoading(false);
+    }
+  }, [apiBase, apiFetch, searchParams]);
+
+  const loadReportDetail = useCallback(async () => {
+    if (!operationsReportId) return;
+    setReportDetailLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as { report: OperationsReportDetail };
+      setReportDetail(data.report);
+    } catch (err) {
+      console.warn("Failed to load operations report", err);
+      setReportDetail(null);
+    } finally {
+      setReportDetailLoading(false);
+    }
+  }, [apiBase, apiFetch, operationsReportId]);
+
+  const loadReportPreview = useCallback(async () => {
+    if (!operationsReportId) return;
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/preview`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        payload: ClientReportPayload;
+        readinessIssues: string[];
+      };
+      setReportPreview(data.payload);
+      setReportReadinessIssues(data.readinessIssues ?? []);
+    } catch (err) {
+      console.warn("Failed to load report preview", err);
+      setReportPreview(null);
+      setReportReadinessIssues([]);
+    }
+  }, [apiBase, apiFetch, operationsReportId]);
+
+  const loadReportableScans = useCallback(
+    async (businessIdValue: string, siteIdValue: string) => {
+      if (!businessIdValue || !siteIdValue) {
+        setReportableScans([]);
+        return;
+      }
+      try {
+        const res = await apiFetch(
+          `${apiBase}/operations/reports/reportable-scan-runs${buildQuery({
+            businessId: businessIdValue,
+            siteId: siteIdValue,
+          })}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        const data = (await res.json()) as {
+          scanRuns: typeof reportableScans;
+        };
+        setReportableScans(data.scanRuns);
+      } catch (err) {
+        console.warn("Failed to load reportable scans", err);
+        setReportableScans([]);
+      }
+    },
+    [apiBase, apiFetch],
+  );
+
+  const loadReportCreateBusiness = useCallback(
+    async (businessIdValue: string) => {
+      if (!businessIdValue) {
+        setReportCreateDetail(null);
+        return;
+      }
+      if (detail?.business.id === businessIdValue) {
+        setReportCreateDetail(detail);
+        return;
+      }
+      try {
+        const res = await apiFetch(
+          `${apiBase}/operations/businesses/${encodeURIComponent(businessIdValue)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        const data = (await res.json()) as { business: BusinessDetail };
+        setReportCreateDetail(data.business);
+      } catch (err) {
+        console.warn("Failed to load report business context", err);
+        setReportCreateDetail(null);
+      }
+    },
+    [apiBase, apiFetch, detail],
+  );
+
   useEffect(() => {
     void loadSummary();
   }, [loadSummary]);
@@ -969,11 +1408,12 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   useEffect(() => {
     if (
       (activeRoute === "businesses" && !businessId) ||
-      activeRoute === "communications"
+      activeRoute === "communications" ||
+      (activeRoute === "reports" && !operationsReportId)
     ) {
       void loadBusinesses();
     }
-  }, [activeRoute, businessId, loadBusinesses]);
+  }, [activeRoute, businessId, loadBusinesses, operationsReportId]);
 
   useEffect(() => {
     if (businessId) {
@@ -1005,6 +1445,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (activeRoute === "tasks") void loadTasks();
   }, [activeRoute, loadTasks]);
 
+  useEffect(() => {
+    if (activeRoute === "reports" && !operationsReportId) {
+      void loadReports();
+    }
+  }, [activeRoute, loadReports, operationsReportId]);
+
+  useEffect(() => {
+    if (operationsReportId) {
+      void loadReportDetail();
+      void loadReportPreview();
+    }
+  }, [loadReportDetail, loadReportPreview, operationsReportId]);
+
   const attentionCards = useMemo(
     () => [
       {
@@ -1022,8 +1475,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         label: "Reports awaiting review",
         value: summary.counts.reportsAwaitingReview,
-        detail: "Recent completed scans that may need a report pass.",
+        detail: "Client reports that need finding review.",
         href: "/operations/reports",
+      },
+      {
+        label: "Reports ready to send",
+        value: summary.counts.reportsReadyToSend,
+        detail: "Reviewed client reports waiting for delivery.",
+        href: "/operations/reports?status=ready_to_send",
       },
       {
         label: "Client websites with critical issues",
@@ -1332,6 +1791,170 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           : "."
       }\n\nContinue and ${action}?`,
     );
+  }
+
+  function openCreateReport(overrides: Partial<ReportFormState> = {}) {
+    const selectedBusinessId =
+      overrides.businessId ?? detail?.business.id ?? "";
+    const selectedSiteIdValue =
+      overrides.siteId ?? detail?.linkedSites[0]?.site_id ?? "";
+    setReportForm({
+      ...emptyReportForm,
+      businessId: selectedBusinessId,
+      siteId: selectedSiteIdValue,
+      title:
+        overrides.title ??
+        (detail
+          ? `${detail.business.name} website health report`
+          : "Website health report"),
+      preparedContactId:
+        overrides.preparedContactId ?? detail?.primaryContact?.id ?? "",
+      preparedFor:
+        overrides.preparedFor ??
+        (detail?.primaryContact ? contactName(detail.primaryContact) : ""),
+      reportType: overrides.reportType ?? "initial_health_check",
+      scanRunId: overrides.scanRunId ?? "",
+      allowDuplicate: overrides.allowDuplicate ?? false,
+    });
+    setReportCreateDetail(
+      detail?.business.id === selectedBusinessId ? detail : null,
+    );
+    setReportFormOpen(true);
+    if (selectedBusinessId && detail?.business.id !== selectedBusinessId) {
+      void loadReportCreateBusiness(selectedBusinessId);
+    }
+    if (selectedBusinessId && selectedSiteIdValue) {
+      void loadReportableScans(selectedBusinessId, selectedSiteIdValue);
+    }
+  }
+
+  async function submitReport(event: React.FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    try {
+      const res = await apiFetch(`${apiBase}/operations/reports`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...reportForm,
+          preparedContactId: reportForm.preparedContactId || null,
+          preparedFor: reportForm.preparedFor || null,
+        }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(data?.message ?? "Failed to create report");
+      }
+      const data = (await res.json()) as { report: OperationsReportDetail };
+      setReportFormOpen(false);
+      setReportForm(emptyReportForm);
+      await Promise.all([loadReports(), loadSummary()]);
+      onNavigate(`/operations/reports/${data.report.report.id}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create report",
+      );
+    }
+  }
+
+  async function patchReport(input: Record<string, unknown>) {
+    if (!operationsReportId) return;
+    const res = await apiFetch(
+      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as {
+        message?: string;
+      } | null;
+      throw new Error(data?.message ?? "Failed to update report");
+    }
+    await Promise.all([loadReportDetail(), loadReportPreview(), loadSummary()]);
+  }
+
+  async function patchFinding(
+    findingId: string,
+    input: Record<string, unknown>,
+  ) {
+    if (!operationsReportId) return;
+    const res = await apiFetch(
+      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/findings/${encodeURIComponent(findingId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) throw new Error("Failed to update finding");
+    await Promise.all([loadReportDetail(), loadReportPreview()]);
+  }
+
+  async function runReportAction(endpoint: string, body?: unknown) {
+    if (!operationsReportId) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/${endpoint}`,
+        {
+          method: "POST",
+          headers: body ? { "content-type": "application/json" } : undefined,
+          body: body ? JSON.stringify(body) : undefined,
+        },
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+          readinessIssues?: string[];
+        } | null;
+        if (data?.readinessIssues)
+          setReportReadinessIssues(data.readinessIssues);
+        throw new Error(data?.message ?? "Report action failed");
+      }
+      await Promise.all([
+        loadReportDetail(),
+        loadReportPreview(),
+        loadReports(),
+        loadSummary(),
+      ]);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Report action failed",
+      );
+    }
+  }
+
+  async function recordReportSent() {
+    const followUpAt = window.prompt(
+      "Optional follow-up date/time (YYYY-MM-DDTHH:mm), or leave blank",
+      "",
+    );
+    await runReportAction("record-sent", {
+      deliveryMethod: "email_attachment",
+      contactId: reportDetail?.report.prepared_contact_id ?? null,
+      followUpAt: followUpAt ? localDateTimeToIso(followUpAt) : null,
+      updatePipelineStage: true,
+    });
+  }
+
+  async function createRetestReport() {
+    if (!reportDetail) return;
+    const scanRunId = window.prompt("Completed scan run id for the re-test");
+    if (!scanRunId) return;
+    await runReportAction("create-retest", {
+      scanRunId,
+      reportType: "post_fix_retest",
+    });
+  }
+
+  async function generateReportPdf() {
+    await runReportAction("generate-pdf");
+    window.setTimeout(() => window.print(), 50);
   }
 
   async function generateDraft() {
@@ -2443,6 +3066,713 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     );
   }
 
+  function renderReportCreateModal() {
+    if (!reportFormOpen) return null;
+    const selectedBusiness =
+      detail?.business.id === reportForm.businessId
+        ? detail
+        : reportCreateDetail?.business.id === reportForm.businessId
+          ? reportCreateDetail
+          : null;
+    const linkedSites = selectedBusiness?.linkedSites ?? [];
+    const contacts = selectedBusiness?.contacts ?? [];
+    return (
+      <div className="ops-modal">
+        <div className="ops-modal__panel ops-modal__panel--wide">
+          <div className="ops-panel__header">
+            <h2>Create client report</h2>
+            <button
+              className="ops-button"
+              onClick={() => setReportFormOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+          <form className="ops-form" onSubmit={submitReport}>
+            <div className="ops-form-grid">
+              <label>
+                Business
+                <select
+                  value={reportForm.businessId}
+                  disabled={Boolean(detail)}
+                  onChange={(event) => {
+                    const nextBusinessId = event.target.value;
+                    setReportForm((prev) => ({
+                      ...prev,
+                      businessId: nextBusinessId,
+                      siteId: "",
+                      scanRunId: "",
+                      preparedContactId: "",
+                      preparedFor: "",
+                    }));
+                    void loadReportCreateBusiness(nextBusinessId);
+                  }}
+                >
+                  <option value="">Select business</option>
+                  {(detail ? [detail.business] : businesses).map((business) => (
+                    <option key={business.id} value={business.id}>
+                      {business.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Linked website
+                <select
+                  value={reportForm.siteId}
+                  onChange={(event) => {
+                    const siteIdValue = event.target.value;
+                    setReportForm((prev) => ({
+                      ...prev,
+                      siteId: siteIdValue,
+                      scanRunId: "",
+                    }));
+                    void loadReportableScans(
+                      reportForm.businessId,
+                      siteIdValue,
+                    );
+                  }}
+                  disabled={!selectedBusiness}
+                >
+                  <option value="">Select website</option>
+                  {linkedSites.map((site) => (
+                    <option key={site.site_id} value={site.site_id}>
+                      {site.site_display_name ?? site.url}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Completed scan
+                <select
+                  value={reportForm.scanRunId}
+                  onChange={(event) =>
+                    setReportForm((prev) => ({
+                      ...prev,
+                      scanRunId: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Select scan</option>
+                  {reportableScans.map((scan) => (
+                    <option key={scan.id} value={scan.id}>
+                      {formatDateTime(scan.finished_at)} · {scan.open_issues}{" "}
+                      issues
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Report type
+                <select
+                  value={reportForm.reportType}
+                  onChange={(event) =>
+                    setReportForm((prev) => ({
+                      ...prev,
+                      reportType: event.target.value as OperationsReportType,
+                    }))
+                  }
+                >
+                  {operationsReportTypeOptions.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Prepared contact
+                <select
+                  value={reportForm.preparedContactId}
+                  onChange={(event) => {
+                    const contact = contacts.find(
+                      (item) => item.id === event.target.value,
+                    );
+                    setReportForm((prev) => ({
+                      ...prev,
+                      preparedContactId: event.target.value,
+                      preparedFor: contact
+                        ? contactName(contact)
+                        : prev.preparedFor,
+                    }));
+                  }}
+                >
+                  <option value="">No contact selected</option>
+                  {contacts.map((contact) => (
+                    <option key={contact.id} value={contact.id}>
+                      {contactName(contact)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="ops-checkbox">
+                <input
+                  type="checkbox"
+                  checked={reportForm.allowDuplicate}
+                  onChange={(event) =>
+                    setReportForm((prev) => ({
+                      ...prev,
+                      allowDuplicate: event.target.checked,
+                    }))
+                  }
+                />
+                Allow another version for this scan
+              </label>
+            </div>
+            <label>
+              Report title
+              <input
+                value={reportForm.title}
+                onChange={(event) =>
+                  setReportForm((prev) => ({
+                    ...prev,
+                    title: event.target.value,
+                  }))
+                }
+                required
+              />
+            </label>
+            <label>
+              Prepared for
+              <input
+                value={reportForm.preparedFor}
+                onChange={(event) =>
+                  setReportForm((prev) => ({
+                    ...prev,
+                    preparedFor: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            {actionError && <div className="ops-error">{actionError}</div>}
+            <div className="ops-form-actions">
+              <button
+                className="ops-button ops-button--primary"
+                disabled={
+                  !reportForm.businessId ||
+                  !reportForm.siteId ||
+                  !reportForm.scanRunId ||
+                  !reportForm.title.trim()
+                }
+              >
+                Create report
+              </button>
+              <button
+                type="button"
+                className="ops-button"
+                onClick={() => setReportFormOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  function renderReportsPage() {
+    if (operationsReportId) return renderReportDetail();
+    const cards = [
+      ["Draft", reportsSummary.draft],
+      ["Needs review", reportsSummary.needsReview],
+      ["Ready to send", reportsSummary.readyToSend],
+      ["Sent this month", reportsSummary.sentThisMonth],
+      ["Awaiting response", reportsSummary.awaitingClientResponse],
+      ["Completed", reportsSummary.completed],
+    ];
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Client deliverables</div>
+            <h1>Reports</h1>
+            <p>Review findings, prepare client reports and track delivery.</p>
+          </div>
+          <button
+            className="ops-button ops-button--primary"
+            onClick={() => openCreateReport()}
+          >
+            Create report
+          </button>
+        </section>
+        <section className="ops-card-grid">
+          {cards.map(([label, value]) => (
+            <div key={label} className="ops-summary-card">
+              <span>{label}</span>
+              <strong>{value}</strong>
+              <small>Operations client reports</small>
+            </div>
+          ))}
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>{reports.length} reports</h2>
+            <button className="ops-button" onClick={() => void loadReports()}>
+              Refresh
+            </button>
+          </div>
+          {reportsLoading ? (
+            <div className="ops-empty-card">Loading reports...</div>
+          ) : reports.length === 0 ? (
+            <div className="ops-empty-card">
+              No Operations client reports have been created yet.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {reports.map((report) => (
+                <div key={report.id} className="ops-list-card">
+                  <strong>{report.title}</strong>
+                  <span>
+                    {report.business_name ?? "Business"} ·{" "}
+                    {report.site_display_name ?? report.site_url}
+                  </span>
+                  <small>
+                    {reportTypeLabel(report.report_type)} ·{" "}
+                    {reportStatusLabel(report.status)} · v
+                    {report.version_number}
+                  </small>
+                  <small>
+                    {report.included_findings ?? 0} included ·{" "}
+                    {report.critical_findings ?? 0} critical ·{" "}
+                    {report.important_findings ?? 0} important
+                  </small>
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      `/operations/reports/${report.id}`,
+                      "Continue review",
+                      "ops-button ops-button--primary",
+                    )}
+                    {renderLink(
+                      `/report?scanRunId=${report.scan_run_id}`,
+                      "Technical report",
+                      "ops-button",
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        {renderReportCreateModal()}
+      </>
+    );
+  }
+
+  function renderClientReportPreview() {
+    if (!reportPreview) {
+      return <div className="ops-empty-card">Preview is not available.</div>;
+    }
+    return (
+      <div className="ops-client-report">
+        <section className="ops-client-cover">
+          <div className="ops-client-brand">Scanlark</div>
+          <h1>{reportPreview.report.title}</h1>
+          <p>{reportPreview.business.name}</p>
+          <p>{reportPreview.site.displayName ?? reportPreview.site.url}</p>
+          <small>
+            Prepared for {reportPreview.report.preparedFor ?? "Client"} ·{" "}
+            {reportPreview.report.coverDate}
+          </small>
+        </section>
+        <section>
+          <h2>Executive summary</h2>
+          <p>
+            {reportPreview.summaries.executiveSummary ??
+              "Executive summary has not been completed yet."}
+          </p>
+          {reportPreview.summaries.overallSummary && (
+            <p>{reportPreview.summaries.overallSummary}</p>
+          )}
+        </section>
+        <section className="ops-card-grid">
+          {operationsReportPriorityOptions.map((item) => (
+            <div key={item.value} className="ops-empty-card">
+              <strong>{item.label}</strong>
+              <p>{reportPreview.priorityCounts[item.value]} finding(s)</p>
+            </div>
+          ))}
+        </section>
+        <section>
+          <h2>Key findings</h2>
+          {reportPreview.findings.length === 0 ? (
+            <div className="ops-empty-card">
+              No client-facing findings are included.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {reportPreview.findings.map((finding) => (
+                <article key={finding.id} className="ops-list-card">
+                  <small>{reportPriorityLabel(finding.priority)}</small>
+                  <strong>{finding.title}</strong>
+                  {finding.affectedUrl && <span>{finding.affectedUrl}</span>}
+                  {finding.whatWasFound && <p>{finding.whatWasFound}</p>}
+                  {finding.whyItMatters && <p>{finding.whyItMatters}</p>}
+                  {finding.recommendedAction && (
+                    <p>{finding.recommendedAction}</p>
+                  )}
+                  {finding.estimatedEffort && (
+                    <small>Estimated effort: {finding.estimatedEffort}</small>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+        <section>
+          <h2>Positive observations</h2>
+          <ul>
+            {reportPreview.positiveObservations.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+        <section>
+          <h2>Methodology and limitations</h2>
+          <ul>
+            {reportPreview.methodology.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+        <section>
+          <h2>Next steps</h2>
+          <ul>
+            {reportPreview.nextSteps.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+      </div>
+    );
+  }
+
+  function renderReportDetail() {
+    if (reportDetailLoading) {
+      return <section className="ops-panel">Loading report...</section>;
+    }
+    if (!reportDetail) {
+      return <section className="ops-panel">Report not found.</section>;
+    }
+    const report = reportDetail.report;
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Report review</div>
+            <h1>{report.title}</h1>
+            <p>
+              {report.business_name} ·{" "}
+              {report.site_display_name ?? report.site_url}
+            </p>
+            <span className="ops-muted">
+              {reportTypeLabel(report.report_type)} ·{" "}
+              {reportStatusLabel(report.status)} · version{" "}
+              {report.version_number}
+            </span>
+          </div>
+          <div className="ops-inline-actions">
+            <button
+              className="ops-button"
+              onClick={() => void runReportAction("mark-ready")}
+            >
+              Mark ready
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void recordReportSent()}
+            >
+              Record sent
+            </button>
+            <button
+              className="ops-button"
+              onClick={() => void generateReportPdf()}
+            >
+              Print / PDF
+            </button>
+          </div>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        {reportReadinessIssues.length > 0 && (
+          <section className="ops-warning">
+            {reportReadinessIssues.map((issue) => (
+              <div key={issue}>{issue}</div>
+            ))}
+          </section>
+        )}
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <h2>Overview</h2>
+            <dl className="ops-definition-grid">
+              <dt>Prepared for</dt>
+              <dd>{report.prepared_for ?? "-"}</dd>
+              <dt>Cover date</dt>
+              <dd>{formatDate(report.cover_date)}</dd>
+              <dt>Included</dt>
+              <dd>{report.included_findings ?? 0}</dd>
+              <dt>Excluded</dt>
+              <dd>{report.excluded_findings ?? 0}</dd>
+              <dt>Sent</dt>
+              <dd>{formatDateTime(report.sent_at)}</dd>
+              <dt>Frozen</dt>
+              <dd>{formatDateTime(report.frozen_at)}</dd>
+            </dl>
+            <div className="ops-inline-actions">
+              {renderLink(
+                `/report?scanRunId=${report.scan_run_id}`,
+                "Technical report",
+                "ops-button",
+              )}
+              <button
+                className="ops-button"
+                onClick={() => void createRetestReport()}
+              >
+                Create re-test
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => void runReportAction("archive")}
+              >
+                Archive
+              </button>
+            </div>
+          </div>
+          <div className="ops-panel">
+            <h2>Executive summary</h2>
+            <label>
+              Personal executive summary
+              <textarea
+                value={report.executive_summary ?? ""}
+                onChange={(event) =>
+                  setReportDetail((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          report: {
+                            ...prev.report,
+                            executive_summary: event.target.value,
+                          },
+                        }
+                      : prev,
+                  )
+                }
+              />
+            </label>
+            <label>
+              Overall summary
+              <textarea
+                value={report.overall_summary ?? ""}
+                onChange={(event) =>
+                  setReportDetail((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          report: {
+                            ...prev.report,
+                            overall_summary: event.target.value,
+                          },
+                        }
+                      : prev,
+                  )
+                }
+              />
+            </label>
+            <label className="ops-checkbox">
+              <input
+                type="checkbox"
+                checked={report.no_major_findings_waived}
+                onChange={(event) =>
+                  setReportDetail((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          report: {
+                            ...prev.report,
+                            no_major_findings_waived: event.target.checked,
+                          },
+                        }
+                      : prev,
+                  )
+                }
+              />
+              Explicitly allow a no-major-findings report
+            </label>
+            <button
+              className="ops-button ops-button--primary"
+              onClick={() =>
+                void patchReport({
+                  executiveSummary: report.executive_summary,
+                  overallSummary: report.overall_summary,
+                  noMajorFindingsWaived: report.no_major_findings_waived,
+                })
+              }
+            >
+              Save summary
+            </button>
+          </div>
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Findings review</h2>
+            <span className="ops-muted">
+              {reportDetail.findings.length} candidate findings
+            </span>
+          </div>
+          <div className="ops-list">
+            {reportDetail.findings.map((finding) => (
+              <div key={finding.id} className="ops-list-card">
+                <div className="ops-panel__header">
+                  <strong>{finding.title}</strong>
+                  <label className="ops-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={
+                        finding.is_included && !finding.is_false_positive
+                      }
+                      onChange={(event) =>
+                        void patchFinding(finding.id, {
+                          isIncluded: event.target.checked,
+                          isFalsePositive: false,
+                        })
+                      }
+                    />
+                    Include
+                  </label>
+                </div>
+                <small>
+                  {finding.category} · source {finding.original_severity} ·{" "}
+                  {finding.affected_url}
+                </small>
+                <div className="ops-form-grid">
+                  <label>
+                    Client priority
+                    <select
+                      value={finding.client_priority}
+                      onChange={(event) =>
+                        void patchFinding(finding.id, {
+                          clientPriority: event.target
+                            .value as OperationsReportPriority,
+                        })
+                      }
+                    >
+                      {operationsReportPriorityOptions.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Estimated effort
+                    <input
+                      defaultValue={finding.estimated_effort ?? ""}
+                      onBlur={(event) =>
+                        void patchFinding(finding.id, {
+                          estimatedEffort: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <label>
+                  Explanation
+                  <textarea
+                    defaultValue={finding.client_explanation ?? ""}
+                    onBlur={(event) =>
+                      void patchFinding(finding.id, {
+                        clientExplanation: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Recommended action
+                  <textarea
+                    defaultValue={finding.recommended_action ?? ""}
+                    onBlur={(event) =>
+                      void patchFinding(finding.id, {
+                        recommendedAction: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Internal note
+                  <textarea
+                    defaultValue={finding.internal_note ?? ""}
+                    onBlur={(event) =>
+                      void patchFinding(finding.id, {
+                        internalNote: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <div className="ops-inline-actions">
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void patchFinding(finding.id, {
+                        isIncluded: false,
+                      })
+                    }
+                  >
+                    Exclude
+                  </button>
+                  <button
+                    className="ops-button"
+                    onClick={() =>
+                      void patchFinding(finding.id, {
+                        isIncluded: false,
+                        isFalsePositive: true,
+                      })
+                    }
+                  >
+                    Mark false positive
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Client preview</h2>
+            {reportPreview && (
+              <span className="ops-muted">{reportFilename(reportPreview)}</span>
+            )}
+          </div>
+          {renderClientReportPreview()}
+        </section>
+        {reportDetail.comparisonItems.length > 0 && (
+          <section className="ops-panel">
+            <h2>Re-test comparison</h2>
+            <div className="ops-list">
+              {reportDetail.comparisonItems.map((item) => (
+                <div key={item.id} className="ops-list-card">
+                  <strong>{item.comparison_status}</strong>
+                  <span>{item.summary ?? "No comparison summary."}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        <section className="ops-panel">
+          <h2>Activity</h2>
+          <div className="ops-timeline">
+            {reportDetail.activity.map((item) => (
+              <div key={item.id} className="ops-note">
+                <small>
+                  {formatDateTime(item.created_at)} · {item.admin_email}
+                </small>
+                <p>{item.action}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      </>
+    );
+  }
+
   function renderHome() {
     return (
       <>
@@ -2506,6 +3836,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   "Reports awaiting review",
                   summary.counts.reportsAwaitingReview,
                 ],
+                ["Report follow-ups due", summary.counts.reportFollowUpsDue],
               ].map(([label, value]) => (
                 <div key={label} className="ops-empty-card">
                   <strong>{label}</strong>
@@ -3182,35 +4513,61 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             )}
           </div>
           <div className="ops-panel">
-            <h2>Related reports</h2>
+            <div className="ops-panel__header">
+              <h2>Client reports</h2>
+              <button
+                className="ops-button"
+                onClick={() => openCreateReport({ businessId: b.id })}
+              >
+                Create report
+              </button>
+            </div>
             {detail.reports.length === 0 ? (
               <div className="ops-empty-card">
-                No completed reports for linked sites yet.
+                No Operations client reports for this business yet.
               </div>
             ) : (
               <div className="ops-list">
                 {detail.reports.map((report) => (
-                  <div key={report.scan_run_id} className="ops-list-card">
-                    <strong>
-                      {report.site_display_name ?? report.site_url}
-                    </strong>
-                    <span>{formatDateTime(report.finished_at)}</span>
+                  <div key={report.id} className="ops-list-card">
+                    <strong>{report.title}</strong>
+                    <span>
+                      {report.site_display_name ?? report.site_url} ·{" "}
+                      {reportTypeLabel(report.report_type)}
+                    </span>
                     <small>
-                      {report.share_enabled
-                        ? "Share link exists"
-                        : "No active share link"}
+                      {reportStatusLabel(report.status)} ·{" "}
+                      {report.included_findings} included · sent{" "}
+                      {formatDateTime(report.sent_at)}
                     </small>
                     <div className="ops-inline-actions">
                       {renderLink(
-                        `/report?scanRunId=${report.scan_run_id}`,
-                        "View",
-                        "ops-button",
+                        `/operations/reports/${report.id}`,
+                        "Open report",
+                        "ops-button ops-button--primary",
                       )}
                       {renderLink(
-                        `/report?scanRunId=${report.scan_run_id}&print=1`,
-                        "Print/PDF",
+                        `/report?scanRunId=${report.scan_run_id}`,
+                        "Technical report",
                         "ops-button",
                       )}
+                      <button
+                        className="ops-button"
+                        onClick={() =>
+                          openCommunicationForm({
+                            businessId: b.id,
+                            templateId:
+                              communicationTemplates.find(
+                                (template) =>
+                                  template.category === "report_delivery" &&
+                                  template.is_active,
+                              )?.id ?? "",
+                            subject: `Website health report - ${b.name}`,
+                          })
+                        }
+                      >
+                        Create delivery email
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -3448,6 +4805,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </div>
         )}
         {renderCommunicationModal()}
+        {renderReportCreateModal()}
       </>
     );
   }
@@ -3635,7 +4993,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   ? renderCommunicationsPage()
                   : activeRoute === "tasks"
                     ? renderTasksPage()
-                    : renderPlaceholder(activeRoute)}
+                    : activeRoute === "reports"
+                      ? renderReportsPage()
+                      : renderPlaceholder(activeRoute)}
         </main>
       </div>
     </div>
@@ -4089,6 +5449,57 @@ const operationsStyles = `
   .ops-note p {
     white-space: pre-wrap;
   }
+  .ops-client-report {
+    display: grid;
+    gap: 24px;
+    max-width: 820px;
+    margin: 0 auto;
+    border: 1px solid #d5dbe6;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #162033;
+    padding: 44px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.22);
+  }
+  .ops-client-report h1,
+  .ops-client-report h2,
+  .ops-client-report p,
+  .ops-client-report small,
+  .ops-client-report li,
+  .ops-client-report span,
+  .ops-client-report strong {
+    color: inherit;
+  }
+  .ops-client-report h1,
+  .ops-client-report h2 {
+    margin: 0;
+    font-family: var(--font-display);
+  }
+  .ops-client-report p,
+  .ops-client-report li {
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+  .ops-client-report .ops-empty-card,
+  .ops-client-report .ops-list-card {
+    border-color: #d5dbe6;
+    background: #f7f9fc;
+    color: #162033;
+    box-shadow: none;
+  }
+  .ops-client-cover {
+    display: grid;
+    gap: 10px;
+    border-bottom: 2px solid #162033;
+    padding-bottom: 28px;
+  }
+  .ops-client-brand {
+    color: #53627a;
+    font-size: 13px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
   @media (max-width: 980px) {
     .ops-topbar,
     .ops-shell,
@@ -4121,6 +5532,45 @@ const operationsStyles = `
     }
     .ops-account {
       justify-content: flex-start;
+    }
+  }
+  @media print {
+    .ops-topbar,
+    .ops-sidebar,
+    .ops-hero,
+    .ops-panel__header,
+    .ops-button,
+    .ops-error,
+    .ops-warning {
+      display: none !important;
+    }
+    .ops-page,
+    .ops-shell,
+    .ops-main,
+    .ops-panel {
+      display: block;
+      max-width: none;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      background: #ffffff;
+      box-shadow: none;
+    }
+    .ops-panel:not(:has(.ops-client-report)) {
+      display: none !important;
+    }
+    .ops-client-report {
+      max-width: none;
+      min-height: auto;
+      margin: 0;
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      box-shadow: none;
+    }
+    .ops-client-report section,
+    .ops-client-report article {
+      break-inside: avoid;
     }
   }
 `;

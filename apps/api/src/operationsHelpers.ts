@@ -8,6 +8,13 @@ import type {
   OperationsCommunicationTemplateCategory,
   OperationsContactInput,
   OperationsPipelineStage,
+  OperationsReportClientPriority,
+  OperationsReportComparisonStatus,
+  OperationsReportCreateInput,
+  OperationsReportFindingUpdateInput,
+  OperationsReportStatus,
+  OperationsReportType,
+  OperationsReportUpdateInput,
   OperationsRelationshipType,
   OperationsSummary,
   OperationsTaskStatus,
@@ -84,6 +91,43 @@ export const OPERATIONS_TASK_STATUSES = [
   "cancelled",
 ] as const;
 
+export const OPERATIONS_REPORT_STATUSES = [
+  "draft",
+  "needs_review",
+  "ready_to_send",
+  "sent",
+  "client_replied",
+  "fixes_quoted",
+  "work_in_progress",
+  "completed",
+  "archived",
+] as const;
+
+export const OPERATIONS_REPORT_TYPES = [
+  "initial_health_check",
+  "follow_up",
+  "post_fix_retest",
+  "monthly_monitoring",
+  "incident",
+  "custom",
+] as const;
+
+export const OPERATIONS_REPORT_CLIENT_PRIORITIES = [
+  "critical",
+  "important",
+  "improvement",
+  "informational",
+] as const;
+
+export const OPERATIONS_REPORT_COMPARISON_STATUSES = [
+  "resolved",
+  "still_present",
+  "improved",
+  "worsened",
+  "new",
+  "unable_to_compare",
+] as const;
+
 export const SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS = [
   "firstName",
   "lastName",
@@ -145,6 +189,14 @@ const COMMUNICATION_STATUS_SET = new Set<string>(
   OPERATIONS_COMMUNICATION_STATUSES,
 );
 const TASK_STATUS_SET = new Set<string>(OPERATIONS_TASK_STATUSES);
+const REPORT_STATUS_SET = new Set<string>(OPERATIONS_REPORT_STATUSES);
+const REPORT_TYPE_SET = new Set<string>(OPERATIONS_REPORT_TYPES);
+const REPORT_CLIENT_PRIORITY_SET = new Set<string>(
+  OPERATIONS_REPORT_CLIENT_PRIORITIES,
+);
+const REPORT_COMPARISON_STATUS_SET = new Set<string>(
+  OPERATIONS_REPORT_COMPARISON_STATUSES,
+);
 
 const DEFAULT_FOLLOW_UP_BUSINESS_DAYS_BY_CATEGORY: Partial<
   Record<OperationsCommunicationTemplateCategory, number>
@@ -262,6 +314,21 @@ function requiredTextField(input: Record<string, unknown>, key: string) {
   return value;
 }
 
+function assertPlainClientText(value: string | null | undefined, key: string) {
+  if (!value) return value;
+  if (value.length > 8000) throw new Error(`${key}_too_long`);
+  if (/[<>]/.test(value)) throw new Error("unsafe_html");
+  return value;
+}
+
+function requiredClientTextField(input: Record<string, unknown>, key: string) {
+  return assertPlainClientText(requiredTextField(input, key), key) as string;
+}
+
+function optionalClientTextField(input: Record<string, unknown>, key: string) {
+  return assertPlainClientText(optionalTextField(input, key), key);
+}
+
 export function optionalTextField(input: Record<string, unknown>, key: string) {
   if (!(key in input)) return undefined;
   return textField(input, key);
@@ -343,6 +410,40 @@ function parseCommunicationStatus(
 export function parseTaskStatus(value: unknown): OperationsTaskStatus | null {
   if (typeof value !== "string") return null;
   return TASK_STATUS_SET.has(value) ? (value as OperationsTaskStatus) : null;
+}
+
+export function parseOperationsReportStatus(
+  value: unknown,
+): OperationsReportStatus | null {
+  if (typeof value !== "string") return null;
+  return REPORT_STATUS_SET.has(value)
+    ? (value as OperationsReportStatus)
+    : null;
+}
+
+export function parseOperationsReportType(
+  value: unknown,
+): OperationsReportType | null {
+  if (typeof value !== "string") return null;
+  return REPORT_TYPE_SET.has(value) ? (value as OperationsReportType) : null;
+}
+
+export function parseOperationsReportClientPriority(
+  value: unknown,
+): OperationsReportClientPriority | null {
+  if (typeof value !== "string") return null;
+  return REPORT_CLIENT_PRIORITY_SET.has(value)
+    ? (value as OperationsReportClientPriority)
+    : null;
+}
+
+export function parseOperationsReportComparisonStatus(
+  value: unknown,
+): OperationsReportComparisonStatus | null {
+  if (typeof value !== "string") return null;
+  return REPORT_COMPARISON_STATUS_SET.has(value)
+    ? (value as OperationsReportComparisonStatus)
+    : null;
 }
 
 export function optionalUuidField(input: Record<string, unknown>, key: string) {
@@ -669,6 +770,257 @@ export function parseOperationsTaskInput(
     const status = parseTaskStatus(record.status);
     if (!status) throw new Error("invalid_task_status");
     parsed.status = status;
+  }
+  return parsed;
+}
+
+export function parseOperationsReportCreateInput(
+  body: unknown,
+): OperationsReportCreateInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const businessId = optionalUuidField(record, "businessId");
+  const siteId = optionalUuidField(record, "siteId");
+  const scanRunId = optionalUuidField(record, "scanRunId");
+  if (!businessId) throw new Error("invalid_businessId");
+  if (!siteId) throw new Error("invalid_siteId");
+  if (!scanRunId) throw new Error("invalid_scanRunId");
+  const reportType = parseOperationsReportType(
+    record.reportType ?? "initial_health_check",
+  );
+  if (!reportType) throw new Error("invalid_report_type");
+  return {
+    businessId,
+    siteId,
+    scanRunId,
+    reportType,
+    title: requiredClientTextField(record, "title"),
+    preparedContactId: optionalUuidField(record, "preparedContactId"),
+    preparedFor: optionalClientTextField(record, "preparedFor"),
+    preparedBy: optionalClientTextField(record, "preparedBy"),
+    coverDate: parseDateField(record, "coverDate"),
+    allowDuplicate: record.allowDuplicate === true,
+    supersedesReportId: optionalUuidField(record, "supersedesReportId"),
+    comparisonReportId: optionalUuidField(record, "comparisonReportId"),
+  };
+}
+
+export function parseOperationsReportUpdateInput(
+  body: unknown,
+): OperationsReportUpdateInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const parsed: OperationsReportUpdateInput = {};
+  if ("title" in record) {
+    parsed.title = requiredClientTextField(record, "title");
+  }
+  if ("status" in record) {
+    const status = parseOperationsReportStatus(record.status);
+    if (!status) throw new Error("invalid_report_status");
+    parsed.status = status;
+  }
+  if ("reportType" in record) {
+    const reportType = parseOperationsReportType(record.reportType);
+    if (!reportType) throw new Error("invalid_report_type");
+    parsed.reportType = reportType;
+  }
+  if ("executiveSummary" in record) {
+    parsed.executiveSummary = optionalClientTextField(
+      record,
+      "executiveSummary",
+    );
+  }
+  if ("overallSummary" in record) {
+    parsed.overallSummary = optionalClientTextField(record, "overallSummary");
+  }
+  if ("mainStrengths" in record) {
+    parsed.mainStrengths = optionalClientTextField(record, "mainStrengths");
+  }
+  if ("mainConcerns" in record) {
+    parsed.mainConcerns = optionalClientTextField(record, "mainConcerns");
+  }
+  if ("recommendedFirstSteps" in record) {
+    parsed.recommendedFirstSteps = optionalClientTextField(
+      record,
+      "recommendedFirstSteps",
+    );
+  }
+  if ("scopeLimitations" in record) {
+    parsed.scopeLimitations = optionalClientTextField(
+      record,
+      "scopeLimitations",
+    );
+  }
+  if ("preparedFor" in record) {
+    parsed.preparedFor = optionalClientTextField(record, "preparedFor");
+  }
+  if ("preparedBy" in record) {
+    parsed.preparedBy = optionalClientTextField(record, "preparedBy");
+  }
+  if ("preparedContactId" in record) {
+    parsed.preparedContactId = optionalUuidField(record, "preparedContactId");
+  }
+  parsed.coverDate = parseDateField(record, "coverDate");
+  if ("validUntil" in record) {
+    parsed.validUntil = parseDateField(record, "validUntil");
+  }
+  if ("noMajorFindingsWaived" in record) {
+    parsed.noMajorFindingsWaived = record.noMajorFindingsWaived === true;
+  }
+  if ("displaySettings" in record) {
+    const settings =
+      record.displaySettings && typeof record.displaySettings === "object"
+        ? (record.displaySettings as Record<string, unknown>)
+        : {};
+    parsed.displaySettings = {
+      displayLogo:
+        typeof settings.displayLogo === "boolean"
+          ? settings.displayLogo
+          : undefined,
+      displayScanlarkContact:
+        typeof settings.displayScanlarkContact === "boolean"
+          ? settings.displayScanlarkContact
+          : undefined,
+      displayWebsiteHealthScore:
+        typeof settings.displayWebsiteHealthScore === "boolean"
+          ? settings.displayWebsiteHealthScore
+          : undefined,
+      displayTechnicalAppendix:
+        typeof settings.displayTechnicalAppendix === "boolean"
+          ? settings.displayTechnicalAppendix
+          : undefined,
+      displayMethodologyLimitations:
+        typeof settings.displayMethodologyLimitations === "boolean"
+          ? settings.displayMethodologyLimitations
+          : undefined,
+      displayPricingOffer:
+        typeof settings.displayPricingOffer === "boolean"
+          ? settings.displayPricingOffer
+          : undefined,
+      footerText: optionalClientTextField(settings, "footerText"),
+    };
+  }
+  return parsed;
+}
+
+export function parseOperationsReportFindingUpdateInput(
+  body: unknown,
+): OperationsReportFindingUpdateInput {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const parsed: OperationsReportFindingUpdateInput = {};
+  if ("clientPriority" in record) {
+    const priority = parseOperationsReportClientPriority(record.clientPriority);
+    if (!priority) throw new Error("invalid_client_priority");
+    parsed.clientPriority = priority;
+  }
+  if ("title" in record)
+    parsed.title = requiredClientTextField(record, "title");
+  if ("clientExplanation" in record) {
+    parsed.clientExplanation = optionalClientTextField(
+      record,
+      "clientExplanation",
+    );
+  }
+  if ("whyItMatters" in record) {
+    parsed.whyItMatters = optionalClientTextField(record, "whyItMatters");
+  }
+  if ("recommendedAction" in record) {
+    parsed.recommendedAction = optionalClientTextField(
+      record,
+      "recommendedAction",
+    );
+  }
+  if ("internalNote" in record) {
+    parsed.internalNote = optionalClientTextField(record, "internalNote");
+  }
+  if ("estimatedEffort" in record) {
+    parsed.estimatedEffort = optionalClientTextField(record, "estimatedEffort");
+  }
+  if ("isIncluded" in record) parsed.isIncluded = record.isIncluded === true;
+  if ("isFalsePositive" in record) {
+    parsed.isFalsePositive = record.isFalsePositive === true;
+  }
+  if ("displayOrder" in record) {
+    const order =
+      typeof record.displayOrder === "number"
+        ? record.displayOrder
+        : Number.parseInt(String(record.displayOrder), 10);
+    if (!Number.isInteger(order) || order < 0) {
+      throw new Error("invalid_display_order");
+    }
+    parsed.displayOrder = order;
+  }
+  if ("comparisonStatus" in record) {
+    if (record.comparisonStatus == null || record.comparisonStatus === "") {
+      parsed.comparisonStatus = null;
+    } else {
+      const status = parseOperationsReportComparisonStatus(
+        record.comparisonStatus,
+      );
+      if (!status) throw new Error("invalid_comparison_status");
+      parsed.comparisonStatus = status;
+    }
+  }
+  return parsed;
+}
+
+export function parseOperationsReportSentInput(body: unknown) {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const deliveryMethod =
+    typeof record.deliveryMethod === "string" ? record.deliveryMethod : "";
+  if (
+    !["email_attachment", "secure_link", "in_person", "other"].includes(
+      deliveryMethod,
+    )
+  ) {
+    throw new Error("invalid_delivery_method");
+  }
+  return {
+    contactId: optionalUuidField(record, "contactId"),
+    deliveryMethod: deliveryMethod as
+      | "email_attachment"
+      | "secure_link"
+      | "in_person"
+      | "other",
+    followUpAt: parseDateField(record, "followUpAt"),
+    updatePipelineStage: record.updatePipelineStage === true,
+  };
+}
+
+export function parseOperationsReportRetestInput(body: unknown) {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const scanRunId = optionalUuidField(record, "scanRunId");
+  if (!scanRunId) throw new Error("invalid_scanRunId");
+  const reportType = parseOperationsReportType(
+    record.reportType ?? "post_fix_retest",
+  );
+  if (!reportType) throw new Error("invalid_report_type");
+  return { scanRunId, reportType };
+}
+
+export function parseOperationsReportComparisonUpdateInput(body: unknown) {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  const parsed: {
+    comparisonStatus?: OperationsReportComparisonStatus;
+    summary?: string | null;
+    manualNote?: string | null;
+  } = {};
+  if ("comparisonStatus" in record) {
+    const status = parseOperationsReportComparisonStatus(
+      record.comparisonStatus,
+    );
+    if (!status) throw new Error("invalid_comparison_status");
+    parsed.comparisonStatus = status;
+  }
+  if ("summary" in record) {
+    parsed.summary = optionalClientTextField(record, "summary");
+  }
+  if ("manualNote" in record) {
+    parsed.manualNote = optionalClientTextField(record, "manualNote");
   }
   return parsed;
 }

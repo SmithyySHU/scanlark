@@ -1,10 +1,14 @@
 import { ensureConnected } from "./client";
 import { getOperationsBusinessCounts } from "./operationsCrm";
+import { getOperationsReportCountsForSummary } from "./operationsReports";
 
 export type OperationsSummaryCounts = {
   followUpsDue: number;
   prospectsAwaitingContact: number;
   reportsAwaitingReview: number;
+  reportsReadyToSend: number;
+  reportsAwaitingClientResponse: number;
+  reportFollowUpsDue: number;
   criticalClientSites: number;
   quotesAwaitingResponse: number;
   openWorkItems: number;
@@ -124,13 +128,13 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     downSites,
     failedScans,
     highPrioritySites,
-    reportReviewCandidates,
     recentCompletedScans,
     recentFailedScans,
     recentShares,
     recentSites,
     highPrioritySiteCount,
     crmCounts,
+    reportCounts,
   ] = await Promise.all([
     client.query<DownSiteRow>(
       `
@@ -189,14 +193,6 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
         GROUP BY lc.site_id, s.url, s.site_display_name, lc.id, lc.finished_at
         ORDER BY critical_count DESC, high_count DESC, lc.finished_at DESC
         LIMIT 5
-      `,
-    ),
-    client.query<CountRow>(
-      `
-        SELECT COUNT(*)::text AS count
-        FROM scan_runs r
-        WHERE r.status = 'completed'
-          AND r.finished_at >= NOW() - INTERVAL '14 days'
       `,
     ),
     client.query<CompletedScanRow>(
@@ -272,6 +268,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
       `,
     ),
     getOperationsBusinessCounts(),
+    getOperationsReportCountsForSummary(),
   ]);
 
   const monitoringAttention: OperationsMonitoringAttentionItem[] = [
@@ -375,7 +372,10 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
     counts: {
       followUpsDue: crmCounts.followUpsDue,
       prospectsAwaitingContact: crmCounts.prospectsAwaitingContact,
-      reportsAwaitingReview: countValue(reportReviewCandidates.rows[0]),
+      reportsAwaitingReview: reportCounts.reportsAwaitingReview,
+      reportsReadyToSend: reportCounts.reportsReadyToSend,
+      reportsAwaitingClientResponse: reportCounts.reportsAwaitingClientResponse,
+      reportFollowUpsDue: reportCounts.reportFollowUpsDue,
       criticalClientSites: countValue(highPrioritySiteCount.rows[0]),
       quotesAwaitingResponse: 0,
       openWorkItems: crmCounts.openWorkItems,

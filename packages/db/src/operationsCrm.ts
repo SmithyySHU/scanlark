@@ -111,15 +111,24 @@ export type OperationsBusinessNoteRow = {
 };
 
 export type OperationsBusinessReportRow = {
+  id: string;
+  title: string;
+  report_type: string;
+  status: string;
+  version_number: number;
   scan_run_id: string;
   site_id: string;
   site_url: string;
   site_display_name: string | null;
-  status: string;
+  included_findings: number;
+  critical_findings: number;
+  important_findings: number;
+  created_at: Date;
+  updated_at: Date;
+  sent_at: Date | null;
   finished_at: Date | null;
-  share_id: string | null;
-  share_enabled: boolean | null;
-  share_created_at: Date | null;
+  follow_up_at: Date | null;
+  archived_at: Date | null;
 };
 
 export type OperationsBusinessDetail = {
@@ -477,23 +486,38 @@ export async function getOperationsBusinessDetail(
     ),
     client.query<OperationsBusinessReportRow>(
       `
-        SELECT r.id AS scan_run_id,
+        SELECT r.id,
+               r.title,
+               r.report_type,
+               r.status,
+               r.version_number,
+               r.scan_run_id,
                r.site_id,
                s.url AS site_url,
                s.site_display_name,
-               r.status,
-               r.finished_at,
-               rs.id AS share_id,
-               rs.enabled AS share_enabled,
-               rs.created_at AS share_created_at
-        FROM operations_business_sites obs
-        JOIN sites s ON s.id = obs.site_id
-        JOIN scan_runs r ON r.site_id = obs.site_id
-        LEFT JOIN report_shares rs ON rs.scan_run_id = r.id AND rs.enabled = true
-        WHERE obs.business_id = $1
-          AND r.status = 'completed'
-        ORDER BY r.finished_at DESC NULLS LAST, r.started_at DESC
-        LIMIT 10
+               COALESCE(finding_counts.included_findings, 0)::int AS included_findings,
+               COALESCE(finding_counts.critical_findings, 0)::int AS critical_findings,
+               COALESCE(finding_counts.important_findings, 0)::int AS important_findings,
+               r.created_at,
+               r.updated_at,
+               r.sent_at,
+               sr.finished_at,
+               r.follow_up_at,
+               r.archived_at
+        FROM operations_reports r
+        JOIN sites s ON s.id = r.site_id
+        JOIN scan_runs sr ON sr.id = r.scan_run_id
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false)::int AS included_findings,
+            COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false AND f.client_priority = 'critical')::int AS critical_findings,
+            COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false AND f.client_priority = 'important')::int AS important_findings
+          FROM operations_report_findings f
+          WHERE f.operations_report_id = r.id
+        ) finding_counts ON TRUE
+        WHERE r.business_id = $1
+        ORDER BY r.updated_at DESC
+        LIMIT 20
       `,
       [businessId],
     ),
