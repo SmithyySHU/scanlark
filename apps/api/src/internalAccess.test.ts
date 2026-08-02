@@ -12,7 +12,11 @@ import {
 import { adminGuard } from "./adminAccess";
 import {
   parseOperationsBusinessInput,
+  parseOperationsCommunicationInput,
+  parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsTaskInput,
+  renderClientCommunicationTemplate,
   serializeOperationsSummary,
 } from "./routes/operations";
 
@@ -245,6 +249,138 @@ test("operations contact validation accepts useful contact details and rejects i
   assert.throws(
     () => parseOperationsContactInput({}),
     /contact_details_required/,
+  );
+});
+
+test("operations client communication template validation keeps templates separate from transactional email", () => {
+  const input = parseOperationsCommunicationTemplateInput({
+    name: "Warm intro",
+    category: "warm_introduction",
+    subjectTemplate: "Website health check for {{businessName}}",
+    bodyTemplate: "Hi {{firstName}}",
+    isActive: true,
+  });
+  assert.equal(input.category, "warm_introduction");
+  assert.equal(
+    input.subjectTemplate,
+    "Website health check for {{businessName}}",
+  );
+
+  assert.throws(
+    () =>
+      parseOperationsCommunicationTemplateInput({
+        name: "Bad",
+        category: "scan_failed",
+        subjectTemplate: "System alert",
+        bodyTemplate: "This is a transactional key and should not validate.",
+      }),
+    /invalid_template_category/,
+  );
+});
+
+test("operations client communication rendering reports unresolved placeholders", () => {
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "A quick website observation for {{businessName}}",
+      body_template:
+        "Hi {{firstName}},\n\n{{topFinding}}\n\nFrom {{senderName}} at {{senderEmail}}. {{unknownThing}}",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://www.example.com",
+        general_email: null,
+      },
+      contact: {
+        id: "contact_1",
+        first_name: "Ada",
+        last_name: "Lovelace",
+        email: "ada@example.com",
+      },
+      site: {
+        site_id: "site_1",
+        url: "https://www.example.com",
+        site_display_name: null,
+        latest_scan_id: "scan_1",
+        critical_issue_count: 1,
+        high_issue_count: 2,
+        top_finding: "critical issue on https://www.example.com/broken",
+      },
+    },
+    { senderName: "Scanlark Ops" },
+  );
+
+  assert.equal(rendered.subject, "A quick website observation for Example Co");
+  assert(rendered.body.includes("Hi Ada"));
+  assert(
+    rendered.body.includes("critical issue on https://www.example.com/broken"),
+  );
+  assert(rendered.body.includes("{{senderEmail}}"));
+  assert(rendered.body.includes("{{unknownThing}}"));
+  assert.deepEqual(rendered.unresolvedPlaceholders, [
+    "senderEmail",
+    "unknownThing",
+  ]);
+});
+
+test("operations communication validation distinguishes drafts from sent records", () => {
+  const draft = parseOperationsCommunicationInput({
+    contactId: "11111111-1111-4111-8111-111111111111",
+    templateId: "22222222-2222-4222-8222-222222222222",
+    direction: "outbound",
+    channel: "email",
+    status: "draft",
+    subject: "Draft subject",
+    body: "Draft body",
+    followUpAt: "2026-01-15T09:00:00.000Z",
+  });
+  assert.equal(draft.status, "draft");
+  assert.equal(draft.sentAt, undefined);
+  assert(draft.followUpAt instanceof Date);
+
+  const sent = parseOperationsCommunicationInput({
+    status: "sent",
+    body: "Sent body",
+  });
+  assert.equal(sent.status, "sent");
+  assert.equal(sent.sentAt, undefined);
+
+  assert.throws(
+    () =>
+      parseOperationsCommunicationInput({
+        status: "emailed",
+        body: "Nope",
+      }),
+    /invalid_communication_status/,
+  );
+});
+
+test("operations task validation supports follow-up scheduling and snoozing inputs", () => {
+  const task = parseOperationsTaskInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    contactId: "22222222-2222-4222-8222-222222222222",
+    title: "Follow up on report",
+    dueAt: "2026-01-16T10:00:00.000Z",
+    notes: "Ask whether they reviewed the report.",
+  });
+  assert.equal(task.title, "Follow up on report");
+  assert(task.dueAt instanceof Date);
+
+  const patch = parseOperationsTaskInput(
+    { status: "snoozed", dueAt: "2026-01-17T10:00:00.000Z" },
+    { partial: true },
+  );
+  assert.equal(patch.status, "snoozed");
+
+  assert.throws(
+    () =>
+      parseOperationsTaskInput({
+        businessId: "not-a-uuid",
+        title: "Bad task",
+        dueAt: "2026-01-16T10:00:00.000Z",
+      }),
+    /invalid_businessId/,
   );
 });
 

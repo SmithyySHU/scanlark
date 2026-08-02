@@ -29,6 +29,39 @@ type RelationshipType =
   | "partner"
   | "other";
 
+type CommunicationTemplateCategory =
+  | "warm_introduction"
+  | "cold_outreach"
+  | "report_offer"
+  | "report_delivery"
+  | "no_reply_follow_up"
+  | "interested_reply"
+  | "pre_quote_questions"
+  | "quote_delivery"
+  | "access_request"
+  | "work_started"
+  | "work_completed"
+  | "monitoring_offer"
+  | "monthly_update"
+  | "testimonial_request"
+  | "referral_request"
+  | "custom";
+
+type CommunicationDirection = "outbound" | "inbound" | "internal_note";
+type CommunicationChannel =
+  | "email"
+  | "phone"
+  | "video_call"
+  | "in_person"
+  | "other";
+type CommunicationStatus =
+  | "draft"
+  | "ready"
+  | "sent"
+  | "received"
+  | "cancelled";
+type TaskStatus = "open" | "completed" | "snoozed" | "cancelled";
+
 type BusinessListFilter =
   | "active"
   | "follow_up"
@@ -168,6 +201,62 @@ type AvailableSite = {
   owner_email: string | null;
 };
 
+type CommunicationTemplate = {
+  id: string;
+  system_key: string | null;
+  name: string;
+  category: CommunicationTemplateCategory;
+  subject_template: string;
+  body_template: string;
+  is_active: boolean;
+  is_system_default: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type Communication = {
+  id: string;
+  business_id: string;
+  contact_id: string | null;
+  template_id: string | null;
+  direction: CommunicationDirection;
+  channel: CommunicationChannel;
+  status: CommunicationStatus;
+  subject: string | null;
+  body: string;
+  sent_at: string | null;
+  received_at: string | null;
+  occurred_at: string;
+  follow_up_at: string | null;
+  follow_up_completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  contact_email?: string | null;
+  template_name?: string | null;
+};
+
+type OperationsTask = {
+  id: string;
+  business_id: string;
+  contact_id: string | null;
+  source_communication_id: string | null;
+  title: string;
+  notes: string | null;
+  due_at: string;
+  status: TaskStatus;
+  completed_at: string | null;
+  snoozed_until: string | null;
+  created_at: string;
+  updated_at: string;
+  business_name?: string | null;
+  contact_first_name?: string | null;
+  contact_last_name?: string | null;
+  contact_email?: string | null;
+};
+
 type BusinessFormState = {
   name: string;
   websiteUrl: string;
@@ -194,6 +283,29 @@ type ContactFormState = {
   jobTitle: string;
   notes: string;
   isPrimary: boolean;
+};
+
+type CommunicationFormState = {
+  businessId: string;
+  contactId: string;
+  templateId: string;
+  direction: CommunicationDirection;
+  channel: CommunicationChannel;
+  status: CommunicationStatus;
+  subject: string;
+  body: string;
+  followUpAt: string;
+  taskTitle: string;
+  taskNotes: string;
+  unresolvedPlaceholders: string[];
+};
+
+type TemplateFormState = {
+  name: string;
+  category: CommunicationTemplateCategory;
+  subjectTemplate: string;
+  bodyTemplate: string;
+  isActive: boolean;
 };
 
 type OperationsPageProps = {
@@ -228,6 +340,39 @@ const relationshipTypeOptions: Array<{
   { value: "client", label: "Client" },
   { value: "former_client", label: "Former client" },
   { value: "partner", label: "Partner" },
+  { value: "other", label: "Other" },
+];
+
+const communicationTemplateCategoryOptions: Array<{
+  value: CommunicationTemplateCategory;
+  label: string;
+}> = [
+  { value: "warm_introduction", label: "Warm introduction" },
+  { value: "cold_outreach", label: "Cold outreach" },
+  { value: "report_offer", label: "Report offer" },
+  { value: "report_delivery", label: "Report delivery" },
+  { value: "no_reply_follow_up", label: "No-reply follow-up" },
+  { value: "interested_reply", label: "Interested reply" },
+  { value: "pre_quote_questions", label: "Pre-quote questions" },
+  { value: "quote_delivery", label: "Quote delivery" },
+  { value: "access_request", label: "Access request" },
+  { value: "work_started", label: "Work started" },
+  { value: "work_completed", label: "Work completed" },
+  { value: "monitoring_offer", label: "Monitoring offer" },
+  { value: "monthly_update", label: "Monthly update" },
+  { value: "testimonial_request", label: "Testimonial request" },
+  { value: "referral_request", label: "Referral request" },
+  { value: "custom", label: "Custom" },
+];
+
+const communicationChannelOptions: Array<{
+  value: CommunicationChannel;
+  label: string;
+}> = [
+  { value: "email", label: "Email" },
+  { value: "phone", label: "Phone" },
+  { value: "video_call", label: "Video call" },
+  { value: "in_person", label: "In person" },
   { value: "other", label: "Other" },
 ];
 
@@ -355,6 +500,29 @@ const emptyContactForm: ContactFormState = {
   isPrimary: false,
 };
 
+const emptyCommunicationForm: CommunicationFormState = {
+  businessId: "",
+  contactId: "",
+  templateId: "",
+  direction: "outbound",
+  channel: "email",
+  status: "draft",
+  subject: "",
+  body: "",
+  followUpAt: "",
+  taskTitle: "",
+  taskNotes: "",
+  unresolvedPlaceholders: [],
+};
+
+const emptyTemplateForm: TemplateFormState = {
+  name: "",
+  category: "custom",
+  subjectTemplate: "",
+  bodyTemplate: "",
+  isActive: true,
+};
+
 function getRouteKey(path: string): OperationsRouteKey {
   const normalized = path.replace(/\/+$/, "") || "/operations";
   if (normalized === "/operations") return "home";
@@ -443,6 +611,46 @@ function isOverdue(value: string | null) {
   return !Number.isNaN(date.getTime()) && date.getTime() <= Date.now();
 }
 
+function toDateTimeLocalValue(value: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function localDateTimeToIso(value: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function templateCategoryLabel(value: CommunicationTemplateCategory) {
+  return (
+    communicationTemplateCategoryOptions.find((item) => item.value === value)
+      ?.label ?? value
+  );
+}
+
+function communicationContactName(
+  item: Communication | OperationsTask | null | undefined,
+) {
+  if (!item) return "";
+  const name = [item.contact_first_name, item.contact_last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return name || item.contact_email || "";
+}
+
+function communicationLabel(item: Communication) {
+  if (item.status === "sent") return "Sent";
+  if (item.status === "received") return "Received";
+  if (item.status === "ready") return "Ready";
+  if (item.status === "cancelled") return "Cancelled";
+  return "Draft";
+}
+
 function buildQuery(params: Record<string, string | null | undefined>) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -482,6 +690,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   >([]);
   const [pipelineLoading, setPipelineLoading] = useState(false);
   const [availableSites, setAvailableSites] = useState<AvailableSite[]>([]);
+  const [communicationTemplates, setCommunicationTemplates] = useState<
+    CommunicationTemplate[]
+  >([]);
+  const [communications, setCommunications] = useState<Communication[]>([]);
+  const [communicationsLoading, setCommunicationsLoading] = useState(false);
+  const [tasks, setTasks] = useState<OperationsTask[]>([]);
+  const [tasksLoading, setTasksLoading] = useState(false);
   const [addBusinessOpen, setAddBusinessOpen] = useState(false);
   const [businessForm, setBusinessForm] =
     useState<BusinessFormState>(emptyBusinessForm);
@@ -497,6 +712,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [noteBody, setNoteBody] = useState("");
   const [selectedSiteId, setSelectedSiteId] = useState("");
   const [clearFollowUpOnContact, setClearFollowUpOnContact] = useState(false);
+  const [communicationFormOpen, setCommunicationFormOpen] = useState(false);
+  const [communicationForm, setCommunicationForm] =
+    useState<CommunicationFormState>(emptyCommunicationForm);
+  const [templateForm, setTemplateForm] =
+    useState<TemplateFormState>(emptyTemplateForm);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const activeFilter =
@@ -625,24 +845,106 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [apiBase, apiFetch]);
 
+  const loadCommunicationTemplates = useCallback(async () => {
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/communication-templates?activeOnly=false`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        templates: CommunicationTemplate[];
+      };
+      setCommunicationTemplates(data.templates);
+    } catch (err) {
+      console.warn("Failed to load communication templates", err);
+      setCommunicationTemplates([]);
+    }
+  }, [apiBase, apiFetch]);
+
+  const loadCommunications = useCallback(async () => {
+    setCommunicationsLoading(true);
+    try {
+      const url = businessId
+        ? `${apiBase}/operations/businesses/${encodeURIComponent(businessId)}/communications?limit=50`
+        : `${apiBase}/operations/communications?limit=50`;
+      const res = await apiFetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        communications: Communication[];
+      };
+      setCommunications(data.communications);
+    } catch (err) {
+      console.warn("Failed to load communications", err);
+      setCommunications([]);
+    } finally {
+      setCommunicationsLoading(false);
+    }
+  }, [apiBase, apiFetch, businessId]);
+
+  const loadTasks = useCallback(async () => {
+    setTasksLoading(true);
+    const status = searchParams.get("status") ?? "active";
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/tasks${buildQuery({ status, limit: "100" })}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as { tasks: OperationsTask[] };
+      setTasks(data.tasks);
+    } catch (err) {
+      console.warn("Failed to load tasks", err);
+      setTasks([]);
+    } finally {
+      setTasksLoading(false);
+    }
+  }, [apiBase, apiFetch, searchParams]);
+
   useEffect(() => {
     void loadSummary();
   }, [loadSummary]);
 
   useEffect(() => {
-    if (activeRoute === "businesses" && !businessId) void loadBusinesses();
+    if (
+      (activeRoute === "businesses" && !businessId) ||
+      activeRoute === "communications"
+    ) {
+      void loadBusinesses();
+    }
   }, [activeRoute, businessId, loadBusinesses]);
 
   useEffect(() => {
     if (businessId) {
       void loadDetail();
       void loadAvailableSites();
+      void loadCommunicationTemplates();
+      void loadCommunications();
     }
-  }, [businessId, loadAvailableSites, loadDetail]);
+  }, [
+    businessId,
+    loadAvailableSites,
+    loadCommunicationTemplates,
+    loadCommunications,
+    loadDetail,
+  ]);
 
   useEffect(() => {
     if (activeRoute === "pipeline") void loadPipeline();
   }, [activeRoute, loadPipeline]);
+
+  useEffect(() => {
+    if (activeRoute === "communications") {
+      void loadCommunicationTemplates();
+      void loadCommunications();
+    }
+  }, [activeRoute, loadCommunicationTemplates, loadCommunications]);
+
+  useEffect(() => {
+    if (activeRoute === "tasks") void loadTasks();
+  }, [activeRoute, loadTasks]);
 
   const attentionCards = useMemo(
     () => [
@@ -900,6 +1202,231 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       setActionError(
         err instanceof Error ? err.message : "Failed to link site",
       );
+    }
+  }
+
+  function openCommunicationForm(
+    overrides: Partial<CommunicationFormState> = {},
+  ) {
+    setActionError(null);
+    const selectedBusinessId =
+      overrides.businessId ?? detail?.business.id ?? "";
+    setCommunicationForm({
+      ...emptyCommunicationForm,
+      businessId: selectedBusinessId,
+      contactId: overrides.contactId ?? detail?.primaryContact?.id ?? "",
+      templateId:
+        overrides.templateId ??
+        communicationTemplates.find((template) => template.is_active)?.id ??
+        "",
+      direction: overrides.direction ?? "outbound",
+      channel: overrides.channel ?? "email",
+      status: overrides.status ?? "draft",
+      subject: overrides.subject ?? "",
+      body: overrides.body ?? "",
+      followUpAt: overrides.followUpAt ?? "",
+      taskTitle: overrides.taskTitle ?? "",
+      taskNotes: overrides.taskNotes ?? "",
+      unresolvedPlaceholders: [],
+    });
+    setCommunicationFormOpen(true);
+  }
+
+  function communicationRecipientEmail() {
+    if (detail?.business.id === communicationForm.businessId) {
+      const contact = detail.contacts.find(
+        (item) => item.id === communicationForm.contactId,
+      );
+      return (
+        contact?.email ??
+        detail.primaryContact?.email ??
+        detail.business.general_email ??
+        ""
+      );
+    }
+    const business = businesses.find(
+      (item) => item.id === communicationForm.businessId,
+    );
+    return business?.primary_contact_email ?? business?.general_email ?? "";
+  }
+
+  async function generateDraft() {
+    if (!communicationForm.businessId || !communicationForm.templateId) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/businesses/${encodeURIComponent(
+          communicationForm.businessId,
+        )}/communications/draft`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            templateId: communicationForm.templateId,
+            contactId: communicationForm.contactId || null,
+            followUpAt: localDateTimeToIso(communicationForm.followUpAt),
+          }),
+        },
+      );
+      if (!res.ok) throw new Error("Failed to render draft");
+      const data = (await res.json()) as {
+        draft: {
+          subject: string;
+          body: string;
+          unresolvedPlaceholders: string[];
+        };
+      };
+      setCommunicationForm((prev) => ({
+        ...prev,
+        subject: data.draft.subject,
+        body: data.draft.body,
+        unresolvedPlaceholders: data.draft.unresolvedPlaceholders,
+      }));
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to render draft",
+      );
+    }
+  }
+
+  async function saveCommunication(status: CommunicationStatus) {
+    if (!communicationForm.businessId || !communicationForm.body.trim()) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/businesses/${encodeURIComponent(
+          communicationForm.businessId,
+        )}/communications`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            contactId: communicationForm.contactId || null,
+            templateId: communicationForm.templateId || null,
+            direction: communicationForm.direction,
+            channel: communicationForm.channel,
+            status,
+            subject: communicationForm.subject,
+            body: communicationForm.body,
+            followUpAt: localDateTimeToIso(communicationForm.followUpAt),
+            taskTitle: communicationForm.taskTitle,
+            taskNotes: communicationForm.taskNotes,
+          }),
+        },
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(data?.message ?? "Failed to save communication");
+      }
+      setCommunicationFormOpen(false);
+      setCommunicationForm(emptyCommunicationForm);
+      await Promise.all([loadCommunications(), loadSummary(), loadTasks()]);
+      if (businessId) await loadDetail();
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to save communication",
+      );
+    }
+  }
+
+  async function copyCommunication() {
+    const text = `Subject: ${communicationForm.subject}\n\n${communicationForm.body}`;
+    await navigator.clipboard.writeText(text);
+  }
+
+  function openEmailClient() {
+    const to = communicationRecipientEmail();
+    const params = new URLSearchParams({
+      subject: communicationForm.subject,
+      body: communicationForm.body,
+    });
+    window.location.href = `mailto:${encodeURIComponent(to)}?${params.toString()}`;
+  }
+
+  async function submitTemplate(event: React.FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/communication-templates`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(templateForm),
+        },
+      );
+      if (!res.ok) throw new Error("Failed to create template");
+      setTemplateForm(emptyTemplateForm);
+      await loadCommunicationTemplates();
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create template",
+      );
+    }
+  }
+
+  async function toggleTemplate(template: CommunicationTemplate) {
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/communication-templates/${encodeURIComponent(
+          template.id,
+        )}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ isActive: !template.is_active }),
+        },
+      );
+      if (!res.ok) throw new Error("Failed to update template");
+      await loadCommunicationTemplates();
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to update template",
+      );
+    }
+  }
+
+  async function runTaskAction(
+    task: OperationsTask,
+    action: "complete" | "snooze" | "cancel" | "reschedule",
+  ) {
+    setActionError(null);
+    try {
+      let endpoint = `${apiBase}/operations/tasks/${encodeURIComponent(task.id)}/${action}`;
+      let init: RequestInit = { method: "POST" };
+      if (action === "snooze") {
+        const snoozedUntil = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+        init = {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ snoozedUntil: snoozedUntil.toISOString() }),
+        };
+      }
+      if (action === "reschedule") {
+        const raw = window.prompt(
+          "New follow-up date/time",
+          toDateTimeLocalValue(task.due_at),
+        );
+        if (!raw) return;
+        endpoint = `${apiBase}/operations/tasks/${encodeURIComponent(task.id)}`;
+        init = {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            dueAt: localDateTimeToIso(raw),
+            status: "open",
+          }),
+        };
+      }
+      const res = await apiFetch(endpoint, init);
+      if (!res.ok) throw new Error("Failed to update task");
+      await Promise.all([loadTasks(), loadSummary()]);
+      if (businessId) await loadDetail();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Task update failed");
     }
   }
 
@@ -1188,6 +1715,572 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </button>
         </div>
       </form>
+    );
+  }
+
+  function renderCommunicationModal() {
+    if (!communicationFormOpen) return null;
+    const contactOptions =
+      detail?.business.id === communicationForm.businessId
+        ? detail.contacts
+        : [];
+    return (
+      <div className="ops-modal">
+        <div className="ops-modal__panel ops-modal__panel--wide">
+          <div className="ops-panel__header">
+            <div>
+              <div className="ops-eyebrow">Manual communication</div>
+              <h2>
+                {communicationForm.direction === "outbound"
+                  ? "Draft client email"
+                  : communicationForm.direction === "inbound"
+                    ? "Record client reply"
+                    : "Record communication note"}
+              </h2>
+            </div>
+            <button
+              className="ops-button"
+              onClick={() => setCommunicationFormOpen(false)}
+            >
+              Close
+            </button>
+          </div>
+          <div className="ops-composer">
+            <div className="ops-form">
+              <div className="ops-form-grid">
+                <label>
+                  Business
+                  <select
+                    value={communicationForm.businessId}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        businessId: event.target.value,
+                        contactId: "",
+                      }))
+                    }
+                    disabled={Boolean(detail)}
+                  >
+                    <option value="">Select business</option>
+                    {[
+                      ...(detail ? [detail.business] : []),
+                      ...businesses.filter(
+                        (business) => business.id !== detail?.business.id,
+                      ),
+                    ].map((business) => (
+                      <option key={business.id} value={business.id}>
+                        {business.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Contact
+                  <select
+                    value={communicationForm.contactId}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        contactId: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">No contact selected</option>
+                    {contactOptions.map((contact) => (
+                      <option key={contact.id} value={contact.id}>
+                        {contactName(contact)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Template
+                  <select
+                    value={communicationForm.templateId}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        templateId: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">No template</option>
+                    {communicationTemplates
+                      .filter((template) => template.is_active)
+                      .map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  Direction
+                  <select
+                    value={communicationForm.direction}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        direction: event.target.value as CommunicationDirection,
+                        status:
+                          event.target.value === "inbound"
+                            ? "received"
+                            : prev.status,
+                      }))
+                    }
+                  >
+                    <option value="outbound">Outbound</option>
+                    <option value="inbound">Inbound</option>
+                    <option value="internal_note">Internal note</option>
+                  </select>
+                </label>
+                <label>
+                  Channel
+                  <select
+                    value={communicationForm.channel}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        channel: event.target.value as CommunicationChannel,
+                      }))
+                    }
+                  >
+                    {communicationChannelOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Follow-up
+                  <input
+                    type="datetime-local"
+                    value={communicationForm.followUpAt}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        followUpAt: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+              <label>
+                Subject
+                <input
+                  value={communicationForm.subject}
+                  onChange={(event) =>
+                    setCommunicationForm((prev) => ({
+                      ...prev,
+                      subject: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Body
+                <textarea
+                  value={communicationForm.body}
+                  onChange={(event) =>
+                    setCommunicationForm((prev) => ({
+                      ...prev,
+                      body: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <div className="ops-form-grid">
+                <label>
+                  Follow-up task title
+                  <input
+                    value={communicationForm.taskTitle}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        taskTitle: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Follow-up task notes
+                  <input
+                    value={communicationForm.taskNotes}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        taskNotes: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+              {communicationForm.unresolvedPlaceholders.length > 0 && (
+                <div className="ops-warning">
+                  Unresolved placeholders:{" "}
+                  {communicationForm.unresolvedPlaceholders.join(", ")}
+                </div>
+              )}
+              <div className="ops-form-actions">
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void generateDraft()}
+                  disabled={
+                    !communicationForm.businessId ||
+                    !communicationForm.templateId
+                  }
+                >
+                  Generate draft
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void copyCommunication()}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Copy email
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={openEmailClient}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Open email client
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() => void saveCommunication("draft")}
+                  disabled={!communicationForm.body.trim()}
+                >
+                  Save draft
+                </button>
+                <button
+                  type="button"
+                  className="ops-button ops-button--primary"
+                  onClick={() =>
+                    void saveCommunication(
+                      communicationForm.direction === "inbound"
+                        ? "received"
+                        : "sent",
+                    )
+                  }
+                  disabled={!communicationForm.body.trim()}
+                >
+                  {communicationForm.direction === "inbound"
+                    ? "Record received"
+                    : "Mark sent"}
+                </button>
+              </div>
+            </div>
+            <div className="ops-preview">
+              <div className="ops-section-label">Preview</div>
+              <strong>{communicationForm.subject || "No subject"}</strong>
+              <p>{communicationForm.body || "Generate or write a draft."}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderCommunicationsPage() {
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Client messaging</div>
+            <h1>Communications</h1>
+            <p>
+              Draft manual outreach, manage client communication templates, and
+              keep follow-up records separate from transactional email.
+            </p>
+          </div>
+          <button
+            className="ops-button ops-button--primary"
+            onClick={() => openCommunicationForm()}
+          >
+            Draft communication
+          </button>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        <section className="ops-two-column">
+          <div className="ops-panel">
+            <div className="ops-panel__header">
+              <h2>Recent communications</h2>
+              <button
+                className="ops-button"
+                onClick={() => void loadCommunications()}
+              >
+                Refresh
+              </button>
+            </div>
+            {communicationsLoading ? (
+              <div className="ops-empty-card">Loading communications...</div>
+            ) : communications.length === 0 ? (
+              <div className="ops-empty-card">
+                No client communications have been recorded yet.
+              </div>
+            ) : (
+              <div className="ops-timeline">
+                {communications.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="ops-activity"
+                    onClick={() =>
+                      onNavigate(`/operations/businesses/${item.business_id}`)
+                    }
+                  >
+                    <strong>
+                      {communicationLabel(item)} ·{" "}
+                      {item.subject || item.business_name || "Communication"}
+                    </strong>
+                    <span>
+                      {item.business_name ?? "Business"}{" "}
+                      {communicationContactName(item)
+                        ? `· ${communicationContactName(item)}`
+                        : ""}
+                    </span>
+                    <small>{formatDateTime(item.occurred_at)}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="ops-panel">
+            <div className="ops-panel__header">
+              <h2>Client communication templates</h2>
+              <span className="ops-muted">
+                {communicationTemplates.length} templates
+              </span>
+            </div>
+            <div className="ops-list">
+              {communicationTemplates.map((template) => (
+                <div key={template.id} className="ops-list-card">
+                  <strong>
+                    {template.name}{" "}
+                    {template.is_system_default ? "· Default" : ""}
+                  </strong>
+                  <span>{templateCategoryLabel(template.category)}</span>
+                  <small>
+                    {template.is_active ? "Active" : "Inactive"} · Updated{" "}
+                    {formatDateTime(template.updated_at)}
+                  </small>
+                  <div className="ops-inline-actions">
+                    <button
+                      className="ops-button"
+                      onClick={() => void toggleTemplate(template)}
+                    >
+                      {template.is_active ? "Deactivate" : "Activate"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <form className="ops-form" onSubmit={submitTemplate}>
+              <div className="ops-section-label">Add custom template</div>
+              <div className="ops-form-grid">
+                <label>
+                  Name
+                  <input
+                    value={templateForm.name}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Category
+                  <select
+                    value={templateForm.category}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        category: event.target
+                          .value as CommunicationTemplateCategory,
+                      }))
+                    }
+                  >
+                    {communicationTemplateCategoryOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                Subject template
+                <input
+                  value={templateForm.subjectTemplate}
+                  onChange={(event) =>
+                    setTemplateForm((prev) => ({
+                      ...prev,
+                      subjectTemplate: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label>
+                Body template
+                <textarea
+                  value={templateForm.bodyTemplate}
+                  onChange={(event) =>
+                    setTemplateForm((prev) => ({
+                      ...prev,
+                      bodyTemplate: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <button
+                className="ops-button ops-button--primary"
+                disabled={
+                  !templateForm.name.trim() ||
+                  !templateForm.subjectTemplate.trim() ||
+                  !templateForm.bodyTemplate.trim()
+                }
+              >
+                Add template
+              </button>
+            </form>
+          </div>
+        </section>
+        {renderCommunicationModal()}
+      </>
+    );
+  }
+
+  function renderTasksPage() {
+    const activeStatus = searchParams.get("status") ?? "active";
+    const filters = [
+      ["active", "Active"],
+      ["due", "Due"],
+      ["open", "Open"],
+      ["snoozed", "Snoozed"],
+      ["completed", "Completed"],
+      ["cancelled", "Cancelled"],
+    ];
+    return (
+      <>
+        <section className="ops-hero">
+          <div>
+            <div className="ops-eyebrow">Daily work</div>
+            <h1>Tasks</h1>
+            <p>
+              Review due follow-ups, snooze or reschedule outreach, and close
+              completed client work.
+            </p>
+          </div>
+          <button
+            className="ops-button"
+            onClick={() => void loadTasks()}
+            disabled={tasksLoading}
+          >
+            {tasksLoading ? "Refreshing..." : "Refresh"}
+          </button>
+        </section>
+        {actionError && <div className="ops-error">{actionError}</div>}
+        <section className="ops-panel">
+          <div className="ops-segmented">
+            {filters.map(([key, label]) => (
+              <button
+                key={key}
+                className={activeStatus === key ? "active" : ""}
+                onClick={() =>
+                  onNavigate(`/operations/tasks${buildQuery({ status: key })}`)
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+        <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>{tasks.length} tasks</h2>
+          </div>
+          {tasks.length === 0 && !tasksLoading ? (
+            <div className="ops-empty-card">
+              No follow-up tasks match this view.
+            </div>
+          ) : (
+            <div className="ops-list">
+              {tasks.map((task) => (
+                <div key={task.id} className="ops-list-card">
+                  <strong
+                    className={
+                      isOverdue(task.snoozed_until ?? task.due_at)
+                        ? "ops-overdue"
+                        : ""
+                    }
+                  >
+                    {task.title}
+                  </strong>
+                  <span>
+                    {task.business_name ?? "Business"}{" "}
+                    {communicationContactName(task)
+                      ? `· ${communicationContactName(task)}`
+                      : ""}
+                  </span>
+                  <small>
+                    Due {formatDateTime(task.snoozed_until ?? task.due_at)} ·{" "}
+                    {task.status}
+                  </small>
+                  {task.notes && <p>{task.notes}</p>}
+                  <div className="ops-inline-actions">
+                    {renderLink(
+                      `/operations/businesses/${task.business_id}`,
+                      "Open business",
+                      "ops-button",
+                    )}
+                    {task.status !== "completed" && (
+                      <button
+                        className="ops-button"
+                        onClick={() => void runTaskAction(task, "complete")}
+                      >
+                        Complete
+                      </button>
+                    )}
+                    {task.status !== "completed" &&
+                      task.status !== "cancelled" && (
+                        <>
+                          <button
+                            className="ops-button"
+                            onClick={() => void runTaskAction(task, "snooze")}
+                          >
+                            Snooze 3 days
+                          </button>
+                          <button
+                            className="ops-button"
+                            onClick={() =>
+                              void runTaskAction(task, "reschedule")
+                            }
+                          >
+                            Reschedule
+                          </button>
+                          <button
+                            className="ops-button"
+                            onClick={() => void runTaskAction(task, "cancel")}
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </>
     );
   }
 
@@ -1631,6 +2724,36 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </button>
             <button
               className="ops-button"
+              onClick={() => openCommunicationForm({ status: "draft" })}
+            >
+              Draft email
+            </button>
+            <button
+              className="ops-button"
+              onClick={() =>
+                openCommunicationForm({
+                  direction: "inbound",
+                  channel: "email",
+                  status: "received",
+                })
+              }
+            >
+              Record reply
+            </button>
+            <button
+              className="ops-button"
+              onClick={() =>
+                openCommunicationForm({
+                  direction: "internal_note",
+                  channel: "phone",
+                  status: "ready",
+                })
+              }
+            >
+              Record call/note
+            </button>
+            <button
+              className="ops-button"
               onClick={() =>
                 window.confirm(
                   b.is_archived
@@ -1923,6 +3046,50 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </div>
         </section>
         <section className="ops-panel">
+          <div className="ops-panel__header">
+            <h2>Communication timeline</h2>
+            <button
+              className="ops-button"
+              onClick={() => void loadCommunications()}
+            >
+              Refresh
+            </button>
+          </div>
+          {communicationsLoading ? (
+            <div className="ops-empty-card">Loading communications...</div>
+          ) : communications.length === 0 ? (
+            <div className="ops-empty-card">
+              No communications have been recorded for this business yet.
+            </div>
+          ) : (
+            <div className="ops-timeline">
+              {communications.map((item) => (
+                <div key={item.id} className="ops-note">
+                  <small>
+                    {communicationLabel(item)} · {item.channel} ·{" "}
+                    {formatDateTime(item.occurred_at)}
+                    {communicationContactName(item)
+                      ? ` · ${communicationContactName(item)}`
+                      : ""}
+                  </small>
+                  <strong>{item.subject || "No subject"}</strong>
+                  <p>{item.body}</p>
+                  {item.follow_up_at && (
+                    <small>
+                      Follow-up: {formatDateTime(item.follow_up_at)}
+                      {item.follow_up_completed_at
+                        ? ` · completed ${formatDateTime(
+                            item.follow_up_completed_at,
+                          )}`
+                        : ""}
+                    </small>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section className="ops-panel">
           <h2>Internal notes</h2>
           <form className="ops-note-form" onSubmit={submitNote}>
             <textarea
@@ -2060,6 +3227,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </div>
           </div>
         )}
+        {renderCommunicationModal()}
       </>
     );
   }
@@ -2243,7 +3411,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 : renderBusinessesList()
               : activeRoute === "pipeline"
                 ? renderPipeline()
-                : renderPlaceholder(activeRoute)}
+                : activeRoute === "communications"
+                  ? renderCommunicationsPage()
+                  : activeRoute === "tasks"
+                    ? renderTasksPage()
+                    : renderPlaceholder(activeRoute)}
         </main>
       </div>
     </div>
@@ -2522,6 +3694,14 @@ const operationsStyles = `
     padding: 12px;
     font-size: 13px;
   }
+  .ops-warning {
+    border: 1px solid color-mix(in srgb, var(--warning) 48%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--warning);
+    padding: 12px;
+    font-size: 13px;
+  }
   .ops-filterbar {
     display: grid;
     grid-template-columns: minmax(220px, 1fr) 180px;
@@ -2628,6 +3808,31 @@ const operationsStyles = `
     overflow: auto;
     padding: 18px;
   }
+  .ops-modal__panel--wide {
+    width: min(1120px, 100%);
+  }
+  .ops-composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+    gap: 16px;
+    align-items: start;
+  }
+  .ops-preview {
+    display: grid;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--panel-elev) 72%, transparent);
+    padding: 14px;
+    position: sticky;
+    top: 0;
+  }
+  .ops-preview p {
+    white-space: pre-wrap;
+    color: var(--text-muted);
+    line-height: 1.55;
+    margin: 0;
+  }
   .ops-pipeline {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -2666,7 +3871,8 @@ const operationsStyles = `
     .ops-topbar,
     .ops-shell,
     .ops-two-column,
-    .ops-filterbar {
+    .ops-filterbar,
+    .ops-composer {
       grid-template-columns: 1fr;
     }
     .ops-sidebar {
