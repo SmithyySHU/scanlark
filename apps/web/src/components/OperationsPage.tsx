@@ -5325,8 +5325,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       finding.is_included && !finding.is_false_positive,
                   ).length
                 }{" "}
-                included report finding(s) will be copied as zero-priced quote
-                items for manual pricing.
+                included report finding(s) are available for scope reference.
+                Add priced quote items after creating the draft.
               </div>
             )}
             {actionError && <div className="ops-error">{actionError}</div>}
