@@ -17,10 +17,20 @@ import {
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
   parseOperationsContactInput,
+  parseOperationsReportCreateInput,
+  parseOperationsReportFindingUpdateInput,
+  parseOperationsReportSentInput,
+  parseOperationsReportUpdateInput,
   parseOperationsTaskInput,
   renderClientCommunicationTemplate,
   serializeOperationsSummary,
 } from "./operationsHelpers";
+import {
+  buildOperationsClientReportPayload,
+  type OperationsReportComparisonItemRow,
+  type OperationsReportFindingRow,
+  type OperationsReportRow,
+} from "../../../packages/db/src/operationsReports";
 
 async function withEnv<T>(
   env: Record<string, string | undefined>,
@@ -147,6 +157,9 @@ test("operations summary serialization returns a compact safe shape", () => {
       followUpsDue: 0,
       prospectsAwaitingContact: 0,
       reportsAwaitingReview: 1,
+      reportsReadyToSend: 0,
+      reportsAwaitingClientResponse: 0,
+      reportFollowUpsDue: 0,
       criticalClientSites: 2,
       quotesAwaitingResponse: 0,
       openWorkItems: 0,
@@ -440,6 +453,218 @@ test("operations task validation supports follow-up scheduling and snoozing inpu
       }),
     /invalid_businessId/,
   );
+});
+
+test("operations report creation validation requires safe report relationships and fields", () => {
+  const input = parseOperationsReportCreateInput({
+    businessId: "11111111-1111-4111-8111-111111111111",
+    siteId: "22222222-2222-4222-8222-222222222222",
+    scanRunId: "33333333-3333-4333-8333-333333333333",
+    reportType: "initial_health_check",
+    title: "Example Co website health review",
+    preparedFor: "Ada Lovelace",
+    allowDuplicate: true,
+  });
+  assert.equal(input.reportType, "initial_health_check");
+  assert.equal(input.title, "Example Co website health review");
+  assert.equal(input.allowDuplicate, true);
+
+  assert.throws(
+    () =>
+      parseOperationsReportCreateInput({
+        businessId: "not-a-uuid",
+        siteId: "22222222-2222-4222-8222-222222222222",
+        scanRunId: "33333333-3333-4333-8333-333333333333",
+        reportType: "initial_health_check",
+        title: "Example Co website health review",
+      }),
+    /invalid_businessId/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsReportCreateInput({
+        businessId: "11111111-1111-4111-8111-111111111111",
+        siteId: "22222222-2222-4222-8222-222222222222",
+        scanRunId: "33333333-3333-4333-8333-333333333333",
+        reportType: "sales_deck",
+        title: "Example Co website health review",
+      }),
+    /invalid_report_type/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsReportCreateInput({
+        businessId: "11111111-1111-4111-8111-111111111111",
+        siteId: "22222222-2222-4222-8222-222222222222",
+        scanRunId: "33333333-3333-4333-8333-333333333333",
+        reportType: "initial_health_check",
+        title: "<strong>Unsafe</strong>",
+      }),
+    /unsafe_html/,
+  );
+});
+
+test("operations report editing validation rejects unsafe client copy and invalid priorities", () => {
+  const reportPatch = parseOperationsReportUpdateInput({
+    status: "needs_review",
+    executiveSummary: "Reviewed summary for the client.",
+    noMajorFindingsWaived: true,
+  });
+  assert.equal(reportPatch.status, "needs_review");
+  assert.equal(reportPatch.noMajorFindingsWaived, true);
+
+  const findingPatch = parseOperationsReportFindingUpdateInput({
+    clientPriority: "important",
+    clientExplanation: "A broken resource can reduce visitor trust.",
+    recommendedAction: "Replace the missing resource or update the page.",
+    internalNote: "Check manually before sending.",
+    isIncluded: true,
+  });
+  assert.equal(findingPatch.clientPriority, "important");
+  assert.equal(findingPatch.isIncluded, true);
+
+  assert.throws(
+    () =>
+      parseOperationsReportUpdateInput({
+        executiveSummary: "This includes <script>alert(1)</script>",
+      }),
+    /unsafe_html/,
+  );
+  assert.throws(
+    () =>
+      parseOperationsReportFindingUpdateInput({
+        clientPriority: "blocker",
+      }),
+    /invalid_client_priority/,
+  );
+});
+
+test("operations report sent validation requires explicit delivery metadata", () => {
+  const input = parseOperationsReportSentInput({
+    deliveryMethod: "email_attachment",
+    contactId: "11111111-1111-4111-8111-111111111111",
+    followUpAt: "2026-02-03T10:00:00.000Z",
+    updatePipelineStage: true,
+  });
+  assert.equal(input.deliveryMethod, "email_attachment");
+  assert.equal(input.updatePipelineStage, true);
+  assert(input.followUpAt instanceof Date);
+
+  assert.throws(
+    () => parseOperationsReportSentInput({ deliveryMethod: "carrier_pigeon" }),
+    /invalid_delivery_method/,
+  );
+});
+
+test("operations client report payload excludes internal-only finding data", () => {
+  const now = new Date("2026-01-20T12:00:00.000Z");
+  const report = {
+    id: "report_1",
+    business_id: "business_1",
+    site_id: "site_1",
+    scan_run_id: "scan_1",
+    prepared_contact_id: null,
+    supersedes_report_id: null,
+    comparison_report_id: null,
+    delivery_communication_id: null,
+    follow_up_task_id: null,
+    title: "Example Co website health review",
+    status: "ready_to_send",
+    report_type: "initial_health_check",
+    version_number: 1,
+    executive_summary: "The website needs a few fixes.",
+    overall_summary: null,
+    main_strengths: null,
+    main_concerns: null,
+    recommended_first_steps: null,
+    scope_limitations: null,
+    prepared_for: "Ada Lovelace",
+    prepared_by: "Scanlark",
+    cover_date: now,
+    valid_until: null,
+    sent_at: null,
+    completed_at: null,
+    archived_at: null,
+    follow_up_at: null,
+    no_major_findings_waived: false,
+    display_settings_json: {},
+    frozen_render_json: null,
+    frozen_at: null,
+    last_pdf_generated_at: null,
+    created_by_user_id: null,
+    created_at: now,
+    updated_at: now,
+    business_name: "Example Co",
+    site_url: "https://www.example.com",
+    site_display_name: "Example",
+  } satisfies OperationsReportRow;
+  const findings = [
+    {
+      id: "finding_1",
+      operations_report_id: "report_1",
+      source_issue_id: "issue_1",
+      source_link_id: null,
+      source_type: "scan_issue",
+      source_fingerprint: "fingerprint_1",
+      category: "links",
+      original_severity: "high",
+      client_priority: "important",
+      title: "Important broken link",
+      technical_summary: "HTTP 404",
+      client_explanation: "A visitor may hit a dead end.",
+      why_it_matters: "Broken links reduce trust.",
+      recommended_action: "Update or remove the link.",
+      affected_url: "https://www.example.com/missing",
+      evidence_json: { statusCode: 404 },
+      is_included: true,
+      is_false_positive: false,
+      internal_note: "Do not leak this note.",
+      display_order: 1,
+      estimated_effort: "Small",
+      comparison_status: null,
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "finding_2",
+      operations_report_id: "report_1",
+      source_issue_id: "issue_2",
+      source_link_id: null,
+      source_type: "scan_issue",
+      source_fingerprint: "fingerprint_2",
+      category: "resources",
+      original_severity: "critical",
+      client_priority: "critical",
+      title: "Excluded issue",
+      technical_summary: null,
+      client_explanation: "Excluded copy",
+      why_it_matters: null,
+      recommended_action: null,
+      affected_url: null,
+      evidence_json: {},
+      is_included: false,
+      is_false_positive: false,
+      internal_note: "Excluded note.",
+      display_order: 2,
+      estimated_effort: null,
+      comparison_status: null,
+      created_at: now,
+      updated_at: now,
+    },
+  ] satisfies OperationsReportFindingRow[];
+
+  const payload = buildOperationsClientReportPayload(
+    report,
+    findings,
+    [] satisfies OperationsReportComparisonItemRow[],
+  );
+  assert.equal(payload.findings.length, 1);
+  assert.equal(payload.findings[0]?.title, "Important broken link");
+  const serialized = JSON.stringify(payload);
+  assert(!serialized.includes("Do not leak this note."));
+  assert(!serialized.includes("Excluded issue"));
+  assert(!serialized.includes("source_issue_id"));
+  assert(!serialized.includes("contact_email"));
 });
 
 test("multiple administrator emails are parsed case-insensitively", () => {
