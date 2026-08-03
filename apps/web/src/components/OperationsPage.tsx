@@ -620,6 +620,7 @@ type ClientReportPayload = {
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
+    healthScore: number | null;
   };
   summaries: {
     executiveSummary: string | null;
@@ -3429,7 +3430,26 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         body: JSON.stringify(input),
       },
     );
-    if (!res.ok) throw new Error("Failed to update finding");
+    if (!res.ok) {
+      throw new Error(await apiErrorMessage(res, "Failed to update finding"));
+    }
+    const data = (await res.json()) as { finding: OperationsReportFinding };
+    setReportDetail((prev) =>
+      prev
+        ? {
+            ...prev,
+            findings: prev.findings.map((finding) =>
+              finding.id === data.finding.id ? data.finding : finding,
+            ),
+            report: {
+              ...prev.report,
+              last_preview_generated_at: null,
+              last_pdf_generated_at: null,
+              updated_at: data.finding.updated_at,
+            },
+          }
+        : prev,
+    );
     await Promise.all([loadReportDetail(), loadReportPreview()]);
   }
 
@@ -3607,13 +3627,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     });
   }
 
-  async function generateReportPdf() {
+  async function generateReportPdf(mode: "draft" | "final" = "final") {
     if (!operationsReportId) return;
     setActionError(null);
     try {
       const res = await apiFetch(
         `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/generate-pdf`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode }),
+        },
       );
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as {
@@ -11075,15 +11099,17 @@ const operationsStyles = `
   }
   .ops-report-findings-layout {
     display: grid;
-    grid-template-columns: minmax(320px, 0.62fr) minmax(460px, 1fr);
+    grid-template-columns: minmax(300px, 0.38fr) minmax(0, 0.62fr);
     gap: 14px;
     align-items: start;
+    min-width: 0;
   }
   .ops-report-filterbar {
     grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.45fr) minmax(150px, 0.45fr);
   }
   .ops-report-review-queue {
     align-self: start;
+    min-width: 0;
   }
   .ops-report-progress {
     display: grid;
@@ -11133,6 +11159,7 @@ const operationsStyles = `
     padding: 10px;
     text-align: left;
     cursor: pointer;
+    min-width: 0;
   }
   .ops-report-finding-row:focus-visible,
   .ops-report-editor-toolbar button:focus-visible {
@@ -11178,7 +11205,10 @@ const operationsStyles = `
     position: sticky;
     top: 178px;
     max-height: calc(100vh - 196px);
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-width: 0;
+    width: 100%;
   }
   .ops-report-editor-toolbar {
     position: sticky;
@@ -11194,6 +11224,10 @@ const operationsStyles = `
     backdrop-filter: blur(8px);
     padding: 8px;
     margin-bottom: 12px;
+    max-width: 100%;
+  }
+  .ops-report-editor-toolbar .ops-button {
+    white-space: normal;
   }
   .ops-report-back {
     display: none;
@@ -11203,6 +11237,7 @@ const operationsStyles = `
     gap: 10px;
     border-top: 1px solid var(--border);
     padding-top: 12px;
+    min-width: 0;
   }
   .ops-report-collapsible {
     border-top: 1px solid var(--border);
@@ -11226,11 +11261,18 @@ const operationsStyles = `
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
     align-items: center;
+    min-width: 0;
   }
   .ops-report-example-list span {
     overflow-wrap: anywhere;
     color: var(--text-muted);
     font-size: 12px;
+  }
+  .ops-report-finding-editor input,
+  .ops-report-finding-editor textarea,
+  .ops-report-finding-editor select {
+    min-width: 0;
+    max-width: 100%;
   }
   .ops-report-preview {
     display: grid;

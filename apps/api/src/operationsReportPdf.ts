@@ -112,6 +112,7 @@ function findingEvidenceTable(
 
 export function renderOperationsReportHtml(
   payload: OperationsClientReportPayload,
+  options: { draft?: boolean } = {},
 ) {
   const priorities = Object.entries(payload.priorityCounts)
     .filter(([priority, count]) => priority !== "informational" || count > 0)
@@ -247,6 +248,7 @@ export function renderOperationsReportHtml(
     h4 { font-size: 8pt; margin: 3mm 0 1mm; color: #4d5b73; text-transform: uppercase; letter-spacing: .04em; }
     .cover { min-height: 255mm; display: grid; align-content: center; gap: 6mm; page-break-after: always; }
     .brand { color: #315178; font-size: 16pt; font-weight: 800; letter-spacing: 0; }
+    .draft-label { display: inline-block; width: fit-content; border: 1px solid #b91c1c; color: #b91c1c; padding: 1.5mm 3mm; border-radius: 999px; font-size: 10pt; font-weight: 900; letter-spacing: .08em; }
     .report-title { color: #526176; font-size: 13pt; font-weight: 650; }
     .cover-meta { display: grid; gap: 2mm; color: #526176; font-size: 12pt; }
     .confidential { margin-top: 14mm; color: #526176; font-size: 10pt; }
@@ -279,13 +281,27 @@ export function renderOperationsReportHtml(
     .closing-grid ul { margin: 0; }
     .closing-grid li { margin-bottom: 1mm; }
     .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+    .draft-watermark {
+      position: fixed;
+      inset: 45% 0 auto;
+      z-index: 50;
+      text-align: center;
+      color: rgba(185, 28, 28, 0.12);
+      font-size: 64pt;
+      font-weight: 900;
+      letter-spacing: .1em;
+      transform: rotate(-22deg);
+      pointer-events: none;
+    }
     ul { padding-left: 5mm; }
     li { margin-bottom: 2mm; }
   </style>
 </head>
 <body>
+  ${options.draft ? `<div class="draft-watermark">DRAFT</div>` : ""}
   <section class="cover">
     <div class="brand">${payload.settings.displayLogo ? "Scanlark" : ""}</div>
+    ${options.draft ? `<div class="draft-label">DRAFT - INTERNAL REVIEW</div>` : ""}
     <h1>Website Health Report</h1>
     <div class="report-title">${escapeHtml(payload.report.title)}</div>
     <div class="cover-meta">
@@ -317,6 +333,20 @@ export function renderOperationsReportHtml(
         .join("")}
     </div>
   </section>
+  ${
+    payload.settings.displayWebsiteHealthScore &&
+    payload.scan.healthScore != null
+      ? `<section class="report-section avoid-break">
+          <h2>Website health score</h2>
+          <div class="summary-grid">
+            <article class="summary-card">
+              <span>Reviewed score</span>
+              <strong>${payload.scan.healthScore}</strong>
+            </article>
+          </div>
+        </section>`
+      : ""
+  }
   <section class="report-section">
     <h2>Review scope</h2>
     <dl class="scope-grid">
@@ -354,6 +384,7 @@ export function renderOperationsReportHtml(
 
 export async function renderOperationsReportPdf(
   payload: OperationsClientReportPayload,
+  options: { draft?: boolean } = {},
 ) {
   const executablePath =
     process.env.PLAYWRIGHT_CHROMIUM_PATH ??
@@ -364,7 +395,7 @@ export async function renderOperationsReportPdf(
   });
   try {
     const page = await browser.newPage();
-    await page.setContent(renderOperationsReportHtml(payload), {
+    await page.setContent(renderOperationsReportHtml(payload, options), {
       waitUntil: "load",
     });
     return await page.pdf({

@@ -108,6 +108,7 @@ export type OperationsReportRow = {
   scan_finished_at?: Date | null;
   scan_checked_links?: number;
   scan_total_links?: number;
+  scan_health_score?: number | null;
   included_findings?: number;
   excluded_findings?: number;
   incomplete_findings?: number;
@@ -389,6 +390,7 @@ export type OperationsClientReportPayload = {
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
+    healthScore: number | null;
   };
   summaries: {
     executiveSummary: string | null;
@@ -998,6 +1000,28 @@ function reportSelect() {
     sr.finished_at AS scan_finished_at,
     sr.checked_links AS scan_checked_links,
     sr.total_links AS scan_total_links,
+    CASE
+      WHEN sr.status = 'completed' THEN
+        GREATEST(
+          0,
+          LEAST(
+            100,
+            ROUND(
+              100 - GREATEST(
+                0,
+                LEAST(
+                  100,
+                  LEAST(70, scan_issue_counts.critical_count * 25)
+                    + LEAST(40, scan_issue_counts.high_count * 12)
+                    + LEAST(30, scan_issue_counts.medium_count * 6)
+                    + LEAST(15, scan_issue_counts.low_count)
+                )
+              )
+            )
+          )
+        )::int
+      ELSE NULL
+    END AS scan_health_score,
     c.first_name AS contact_first_name,
     c.last_name AS contact_last_name,
     c.email AS contact_email,
@@ -1017,6 +1041,15 @@ function reportJoins() {
     JOIN sites s ON s.id = r.site_id
     JOIN scan_runs sr ON sr.id = r.scan_run_id
     LEFT JOIN operations_contacts c ON c.id = r.prepared_contact_id
+    LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*) FILTER (WHERE si.severity = 'critical' AND si.status = 'open')::int AS critical_count,
+        COUNT(*) FILTER (WHERE si.severity = 'high' AND si.status = 'open')::int AS high_count,
+        COUNT(*) FILTER (WHERE si.severity = 'medium' AND si.status = 'open')::int AS medium_count,
+        COUNT(*) FILTER (WHERE si.severity = 'low' AND si.status = 'open')::int AS low_count
+      FROM scan_issues si
+      WHERE si.scan_run_id = sr.id
+    ) scan_issue_counts ON TRUE
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) FILTER (WHERE f.is_included = true AND f.is_false_positive = false)::int AS included_findings,
@@ -2936,6 +2969,10 @@ export function buildOperationsClientReportPayload(
       finishedAt: iso(report.scan_finished_at ?? null),
       checkedLinks: report.scan_checked_links ?? 0,
       totalLinks: report.scan_total_links ?? 0,
+      healthScore:
+        typeof report.scan_health_score === "number"
+          ? report.scan_health_score
+          : null,
     },
     summaries: {
       executiveSummary: report.executive_summary,

@@ -3610,10 +3610,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
+      const mode = req.body?.mode === "draft" ? "draft" : "final";
       const preview = await getOperationsReportPreview(reportId);
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
-      if (preview.frozen) {
+      if (preview.frozen && mode === "final") {
         const storedPdf = await getOperationsReportPdfRender(reportId);
         if (storedPdf) {
           res.setHeader("content-type", "application/pdf");
@@ -3623,6 +3624,21 @@ export function mountOperationsRoutes(app: express.Application) {
           );
           return res.send(storedPdf.pdf_bytes);
         }
+      }
+      if (mode === "draft" && !preview.frozen) {
+        const pdf = await renderOperationsReportPdf(preview.payload, {
+          draft: true,
+        });
+        const filename = operationsReportPdfFilename(preview.payload).replace(
+          /\.pdf$/,
+          "-draft.pdf",
+        );
+        res.setHeader("content-type", "application/pdf");
+        res.setHeader(
+          "content-disposition",
+          `attachment; filename="${filename}"`,
+        );
+        return res.send(pdf);
       }
       const blockingIssues = preview.readinessIssues.filter(
         (issue) => issue.code !== "pdf_not_generated",

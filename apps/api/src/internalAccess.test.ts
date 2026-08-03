@@ -1075,6 +1075,7 @@ test("operations client report payload excludes internal-only finding data", () 
     scan_finished_at: now,
     scan_checked_links: 9,
     scan_total_links: 12,
+    scan_health_score: 84,
   } satisfies OperationsReportRow;
   const findings = [
     {
@@ -1214,6 +1215,7 @@ test("operations client report payload excludes internal-only finding data", () 
     "Repair important broken link",
   );
   assert.equal(payload.scan.checkedLinks, 9);
+  assert.equal(payload.scan.healthScore, 84);
   const serialized = JSON.stringify(payload);
   assert(!serialized.includes("Do not leak this note."));
   assert(!serialized.includes("Private review note."));
@@ -1310,6 +1312,15 @@ test("operations client report payload excludes internal-only finding data", () 
     ...payload,
     findings: [{ ...payload.findings[0]!, affectedUrl: longUrl }],
   });
+  assert(!html.includes("Website health score"));
+  const scoreHtml = renderOperationsReportHtml({
+    ...payload,
+    settings: { ...payload.settings, displayWebsiteHealthScore: true },
+  });
+  assert(scoreHtml.includes("Website health score"));
+  assert(scoreHtml.includes("<strong>84</strong>"));
+  const draftHtml = renderOperationsReportHtml(payload, { draft: true });
+  assert(draftHtml.includes("DRAFT"));
   assert(html.includes("overflow-wrap: anywhere"));
   assert(html.includes("&amp;value=&lt;reviewed&gt;"));
   assert(!html.includes("value=<reviewed>"));

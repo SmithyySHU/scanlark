@@ -219,6 +219,7 @@ export type ClientReportPayload = {
     finishedAt: string | null;
     checkedLinks: number;
     totalLinks: number;
+    healthScore: number | null;
   };
   summaries: {
     executiveSummary: string | null;

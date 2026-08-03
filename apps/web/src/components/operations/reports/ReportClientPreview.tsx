@@ -59,9 +59,7 @@ export function ReportClientPreview({
   return (
     <div className={`ops-report-preview ops-report-preview--${mode}`}>
       {stale && (
-        <div className="ops-warning">
-          Preview is based on saved report data. Save changes to refresh it.
-        </div>
+        <div className="ops-warning">Save your changes before previewing.</div>
       )}
       <div className="ops-client-report">
         <section className="ops-client-cover">
@@ -117,6 +115,13 @@ export function ReportClientPreview({
           )}
         </section>
         <section className="ops-card-grid">
+          {payload.settings.displayWebsiteHealthScore &&
+            payload.scan.healthScore != null && (
+              <div className="ops-empty-card">
+                <strong>{payload.scan.healthScore}</strong>
+                <p>Website health score</p>
+              </div>
+            )}
           {Object.entries(payload.priorityCounts).map(([key, value]) =>
             key === "informational" && value === 0 ? null : (
               <div key={key} className="ops-empty-card">

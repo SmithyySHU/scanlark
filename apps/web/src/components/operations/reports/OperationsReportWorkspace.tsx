@@ -126,7 +126,7 @@ type Props = {
   ) => Promise<void>;
   onMarkReady: () => Promise<void>;
   onRecordSent: () => Promise<void>;
-  onGeneratePdf: () => Promise<void>;
+  onGeneratePdf: (mode: "draft" | "final") => Promise<void>;
   onArchive: () => Promise<void>;
   onCreateRetest: () => Promise<void>;
   onCreateQuote: () => void;
@@ -172,6 +172,7 @@ export function OperationsReportWorkspace({
   const [findingSaveState, setFindingSaveState] = useState<
     "saved" | "saving" | "unsaved" | "error"
   >("saved");
+  const [findingSaveError, setFindingSaveError] = useState<string | null>(null);
   const [dirtyChildKeys, setDirtyChildKeys] = useState<Set<string>>(
     () => new Set(),
   );
@@ -223,6 +224,9 @@ export function OperationsReportWorkspace({
   );
   const previewStale =
     reportDraft.dirty || findingDraft.dirty || dirtyChildKeys.size > 0;
+  const clientOutputFrozen =
+    Boolean(detail.report.frozen_at) &&
+    !["draft", "needs_review"].includes(detail.report.status);
   const priorityCounts = priorityOptions.map((priority) => ({
     ...priority,
     count: detail.findings.filter(
@@ -235,6 +239,15 @@ export function OperationsReportWorkspace({
   const pdfBlockingIssues = readinessIssues.filter(
     (issue) => issue.code !== "pdf_not_generated",
   );
+  const editableDraftReport =
+    !clientOutputFrozen &&
+    (detail.report.status === "draft" ||
+      detail.report.status === "needs_review");
+  const pdfUnavailableReason = previewStale
+    ? "Save your changes before generating a PDF."
+    : pdfBlockingIssues.length > 0
+      ? `${pdfBlockingIssues.length} readiness item${pdfBlockingIssues.length === 1 ? "" : "s"} block final PDF generation.`
+      : "";
   const includedFindingIds = new Set(
     detail.findings
       .filter((finding) => finding.is_included && !finding.is_false_positive)
@@ -249,9 +262,6 @@ export function OperationsReportWorkspace({
     5,
     Math.ceil(2 + includedCount * 0.55 + visibleActionPlanItems.length * 0.15),
   );
-  const clientOutputFrozen =
-    Boolean(detail.report.frozen_at) &&
-    !["draft", "needs_review"].includes(detail.report.status);
   const readinessSections = useMemo(() => {
     const sectionLabels: Record<
       OperationsReportReadinessIssue["section"],
@@ -345,6 +355,7 @@ export function OperationsReportWorkspace({
 
   useEffect(() => {
     setFindingSaveState(findingDraft.dirty ? "unsaved" : "saved");
+    if (findingDraft.dirty) setFindingSaveError(null);
   }, [findingDraft.dirty, selectedFindingId]);
 
   useEffect(() => {
@@ -395,6 +406,7 @@ export function OperationsReportWorkspace({
   }) {
     if (!findingDraft.draft) return;
     setFindingSaveState("saving");
+    setFindingSaveError(null);
     try {
       await onPatchFinding(findingDraft.draft.id, {
         clientPriority: findingDraft.draft.client_priority,
@@ -420,6 +432,9 @@ export function OperationsReportWorkspace({
       if (options?.nextId) setFindingDetailOpen(true);
     } catch (err) {
       setFindingSaveState("error");
+      setFindingSaveError(
+        err instanceof Error ? err.message : "Failed to save finding",
+      );
       throw err;
     }
   }
@@ -523,12 +538,21 @@ export function OperationsReportWorkspace({
           <button className="ops-button" onClick={() => switchTab("preview")}>
             Preview
           </button>
+          {editableDraftReport && (
+            <button
+              className="ops-button"
+              disabled={previewStale}
+              onClick={() => void onGeneratePdf("draft")}
+            >
+              Generate draft PDF
+            </button>
+          )}
           <button
             className="ops-button"
             disabled={pdfBlockingIssues.length > 0 || previewStale}
-            onClick={() => void onGeneratePdf()}
+            onClick={() => void onGeneratePdf("final")}
           >
-            Generate PDF
+            Generate final PDF
           </button>
           <button
             className="ops-button"
@@ -550,6 +574,14 @@ export function OperationsReportWorkspace({
         </div>
       </section>
       {actionError && <div className="ops-error">{actionError}</div>}
+      {pdfUnavailableReason && (
+        <div className="ops-warning">
+          {pdfUnavailableReason}
+          {pdfBlockingIssues[0] && !previewStale
+            ? ` ${pdfBlockingIssues[0].message}`
+            : ""}
+        </div>
+      )}
       {clientOutputFrozen && (
         <div className="ops-warning">
           The approved client output is frozen. Later review-record edits do not
@@ -1109,6 +1141,7 @@ export function OperationsReportWorkspace({
                   allIncompleteReviewed={incomplete.length === 0}
                   dirty={findingDraft.dirty}
                   saveState={findingSaveState}
+                  saveError={findingSaveError}
                   trapFocus={findingDetailOpen}
                   onChange={findingDraft.updateDraft}
                   onSave={saveFindingAndContinue}
@@ -1291,6 +1324,7 @@ function FindingEditor({
   allIncompleteReviewed,
   dirty,
   saveState,
+  saveError,
   trapFocus,
   onChange,
   onSave,
@@ -1304,6 +1338,7 @@ function FindingEditor({
   allIncompleteReviewed: boolean;
   dirty: boolean;
   saveState: "saved" | "saving" | "unsaved" | "error";
+  saveError: string | null;
   trapFocus: boolean;
   onChange: (patch: Partial<OperationsReportFinding>) => void;
   onSave: (options?: {
@@ -1550,6 +1585,7 @@ function FindingEditor({
       {missing.length > 0 && (
         <div className="ops-warning">Missing: {missing.join(", ")}</div>
       )}
+      {saveError && <div className="ops-error">{saveError}</div>}
 
       <section>
         <h3>Client-facing content</h3>
