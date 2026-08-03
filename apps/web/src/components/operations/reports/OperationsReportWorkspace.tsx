@@ -23,9 +23,11 @@ import type {
   OperationsReportActionPlanItem,
   OperationsReportDetail,
   OperationsReportFinding,
+  OperationsReportFindingSource,
   OperationsReportPositiveObservation,
   OperationsReportPriority,
   OperationsReportReadinessIssue,
+  OperationsReportRegroupPreview,
 } from "./types";
 
 type ReportTab =
@@ -82,6 +84,7 @@ type Props = {
   detail: OperationsReportDetail;
   preview: ClientReportPayload | null;
   readinessIssues: OperationsReportReadinessIssue[];
+  regroupPreview: OperationsReportRegroupPreview | null;
   actionError: string | null;
   onPatchReport: (input: Record<string, unknown>) => Promise<void>;
   onPatchFinding: (
@@ -89,6 +92,8 @@ type Props = {
     input: Record<string, unknown>,
   ) => Promise<void>;
   onBulkFindings: (input: Record<string, unknown>) => Promise<void>;
+  onPreviewRegroup: () => Promise<void>;
+  onApplyRegroup: (previewHash: string) => Promise<void>;
   onPatchObservation: (
     observationId: string,
     input: Record<string, unknown>,
@@ -109,10 +114,13 @@ export function OperationsReportWorkspace({
   detail,
   preview,
   readinessIssues,
+  regroupPreview,
   actionError,
   onPatchReport,
   onPatchFinding,
   onBulkFindings,
+  onPreviewRegroup,
+  onApplyRegroup,
   onPatchObservation,
   onPatchActionPlanItem,
   onMarkReady,
@@ -156,6 +164,10 @@ export function OperationsReportWorkspace({
   const excludedCount = detail.findings.filter(
     (finding) => !finding.is_included && !finding.is_false_positive,
   ).length;
+  const rawOccurrenceCount = detail.findings.reduce(
+    (total, finding) => total + Math.max(1, finding.occurrence_count ?? 1),
+    0,
+  );
   const readyCount = detail.findings.filter(isFindingReady).length;
   const incomplete = detail.findings.filter(
     (finding) =>
@@ -187,9 +199,53 @@ export function OperationsReportWorkspace({
       item.report_finding_id == null ||
       includedFindingIds.has(item.report_finding_id),
   );
+  const estimatedMainPages = Math.max(
+    5,
+    Math.ceil(2 + includedCount * 0.55 + visibleActionPlanItems.length * 0.15),
+  );
   const clientOutputFrozen =
     Boolean(detail.report.frozen_at) &&
     !["draft", "needs_review"].includes(detail.report.status);
+  const readinessSections = useMemo(() => {
+    const sectionLabels: Record<
+      OperationsReportReadinessIssue["section"],
+      string
+    > = {
+      settings: "Report details",
+      summary: "Executive summary",
+      findings: "Findings requiring review",
+      action_plan: "Action plan and positives",
+      preview: "Preview/PDF",
+    };
+    return Object.entries(sectionLabels)
+      .map(([section, label]) => {
+        const issues = readinessIssues.filter(
+          (issue) => issue.section === section,
+        );
+        const grouped = new Map<string, OperationsReportReadinessIssue[]>();
+        for (const issue of issues) {
+          const finding = issue.findingId
+            ? detail.findings.find((item) => item.id === issue.findingId)
+            : null;
+          const key =
+            finding?.group_key ??
+            finding?.title ??
+            issue.message.replace(/".*"/, '"finding"');
+          grouped.set(key, [...(grouped.get(key) ?? []), issue]);
+        }
+        return {
+          section: section as OperationsReportReadinessIssue["section"],
+          label,
+          issues,
+          grouped: [...grouped.entries()].map(([key, items]) => ({
+            key,
+            first: items[0],
+            count: items.length,
+          })),
+        };
+      })
+      .filter((section) => section.issues.length > 0);
+  }, [detail.findings, readinessIssues]);
 
   useEffect(() => {
     if (!selectedFindingId && detail.findings[0]) {
@@ -379,15 +435,40 @@ export function OperationsReportWorkspace({
       )}
       {readinessIssues.length > 0 && (
         <section className="ops-warning ops-readiness-list">
-          {readinessIssues.map((issue) => (
-            <button
-              key={`${issue.code}-${issue.findingId ?? issue.message}`}
-              type="button"
-              onClick={() => openReadinessIssue(issue)}
-            >
-              <span>{issue.message}</span>
-              <strong>Resolve</strong>
-            </button>
+          {readinessSections.map((section) => (
+            <details key={section.section} open={section.section !== "preview"}>
+              <summary>
+                <strong>{section.label}</strong>
+                <span>
+                  {section.issues.length} issue
+                  {section.issues.length === 1 ? "" : "s"}
+                </span>
+              </summary>
+              {section.grouped.map((group) => {
+                const finding = group.first.findingId
+                  ? detail.findings.find(
+                      (item) => item.id === group.first.findingId,
+                    )
+                  : null;
+                const label =
+                  finding && finding.affected_page_count > 1
+                    ? `${finding.title} - ${finding.affected_page_count} affected pages`
+                    : group.first.message;
+                return (
+                  <button
+                    key={`${section.section}-${group.key}`}
+                    type="button"
+                    onClick={() => openReadinessIssue(group.first)}
+                  >
+                    <span>
+                      {label}
+                      {group.count > 1 ? ` (${group.count} checks)` : ""}
+                    </span>
+                    <strong>Resolve</strong>
+                  </button>
+                );
+              })}
+            </details>
           ))}
         </section>
       )}
@@ -415,6 +496,8 @@ export function OperationsReportWorkspace({
               <dd>{formatOperationsDate(detail.report.cover_date)}</dd>
               <dt>Included</dt>
               <dd>{includedCount}</dd>
+              <dt>Raw occurrences</dt>
+              <dd>{rawOccurrenceCount}</dd>
               <dt>Excluded</dt>
               <dd>{excludedCount}</dd>
               <dt>False positive</dt>
@@ -462,6 +545,17 @@ export function OperationsReportWorkspace({
                 </strong>
                 <small>{clientReportFilename(preview)}</small>
               </div>
+              <div className="ops-summary-card">
+                <span>Size</span>
+                <strong>{estimatedMainPages}p</strong>
+                <small>
+                  {includedCount} grouped, appendix{" "}
+                  {reportDraft.draft.display_settings_json
+                    ?.displayTechnicalAppendix
+                    ? "on"
+                    : "off"}
+                </small>
+              </div>
             </div>
             <div className="ops-card-grid">
               {priorityCounts.map((priority) => (
@@ -472,6 +566,94 @@ export function OperationsReportWorkspace({
                 </div>
               ))}
             </div>
+          </div>
+          <div className="ops-panel">
+            <h2>Client grouping</h2>
+            <p className="ops-muted">
+              {rawOccurrenceCount} raw technical occurrence
+              {rawOccurrenceCount === 1 ? "" : "s"} represented as{" "}
+              {detail.findings.length} client finding
+              {detail.findings.length === 1 ? "" : "s"}.
+            </p>
+            {detail.findings.length > 15 && (
+              <div className="ops-warning">
+                This report has {detail.findings.length} grouped client findings
+                and may be difficult for a client to review.
+              </div>
+            )}
+            <div className="ops-inline-actions">
+              <button
+                className="ops-button"
+                onClick={() => void onPreviewRegroup()}
+                disabled={clientOutputFrozen}
+              >
+                Regroup client findings
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => setFilter("improvement")}
+              >
+                Review improvements
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => void runBulk("exclude")}
+                disabled={selectedIds.size === 0}
+              >
+                Exclude selected
+              </button>
+            </div>
+            {regroupPreview && (
+              <div className="ops-regroup-preview">
+                <dl className="ops-definition-grid">
+                  <dt>Current findings</dt>
+                  <dd>{regroupPreview.currentFindingCount}</dd>
+                  <dt>Grouped findings</dt>
+                  <dd>{regroupPreview.proposedGroupedCount}</dd>
+                  <dt>Raw issues</dt>
+                  <dd>{regroupPreview.rawSourceIssueCount}</dd>
+                  <dt>Occurrences</dt>
+                  <dd>{regroupPreview.rawOccurrenceCount}</dd>
+                </dl>
+                <div className="ops-report-findings-list">
+                  {regroupPreview.groups.map((group) => (
+                    <div
+                      key={group.groupKey}
+                      className="ops-report-finding-row"
+                    >
+                      <span>
+                        <strong>{group.title}</strong>
+                        <small>
+                          {group.sourceIssueCount} source issue
+                          {group.sourceIssueCount === 1 ? "" : "s"} ·{" "}
+                          {group.occurrenceCount} occurrence
+                          {group.occurrenceCount === 1 ? "" : "s"}
+                        </small>
+                      </span>
+                      <small>{group.groupLabel}</small>
+                      <small>{group.affectedPageCount} pages</small>
+                      <small>{group.affectedResourceCount} resources</small>
+                      <small>
+                        {group.mergeReviewFindingIds.length > 0
+                          ? "Merge review"
+                          : group.preservedFindingIds.length > 0
+                            ? "Preserves edits"
+                            : "Default wording"}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  className="ops-button ops-button--primary"
+                  onClick={() =>
+                    void onApplyRegroup(regroupPreview.previewHash)
+                  }
+                  disabled={Boolean(regroupPreview.blockedReason)}
+                >
+                  Apply grouped findings
+                </button>
+              </div>
+            )}
           </div>
         </section>
       )}
@@ -657,11 +839,18 @@ export function OperationsReportWorkspace({
                     />
                     <span>
                       <strong>{finding.title}</strong>
-                      <small>{finding.affected_url ?? "No URL recorded"}</small>
+                      <small>
+                        {finding.occurrence_count} occurrence
+                        {finding.occurrence_count === 1 ? "" : "s"} ·{" "}
+                        {finding.affected_page_count} page
+                        {finding.affected_page_count === 1 ? "" : "s"} ·{" "}
+                        {finding.affected_resource_count} resource
+                        {finding.affected_resource_count === 1 ? "" : "s"}
+                      </small>
                     </span>
                     <small>{priorityLabel(finding.client_priority)}</small>
                     <small>{finding.category}</small>
-                    <small>source {finding.original_severity}</small>
+                    <small>{finding.group_label ?? "Ungrouped"}</small>
                     <small>
                       {finding.is_false_positive
                         ? "False positive"
@@ -679,17 +868,24 @@ export function OperationsReportWorkspace({
               })}
             </div>
           </div>
-          {findingDraft.draft && (
-            <FindingEditor
-              finding={findingDraft.draft}
-              previousIncomplete={previousIncomplete}
-              nextIncomplete={nextIncomplete}
-              dirty={findingDraft.dirty}
-              onChange={findingDraft.updateDraft}
-              onSave={saveFindingAndContinue}
-              onPatchFinding={onPatchFinding}
-            />
-          )}
+          {findingDraft.draft &&
+            (() => {
+              const draft = findingDraft.draft;
+              return (
+                <FindingEditor
+                  finding={draft}
+                  sources={detail.findingSources.filter(
+                    (source) => source.report_finding_id === draft.id,
+                  )}
+                  previousIncomplete={previousIncomplete}
+                  nextIncomplete={nextIncomplete}
+                  dirty={findingDraft.dirty}
+                  onChange={findingDraft.updateDraft}
+                  onSave={saveFindingAndContinue}
+                  onPatchFinding={onPatchFinding}
+                />
+              );
+            })()}
         </section>
       )}
 
@@ -858,6 +1054,7 @@ export function OperationsReportWorkspace({
 
 function FindingEditor({
   finding,
+  sources,
   previousIncomplete,
   nextIncomplete,
   dirty,
@@ -866,6 +1063,7 @@ function FindingEditor({
   onPatchFinding,
 }: {
   finding: OperationsReportFinding;
+  sources: OperationsReportFindingSource[];
   previousIncomplete?: OperationsReportFinding;
   nextIncomplete?: OperationsReportFinding;
   dirty: boolean;
@@ -897,8 +1095,52 @@ function FindingEditor({
           <dd>{finding.original_severity}</dd>
           <dt>Category</dt>
           <dd>{finding.category}</dd>
+          <dt>Group</dt>
+          <dd>{finding.group_label ?? finding.group_key ?? "Ungrouped"}</dd>
+          <dt>Occurrences</dt>
+          <dd>{finding.occurrence_count}</dd>
+          <dt>Affected pages</dt>
+          <dd>{finding.affected_page_count}</dd>
+          <dt>Affected resources</dt>
+          <dd>{finding.affected_resource_count}</dd>
         </dl>
         {finding.technical_summary && <p>{finding.technical_summary}</p>}
+        {finding.requires_merge_review && (
+          <div className="ops-warning">
+            Merged administrator wording needs review before this finding is
+            ready.
+          </div>
+        )}
+        <div className="ops-table-wrap">
+          <table className="ops-evidence-table">
+            <thead>
+              <tr>
+                <th>Affected page</th>
+                <th>Resource</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sources.slice(0, 20).map((source) => (
+                <tr key={source.id}>
+                  <td>{source.affected_page_url ?? "-"}</td>
+                  <td>{source.affected_resource_url ?? "-"}</td>
+                  <td>{source.outcome_key ?? source.source_kind}</td>
+                </tr>
+              ))}
+              {sources.length === 0 && (
+                <tr>
+                  <td colSpan={3}>No normalized source records yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {sources.length > 20 && (
+          <p className="ops-muted">
+            Showing 20 of {sources.length} source records.
+          </p>
+        )}
       </section>
       <section>
         <h3>Client-visible content</h3>

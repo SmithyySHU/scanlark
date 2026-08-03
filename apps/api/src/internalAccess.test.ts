@@ -24,6 +24,7 @@ import {
   parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportPositiveObservationUpdateInput,
+  parseOperationsReportRegroupInput,
   parseOperationsReportSentInput,
   parseOperationsReportUpdateInput,
   parseOperationsClientServiceActivationInput,
@@ -39,6 +40,7 @@ import {
   serializeOperationsSummary,
 } from "./operationsHelpers";
 import {
+  buildOperationsReportGroupingPreviewForIssues,
   buildOperationsClientReportPayload,
   getOperationsReportReadinessIssues,
   type OperationsReportComparisonItemRow,
@@ -710,6 +712,161 @@ test("operations report sent validation requires explicit delivery metadata", ()
   );
 });
 
+test("operations report regroup validation requires confirmation and preview hash", () => {
+  assert.deepEqual(
+    parseOperationsReportRegroupInput({
+      confirm: true,
+      previewHash: "abc123",
+    }),
+    { confirm: true, previewHash: "abc123" },
+  );
+  assert.throws(
+    () => parseOperationsReportRegroupInput({ confirm: false }),
+    /regroup_confirmation_required/,
+  );
+  assert.throws(
+    () => parseOperationsReportRegroupInput({ confirm: true }),
+    /regroup_preview_hash_required/,
+  );
+});
+
+test("operations report grouping consolidates repeated source issues safely", () => {
+  const now = new Date("2026-01-20T12:00:00.000Z");
+  const issue = (
+    id: string,
+    issue_type: string,
+    affected_url: string,
+    source_url: string | null,
+    overrides: Record<string, unknown> = {},
+  ) => ({
+    id,
+    scan_run_id: "scan_1",
+    site_id: "site_1",
+    category:
+      issue_type === "frame_ancestors_missing"
+        ? "security_header"
+        : issue_type.startsWith("homepage_")
+          ? "performance_basic"
+          : issue_type.includes("link") ||
+              issue_type === "no_response" ||
+              issue_type === "ignored_safety_skip"
+            ? "link_integrity"
+            : "seo_basic",
+    severity: issue_type === "broken_link" ? "medium" : "low",
+    status: "open",
+    issue_type,
+    affected_url,
+    source_url,
+    title: issue_type,
+    description: `${issue_type} description`,
+    evidence_json: overrides,
+    change_status: null,
+    first_seen_at: now,
+    last_seen_at: now,
+    resolved_at: null,
+  });
+  const groups = buildOperationsReportGroupingPreviewForIssues(
+    [
+      issue(
+        "meta_1",
+        "missing_meta_description",
+        "https://www.example.com/a",
+        null,
+      ),
+      issue(
+        "meta_2",
+        "missing_meta_description",
+        "https://www.example.com/b",
+        null,
+      ),
+      issue(
+        "broken_1",
+        "broken_link",
+        "https://external.example/missing",
+        "https://www.example.com/a",
+        { status_code: 404, occurrence_count: 2 },
+      ),
+      issue(
+        "broken_2",
+        "broken_link",
+        "https://external.example/missing",
+        "https://www.example.com/b",
+        { status_code: 404, occurrence_count: 1 },
+      ),
+      issue(
+        "blocked_1",
+        "blocked_link",
+        "https://external.example/photo.jpg",
+        "https://www.example.com/a",
+      ),
+      issue(
+        "internal_1",
+        "broken_link",
+        "https://www.example.com/missing",
+        "https://www.example.com/a",
+        { status_code: 404 },
+      ),
+      issue(
+        "header_1",
+        "frame_ancestors_missing",
+        "https://www.example.com",
+        null,
+      ),
+      issue(
+        "perf_1",
+        "homepage_asset_count_high",
+        "https://www.example.com",
+        null,
+      ),
+      issue(
+        "perf_2",
+        "homepage_script_count_high",
+        "https://www.example.com",
+        null,
+      ),
+      issue(
+        "skip_1",
+        "ignored_safety_skip",
+        "https://blocked.example",
+        "https://www.example.com",
+      ),
+    ] as never,
+    "https://www.example.com",
+  );
+  const byKey = new Map(groups.map((group) => [group.groupKey, group]));
+  assert.equal(byKey.get("seo_basic:meta_description")?.sourceIssueCount, 2);
+  assert.equal(byKey.get("seo_basic:meta_description")?.affectedPageCount, 2);
+  assert.equal(
+    byKey.get("link_integrity:external:broken:404:external_destinations")
+      ?.occurrenceCount,
+    3,
+  );
+  assert(
+    byKey.has("link_integrity:external:blocked_link:external_destinations"),
+  );
+  assert(
+    byKey.has(
+      "link_integrity:internal:broken:404:https://www.example.com/missing",
+    ),
+  );
+  assert.equal(
+    byKey.get("security_header:browser_security_controls")?.sourceIssueCount,
+    1,
+  );
+  assert.equal(
+    byKey.get("performance_basic:homepage_weight")?.sourceIssueCount,
+    2,
+  );
+  assert.equal(
+    byKey.get("link_integrity:ignored_safety_skip")?.isIncluded,
+    false,
+  );
+  assert.equal(
+    byKey.get("seo_basic:meta_description")?.representativeExamples.length,
+    2,
+  );
+});
+
 test("operations client report payload excludes internal-only finding data", () => {
   const now = new Date("2026-01-20T12:00:00.000Z");
   const report = {
@@ -785,6 +942,22 @@ test("operations client report payload excludes internal-only finding data", () 
       display_order: 1,
       estimated_effort: "Small",
       comparison_status: null,
+      group_key: "link_integrity:external:broken:example.com",
+      group_label: "Unavailable external links",
+      source_issue_count: 1,
+      occurrence_count: 3,
+      affected_page_count: 1,
+      affected_resource_count: 1,
+      representative_examples_json: [
+        {
+          affectedPageUrl: "https://www.example.com",
+          affectedResourceUrl: "https://www.example.com/missing",
+          result: "broken:404",
+          note: "Status code 404",
+        },
+      ],
+      requires_merge_review: false,
+      regrouped_at: now,
       created_at: now,
       updated_at: now,
     },
@@ -816,6 +989,15 @@ test("operations client report payload excludes internal-only finding data", () 
       display_order: 2,
       estimated_effort: null,
       comparison_status: null,
+      group_key: "resources:excluded",
+      group_label: "Excluded resources",
+      source_issue_count: 1,
+      occurrence_count: 1,
+      affected_page_count: 0,
+      affected_resource_count: 0,
+      representative_examples_json: [],
+      requires_merge_review: false,
+      regrouped_at: now,
       created_at: now,
       updated_at: now,
     },

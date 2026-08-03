@@ -1528,6 +1528,19 @@ export function parseOperationsReportFindingBulkInput(
   return parsed;
 }
 
+export function parseOperationsReportRegroupInput(body: unknown) {
+  const input = body && typeof body === "object" ? body : {};
+  const record = input as Record<string, unknown>;
+  if (record.confirm !== true) throw new Error("regroup_confirmation_required");
+  if (typeof record.previewHash !== "string" || !record.previewHash.trim()) {
+    throw new Error("regroup_preview_hash_required");
+  }
+  return {
+    confirm: true,
+    previewHash: record.previewHash.trim(),
+  };
+}
+
 export function parseOperationsReportSentInput(body: unknown) {
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;

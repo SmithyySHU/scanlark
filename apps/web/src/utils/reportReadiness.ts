@@ -16,6 +16,7 @@ export type ReviewFinding = {
   is_included: boolean;
   is_false_positive: boolean;
   reviewed_at: string | null;
+  requires_merge_review?: boolean;
 };
 
 function hasText(value: string | null | undefined) {
@@ -45,6 +46,7 @@ export function missingFindingReadinessFields(finding: ReviewFinding) {
     missing.push("affected URL or no-URL reason");
   }
   if (!finding.reviewed_at) missing.push("administrator review");
+  if (finding.requires_merge_review) missing.push("merged wording review");
   return missing;
 }
 

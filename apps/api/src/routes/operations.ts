@@ -120,7 +120,9 @@ import {
   updateOperationsServicePlan,
   changeOperationsClientServicePlan,
   pauseOperationsClientService,
+  previewOperationsReportRegroup,
   proposeOperationsClientService,
+  regroupOperationsReportFindings,
   updateOperationsTask,
   updateOperationsContact,
   type AdminActor,
@@ -175,6 +177,7 @@ import {
   parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportPositiveObservationUpdateInput,
+  parseOperationsReportRegroupInput,
   parseOperationsReportRetestInput,
   parseOperationsReportSentInput,
   parseOperationsReportStatus,
@@ -2913,6 +2916,77 @@ export function mountOperationsRoutes(app: express.Application) {
         500,
         "operations_report_findings_bulk_update_failed",
         "Failed to update selected findings",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/regroup-preview", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const preview = await previewOperationsReportRegroup(reportId);
+      if (!preview)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      if (preview.blockedReason) {
+        return sendApiError(
+          res,
+          409,
+          "report_regroup_blocked",
+          "This report cannot be regrouped",
+          { blockedReason: preview.blockedReason, preview },
+        );
+      }
+      return res.json({ preview: serializeObject(preview) });
+    } catch (err) {
+      console.error("Operations report regroup preview failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_regroup_preview_failed",
+        "Failed to preview grouped findings",
+      );
+    }
+  });
+
+  router.post("/reports/:reportId/regroup", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const result = await regroupOperationsReportFindings(
+        getActor(req),
+        reportId,
+        parseOperationsReportRegroupInput(req.body),
+      );
+      if (!result)
+        return sendApiError(res, 404, "not_found", "Report not found");
+      if ("blockedReason" in result) {
+        return sendApiError(
+          res,
+          409,
+          "report_regroup_blocked",
+          "This report cannot be regrouped",
+          { blockedReason: result.blockedReason },
+        );
+      }
+      if ("stalePreview" in result) {
+        return sendApiError(
+          res,
+          409,
+          "report_regroup_preview_stale",
+          "Regroup preview is stale",
+          { preview: serializeObject(result.preview) },
+        );
+      }
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report regroup failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_regroup_failed",
+        "Failed to regroup findings",
       );
     }
   });

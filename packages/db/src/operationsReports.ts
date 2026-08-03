@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { recordAdminAuditLog, type AdminActor } from "./admin";
 import { ensureConnected } from "./client";
 import { formatIssuePresentation } from "./issuePresentation";
@@ -144,6 +145,39 @@ export type OperationsReportFindingRow = {
   display_order: number;
   estimated_effort: string | null;
   comparison_status: OperationsReportComparisonStatus | null;
+  group_key: string | null;
+  group_label: string | null;
+  source_issue_count: number;
+  occurrence_count: number;
+  affected_page_count: number;
+  affected_resource_count: number;
+  representative_examples_json: OperationsReportFindingExample[];
+  requires_merge_review: boolean;
+  regrouped_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+};
+
+export type OperationsReportFindingExample = {
+  affectedPageUrl: string | null;
+  affectedResourceUrl: string | null;
+  result: string | null;
+  note: string | null;
+};
+
+export type OperationsReportFindingSourceRow = {
+  id: string;
+  operations_report_id: string;
+  report_finding_id: string;
+  source_issue_id: string | null;
+  source_link_id: string | null;
+  source_kind: "scan_issue" | "scan_link" | "manual";
+  affected_page_url: string | null;
+  affected_resource_url: string | null;
+  outcome_key: string | null;
+  evidence_json: Record<string, unknown>;
+  display_order: number;
+  reviewed_for_client: boolean;
   created_at: Date;
   updated_at: Date;
 };
@@ -214,6 +248,7 @@ export type OperationsReportPdfRenderRow = {
 export type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFindingRow[];
+  findingSources: OperationsReportFindingSourceRow[];
   positiveObservations: OperationsReportPositiveObservationRow[];
   actionPlanItems: OperationsReportActionPlanItemRow[];
   comparisonItems: OperationsReportComparisonItemRow[];
@@ -377,6 +412,12 @@ export type OperationsClientReportPayload = {
     estimatedEffort: string | null;
     displayOrder: number;
     comparisonStatus: OperationsReportComparisonStatus | null;
+    groupKey: string | null;
+    groupLabel: string | null;
+    occurrenceCount: number;
+    affectedPageCount: number;
+    affectedResourceCount: number;
+    representativeExamples: OperationsReportFindingExample[];
   }>;
   actionPlan: Record<
     OperationsReportActionPlanGroup,
@@ -399,6 +440,53 @@ export type OperationsClientReportPayload = {
 };
 
 type CountRow = { count: string };
+
+type OperationsReportGroupingCandidate = {
+  groupKey: string;
+  groupLabel: string;
+  category: string;
+  priority: OperationsReportClientPriority;
+  title: string;
+  technicalSummary: string;
+  clientExplanation: string;
+  whyItMatters: string;
+  recommendedAction: string;
+  affectedUrl: string | null;
+  affectedUrlNote: string | null;
+  isIncluded: boolean;
+  internalNote: string | null;
+  issues: ScanIssue[];
+  representativeExamples: OperationsReportFindingExample[];
+  occurrenceCount: number;
+  affectedPageCount: number;
+  affectedResourceCount: number;
+};
+
+export type OperationsReportRegroupPreviewGroup = {
+  groupKey: string;
+  groupLabel: string;
+  title: string;
+  sourceIssueCount: number;
+  occurrenceCount: number;
+  affectedPageCount: number;
+  affectedResourceCount: number;
+  preservedFindingIds: string[];
+  mergeReviewFindingIds: string[];
+  representativeExamples: OperationsReportFindingExample[];
+};
+
+export type OperationsReportRegroupPreview = {
+  reportId: string;
+  currentFindingCount: number;
+  proposedGroupedCount: number;
+  currentIncludedCount: number;
+  proposedIncludedCount: number;
+  rawSourceIssueCount: number;
+  rawOccurrenceCount: number;
+  previewHash: string;
+  groups: OperationsReportRegroupPreviewGroup[];
+  blockedReason: string | null;
+};
 
 export type OperationsReportDeleteEligibility = {
   allowed: boolean;
@@ -512,12 +600,361 @@ function priorityFromSeverity(
   return "informational";
 }
 
+function severityRank(severity: ScanIssueSeverity) {
+  if (severity === "critical") return 1;
+  if (severity === "high") return 2;
+  if (severity === "medium") return 3;
+  if (severity === "low") return 4;
+  return 5;
+}
+
 function actionPlanGroupForPriority(
   priority: OperationsReportClientPriority,
 ): OperationsReportActionPlanGroup {
   if (priority === "critical") return "address_now";
   if (priority === "important") return "address_soon";
   return "consider_later";
+}
+
+function numberValue(value: unknown, fallback = 1): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
+}
+
+function normalizedTextKey(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function urlHost(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyInternalUrl(
+  siteUrl: string,
+  value: string | null | undefined,
+) {
+  const siteHost = urlHost(siteUrl);
+  const targetHost = urlHost(value);
+  return Boolean(siteHost && targetHost && siteHost === targetHost);
+}
+
+function issueOccurrenceCount(issue: ScanIssue) {
+  return Math.max(1, numberValue(issue.evidence_json?.occurrence_count, 1));
+}
+
+function issueOutcomeKey(issue: ScanIssue) {
+  const statusCode = numberValue(issue.evidence_json?.status_code, 0);
+  if (issue.issue_type === "broken_link" && statusCode > 0) {
+    return `broken:${statusCode}`;
+  }
+  return issue.issue_type;
+}
+
+function representativeExampleForIssue(
+  issue: ScanIssue,
+): OperationsReportFindingExample {
+  return {
+    affectedPageUrl: issue.source_url || issue.affected_url || null,
+    affectedResourceUrl: issue.source_url ? issue.affected_url : null,
+    result: issueOutcomeKey(issue),
+    note: issue.title,
+  };
+}
+
+function uniqueCount(values: Array<string | null | undefined>) {
+  return new Set(
+    values.map((value) => normalizeUrlForFingerprint(value)).filter(Boolean),
+  ).size;
+}
+
+function issueGroupKey(issue: ScanIssue, siteUrl: string) {
+  if (
+    issue.category === "seo_basic" &&
+    (issue.issue_type === "missing_meta_description" ||
+      issue.issue_type === "empty_meta_description")
+  ) {
+    return "seo_basic:meta_description";
+  }
+  if (issue.issue_type === "duplicate_title") {
+    const duplicateTitle =
+      typeof issue.evidence_json?.title === "string"
+        ? issue.evidence_json.title
+        : issue.title;
+    return `seo_basic:duplicate_title:${normalizedTextKey(duplicateTitle) || "unknown"}`;
+  }
+  if (issue.category === "link_integrity") {
+    if (issue.issue_type === "ignored_safety_skip") {
+      return "link_integrity:ignored_safety_skip";
+    }
+    const internal = isLikelyInternalUrl(siteUrl, issue.affected_url);
+    const targetKey = internal
+      ? normalizeUrlForFingerprint(issue.affected_url)
+      : "external_destinations";
+    return `link_integrity:${internal ? "internal" : "external"}:${issueOutcomeKey(issue)}:${targetKey}`;
+  }
+  if (issue.category === "security_header") {
+    return "security_header:browser_security_controls";
+  }
+  if (
+    issue.category === "performance_basic" &&
+    issue.issue_type.startsWith("homepage_")
+  ) {
+    return "performance_basic:homepage_weight";
+  }
+  return `${issue.category}:${issue.issue_type}`;
+}
+
+function issueGroupLabel(issue: ScanIssue, siteUrl: string) {
+  if (
+    issue.category === "seo_basic" &&
+    (issue.issue_type === "missing_meta_description" ||
+      issue.issue_type === "empty_meta_description")
+  ) {
+    return "Missing meta descriptions";
+  }
+  if (issue.issue_type === "duplicate_title") return "Duplicate page titles";
+  if (issue.category === "link_integrity") {
+    if (issue.issue_type === "ignored_safety_skip")
+      return "Internal crawl limits";
+    const internal = isLikelyInternalUrl(siteUrl, issue.affected_url);
+    if (internal) return "Broken internal links";
+    if (issue.issue_type === "blocked_link") return "Blocked external links";
+    if (issue.issue_type === "no_response")
+      return "External links with no response";
+    return "Unavailable external links";
+  }
+  if (issue.category === "security_header") {
+    return "Browser security headers";
+  }
+  if (
+    issue.category === "performance_basic" &&
+    issue.issue_type.startsWith("homepage_")
+  ) {
+    return "Homepage performance weight";
+  }
+  return issue.title;
+}
+
+function defaultGroupedFindingContent(
+  group: Pick<
+    OperationsReportGroupingCandidate,
+    | "groupKey"
+    | "groupLabel"
+    | "issues"
+    | "occurrenceCount"
+    | "affectedPageCount"
+    | "affectedResourceCount"
+  >,
+): Pick<
+  OperationsReportGroupingCandidate,
+  | "title"
+  | "technicalSummary"
+  | "clientExplanation"
+  | "whyItMatters"
+  | "recommendedAction"
+  | "affectedUrl"
+  | "affectedUrlNote"
+  | "internalNote"
+> {
+  const first = group.issues[0];
+  const pages = group.affectedPageCount;
+  const resources = group.affectedResourceCount;
+  if (group.groupKey === "seo_basic:meta_description") {
+    return {
+      title: "Meta descriptions are missing on multiple pages",
+      technicalSummary: `${pages} page${pages === 1 ? "" : "s"} do not have a usable meta description.`,
+      clientExplanation:
+        "Several pages are missing the short description that search engines and sharing tools can use to summarise page content.",
+      whyItMatters:
+        "Clear page descriptions help visitors understand what a page is about before they click and make the site easier to manage in search results.",
+      recommendedAction:
+        "Write unique, page-specific meta descriptions for the highest-value pages first, then complete the remaining reviewed pages.",
+      affectedUrl: null,
+      affectedUrlNote: `${pages} pages affected; representative examples are shown.`,
+      internalNote: null,
+    };
+  }
+  if (first.issue_type === "duplicate_title") {
+    return {
+      title: "Some pages share the same title",
+      technicalSummary: `${pages} page${pages === 1 ? "" : "s"} share title wording.`,
+      clientExplanation:
+        "Multiple pages use the same or very similar page title, which can make pages harder to distinguish.",
+      whyItMatters:
+        "Distinct titles help visitors, browser tabs and search results make the purpose of each page clearer.",
+      recommendedAction:
+        "Give each important page a specific title that describes its individual content or service.",
+      affectedUrl: null,
+      affectedUrlNote: `${pages} pages affected; representative examples are shown.`,
+      internalNote: null,
+    };
+  }
+  if (group.groupKey === "security_header:browser_security_controls") {
+    return {
+      title: "Website security headers could be strengthened",
+      technicalSummary: `${group.issues.length} preventative browser security control${group.issues.length === 1 ? "" : "s"} could be improved.`,
+      clientExplanation:
+        "The website can add or strengthen browser instructions that reduce avoidable exposure to framing, content-type and referrer-related risks.",
+      whyItMatters:
+        "These controls are preventative hardening measures. They do not mean the website is compromised, but they help browsers handle pages more safely.",
+      recommendedAction:
+        "Review the recommended response headers with the website host or developer and apply the appropriate browser security controls.",
+      affectedUrl: first.affected_url,
+      affectedUrlNote: null,
+      internalNote:
+        "This is a website-health finding, not a penetration-test result.",
+    };
+  }
+  if (group.groupKey === "performance_basic:homepage_weight") {
+    return {
+      title: "Homepage assets could be lighter",
+      technicalSummary: `${group.issues.length} homepage performance signal${group.issues.length === 1 ? "" : "s"} exceeded the configured guideline.`,
+      clientExplanation:
+        "The homepage includes more page resources than expected for a lightweight public page.",
+      whyItMatters:
+        "Reducing unnecessary scripts, images and assets can make the first visitor experience faster and easier to maintain.",
+      recommendedAction:
+        "Review homepage scripts, images and assets, then remove, defer or optimise anything that is not needed for the initial page experience.",
+      affectedUrl: first.affected_url,
+      affectedUrlNote: null,
+      internalNote: null,
+    };
+  }
+  if (first.category === "link_integrity") {
+    const internal = group.groupKey.includes(":internal:");
+    const outcome =
+      first.issue_type === "blocked_link"
+        ? "blocked by the destination or checker"
+        : first.issue_type === "no_response"
+          ? "not responding"
+          : "unavailable";
+    return {
+      title: internal
+        ? "Internal links point to unavailable pages"
+        : "Several external links lead to unavailable pages",
+      technicalSummary: `${resources || group.issues.length} destination${(resources || group.issues.length) === 1 ? "" : "s"} were ${outcome}.`,
+      clientExplanation: internal
+        ? "One or more links on the website point visitors to pages that are not available."
+        : "Some links from the website point to external destinations that did not return a healthy response during the check.",
+      whyItMatters: internal
+        ? "Broken internal links interrupt visitor journeys and can make important content harder to reach."
+        : "Unavailable external references can frustrate visitors and make supporting evidence, press links or resources look outdated.",
+      recommendedAction: internal
+        ? "Update the affected internal links to the correct page or remove links that are no longer needed."
+        : "Review the unavailable external destinations and replace, update or remove links that are no longer useful.",
+      affectedUrl: internal && resources === 1 ? first.affected_url : null,
+      affectedUrlNote:
+        resources > 1 || !internal
+          ? `${resources || group.issues.length} destination${(resources || group.issues.length) === 1 ? "" : "s"} affected; representative examples are shown.`
+          : null,
+      internalNote:
+        first.issue_type === "blocked_link"
+          ? "Blocked external links may require manual confirmation because some third-party hosts reject automated checks."
+          : null,
+    };
+  }
+  return {
+    title: clientFriendlyStarterText(first.title),
+    technicalSummary: clientFriendlyStarterText(first.description),
+    clientExplanation: clientFriendlyStarterText(first.description),
+    whyItMatters:
+      "This item may affect how visitors, browsers or automated services understand the website.",
+    recommendedAction: clientFriendlyStarterText(
+      formatIssuePresentation(first).suggestedFix,
+    ),
+    affectedUrl: first.affected_url,
+    affectedUrlNote: null,
+    internalNote: null,
+  };
+}
+
+function buildGroupedFindingCandidates(
+  issues: ScanIssue[],
+  siteUrl: string,
+): OperationsReportGroupingCandidate[] {
+  const grouped = new Map<string, ScanIssue[]>();
+  for (const issue of issues) {
+    const key = issueGroupKey(issue, siteUrl);
+    grouped.set(key, [...(grouped.get(key) ?? []), issue]);
+  }
+  return [...grouped.entries()]
+    .map(([groupKey, groupIssues]) => {
+      const first = groupIssues[0];
+      const affectedPages = groupIssues.map((issue) =>
+        issue.source_url ? issue.source_url : issue.affected_url,
+      );
+      const affectedResources = groupIssues.map((issue) =>
+        issue.source_url ? issue.affected_url : null,
+      );
+      const occurrenceCount = groupIssues.reduce(
+        (count, issue) => count + issueOccurrenceCount(issue),
+        0,
+      );
+      const candidateBase = {
+        groupKey,
+        groupLabel: issueGroupLabel(first, siteUrl),
+        issues: groupIssues,
+        occurrenceCount,
+        affectedPageCount: uniqueCount(affectedPages),
+        affectedResourceCount: uniqueCount(affectedResources),
+      };
+      const content = defaultGroupedFindingContent(candidateBase);
+      const priority = groupIssues.reduce<OperationsReportClientPriority>(
+        (highest, issue) => {
+          const next = priorityFromSeverity(issue.severity);
+          const rank = OPERATIONS_REPORT_CLIENT_PRIORITIES.indexOf(next);
+          const current = OPERATIONS_REPORT_CLIENT_PRIORITIES.indexOf(highest);
+          return rank < current ? next : highest;
+        },
+        priorityFromSeverity(first.severity),
+      );
+      const isInternalSafety =
+        groupKey === "link_integrity:ignored_safety_skip";
+      return {
+        ...candidateBase,
+        category: first.category,
+        priority,
+        isIncluded: !isInternalSafety,
+        representativeExamples: groupIssues
+          .map(representativeExampleForIssue)
+          .slice(0, 5),
+        ...content,
+      };
+    })
+    .sort((a, b) => {
+      const priorityDelta =
+        OPERATIONS_REPORT_CLIENT_PRIORITIES.indexOf(a.priority) -
+        OPERATIONS_REPORT_CLIENT_PRIORITIES.indexOf(b.priority);
+      if (priorityDelta !== 0) return priorityDelta;
+      return a.groupLabel.localeCompare(b.groupLabel);
+    });
+}
+
+export function buildOperationsReportGroupingPreviewForIssues(
+  issues: ScanIssue[],
+  siteUrl: string,
+) {
+  return buildGroupedFindingCandidates(issues, siteUrl).map((candidate) => ({
+    groupKey: candidate.groupKey,
+    groupLabel: candidate.groupLabel,
+    title: candidate.title,
+    isIncluded: candidate.isIncluded,
+    sourceIssueCount: candidate.issues.length,
+    occurrenceCount: candidate.occurrenceCount,
+    affectedPageCount: candidate.affectedPageCount,
+    affectedResourceCount: candidate.affectedResourceCount,
+    representativeExamples: candidate.representativeExamples,
+    recommendedAction: candidate.recommendedAction,
+  }));
 }
 
 function clientFriendlyStarterText(value: string) {
@@ -683,6 +1120,22 @@ async function listFindings(
   return res.rows;
 }
 
+async function listFindingSources(
+  reportId: string,
+): Promise<OperationsReportFindingSourceRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportFindingSourceRow>(
+    `
+      SELECT *
+      FROM operations_report_finding_sources
+      WHERE operations_report_id = $1
+      ORDER BY report_finding_id ASC, display_order ASC, created_at ASC
+    `,
+    [reportId],
+  );
+  return res.rows;
+}
+
 async function listComparisonItems(
   reportId: string,
 ): Promise<OperationsReportComparisonItemRow[]> {
@@ -787,6 +1240,7 @@ async function insertFindingsForScan(
   client: Awaited<ReturnType<typeof ensureConnected>>,
   reportId: string,
   scanRunId: string,
+  siteUrl: string,
 ) {
   const issuesRes = await client.query<ScanIssue>(
     `
@@ -808,10 +1262,16 @@ async function insertFindingsForScan(
     [scanRunId],
   );
 
+  const groupedFindings = buildGroupedFindingCandidates(
+    issuesRes.rows,
+    siteUrl,
+  );
   let order = 0;
-  for (const issue of issuesRes.rows) {
-    const presentation = formatIssuePresentation(issue);
-    await client.query(
+  for (const group of groupedFindings) {
+    const strongestIssue = [...group.issues].sort(
+      (a, b) => severityRank(a.severity) - severityRank(b.severity),
+    )[0];
+    const findingRes = await client.query<{ id: string }>(
       `
         INSERT INTO operations_report_findings (
           operations_report_id,
@@ -829,25 +1289,373 @@ async function insertFindingsForScan(
           affected_url,
           evidence_json,
           is_included,
+          group_key,
+          group_label,
+          source_issue_count,
+          occurrence_count,
+          affected_page_count,
+          affected_resource_count,
+          representative_examples_json,
+          affected_url_note,
+          internal_note,
+          regrouped_at,
           display_order
         )
-        VALUES ($1, $2, 'scan_issue', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true, $14)
+        VALUES ($1, $2, 'scan_issue', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now(), $21)
+        RETURNING id
       `,
       [
         reportId,
+        strongestIssue.id,
+        group.groupKey,
+        group.category,
+        strongestIssue.severity,
+        group.priority,
+        group.title,
+        group.technicalSummary,
+        group.clientExplanation,
+        group.whyItMatters,
+        group.recommendedAction,
+        group.affectedUrl,
+        {
+          grouped: true,
+          issueTypes: [
+            ...new Set(group.issues.map((issue) => issue.issue_type)),
+          ],
+          sourceIssueCount: group.issues.length,
+          occurrenceCount: group.occurrenceCount,
+        },
+        group.isIncluded,
+        group.groupKey,
+        group.groupLabel,
+        group.issues.length,
+        group.occurrenceCount,
+        group.affectedPageCount,
+        group.affectedResourceCount,
+        JSON.stringify(group.representativeExamples),
+        group.affectedUrlNote,
+        group.internalNote,
+        order++,
+      ],
+    );
+    const findingId = findingRes.rows[0].id;
+    for (const [sourceIndex, issue] of group.issues.entries()) {
+      await client.query(
+        `
+          INSERT INTO operations_report_finding_sources (
+            operations_report_id,
+            report_finding_id,
+            source_issue_id,
+            source_kind,
+            affected_page_url,
+            affected_resource_url,
+            outcome_key,
+            evidence_json,
+            display_order
+          )
+          VALUES ($1, $2, $3, 'scan_issue', $4, $5, $6, $7, $8)
+        `,
+        [
+          reportId,
+          findingId,
+          issue.id,
+          issue.source_url || issue.affected_url,
+          issue.source_url ? issue.affected_url : null,
+          issueOutcomeKey(issue),
+          {
+            issueType: issue.issue_type,
+            sourceUrl: issue.source_url,
+            sourceTitle: issue.title,
+            sourceDescription: issue.description,
+            changeStatus: issue.change_status,
+            evidence: issue.evidence_json,
+            detectedAt: issue.last_seen_at.toISOString(),
+          },
+          sourceIndex,
+        ],
+      );
+    }
+  }
+}
+
+function reportRegroupBlockedReason(report: OperationsReportRow) {
+  if (report.archived_at) return "archived_report";
+  if (report.frozen_at || report.frozen_render_json) return "frozen_report";
+  if (report.sent_at) return "sent_report";
+  if (!(report.status === "draft" || report.status === "needs_review")) {
+    return "report_not_editable";
+  }
+  return null;
+}
+
+function findingHasAdminEdits(finding: OperationsReportFindingRow) {
+  return Boolean(
+    finding.reviewed_at ||
+    textValue(finding.review_note) ||
+    textValue(finding.internal_note) ||
+    textValue(finding.client_evidence) ||
+    textValue(finding.estimated_effort),
+  );
+}
+
+function regroupPreviewHash(
+  report: OperationsReportRow,
+  findings: OperationsReportFindingRow[],
+  groups: OperationsReportRegroupPreviewGroup[],
+) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        reportId: report.id,
+        updatedAt: report.updated_at.toISOString(),
+        findings: findings.map((finding) => [
+          finding.id,
+          finding.updated_at.toISOString(),
+          finding.source_issue_id,
+          finding.group_key,
+        ]),
+        groups: groups.map((group) => [
+          group.groupKey,
+          group.sourceIssueCount,
+          group.occurrenceCount,
+        ]),
+      }),
+    )
+    .digest("hex");
+}
+
+function matchingExistingFindings(
+  candidate: OperationsReportGroupingCandidate,
+  currentFindings: OperationsReportFindingRow[],
+) {
+  const sourceIssueIds = new Set(candidate.issues.map((issue) => issue.id));
+  return currentFindings.filter(
+    (finding) =>
+      (finding.group_key && finding.group_key === candidate.groupKey) ||
+      (finding.source_issue_id && sourceIssueIds.has(finding.source_issue_id)),
+  );
+}
+
+function buildRegroupPreviewFromCandidates(
+  report: OperationsReportRow,
+  findings: OperationsReportFindingRow[],
+  candidates: OperationsReportGroupingCandidate[],
+) {
+  const groups = candidates.map<OperationsReportRegroupPreviewGroup>(
+    (candidate) => {
+      const matches = matchingExistingFindings(candidate, findings).filter(
+        findingHasAdminEdits,
+      );
+      return {
+        groupKey: candidate.groupKey,
+        groupLabel: candidate.groupLabel,
+        title: candidate.title,
+        sourceIssueCount: candidate.issues.length,
+        occurrenceCount: candidate.occurrenceCount,
+        affectedPageCount: candidate.affectedPageCount,
+        affectedResourceCount: candidate.affectedResourceCount,
+        preservedFindingIds: matches.length === 1 ? [matches[0].id] : [],
+        mergeReviewFindingIds:
+          matches.length > 1 ? matches.map((finding) => finding.id) : [],
+        representativeExamples: candidate.representativeExamples,
+      };
+    },
+  );
+  return {
+    reportId: report.id,
+    currentFindingCount: findings.length,
+    proposedGroupedCount: candidates.length,
+    currentIncludedCount: findings.filter(
+      (finding) => finding.is_included && !finding.is_false_positive,
+    ).length,
+    proposedIncludedCount: candidates.filter(
+      (candidate) => candidate.isIncluded,
+    ).length,
+    rawSourceIssueCount: candidates.reduce(
+      (count, candidate) => count + candidate.issues.length,
+      0,
+    ),
+    rawOccurrenceCount: candidates.reduce(
+      (count, candidate) => count + candidate.occurrenceCount,
+      0,
+    ),
+    previewHash: regroupPreviewHash(report, findings, groups),
+    groups,
+    blockedReason: reportRegroupBlockedReason(report),
+  } satisfies OperationsReportRegroupPreview;
+}
+
+async function buildRegroupCandidatesForReport(report: OperationsReportRow) {
+  const client = await ensureConnected();
+  const issuesRes = await client.query<ScanIssue>(
+    `
+      SELECT *
+      FROM scan_issues
+      WHERE scan_run_id = $1
+        AND status = 'open'
+      ORDER BY
+        CASE severity
+          WHEN 'critical' THEN 1
+          WHEN 'high' THEN 2
+          WHEN 'medium' THEN 3
+          WHEN 'low' THEN 4
+          ELSE 5
+        END,
+        category ASC,
+        affected_url ASC
+    `,
+    [report.scan_run_id],
+  );
+  return buildGroupedFindingCandidates(issuesRes.rows, report.site_url ?? "");
+}
+
+export async function previewOperationsReportRegroup(
+  reportId: string,
+): Promise<OperationsReportRegroupPreview | null> {
+  const detail = await getOperationsReportDetail(reportId);
+  if (!detail) return null;
+  const candidates = await buildRegroupCandidatesForReport(detail.report);
+  return buildRegroupPreviewFromCandidates(
+    detail.report,
+    detail.findings,
+    candidates,
+  );
+}
+
+async function insertGroupedCandidateFinding(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  reportId: string,
+  candidate: OperationsReportGroupingCandidate,
+  existingFindings: OperationsReportFindingRow[],
+  displayOrder: number,
+) {
+  const matches = matchingExistingFindings(candidate, existingFindings).filter(
+    findingHasAdminEdits,
+  );
+  const preserved = matches.length === 1 ? matches[0] : null;
+  const strongestIssue = [...candidate.issues].sort(
+    (a, b) => severityRank(a.severity) - severityRank(b.severity),
+  )[0];
+  const mergeNotes =
+    matches.length > 1
+      ? matches
+          .map((finding) =>
+            [
+              `Merged finding: ${finding.title}`,
+              finding.client_explanation,
+              finding.why_it_matters,
+              finding.recommended_action,
+              finding.review_note,
+              finding.internal_note,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          )
+          .join("\n\n")
+      : null;
+  const findingRes = await client.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_findings (
+        operations_report_id,
+        source_issue_id,
+        source_type,
+        source_fingerprint,
+        category,
+        original_severity,
+        client_priority,
+        title,
+        technical_summary,
+        client_explanation,
+        why_it_matters,
+        recommended_action,
+        affected_url,
+        client_evidence,
+        affected_url_note,
+        evidence_json,
+        is_included,
+        is_false_positive,
+        internal_note,
+        review_note,
+        reviewed_at,
+        display_order,
+        estimated_effort,
+        group_key,
+        group_label,
+        source_issue_count,
+        occurrence_count,
+        affected_page_count,
+        affected_resource_count,
+        representative_examples_json,
+        requires_merge_review,
+        regrouped_at
+      )
+      VALUES ($1, $2, 'scan_issue', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, false, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, now())
+      RETURNING id
+    `,
+    [
+      reportId,
+      strongestIssue.id,
+      candidate.groupKey,
+      candidate.category,
+      strongestIssue.severity,
+      preserved?.client_priority ?? candidate.priority,
+      preserved?.title ?? candidate.title,
+      candidate.technicalSummary,
+      preserved?.client_explanation ?? candidate.clientExplanation,
+      preserved?.why_it_matters ?? candidate.whyItMatters,
+      preserved?.recommended_action ?? candidate.recommendedAction,
+      preserved?.affected_url ?? candidate.affectedUrl,
+      preserved?.client_evidence ?? null,
+      preserved?.affected_url_note ?? candidate.affectedUrlNote,
+      {
+        grouped: true,
+        issueTypes: [
+          ...new Set(candidate.issues.map((issue) => issue.issue_type)),
+        ],
+        sourceIssueCount: candidate.issues.length,
+        occurrenceCount: candidate.occurrenceCount,
+      },
+      preserved?.is_included ?? candidate.isIncluded,
+      [candidate.internalNote, mergeNotes].filter(Boolean).join("\n\n") || null,
+      preserved?.review_note ?? null,
+      preserved?.reviewed_at ?? null,
+      displayOrder,
+      preserved?.estimated_effort ?? null,
+      candidate.groupKey,
+      candidate.groupLabel,
+      candidate.issues.length,
+      candidate.occurrenceCount,
+      candidate.affectedPageCount,
+      candidate.affectedResourceCount,
+      JSON.stringify(candidate.representativeExamples),
+      matches.length > 1,
+    ],
+  );
+  const findingId = findingRes.rows[0].id;
+  for (const [index, issue] of candidate.issues.entries()) {
+    await client.query(
+      `
+        INSERT INTO operations_report_finding_sources (
+          operations_report_id,
+          report_finding_id,
+          source_issue_id,
+          source_kind,
+          affected_page_url,
+          affected_resource_url,
+          outcome_key,
+          evidence_json,
+          display_order,
+          reviewed_for_client
+        )
+        VALUES ($1, $2, $3, 'scan_issue', $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        reportId,
+        findingId,
         issue.id,
-        sourceFingerprint(issue),
-        issue.category,
-        issue.severity,
-        priorityFromSeverity(issue.severity),
-        clientFriendlyStarterText(presentation.userTitle),
-        presentation.technicalDetail,
-        clientFriendlyStarterText(
-          presentation.whatItMeans || presentation.shortSummary,
-        ),
-        clientFriendlyStarterText(presentation.whyItMatters),
-        clientFriendlyStarterText(presentation.suggestedFix),
-        issue.affected_url,
+        issue.source_url || issue.affected_url,
+        issue.source_url ? issue.affected_url : null,
+        issueOutcomeKey(issue),
         {
           issueType: issue.issue_type,
           sourceUrl: issue.source_url,
@@ -857,10 +1665,152 @@ async function insertFindingsForScan(
           evidence: issue.evidence_json,
           detectedAt: issue.last_seen_at.toISOString(),
         },
-        order++,
+        index,
+        Boolean(preserved?.reviewed_at),
       ],
     );
   }
+}
+
+async function rebuildActionPlanForGroupedFindings(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  reportId: string,
+) {
+  await client.query(
+    `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+    [reportId],
+  );
+  const findings = await client.query<
+    Pick<
+      OperationsReportFindingRow,
+      | "id"
+      | "client_priority"
+      | "title"
+      | "recommended_action"
+      | "display_order"
+    >
+  >(
+    `
+      SELECT id, client_priority, title, recommended_action, display_order
+      FROM operations_report_findings
+      WHERE operations_report_id = $1
+        AND is_included = true
+        AND is_false_positive = false
+      ORDER BY display_order ASC, created_at ASC
+    `,
+    [reportId],
+  );
+  const groupCounts: Record<OperationsReportActionPlanGroup, number> = {
+    address_now: 0,
+    address_soon: 0,
+    consider_later: 0,
+  };
+  for (const finding of findings.rows) {
+    const group = actionPlanGroupForPriority(finding.client_priority);
+    await client.query(
+      `
+        INSERT INTO operations_report_action_plan_items (
+          operations_report_id,
+          report_finding_id,
+          group_key,
+          title,
+          summary,
+          display_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [
+        reportId,
+        finding.id,
+        group,
+        finding.title,
+        finding.recommended_action,
+        groupCounts[group]++,
+      ],
+    );
+  }
+}
+
+export async function regroupOperationsReportFindings(
+  actor: AdminActor,
+  reportId: string,
+  input: { confirm: boolean; previewHash: string },
+): Promise<
+  | OperationsReportDetail
+  | null
+  | { blockedReason: string }
+  | { stalePreview: true; preview: OperationsReportRegroupPreview }
+> {
+  if (!input.confirm) throw new Error("regroup_confirmation_required");
+  const detail = await getOperationsReportDetail(reportId);
+  if (!detail) return null;
+  const candidates = await buildRegroupCandidatesForReport(detail.report);
+  const preview = buildRegroupPreviewFromCandidates(
+    detail.report,
+    detail.findings,
+    candidates,
+  );
+  if (preview.blockedReason) return { blockedReason: preview.blockedReason };
+  if (preview.previewHash !== input.previewHash) {
+    return { stalePreview: true, preview };
+  }
+  const client = await ensureConnected();
+  await client.query("BEGIN");
+  try {
+    await client.query(
+      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query(
+      `DELETE FROM operations_report_finding_sources WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query(
+      `DELETE FROM operations_report_findings WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    for (const [index, candidate] of candidates.entries()) {
+      await insertGroupedCandidateFinding(
+        client,
+        reportId,
+        candidate,
+        detail.findings,
+        index,
+      );
+    }
+    await rebuildActionPlanForGroupedFindings(client, reportId);
+    await client.query(
+      `
+        UPDATE operations_reports
+        SET frozen_render_json = NULL,
+            frozen_at = NULL,
+            last_preview_generated_at = NULL,
+            last_pdf_generated_at = NULL,
+            updated_at = now()
+        WHERE id = $1
+      `,
+      [reportId],
+    );
+    await client.query(
+      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1`,
+      [reportId],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  }
+  await recordAdminAuditLog(actor, {
+    action: "operations_report_findings_regrouped",
+    targetType: "operations_report",
+    targetId: reportId,
+    metadata: {
+      currentFindingCount: preview.currentFindingCount,
+      groupedFindingCount: preview.proposedGroupedCount,
+      rawOccurrenceCount: preview.rawOccurrenceCount,
+    },
+  });
+  return getOperationsReportDetail(reportId) as Promise<OperationsReportDetail>;
 }
 
 async function insertDefaultReportReviewSections(
@@ -944,10 +1894,11 @@ async function insertDefaultReportReviewSections(
       | "title"
       | "recommended_action"
       | "display_order"
+      | "occurrence_count"
     >
   >(
     `
-      SELECT id, client_priority, title, recommended_action, display_order
+      SELECT id, client_priority, title, recommended_action, display_order, occurrence_count
       FROM operations_report_findings
       WHERE operations_report_id = $1
         AND is_included = true
@@ -999,6 +1950,19 @@ async function insertDefaultReportReviewSections(
     } satisfies Record<OperationsReportClientPriority, number>,
   );
   const urgentCount = priorityCounts.critical + priorityCounts.important;
+  const occurrenceTotal = findings.rows.reduce(
+    (total, finding) =>
+      total +
+      Math.max(
+        1,
+        numberValue(
+          (finding as Pick<OperationsReportFindingRow, "occurrence_count">)
+            .occurrence_count,
+          1,
+        ),
+      ),
+    0,
+  );
   await client.query(
     `
       UPDATE operations_reports
@@ -1012,7 +1976,7 @@ async function insertDefaultReportReviewSections(
     `,
     [
       reportId,
-      `This website health review identified ${findings.rows.length} candidate finding${findings.rows.length === 1 ? "" : "s"}. Each item should be confirmed and edited before the report is shared.`,
+      `This website health review identified ${findings.rows.length} grouped area${findings.rows.length === 1 ? "" : "s"} for attention across ${occurrenceTotal} technical occurrence${occurrenceTotal === 1 ? "" : "s"}. Each item should be confirmed and edited before the report is shared.`,
       urgentCount > 0
         ? `The selected check found ${urgentCount} candidate item${urgentCount === 1 ? "" : "s"} that may deserve earlier attention, alongside lower-priority improvements.`
         : "The selected check did not identify any candidate critical or important items, but the remaining improvements should still be reviewed.",
@@ -1130,7 +2094,12 @@ export async function createOperationsReport(
       ],
     );
     const report = reportRes.rows[0];
-    await insertFindingsForScan(client, report.id, input.scanRunId);
+    await insertFindingsForScan(
+      client,
+      report.id,
+      input.scanRunId,
+      relationship.site_url,
+    );
     await insertDefaultReportReviewSections(
       client,
       report.id,
@@ -1327,12 +2296,14 @@ export async function getOperationsReportDetail(
   if (!report) return null;
   const [
     findings,
+    findingSources,
     positiveObservations,
     actionPlanItems,
     comparisonItems,
     activity,
   ] = await Promise.all([
     listFindings(reportId),
+    listFindingSources(reportId),
     listPositiveObservations(reportId),
     listActionPlanItems(reportId),
     listComparisonItems(reportId),
@@ -1341,6 +2312,7 @@ export async function getOperationsReportDetail(
   return {
     report,
     findings,
+    findingSources,
     positiveObservations,
     actionPlanItems,
     comparisonItems,
@@ -1773,6 +2745,7 @@ export function getOperationsReportReadinessIssues(
       missing.push("affected URL or no-URL reason");
     }
     if (!finding.reviewed_at) missing.push("administrator review");
+    if (finding.requires_merge_review) missing.push("merged wording review");
     if (missing.length > 0) {
       add(
         "finding_incomplete",
@@ -1986,6 +2959,12 @@ export function buildOperationsClientReportPayload(
       estimatedEffort: finding.estimated_effort,
       displayOrder: finding.display_order,
       comparisonStatus: finding.comparison_status,
+      groupKey: finding.group_key,
+      groupLabel: finding.group_label,
+      occurrenceCount: finding.occurrence_count,
+      affectedPageCount: finding.affected_page_count,
+      affectedResourceCount: finding.affected_resource_count,
+      representativeExamples: finding.representative_examples_json,
     })),
     actionPlan,
     positiveObservations: positiveObservationRows

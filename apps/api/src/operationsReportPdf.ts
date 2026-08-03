@@ -78,6 +78,38 @@ function listItems(items: string[]) {
     : "";
 }
 
+function findingEvidenceTable(
+  finding: OperationsClientReportPayload["findings"][number],
+  limit: number,
+) {
+  const examples = finding.representativeExamples.slice(0, limit);
+  if (examples.length === 0) return "";
+  return `
+    <table class="evidence-table">
+      <thead>
+        <tr>
+          <th>Affected page/resource</th>
+          <th>Result</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${examples
+          .map(
+            (example) => `
+              <tr>
+                <td>${escapeHtml(example.affectedResourceUrl ?? example.affectedPageUrl ?? "-")}</td>
+                <td>${escapeHtml(example.result ?? "-")}</td>
+                <td>${escapeHtml(example.note ?? "-")}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
 export function renderOperationsReportHtml(
   payload: OperationsClientReportPayload,
 ) {
@@ -122,6 +154,17 @@ export function renderOperationsReportHtml(
           <dt>Links/resources discovered</dt><dd>${payload.scan.totalLinks}</dd>
           <dt>Included reviewed findings</dt><dd>${payload.findings.length}</dd>
         </dl>
+        ${payload.findings
+          .map(
+            (finding) => `
+              <article class="appendix-item avoid-break">
+                <h3>${escapeHtml(finding.title)}</h3>
+                <p>${finding.occurrenceCount} technical occurrence${finding.occurrenceCount === 1 ? "" : "s"} reviewed.</p>
+                ${findingEvidenceTable(finding, 50)}
+              </article>
+            `,
+          )
+          .join("")}
       </section>`
     : "";
   const closingSections = [
@@ -153,6 +196,14 @@ export function renderOperationsReportHtml(
         <article class="finding avoid-break">
           <div class="finding__meta">${priorityLabel(finding.priority)}</div>
           <h3>${escapeHtml(finding.title)}</h3>
+          <p class="finding-counts">
+            ${finding.occurrenceCount} technical occurrence${finding.occurrenceCount === 1 ? "" : "s"} ·
+            ${finding.affectedPageCount} affected page${finding.affectedPageCount === 1 ? "" : "s"}${
+              finding.affectedResourceCount > 0
+                ? ` · ${finding.affectedResourceCount} affected resource${finding.affectedResourceCount === 1 ? "" : "s"}`
+                : ""
+            }
+          </p>
           ${
             finding.affectedUrl
               ? `<p class="url">${escapeHtml(finding.affectedUrl)}</p>`
@@ -164,6 +215,7 @@ export function renderOperationsReportHtml(
           ${finding.whyItMatters ? `<h4>Why it matters</h4><p>${escapeHtml(finding.whyItMatters)}</p>` : ""}
           ${finding.recommendedAction ? `<h4>Recommended action</h4><p>${escapeHtml(finding.recommendedAction)}</p>` : ""}
           ${finding.clientEvidence ? `<h4>Evidence</h4><p>${escapeHtml(finding.clientEvidence)}</p>` : ""}
+          ${findingEvidenceTable(finding, 3)}
           ${finding.estimatedEffort ? `<p class="effort">Estimated effort: ${escapeHtml(finding.estimatedEffort)}</p>` : ""}
         </article>
       `,
@@ -176,38 +228,43 @@ export function renderOperationsReportHtml(
   <meta charset="utf-8" />
   <title>${escapeHtml(payload.report.title)}</title>
   <style>
-    @page { size: A4; margin: 18mm 16mm 20mm; }
+    @page { size: A4; margin: 13mm 12mm 16mm; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       background: #fff;
       color: #172033;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 11pt;
-      line-height: 1.55;
+      font-size: 9.5pt;
+      line-height: 1.36;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
     h1, h2, h3, h4, p { margin-top: 0; }
-    h1 { font-size: 30pt; line-height: 1.05; margin-bottom: 5mm; }
-    h2 { font-size: 18pt; border-bottom: 1px solid #d6deea; padding-bottom: 4mm; break-after: avoid-page; page-break-after: avoid; }
-    h3 { font-size: 13pt; margin-bottom: 3mm; break-after: avoid-page; page-break-after: avoid; }
-    h4 { font-size: 9pt; margin: 5mm 0 1.5mm; color: #4d5b73; text-transform: uppercase; letter-spacing: .04em; }
-    .cover { min-height: 246mm; display: grid; align-content: center; gap: 7mm; page-break-after: always; }
+    h1 { font-size: 28pt; line-height: 1.05; margin-bottom: 4mm; }
+    h2 { font-size: 15pt; border-bottom: 1px solid #d6deea; padding-bottom: 2.5mm; margin-bottom: 4mm; break-after: avoid-page; page-break-after: avoid; }
+    h3 { font-size: 11pt; margin-bottom: 2mm; break-after: avoid-page; page-break-after: avoid; }
+    h4 { font-size: 8pt; margin: 3mm 0 1mm; color: #4d5b73; text-transform: uppercase; letter-spacing: .04em; }
+    .cover { min-height: 255mm; display: grid; align-content: center; gap: 6mm; page-break-after: always; }
     .brand { color: #315178; font-size: 16pt; font-weight: 800; letter-spacing: 0; }
     .report-title { color: #526176; font-size: 13pt; font-weight: 650; }
     .cover-meta { display: grid; gap: 2mm; color: #526176; font-size: 12pt; }
     .confidential { margin-top: 14mm; color: #526176; font-size: 10pt; }
-    .report-section { margin: 0 0 10mm; }
-    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; margin: 6mm 0 10mm; }
-    .summary-card { border: 1px solid #d6deea; border-radius: 3mm; padding: 4mm; background: #f7f9fc; }
-    .summary-card strong { display: block; font-size: 18pt; }
+    .report-section { margin: 0 0 6mm; }
+    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3mm; margin: 4mm 0 6mm; }
+    .summary-card { border: 1px solid #d6deea; border-radius: 2mm; padding: 3mm; background: #f7f9fc; }
+    .summary-card strong { display: block; font-size: 15pt; }
     .summary-card span { color: #526176; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; }
-    .finding, .action-item, .positive-item, .priority-item { border: 1px solid #d6deea; border-radius: 2mm; padding: 5mm; margin-bottom: 5mm; background: #fff; }
-    .action-item, .positive-item { padding: 3.5mm; margin-bottom: 3mm; }
-    .finding__meta { display: inline-block; margin-bottom: 3mm; padding: 1.5mm 2.5mm; border-radius: 999px; background: #edf3fb; color: #214b76; font-size: 8.5pt; font-weight: 800; }
+    .finding, .action-item, .positive-item, .priority-item { border: 1px solid #d6deea; border-radius: 2mm; padding: 3.2mm; margin-bottom: 3mm; background: #fff; }
+    .action-item, .positive-item { padding: 2.7mm; margin-bottom: 2mm; }
+    .finding__meta { display: inline-block; margin-bottom: 2mm; padding: 1mm 2mm; border-radius: 999px; background: #edf3fb; color: #214b76; font-size: 7.8pt; font-weight: 800; }
+    .finding-counts { color: #526176; font-size: 8.2pt; margin-bottom: 2mm; }
     .url { overflow-wrap: anywhere; word-break: break-word; color: #526176; }
     .effort { color: #526176; font-size: 9pt; }
+    .evidence-table { width: 100%; border-collapse: collapse; margin: 2mm 0; font-size: 7.8pt; table-layout: fixed; }
+    .evidence-table th, .evidence-table td { border: 1px solid #d6deea; padding: 1.3mm; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
+    .evidence-table th { background: #f7f9fc; color: #4d5b73; text-align: left; }
+    .appendix-item { border-top: 1px solid #d6deea; padding-top: 4mm; margin-top: 5mm; }
     .priority-item div { display: flex; justify-content: space-between; gap: 5mm; }
     .priority-item span { color: #526176; font-size: 9pt; }
     .priority-item p { margin: 2mm 0 0; }
