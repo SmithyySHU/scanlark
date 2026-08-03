@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { ensureConnected } from "./client";
+import { siteManagePredicate } from "./internalWorkspaces";
 import type { ScanRunRow } from "./scans";
 
 export interface ReportShareRow {
@@ -86,7 +87,7 @@ async function getOwnedRun(
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.id = $1
-        AND s.user_id = $2
+        AND ${siteManagePredicate("s", "$2")}
       LIMIT 1
     `,
     [scanRunId, userId],

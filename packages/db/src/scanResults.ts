@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 import type { LinkClassification } from "./scanRuns";
 
 export interface ScanResultRow {
@@ -140,7 +141,10 @@ export async function getResultsForScanRunForUser(
   const offset = options?.offset ?? 0;
   const classification = options?.classification;
 
-  let whereClause = "WHERE r.scan_run_id = $1 AND s.user_id = $2";
+  let whereClause = `WHERE r.scan_run_id = $1 AND ${siteAccessPredicate(
+    "s",
+    "$2",
+  )}`;
   const params: Array<string | number> = [scanRunId, userId];
 
   if (classification) {
@@ -238,7 +242,8 @@ export async function getResultsSummaryForScanRunForUser(
       FROM scan_results r
       JOIN scan_runs sr ON sr.id = r.scan_run_id
       JOIN sites s ON s.id = sr.site_id
-      WHERE r.scan_run_id = $1 AND s.user_id = $2
+      WHERE r.scan_run_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       GROUP BY r.classification, r.status_code
       ORDER BY r.classification, r.status_code
     `,

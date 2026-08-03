@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 import type { ScanIssueCategory, ScanIssueSeverity } from "./scanIssues";
 
 export type ScanCategoryScoreKey =
@@ -133,16 +134,16 @@ export async function getScanCategoryScores(
   const siteJoin = userId ? "JOIN sites s ON s.id = sc.site_id" : "";
   const issueJoin = userId ? "JOIN sites s ON s.id = si.site_id" : "";
   const runWhere = userId
-    ? "WHERE sr.id = $1 AND s.user_id = $2"
+    ? `WHERE sr.id = $1 AND ${siteAccessPredicate("s", "$2")}`
     : "WHERE sr.id = $1";
   const pageWhere = userId
-    ? "WHERE pc.scan_run_id = $1 AND s.user_id = $2"
+    ? `WHERE pc.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")}`
     : "WHERE pc.scan_run_id = $1";
   const siteWhere = userId
-    ? "WHERE sc.scan_run_id = $1 AND s.user_id = $2"
+    ? `WHERE sc.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")}`
     : "WHERE sc.scan_run_id = $1";
   const issueWhere = userId
-    ? "WHERE si.scan_run_id = $1 AND s.user_id = $2 AND si.status = 'open'"
+    ? `WHERE si.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")} AND si.status = 'open'`
     : "WHERE si.scan_run_id = $1 AND si.status = 'open'";
 
   const [runRes, pageChecksRes, siteChecksRes, issueCountsRes] =

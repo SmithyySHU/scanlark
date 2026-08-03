@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { createAppNotification } from "./appNotifications";
+import { siteAccessPredicate, siteManagePredicate } from "./internalWorkspaces";
 
 export type UptimeStatus = "unknown" | "up" | "degraded" | "down";
 export type UptimeCheckStatus = Exclude<UptimeStatus, "unknown">;
@@ -128,7 +129,7 @@ async function ensureSettingsForSite(
         NOW()
       FROM sites
       WHERE id = $1
-        AND ($2::uuid IS NULL OR user_id = $2)
+        AND ($2::uuid IS NULL OR ${siteAccessPredicate("sites", "$2")})
       ON CONFLICT (site_id) DO NOTHING
     `,
     [siteId, userId ?? null],
@@ -150,7 +151,7 @@ async function ensureSettingsForSite(
       FROM site_uptime_settings s
       JOIN sites site ON site.id = s.site_id
       WHERE s.site_id = $1
-        AND ($2::uuid IS NULL OR site.user_id = $2)
+        AND ($2::uuid IS NULL OR ${siteAccessPredicate("site", "$2")})
     `,
     [siteId, userId ?? null],
   );
@@ -315,7 +316,7 @@ export async function updateUptimeMonitorSettingsForUser(
       FROM sites site
       WHERE s.site_id = $1
         AND site.id = s.site_id
-        AND site.user_id = $2
+        AND ${siteManagePredicate("site", "$2")}
         AND (site.is_sample_site = false OR $3 = false)
       RETURNING
         s.id,

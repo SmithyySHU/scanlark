@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { emitScanEvent } from "./events";
+import { siteAccessPredicate, siteManagePredicate } from "./internalWorkspaces";
 
 export type ScheduleFrequency = "manual" | "daily" | "weekly" | "monthly";
 
@@ -431,7 +432,8 @@ export async function getSiteScheduleForUser(
              next_scheduled_at,
              last_scheduled_at
       FROM sites
-      WHERE id = $1 AND user_id = $2
+      WHERE id = $1
+        AND ${siteAccessPredicate("sites", "$2")}
     `,
     [siteId, userId],
   );
@@ -515,7 +517,8 @@ export async function updateSiteScheduleForUser(
           schedule_day_of_week = $6,
           schedule_day_of_month = $7,
           next_scheduled_at = $8
-      WHERE s.id = $1 AND s.user_id = $2
+      WHERE s.id = $1
+        AND ${siteManagePredicate("s", "$2")}
         AND (s.is_sample_site = false OR $3 = false)
       RETURNING id,
                 user_id,

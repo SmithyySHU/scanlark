@@ -680,4 +680,28 @@ export {
 } from "./auth";
 export type { AuthUser } from "./auth";
 
+export {
+  canAccessOperationsWorkspace,
+  canAccessOperationsBusiness,
+  canAccessScanRun,
+  canAccessSite,
+  canAccessTechnicalReport,
+  canManageInternalWorkspaceMemberships,
+  canManageOperationsWorkspace,
+  canManageSite,
+  getInternalWorkspaceByCode,
+  getUserInternalWorkspaceMemberships,
+  listInternalWorkspaceMembers,
+  SCANLARK_OPERATIONS_WORKSPACE_CODE,
+  setInternalWorkspaceMembershipActive,
+  siteAccessPredicate,
+  siteManagePredicate,
+  upsertInternalWorkspaceMembership,
+} from "./internalWorkspaces";
+export type {
+  InternalWorkspaceMembershipRow,
+  InternalWorkspaceRole,
+  InternalWorkspaceRow,
+} from "./internalWorkspaces";
+
 export { SCAN_EVENT_CHANNEL } from "./events";

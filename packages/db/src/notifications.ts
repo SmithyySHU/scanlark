@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { computeSeverityScore } from "./scanCategoryScores";
+import { siteAccessPredicate, siteManagePredicate } from "./internalWorkspaces";
 import { isValidEmailAddress } from "./validation";
 
 export type NotificationMode =
@@ -114,8 +115,9 @@ export async function getSiteNotificationSettingsForUser(
              notify_on,
              notify_include_csv,
              summary_enabled
-      FROM sites
-      WHERE id = $1 AND user_id = $2
+      FROM sites s
+      WHERE s.id = $1
+        AND ${siteAccessPredicate("s", "$2")}
     `,
     [siteId, userId],
   );
@@ -208,7 +210,8 @@ export async function updateSiteNotificationSettingsForUser(
           notify_on = $5,
           notify_include_csv = $6,
           summary_enabled = $7
-      WHERE id = $1 AND user_id = $2
+      WHERE id = $1
+        AND ${siteManagePredicate("sites", "$2")}
       RETURNING notify_enabled,
                 notify_email,
                 notify_on,

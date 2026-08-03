@@ -138,6 +138,8 @@ interface Site {
   avatar_fetched_at: string | null;
   avatar_checked_at: string | null;
   avatar_error: string | null;
+  operations_business_id?: string | null;
+  operations_business_name?: string | null;
 }
 
 function isSampleSite(site: Pick<Site, "is_sample_site" | "url">) {
@@ -3518,6 +3520,14 @@ const App: React.FC = () => {
         ),
   );
   const [route, setRoute] = useState<AppRoute>(() => getRouteFromLocation());
+  const newSiteOperationsBusinessId = useMemo(() => {
+    if (route !== "new_site") return null;
+    const params = new URLSearchParams(
+      locationSearch.startsWith("?") ? locationSearch.slice(1) : locationSearch,
+    );
+    const businessId = params.get("operationsBusinessId")?.trim() ?? "";
+    return businessId || null;
+  }, [locationSearch, route]);
   const [learnSlug, setLearnSlug] = useState<string | null>(() =>
     getLearnSlugFromLocation(),
   );
@@ -3858,15 +3868,12 @@ const App: React.FC = () => {
     authUser,
     internalOnlyMode,
   );
-  const hasMonitoringWorkspaceAccess = !!authUser && (
-    !internalOnlyMode || hasOperationsWorkspaceAccess
-  );
+  const hasMonitoringWorkspaceAccess =
+    !!authUser && (!internalOnlyMode || hasOperationsWorkspaceAccess);
   const hasInternalAppAccess =
     hasMonitoringWorkspaceAccess && !publicConfigLoading;
   const isBlockedInternalUser =
-    internalOnlyMode &&
-    !!authUser &&
-    !hasOperationsWorkspaceAccess;
+    internalOnlyMode && !!authUser && !hasOperationsWorkspaceAccess;
   const sitesLoadError = sitesLoadState === "error";
   const isSiteStatePending = ["idle", "loading"].includes(sitesLoadState);
   const hasSiteSelectionResolved = Boolean(
@@ -5128,8 +5135,15 @@ const App: React.FC = () => {
   const filteredSites = useMemo(() => {
     const query = siteSearch.trim().toLowerCase();
     if (!query) return sites;
-    return sites.filter((site) => site.url.toLowerCase().includes(query));
-  }, [sites, siteSearch]);
+    return sites.filter((site) => {
+      const label = site.site_display_name ?? siteNameById[site.id] ?? "";
+      return (
+        site.url.toLowerCase().includes(query) ||
+        label.toLowerCase().includes(query) ||
+        (site.operations_business_name ?? "").toLowerCase().includes(query)
+      );
+    });
+  }, [siteNameById, sites, siteSearch]);
 
   const isSelectedRunInProgress = isInProgress(selectedRun?.status);
   const isQueued = selectedRun?.status === "queued";
@@ -5883,6 +5897,15 @@ const App: React.FC = () => {
     },
     [siteNameById],
   );
+  const getSiteOptionLabel = useCallback(
+    (site: Site) => {
+      const label = getSiteDisplayName(site) ?? site.url;
+      return site.operations_business_name
+        ? `${label} - ${site.operations_business_name}`
+        : label;
+    },
+    [getSiteDisplayName],
+  );
   const selectedSite = useMemo(
     () => sites.find((site) => site.id === selectedSiteId) ?? null,
     [sites, selectedSiteId],
@@ -6484,7 +6507,11 @@ const App: React.FC = () => {
   const isAdminRoute = route === "admin";
   const isOperationsRoute = route === "operations";
   const isReadOnlyReport = isSharedReportRoute;
-  const isMonitoringWorkspace = isSiteSelectionRoute || isSiteSetupRoute || isReportRoute || route === "app";
+  const isMonitoringWorkspace =
+    isSiteSelectionRoute ||
+    isSiteSetupRoute ||
+    isReportRoute ||
+    route === "app";
   const allowAnonymousSharedReport = isSharedReportRoute && !internalOnlyMode;
   const hasLandingDashboardSelectIntent =
     getLandingDashboardSelectSiteIntent(locationSearch);
@@ -6520,9 +6547,7 @@ const App: React.FC = () => {
         </button>
         <button
           type="button"
-          className={`app-workspace-tab ${
-            isOperationsRoute ? "active" : ""
-          }`}
+          className={`app-workspace-tab ${isOperationsRoute ? "active" : ""}`}
           onClick={() => navigateTo("/operations")}
         >
           Operations
@@ -11031,7 +11056,10 @@ const App: React.FC = () => {
       clientName?: string;
       reportDisplayName?: string;
     },
-    options?: { permissionConfirmed?: boolean },
+    options?: {
+      permissionConfirmed?: boolean;
+      operationsBusinessId?: string | null;
+    },
   ) {
     const normalizedUrl = normalizeSiteUrlInput(url);
     const res = await apiFetch(`${API_BASE}/sites`, {
@@ -11043,6 +11071,7 @@ const App: React.FC = () => {
         clientName: metadata?.clientName?.trim() || undefined,
         reportDisplayName: metadata?.reportDisplayName?.trim() || undefined,
         permissionConfirmed: options?.permissionConfirmed === true,
+        operationsBusinessId: options?.operationsBusinessId || undefined,
       }),
     });
 
@@ -11053,6 +11082,25 @@ const App: React.FC = () => {
 
     const data = (await res.json()) as { site: Site };
     return data.site;
+  }
+
+  async function linkSiteToOperationsBusiness(
+    siteId: string,
+    businessId: string,
+  ) {
+    const res = await apiFetch(
+      `${API_BASE}/operations/businesses/${encodeURIComponent(businessId)}/sites`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ siteId }),
+      },
+    );
+    if (res.status === 409) return;
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw normalizeCreateSiteError(res.status, text);
+    }
   }
 
   function applyCreatedSite(site: Site, fallbackName?: string) {
@@ -11151,6 +11199,13 @@ const App: React.FC = () => {
 
       if (existing) {
         applyCreatedSite(existing, getSiteDisplayName(existing) ?? undefined);
+        if (newSiteOperationsBusinessId) {
+          await linkSiteToOperationsBusiness(
+            existing.id,
+            newSiteOperationsBusinessId,
+          );
+          await refreshSites();
+        }
         openAppSection("dashboard");
         closeAddSiteModal();
         pushToast("That site is already in your workspace", "info");
@@ -11176,9 +11231,13 @@ const App: React.FC = () => {
         },
         {
           permissionConfirmed: newSitePermissionConfirmed,
+          operationsBusinessId: newSiteOperationsBusinessId,
         },
       );
       applyCreatedSite(site, siteDisplayName || undefined);
+      if (newSiteOperationsBusinessId) {
+        void refreshSites();
+      }
       openAppSection("dashboard");
       closeAddSiteModal();
       pushToast("Site added", "success");
@@ -20063,7 +20122,9 @@ const App: React.FC = () => {
           <MarketingPage
             isAuthenticated
             primaryLabel={
-              hasOperationsWorkspaceAccess ? "Open operations" : "Open dashboard"
+              hasOperationsWorkspaceAccess
+                ? "Open operations"
+                : "Open dashboard"
             }
             secondaryLabel="Account"
             onOpenPrimary={() =>
@@ -20390,6 +20451,17 @@ const App: React.FC = () => {
                                     }}
                                   >
                                     {site.client_name}
+                                  </div>
+                                ) : null}
+                                {site.operations_business_name ? (
+                                  <div
+                                    style={{
+                                      color: "var(--text-muted)",
+                                      fontSize: "12px",
+                                      marginBottom: "8px",
+                                    }}
+                                  >
+                                    Operations - {site.operations_business_name}
                                   </div>
                                 ) : null}
                               </div>
@@ -21180,7 +21252,7 @@ const App: React.FC = () => {
                       )}
                       {sites.map((site) => (
                         <option key={site.id} value={site.id}>
-                          {(getSiteDisplayName(site) ?? site.url).slice(0, 90)}
+                          {getSiteOptionLabel(site).slice(0, 90)}
                         </option>
                       ))}
                     </select>
@@ -22110,12 +22182,12 @@ const App: React.FC = () => {
                         onClick={() => openAppSection(item.key)}
                       >
                         {item.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {renderWorkspaceSwitcher()}
+                      </button>
+                    );
+                  })}
                 </div>
+                {renderWorkspaceSwitcher()}
+              </div>
 
               <div className="app-site-switcher">
                 <div style={{ minWidth: 0 }}>
@@ -22135,7 +22207,7 @@ const App: React.FC = () => {
                     {!selectedSiteId && <option value="">Select a site</option>}
                     {sites.map((site) => (
                       <option key={site.id} value={site.id}>
-                        {(getSiteDisplayName(site) ?? site.url).slice(0, 90)}
+                        {getSiteOptionLabel(site).slice(0, 90)}
                       </option>
                     ))}
                   </select>
@@ -22345,6 +22417,17 @@ const App: React.FC = () => {
                                     }}
                                   >
                                     {site.url}
+                                  </div>
+                                )}
+                                {site.operations_business_name && (
+                                  <div
+                                    style={{
+                                      fontSize: "10px",
+                                      color: "var(--muted)",
+                                      marginTop: "2px",
+                                    }}
+                                  >
+                                    Operations - {site.operations_business_name}
                                   </div>
                                 )}
                                 {isSampleSite(site) && (

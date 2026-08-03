@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 
 export interface IgnoredLinkRow {
   id: string;
@@ -130,7 +131,8 @@ export async function listIgnoredLinksForRunForUser(
       FROM scan_ignored_links sil
       JOIN scan_runs r ON r.id = sil.scan_run_id
       JOIN sites s ON s.id = r.site_id
-      WHERE sil.scan_run_id = $1 AND s.user_id = $2
+      WHERE sil.scan_run_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
     `,
     [scanRunId, userId],
   );
@@ -146,7 +148,8 @@ export async function listIgnoredLinksForRunForUser(
       LEFT JOIN ignore_rules ir ON ir.id = sil.rule_id
       JOIN scan_runs r ON r.id = sil.scan_run_id
       JOIN sites s ON s.id = r.site_id
-      WHERE sil.scan_run_id = $1 AND s.user_id = $2
+      WHERE sil.scan_run_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       ORDER BY sil.last_seen_at DESC
       LIMIT $3 OFFSET $4
     `,
@@ -203,7 +206,8 @@ export async function listIgnoredOccurrencesForUser(
       FROM scan_ignored_occurrences sio
       JOIN scan_runs r ON r.id = sio.scan_run_id
       JOIN sites s ON s.id = r.site_id
-      WHERE sio.scan_ignored_link_id = $1 AND s.user_id = $2
+      WHERE sio.scan_ignored_link_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
     `,
     [ignoredLinkId, userId],
   );
@@ -215,7 +219,8 @@ export async function listIgnoredOccurrencesForUser(
       FROM scan_ignored_occurrences sio
       JOIN scan_runs r ON r.id = sio.scan_run_id
       JOIN sites s ON s.id = r.site_id
-      WHERE sio.scan_ignored_link_id = $1 AND s.user_id = $2
+      WHERE sio.scan_ignored_link_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       ORDER BY sio.created_at DESC
       LIMIT $3 OFFSET $4
     `,
