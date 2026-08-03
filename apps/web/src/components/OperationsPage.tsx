@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { copyRichEmailToClipboard } from "../emailClipboard";
 import { OperationsReportWorkspace } from "./operations/reports/OperationsReportWorkspace";
 import type {
@@ -1247,6 +1253,10 @@ type CommunicationFormState = {
   previewMode: "desktop" | "narrow" | "images_hidden" | "plain_text";
   copyStatus: string;
   hasUnsavedRenderEdits: boolean;
+  renderStatus: "idle" | "rendering" | "current" | "stale" | "failed";
+  renderVersion: number;
+  lastRenderedAt: string;
+  lastSavedAt: string;
   followUpAt: string;
   taskTitle: string;
   taskNotes: string;
@@ -1664,6 +1674,10 @@ const emptyCommunicationForm: CommunicationFormState = {
   previewMode: "desktop",
   copyStatus: "",
   hasUnsavedRenderEdits: false,
+  renderStatus: "idle",
+  renderVersion: 0,
+  lastRenderedAt: "",
+  lastSavedAt: "",
   followUpAt: "",
   taskTitle: "",
   taskNotes: "",
@@ -1985,6 +1999,14 @@ function localDateToIso(value: string) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function escapeHtmlText(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function sanitizeFilenamePart(value: string) {
   return value
     .toLowerCase()
@@ -2303,6 +2325,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [communicationFormOpen, setCommunicationFormOpen] = useState(false);
   const [communicationForm, setCommunicationForm] =
     useState<CommunicationFormState>(emptyCommunicationForm);
+  const communicationRenderSequenceRef = useRef(0);
   const [templateForm, setTemplateForm] =
     useState<TemplateFormState>(emptyTemplateForm);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -2998,6 +3021,37 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }, [activeRoute, loadTasks]);
 
   useEffect(() => {
+    if (
+      !communicationFormOpen ||
+      !communicationForm.businessId ||
+      !communicationForm.templateId ||
+      !communicationForm.hasUnsavedRenderEdits
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void renderCommunicationDraft({
+        useCurrentContent: true,
+        source: "auto",
+      });
+    }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [
+    communicationFormOpen,
+    communicationForm.businessId,
+    communicationForm.contactId,
+    communicationForm.templateId,
+    communicationForm.subject,
+    communicationForm.preheader,
+    communicationForm.body,
+    communicationForm.senderIdentityKey,
+    communicationForm.wordingVariantKey,
+    communicationForm.signatureMode,
+    communicationForm.followUpAt,
+    communicationForm.hasUnsavedRenderEdits,
+  ]);
+
+  useEffect(() => {
     if (activeRoute === "reports" && !operationsReportId) {
       void loadReports();
     }
@@ -3444,6 +3498,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         : null;
   }
 
+  function invalidateCommunicationRender() {
+    communicationRenderSequenceRef.current += 1;
+  }
+
+  function markCommunicationRenderStale(
+    next: CommunicationFormState,
+  ): CommunicationFormState {
+    return {
+      ...next,
+      hasUnsavedRenderEdits: true,
+      renderStatus: "stale",
+      copyStatus: "Save your latest changes before copying formatted email.",
+    };
+  }
+
   function findEditorPlaceholders(subject: string, body: string) {
     const placeholders = new Set<string>();
     for (const value of [subject, body]) {
@@ -3456,20 +3525,20 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function setCommunicationSubject(subject: string) {
+    invalidateCommunicationRender();
     setCommunicationForm((prev) => ({
-      ...prev,
+      ...markCommunicationRenderStale(prev),
       subject,
-      hasUnsavedRenderEdits: true,
       unresolvedPlaceholders: findEditorPlaceholders(subject, prev.body),
     }));
   }
 
   function setCommunicationBody(body: string) {
+    invalidateCommunicationRender();
     setCommunicationForm((prev) => ({
-      ...prev,
+      ...markCommunicationRenderStale(prev),
       body,
       plainTextBody: body,
-      hasUnsavedRenderEdits: true,
       unresolvedPlaceholders: findEditorPlaceholders(prev.subject, body),
     }));
   }
@@ -4380,24 +4449,49 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     await Promise.all([loadServiceDetail(), loadServices(), loadSummary()]);
   }
 
-  async function generateDraft() {
-    if (!communicationForm.businessId || !communicationForm.templateId) return;
-    setActionError(null);
+  async function renderCommunicationDraft(options: {
+    useCurrentContent: boolean;
+    source: "manual" | "auto" | "save";
+  }) {
+    if (!communicationForm.businessId || !communicationForm.templateId) {
+      return null;
+    }
+    const renderInput = communicationForm;
+    const renderSequence = communicationRenderSequenceRef.current + 1;
+    communicationRenderSequenceRef.current = renderSequence;
+    if (options.source !== "auto") setActionError(null);
+    setCommunicationForm((prev) => ({
+      ...prev,
+      renderStatus: "rendering",
+      copyStatus:
+        options.source === "save"
+          ? "Rendering the latest draft before saving..."
+          : prev.copyStatus,
+    }));
     try {
       const res = await apiFetch(
         `${apiBase}/operations/businesses/${encodeURIComponent(
-          communicationForm.businessId,
+          renderInput.businessId,
         )}/communications/draft`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            templateId: communicationForm.templateId,
-            contactId: communicationForm.contactId || null,
-            followUpAt: localDateTimeToIso(communicationForm.followUpAt),
-            senderIdentityKey: communicationForm.senderIdentityKey,
-            wordingVariantKey: communicationForm.wordingVariantKey || null,
-            signatureMode: communicationForm.signatureMode,
+            templateId: renderInput.templateId,
+            contactId: renderInput.contactId || null,
+            followUpAt: localDateTimeToIso(renderInput.followUpAt),
+            senderIdentityKey: renderInput.senderIdentityKey,
+            wordingVariantKey: renderInput.wordingVariantKey || null,
+            signatureMode: renderInput.signatureMode,
+            ...(options.useCurrentContent
+              ? {
+                  manualSubject: renderInput.subject,
+                  manualPreheader: renderInput.preheader,
+                  manualBody: renderInput.body,
+                  manualPlainText:
+                    renderInput.plainTextBody || renderInput.body,
+                }
+              : {}),
           }),
         },
       );
@@ -4426,10 +4520,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           } | null;
         };
       };
+      if (communicationRenderSequenceRef.current !== renderSequence) {
+        return null;
+      }
       const selectedContact = selectedCommunicationContact();
       const context = communicationBusinessContext();
-      setCommunicationForm((prev) => ({
-        ...prev,
+      const renderedAt = new Date().toISOString();
+      const renderedDraft = {
         subject: data.draft.subject,
         preheader: data.draft.preheader,
         body: data.draft.body,
@@ -4439,7 +4536,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         layoutKey: data.draft.layoutKey,
         signatureMode: data.draft.signatureMode,
         senderIdentityKey:
-          data.draft.senderIdentityKey ?? prev.senderIdentityKey,
+          data.draft.senderIdentityKey ?? renderInput.senderIdentityKey,
         recipientName:
           selectedContact != null
             ? contactName(selectedContact)
@@ -4451,17 +4548,48 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         templateSnapshot: data.draft.templateSnapshot,
         renderWarnings: data.draft.warnings,
         hasUnsavedRenderEdits: false,
+        renderStatus: "current" as const,
         copyStatus: "",
         followUpAt:
-          prev.followUpAt ||
+          renderInput.followUpAt ||
           toDateTimeLocalValue(data.draft.suggestedFollowUpAt ?? null),
         unresolvedPlaceholders: data.draft.unresolvedPlaceholders,
+      };
+      setCommunicationForm((prev) => ({
+        ...prev,
+        ...renderedDraft,
+        renderVersion: prev.renderVersion + 1,
+        lastRenderedAt: renderedAt,
       }));
+      return {
+        ...renderedDraft,
+        renderVersion: renderInput.renderVersion + 1,
+        lastRenderedAt: renderedAt,
+      };
     } catch (err) {
-      setActionError(
-        err instanceof Error ? err.message : "Failed to render draft",
-      );
+      if (communicationRenderSequenceRef.current === renderSequence) {
+        setCommunicationForm((prev) => ({
+          ...prev,
+          renderStatus: "failed",
+          hasUnsavedRenderEdits: true,
+          copyStatus:
+            "Render failed. Save/copy is blocked until preview renders.",
+        }));
+      }
+      if (options.source !== "auto") {
+        setActionError(
+          err instanceof Error ? err.message : "Failed to render draft",
+        );
+      }
+      return null;
     }
+  }
+
+  async function generateDraft() {
+    await renderCommunicationDraft({
+      useCurrentContent: false,
+      source: "manual",
+    });
   }
 
   async function saveCommunication(status: CommunicationStatus) {
@@ -4516,51 +4644,68 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
     setActionError(null);
     try {
+      let formForSave = communicationForm;
+      if (
+        communicationForm.hasUnsavedRenderEdits ||
+        communicationForm.renderStatus !== "current"
+      ) {
+        const rendered = await renderCommunicationDraft({
+          useCurrentContent: true,
+          source: "save",
+        });
+        if (!rendered) {
+          throw new Error("Render the latest draft before saving.");
+        }
+        formForSave = {
+          ...communicationForm,
+          ...rendered,
+          hasUnsavedRenderEdits: false,
+          lastSavedAt: new Date().toISOString(),
+        };
+      }
       const res = await apiFetch(
         `${apiBase}/operations/businesses/${encodeURIComponent(
-          communicationForm.businessId,
+          formForSave.businessId,
         )}/communications`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            contactId: communicationForm.contactId || null,
-            templateId: communicationForm.templateId || null,
-            direction: communicationForm.direction,
-            channel: communicationForm.channel,
+            contactId: formForSave.contactId || null,
+            templateId: formForSave.templateId || null,
+            direction: formForSave.direction,
+            channel: formForSave.channel,
             status,
-            subject: communicationForm.subject,
-            body: communicationForm.body,
-            preheader: communicationForm.preheader || null,
-            htmlFragment: communicationForm.htmlFragment || null,
-            htmlDocument: communicationForm.htmlDocument || null,
-            plainTextBody:
-              communicationForm.plainTextBody || communicationForm.body,
-            layoutKey: communicationForm.layoutKey,
-            wordingVariantKey: communicationForm.wordingVariantKey || null,
-            signatureMode: communicationForm.signatureMode,
-            senderIdentityKey: communicationForm.senderIdentityKey || null,
-            senderName: communicationForm.senderName || null,
-            senderEmail: communicationForm.senderEmail || null,
-            recipientName: communicationForm.recipientName || null,
+            subject: formForSave.subject,
+            body: formForSave.body,
+            preheader: formForSave.preheader || null,
+            htmlFragment: formForSave.htmlFragment || null,
+            htmlDocument: formForSave.htmlDocument || null,
+            plainTextBody: formForSave.plainTextBody || formForSave.body,
+            layoutKey: formForSave.layoutKey,
+            wordingVariantKey: formForSave.wordingVariantKey || null,
+            signatureMode: formForSave.signatureMode,
+            senderIdentityKey: formForSave.senderIdentityKey || null,
+            senderName: formForSave.senderName || null,
+            senderEmail: formForSave.senderEmail || null,
+            recipientName: formForSave.recipientName || null,
             recipientEmail:
-              communicationForm.recipientEmail ||
+              formForSave.recipientEmail ||
               communicationRecipientEmail() ||
               null,
-            templateSnapshotJson: communicationForm.templateSnapshot,
-            publicAssetUrlsJson: communicationForm.publicAssetUrls,
-            attachmentRequirementsJson:
-              communicationForm.attachmentRequirements,
+            templateSnapshotJson: formForSave.templateSnapshot,
+            publicAssetUrlsJson: formForSave.publicAssetUrls,
+            attachmentRequirementsJson: formForSave.attachmentRequirements,
             attachmentConfirmedAt:
-              communicationForm.attachmentRequirements.length > 0 &&
-              communicationForm.attachmentConfirmed
+              formForSave.attachmentRequirements.length > 0 &&
+              formForSave.attachmentConfirmed
                 ? new Date().toISOString()
                 : null,
             attachmentConfirmationNote:
-              communicationForm.attachmentConfirmationNote || null,
-            followUpAt: localDateTimeToIso(communicationForm.followUpAt),
-            taskTitle: communicationForm.taskTitle,
-            taskNotes: communicationForm.taskNotes,
+              formForSave.attachmentConfirmationNote || null,
+            followUpAt: localDateTimeToIso(formForSave.followUpAt),
+            taskTitle: formForSave.taskTitle,
+            taskNotes: formForSave.taskNotes,
             unresolvedPlaceholderOverride,
             unresolvedPlaceholderOverrideReason,
           }),
@@ -4585,32 +4730,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   async function copyCommunication() {
-    if (communicationForm.hasUnsavedRenderEdits) {
-      setCommunicationForm((prev) => ({
-        ...prev,
-        copyStatus: "Regenerate the draft before copying formatted email.",
-      }));
-      return;
-    }
-    const html = communicationForm.htmlFragment;
-    if (!html.trim()) {
-      setCommunicationForm((prev) => ({
-        ...prev,
-        copyStatus:
-          "Generate the rendered HTML email before copying formatted email.",
-      }));
-      return;
-    }
-    const plainText =
-      communicationForm.plainTextBody ||
-      `Subject: ${communicationForm.subject}\n\n${communicationForm.body}`;
-    const result = await copyRichEmailToClipboard({
-      html,
-      plainText,
-    });
     setCommunicationForm((prev) => ({
       ...prev,
-      copyStatus: result.message,
+      copyStatus:
+        "Save your latest changes before copying formatted email. Copy from the saved communication record.",
     }));
   }
 
@@ -4622,6 +4745,35 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           ? communicationForm.subject
           : communicationForm.plainTextBody || communicationForm.body;
     await navigator.clipboard.writeText(value);
+  }
+
+  function downloadSavedCommunicationHtml(communication: Communication) {
+    const html =
+      communication.html_document ||
+      (communication.html_fragment
+        ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtmlText(
+            communication.subject ?? "Scanlark email",
+          )}</title></head><body>${communication.html_fragment}</body></html>`
+        : "");
+    if (!html.trim()) {
+      setCommunicationCopyStatus("Saved HTML email output is not available.");
+      return;
+    }
+    const slug = (communication.subject || "scanlark-email")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 80);
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${slug || "scanlark-email"}.html`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setCommunicationCopyStatus("Saved HTML email downloaded.");
   }
 
   function openEmailClient() {
@@ -4821,6 +4973,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       "</head>",
       "<style>img{visibility:hidden!important;} img::after{content:attr(alt);visibility:visible;}</style></head>",
     );
+  }
+
+  function communicationRenderStatusLabel() {
+    if (communicationForm.renderStatus === "rendering") return "Rendering...";
+    if (communicationForm.renderStatus === "current") return "Preview current";
+    if (communicationForm.renderStatus === "stale") return "Preview stale";
+    if (communicationForm.renderStatus === "failed") return "Render failed";
+    return "Generate draft";
   }
 
   async function runTaskAction(
@@ -5294,8 +5454,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     value={communicationForm.businessId}
                     onChange={(event) => {
                       const nextBusinessId = event.target.value;
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         businessId: nextBusinessId,
                         contactId: "",
                         unresolvedPlaceholders: findEditorPlaceholders(
@@ -5324,12 +5485,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   Contact
                   <select
                     value={communicationForm.contactId}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         contactId: event.target.value,
-                      }))
-                    }
+                      }));
+                    }}
                   >
                     <option value="">No contact selected</option>
                     {businessContext?.business.general_email && (
@@ -5351,8 +5513,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       const template = communicationTemplates.find(
                         (item) => item.id === event.target.value,
                       );
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         templateId: event.target.value,
                         layoutKey: template?.layout_key ?? prev.layoutKey,
                         wordingVariantKey:
@@ -5365,7 +5528,6 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         plainTextBody: "",
                         attachmentRequirements: [],
                         attachmentConfirmed: false,
-                        hasUnsavedRenderEdits: true,
                       }));
                     }}
                   >
@@ -5422,12 +5584,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   <input
                     type="datetime-local"
                     value={communicationForm.followUpAt}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         followUpAt: event.target.value,
-                      }))
-                    }
+                      }));
+                    }}
                   />
                 </label>
               </div>
@@ -5440,12 +5603,12 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       const sender = senderIdentities.find(
                         (item) => item.key === event.target.value,
                       );
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         senderIdentityKey: event.target.value,
                         senderName: sender?.name ?? prev.senderName,
                         senderEmail: sender?.email ?? prev.senderEmail,
-                        hasUnsavedRenderEdits: true,
                       }));
                     }}
                   >
@@ -5465,13 +5628,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   Wording variant
                   <select
                     value={communicationForm.wordingVariantKey}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         wordingVariantKey: event.target.value,
-                        hasUnsavedRenderEdits: true,
-                      }))
-                    }
+                      }));
+                    }}
                   >
                     <option value="">Default wording</option>
                     {selectedTemplate?.content_variants_json?.map((variant) => (
@@ -5485,14 +5648,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   Signature
                   <select
                     value={communicationForm.signatureMode}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      invalidateCommunicationRender();
                       setCommunicationForm((prev) => ({
-                        ...prev,
+                        ...markCommunicationRenderStale(prev),
                         signatureMode: event.target
                           .value as CommunicationSignatureMode,
-                        hasUnsavedRenderEdits: true,
-                      }))
-                    }
+                      }));
+                    }}
                   >
                     <option value="include_scanlark_signature">
                       Include Scanlark signature
@@ -5516,13 +5679,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 Preheader
                 <input
                   value={communicationForm.preheader}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    invalidateCommunicationRender();
                     setCommunicationForm((prev) => ({
-                      ...prev,
+                      ...markCommunicationRenderStale(prev),
                       preheader: event.target.value,
-                      hasUnsavedRenderEdits: true,
-                    }))
-                  }
+                    }));
+                  }}
                 />
               </label>
               <label>
@@ -5605,8 +5768,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               )}
               {communicationForm.hasUnsavedRenderEdits && (
                 <div className="ops-warning">
-                  Regenerate the draft before copying formatted email or marking
-                  it sent.
+                  Save your latest changes before copying or downloading.
+                  Preview can render unsaved edits, but handoff actions use
+                  saved content.
                 </div>
               )}
               {communicationForm.attachmentRequirements.length > 0 && (
@@ -5781,6 +5945,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 <div>
                   <div className="ops-section-label">Preview</div>
                   <strong>{communicationForm.subject || "No subject"}</strong>
+                  <small>
+                    {communicationRenderStatusLabel()} · render #
+                    {communicationForm.renderVersion}
+                    {communicationForm.lastRenderedAt
+                      ? ` · ${formatDateTime(communicationForm.lastRenderedAt)}`
+                      : ""}
+                  </small>
                 </div>
               </div>
               <div className="ops-segmented" aria-label="Email preview modes">
@@ -6156,13 +6327,37 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                           plainText:
                             selectedCommunication.plain_text_body ??
                             selectedCommunication.body,
+                          expectedText: selectedCommunication.body,
+                          requireLayout: true,
+                          requireLogoUrl:
+                            selectedCommunication.signature_mode !==
+                            "use_mailbox_signature",
                         }).then((result) =>
-                          setCommunicationCopyStatus(result.message),
+                          setCommunicationCopyStatus(
+                            result.ok
+                              ? `${result.message} (${result.mimeTypes.join(
+                                  ", ",
+                                )})`
+                              : result.message,
+                          ),
                         );
                       }}
                       disabled={!selectedCommunication.html_fragment}
                     >
                       Copy formatted email
+                    </button>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      onClick={() =>
+                        downloadSavedCommunicationHtml(selectedCommunication)
+                      }
+                      disabled={
+                        !selectedCommunication.html_document &&
+                        !selectedCommunication.html_fragment
+                      }
+                    >
+                      Download HTML
                     </button>
                     <button
                       type="button"

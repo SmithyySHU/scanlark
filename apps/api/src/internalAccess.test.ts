@@ -653,6 +653,41 @@ test("operations html communication renderer keeps plain text compatible", () =>
   assert.deepEqual(rendered.attachmentRequirements, []);
 });
 
+test("operations html communication renderer uses edited manual body for html and plain text", () => {
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "Original subject",
+      body_template: "Original plain body",
+      html_body_template: "<p>Original HTML body</p>",
+      layout_key: "personal_letter",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://example.com",
+        general_email: "hello@example.com",
+      },
+      contact: null,
+      site: null,
+    },
+    {
+      senderName: "Connor Smith",
+      senderEmail: "connor@scanlark.com",
+      publicSiteUrl: "https://scanlark.com",
+      emailAssetBaseUrl: "https://scanlark.com/assets/email",
+      manualSubject: "Edited subject",
+      manualBody: "COMMUNICATIONS PREVIEW TEST 4837",
+    },
+  );
+
+  assert.equal(rendered.subject, "Edited subject");
+  assert.equal(rendered.body, "COMMUNICATIONS PREVIEW TEST 4837");
+  assert.equal(rendered.plainText, "COMMUNICATIONS PREVIEW TEST 4837");
+  assert(rendered.htmlFragment.includes("COMMUNICATIONS PREVIEW TEST 4837"));
+  assert(!rendered.htmlFragment.includes("Original HTML body"));
+});
+
 test("operations html communication renderer escapes placeholder injection and flags assets", () => {
   const rendered = renderClientCommunicationTemplate(
     {

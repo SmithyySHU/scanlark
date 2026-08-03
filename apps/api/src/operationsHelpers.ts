@@ -1564,9 +1564,13 @@ export function renderClientCommunicationTemplate(
     template.preheader_template ??
     "";
   const bodySource = options.manualBody ?? selected.body;
-  const plainTextSource = options.manualPlainText ?? selected.plainText;
+  const plainTextSource =
+    options.manualPlainText ?? options.manualBody ?? selected.plainText;
   const rawHtmlSource =
-    options.manualHtml ?? selected.html ?? plainTextToParagraphs(bodySource);
+    options.manualHtml ??
+    (options.manualBody ? plainTextToParagraphs(options.manualBody) : null) ??
+    selected.html ??
+    plainTextToParagraphs(bodySource);
   const subject = render(subjectSource);
   const preheader = render(preheaderSource);
   const plainText = render(plainTextSource);

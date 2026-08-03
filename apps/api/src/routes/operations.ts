@@ -3972,6 +3972,10 @@ export function mountOperationsRoutes(app: express.Application) {
         const contactId = optionalUuidField(record, "contactId");
         const followUpAt = parseDateField(record, "followUpAt");
         const reportName = optionalTextField(record, "reportName");
+        const manualSubject = optionalTextField(record, "manualSubject");
+        const manualPreheader = optionalTextField(record, "manualPreheader");
+        const manualBody = optionalTextField(record, "manualBody");
+        const manualPlainText = optionalTextField(record, "manualPlainText");
         const renderOptions = getCommunicationRenderOptions(record);
         const template = await getOperationsCommunicationTemplate(templateId);
         if (!template)
@@ -3997,6 +4001,10 @@ export function mountOperationsRoutes(app: express.Application) {
           publicContactEmail: renderOptions.publicContactEmail,
           followUpDate: suggestedFollowUpAt,
           reportName,
+          manualSubject,
+          manualPreheader,
+          manualBody,
+          manualPlainText,
         });
         return res.json({
           preview: {
@@ -4792,6 +4800,10 @@ export function mountOperationsRoutes(app: express.Application) {
         const contactId = optionalUuidField(record, "contactId");
         const followUpAt = parseDateField(record, "followUpAt");
         const reportName = optionalTextField(record, "reportName");
+        const manualSubject = optionalTextField(record, "manualSubject");
+        const manualPreheader = optionalTextField(record, "manualPreheader");
+        const manualBody = optionalTextField(record, "manualBody");
+        const manualPlainText = optionalTextField(record, "manualPlainText");
         const renderOptions = getCommunicationRenderOptions(record);
         const [template, context] = await Promise.all([
           getOperationsCommunicationTemplate(templateId),
@@ -4814,6 +4826,10 @@ export function mountOperationsRoutes(app: express.Application) {
           publicContactEmail: renderOptions.publicContactEmail,
           followUpDate: suggestedFollowUpAt,
           reportName,
+          manualSubject,
+          manualPreheader,
+          manualBody,
+          manualPlainText,
         });
         return res.json({
           draft: {
