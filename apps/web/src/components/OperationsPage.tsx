@@ -8345,7 +8345,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function renderReportDetail() {
-    if (reportDetailLoading) {
+    if (reportDetailLoading && !reportDetail) {
       return <section className="ops-panel">Loading report...</section>;
     }
     if (!reportDetail) {
@@ -10995,6 +10995,57 @@ const operationsStyles = `
     color: var(--text);
     white-space: nowrap;
   }
+  .ops-readiness-summary {
+    display: grid;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 10px;
+  }
+  .ops-readiness-summary__header,
+  .ops-readiness-summary summary,
+  .ops-readiness-summary__body,
+  .ops-readiness-summary__examples button {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+  }
+  .ops-readiness-summary__header span,
+  .ops-readiness-summary summary span {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .ops-readiness-summary details {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .ops-readiness-summary summary {
+    cursor: pointer;
+    font-weight: 800;
+  }
+  .ops-readiness-summary__body {
+    padding: 8px 0;
+  }
+  .ops-readiness-summary__body p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .ops-readiness-summary__examples {
+    display: grid;
+    gap: 4px;
+  }
+  .ops-readiness-summary__examples button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 4px 0;
+    text-align: left;
+    cursor: pointer;
+  }
   .ops-regroup-preview {
     display: grid;
     gap: 12px;
@@ -11024,12 +11075,44 @@ const operationsStyles = `
   }
   .ops-report-findings-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(340px, 0.7fr);
+    grid-template-columns: minmax(320px, 0.62fr) minmax(460px, 1fr);
     gap: 14px;
     align-items: start;
   }
   .ops-report-filterbar {
-    grid-template-columns: minmax(240px, 1fr) minmax(190px, 0.35fr);
+    grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.45fr) minmax(150px, 0.45fr);
+  }
+  .ops-report-review-queue {
+    align-self: start;
+  }
+  .ops-report-progress {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin: 8px 0 12px;
+  }
+  .ops-report-progress div {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--panel-elev) 72%, transparent);
+    padding: 8px;
+    display: grid;
+    gap: 2px;
+  }
+  .ops-report-progress strong {
+    font-size: 18px;
+  }
+  .ops-report-progress small,
+  .ops-report-bulkbar span {
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .ops-report-bulkbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 10px 0;
   }
   .ops-report-findings-list {
     display: grid;
@@ -11040,7 +11123,7 @@ const operationsStyles = `
   }
   .ops-report-finding-row {
     display: grid;
-    grid-template-columns: 24px minmax(220px, 1.4fr) repeat(4, minmax(92px, 0.5fr)) minmax(160px, 0.8fr);
+    grid-template-columns: 22px minmax(0, 1fr) repeat(4, minmax(62px, 0.35fr)) minmax(110px, 0.55fr);
     gap: 10px;
     align-items: start;
     border: 1px solid var(--border);
@@ -11050,6 +11133,11 @@ const operationsStyles = `
     padding: 10px;
     text-align: left;
     cursor: pointer;
+  }
+  .ops-report-finding-row:focus-visible,
+  .ops-report-editor-toolbar button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .ops-report-finding-row.active {
     border-color: var(--accent);
@@ -11064,17 +11152,85 @@ const operationsStyles = `
     color: var(--text-muted);
     overflow-wrap: anywhere;
   }
+  .ops-status-pill,
+  .ops-save-state {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    width: fit-content;
+    font-weight: 800;
+  }
+  .ops-report-finding-row.state-needs-review .ops-status-pill,
+  .ops-save-state.state-unsaved {
+    border-color: color-mix(in srgb, var(--warning) 70%, var(--border));
+    color: var(--warning);
+  }
+  .ops-report-finding-row.state-ready .ops-status-pill,
+  .ops-save-state.state-saved {
+    border-color: color-mix(in srgb, var(--success) 70%, var(--border));
+    color: var(--success);
+  }
+  .ops-report-finding-row.state-excluded .ops-status-pill,
+  .ops-report-finding-row.state-false-positive .ops-status-pill {
+    color: var(--text-muted);
+  }
   .ops-report-finding-editor {
     position: sticky;
     top: 178px;
     max-height: calc(100vh - 196px);
     overflow: auto;
   }
+  .ops-report-editor-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--panel) 94%, transparent);
+    backdrop-filter: blur(8px);
+    padding: 8px;
+    margin-bottom: 12px;
+  }
+  .ops-report-back {
+    display: none;
+  }
   .ops-report-finding-editor section {
     display: grid;
     gap: 10px;
     border-top: 1px solid var(--border);
     padding-top: 12px;
+  }
+  .ops-report-collapsible {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .ops-report-collapsible summary {
+    cursor: pointer;
+    font-weight: 800;
+    margin-bottom: 10px;
+  }
+  .ops-report-example-list {
+    display: grid;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    background: color-mix(in srgb, var(--panel-elev) 62%, transparent);
+  }
+  .ops-report-example-list div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .ops-report-example-list span {
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+    font-size: 12px;
   }
   .ops-report-preview {
     display: grid;
@@ -11101,10 +11257,28 @@ const operationsStyles = `
 	    .ops-report-findings-layout {
 	      grid-template-columns: 1fr;
 	    }
-    .ops-report-header,
-    .ops-report-finding-editor {
+    .ops-report-header {
       position: static;
       max-height: none;
+    }
+    .ops-report-findings-layout .ops-report-finding-editor {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      max-height: none;
+      overflow: auto;
+      border-radius: 0;
+      padding: 14px;
+    }
+    .ops-report-findings-layout.detail-open .ops-report-review-queue {
+      display: none;
+    }
+    .ops-report-findings-layout.detail-open .ops-report-finding-editor {
+      display: block;
+    }
+    .ops-report-back {
+      display: inline-flex;
     }
     .ops-report-finding-row {
       grid-template-columns: 24px minmax(0, 1fr);

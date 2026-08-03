@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useOperationsReportDraft,
   useOptionalOperationsReportDraft,
@@ -6,6 +6,7 @@ import {
 import {
   useReportFindings,
   type ReportFindingFilter,
+  type ReportFindingSort,
 } from "../../../hooks/useReportFindings";
 import {
   formatOperationsDate,
@@ -65,6 +66,27 @@ function reportStatusLabel(value: string) {
 
 function priorityLabel(value: string) {
   return priorityOptions.find((item) => item.value === value)?.label ?? value;
+}
+
+function reviewStateLabel(finding: OperationsReportFinding) {
+  if (finding.is_false_positive) return "False positive";
+  if (!finding.is_included) return "Excluded";
+  if (isFindingReady(finding)) return "Ready";
+  return "Needs review";
+}
+
+function findingIsIncluded(finding: OperationsReportFinding) {
+  return finding.is_included && !finding.is_false_positive;
+}
+
+function firstExampleText(finding: OperationsReportFinding) {
+  const example = finding.representative_examples_json[0];
+  return (
+    example?.affectedPageUrl ??
+    example?.affectedResourceUrl ??
+    finding.affected_url ??
+    ""
+  );
 }
 
 function actionPlanLabel(value: string) {
@@ -130,8 +152,15 @@ export function OperationsReportWorkspace({
   onCreateRetest,
   onCreateQuote,
 }: Props) {
+  const initialFindingFilter: ReportFindingFilter = detail.findings.some(
+    (finding) => findingIsIncluded(finding) && !isFindingReady(finding),
+  )
+    ? "needs_editing"
+    : "included";
   const [tab, setTab] = useState<ReportTab>("overview");
-  const [filter, setFilter] = useState<ReportFindingFilter>("all");
+  const [filter, setFilter] =
+    useState<ReportFindingFilter>(initialFindingFilter);
+  const [sort, setSort] = useState<ReportFindingSort>("review_state");
   const [category, setCategory] = useState("");
   const [search, setSearch] = useState("");
   const [selectedFindingId, setSelectedFindingId] = useState(
@@ -139,6 +168,10 @@ export function OperationsReportWorkspace({
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [previewMode, setPreviewMode] = useState<"desktop" | "a4">("a4");
+  const [findingDetailOpen, setFindingDetailOpen] = useState(false);
+  const [findingSaveState, setFindingSaveState] = useState<
+    "saved" | "saving" | "unsaved" | "error"
+  >("saved");
   const [dirtyChildKeys, setDirtyChildKeys] = useState<Set<string>>(
     () => new Set(),
   );
@@ -154,10 +187,9 @@ export function OperationsReportWorkspace({
     filter,
     category,
     search,
+    sort,
   );
-  const includedCount = detail.findings.filter(
-    (finding) => finding.is_included && !finding.is_false_positive,
-  ).length;
+  const includedCount = detail.findings.filter(findingIsIncluded).length;
   const falsePositiveCount = detail.findings.filter(
     (finding) => finding.is_false_positive,
   ).length;
@@ -174,6 +206,20 @@ export function OperationsReportWorkspace({
       finding.is_included &&
       !finding.is_false_positive &&
       !isFindingReady(finding),
+  );
+  const selectedVisibleIds = useMemo(
+    () => new Set(filtered.map((finding) => finding.id)),
+    [filtered],
+  );
+  const selectedVisibleCount = [...selectedIds].filter((id) =>
+    selectedVisibleIds.has(id),
+  ).length;
+  const reviewedIncludedCount = detail.findings.filter(
+    (finding) => findingIsIncluded(finding) && finding.reviewed_at,
+  ).length;
+  const remainingIncludedCount = Math.max(
+    0,
+    includedCount - reviewedIncludedCount,
   );
   const previewStale =
     reportDraft.dirty || findingDraft.dirty || dirtyChildKeys.size > 0;
@@ -256,10 +302,9 @@ export function OperationsReportWorkspace({
   const filterButtons = useMemo(
     () =>
       [
-        ["all", "All"],
+        ["needs_editing", "Needs review"],
         ["included", "Included"],
         ["excluded", "Excluded"],
-        ["needs_editing", "Needs editing"],
         ["ready", "Ready"],
         ["possible_false_positive", "False positives"],
         ["critical", "Critical"],
@@ -269,6 +314,55 @@ export function OperationsReportWorkspace({
       ] as Array<[ReportFindingFilter, string]>,
     [],
   );
+
+  const selectFinding = useCallback(
+    (findingId: string) => {
+      if (findingDraft.dirty) {
+        const proceed = window.confirm(
+          "You have unsaved finding edits. Change finding and discard those unsaved edits?",
+        );
+        if (!proceed) return;
+        findingDraft.setDirty(false);
+      }
+      setSelectedFindingId(findingId);
+      setFindingDetailOpen(true);
+    },
+    [findingDraft],
+  );
+
+  function switchTab(nextTab: ReportTab) {
+    if (findingDraft.dirty || reportDraft.dirty || dirtyChildKeys.size > 0) {
+      const proceed = window.confirm(
+        "You have unsaved report edits. Change tab and discard those unsaved edits?",
+      );
+      if (!proceed) return;
+      findingDraft.setDirty(false);
+      reportDraft.setDirty(false);
+      setDirtyChildKeys(new Set());
+    }
+    setTab(nextTab);
+  }
+
+  useEffect(() => {
+    setFindingSaveState(findingDraft.dirty ? "unsaved" : "saved");
+  }, [findingDraft.dirty, selectedFindingId]);
+
+  useEffect(() => {
+    if (!previewStale) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [previewStale]);
+
+  useEffect(() => {
+    if (filter !== "needs_editing") return;
+    if (counts.needs_editing === 0 && counts.included > 0) {
+      setFilter("included");
+    }
+  }, [counts.included, counts.needs_editing, filter]);
 
   async function saveReportSummary() {
     await onPatchReport({
@@ -295,26 +389,39 @@ export function OperationsReportWorkspace({
     reportDraft.setDirty(false);
   }
 
-  async function saveFindingAndContinue(nextId?: string) {
+  async function saveFindingAndContinue(options?: {
+    nextId?: string;
+    markReviewed?: boolean;
+  }) {
     if (!findingDraft.draft) return;
-    await onPatchFinding(findingDraft.draft.id, {
-      clientPriority: findingDraft.draft.client_priority,
-      title: findingDraft.draft.title,
-      clientExplanation: findingDraft.draft.client_explanation,
-      whyItMatters: findingDraft.draft.why_it_matters,
-      recommendedAction: findingDraft.draft.recommended_action,
-      affectedUrl: findingDraft.draft.affected_url,
-      clientEvidence: findingDraft.draft.client_evidence,
-      affectedUrlNote: findingDraft.draft.affected_url_note,
-      internalNote: findingDraft.draft.internal_note,
-      falsePositiveReason: findingDraft.draft.false_positive_reason,
-      reviewNote: findingDraft.draft.review_note,
-      estimatedEffort: findingDraft.draft.estimated_effort,
-      displayOrder: findingDraft.draft.display_order,
-      reviewedAt: new Date().toISOString(),
-    });
-    findingDraft.setDirty(false);
-    if (nextId) setSelectedFindingId(nextId);
+    setFindingSaveState("saving");
+    try {
+      await onPatchFinding(findingDraft.draft.id, {
+        clientPriority: findingDraft.draft.client_priority,
+        title: findingDraft.draft.title,
+        clientExplanation: findingDraft.draft.client_explanation,
+        whyItMatters: findingDraft.draft.why_it_matters,
+        recommendedAction: findingDraft.draft.recommended_action,
+        affectedUrl: findingDraft.draft.affected_url,
+        clientEvidence: findingDraft.draft.client_evidence,
+        affectedUrlNote: findingDraft.draft.affected_url_note,
+        internalNote: findingDraft.draft.internal_note,
+        falsePositiveReason: findingDraft.draft.false_positive_reason,
+        reviewNote: findingDraft.draft.review_note,
+        estimatedEffort: findingDraft.draft.estimated_effort,
+        displayOrder: findingDraft.draft.display_order,
+        ...(options?.markReviewed
+          ? { reviewedAt: new Date().toISOString() }
+          : {}),
+      });
+      findingDraft.setDirty(false);
+      setFindingSaveState("saved");
+      if (options?.nextId) setSelectedFindingId(options.nextId);
+      if (options?.nextId) setFindingDetailOpen(true);
+    } catch (err) {
+      setFindingSaveState("error");
+      throw err;
+    }
   }
 
   async function runBulk(
@@ -322,10 +429,22 @@ export function OperationsReportWorkspace({
     clientPriority?: OperationsReportPriority,
   ) {
     if (selectedIds.size === 0) return;
+    const findingIds = Array.from(selectedIds).filter((id) =>
+      selectedVisibleIds.has(id),
+    );
+    if (findingIds.length === 0) return;
+    if (
+      action === "exclude" &&
+      !window.confirm(
+        `Exclude ${findingIds.length} selected finding${findingIds.length === 1 ? "" : "s"} from the client report? Technical source records will be preserved.`,
+      )
+    ) {
+      return;
+    }
     await onBulkFindings({
       action,
       clientPriority,
-      findingIds: Array.from(selectedIds),
+      findingIds,
     });
     setSelectedIds(new Set());
   }
@@ -360,10 +479,14 @@ export function OperationsReportWorkspace({
   function openReadinessIssue(issue: OperationsReportReadinessIssue) {
     setTab(issue.section);
     if (issue.findingId) {
-      setSelectedFindingId(issue.findingId);
+      selectFinding(issue.findingId);
       setFilter("all");
       setCategory("");
       setSearch("");
+    }
+    if (issue.section === "findings") {
+      setTab("findings");
+      setFilter("needs_editing");
     }
   }
 
@@ -397,7 +520,7 @@ export function OperationsReportWorkspace({
           >
             Save
           </button>
-          <button className="ops-button" onClick={() => setTab("preview")}>
+          <button className="ops-button" onClick={() => switchTab("preview")}>
             Preview
           </button>
           <button
@@ -434,9 +557,19 @@ export function OperationsReportWorkspace({
         </div>
       )}
       {readinessIssues.length > 0 && (
-        <section className="ops-warning ops-readiness-list">
+        <section className="ops-readiness-summary">
+          <div className="ops-readiness-summary__header">
+            <strong>
+              Report readiness: {counts.needs_editing} finding
+              {counts.needs_editing === 1 ? "" : "s"} need review
+            </strong>
+            <span>
+              {readinessIssues.length} grouped issue
+              {readinessIssues.length === 1 ? "" : "s"}
+            </span>
+          </div>
           {readinessSections.map((section) => (
-            <details key={section.section} open={section.section !== "preview"}>
+            <details key={section.section}>
               <summary>
                 <strong>{section.label}</strong>
                 <span>
@@ -444,30 +577,47 @@ export function OperationsReportWorkspace({
                   {section.issues.length === 1 ? "" : "s"}
                 </span>
               </summary>
-              {section.grouped.map((group) => {
-                const finding = group.first.findingId
-                  ? detail.findings.find(
-                      (item) => item.id === group.first.findingId,
-                    )
-                  : null;
-                const label =
-                  finding && finding.affected_page_count > 1
-                    ? `${finding.title} - ${finding.affected_page_count} affected pages`
-                    : group.first.message;
-                return (
-                  <button
-                    key={`${section.section}-${group.key}`}
-                    type="button"
-                    onClick={() => openReadinessIssue(group.first)}
-                  >
-                    <span>
-                      {label}
-                      {group.count > 1 ? ` (${group.count} checks)` : ""}
-                    </span>
-                    <strong>Resolve</strong>
-                  </button>
-                );
-              })}
+              <div className="ops-readiness-summary__body">
+                <p>{section.grouped[0]?.first.message ?? "Review required"}</p>
+                <button
+                  className="ops-button"
+                  type="button"
+                  onClick={() =>
+                    section.grouped[0] &&
+                    openReadinessIssue(section.grouped[0].first)
+                  }
+                >
+                  Resolve
+                </button>
+              </div>
+              {section.section === "findings" && section.grouped.length > 0 && (
+                <div className="ops-readiness-summary__examples">
+                  {section.grouped.slice(0, 3).map((group) => {
+                    const finding = group.first.findingId
+                      ? detail.findings.find(
+                          (item) => item.id === group.first.findingId,
+                        )
+                      : null;
+                    const label =
+                      finding && finding.affected_page_count > 1
+                        ? `${finding.title} - ${finding.affected_page_count} affected pages`
+                        : group.first.message;
+                    return (
+                      <button
+                        key={`${section.section}-${group.key}`}
+                        type="button"
+                        onClick={() => openReadinessIssue(group.first)}
+                      >
+                        <span>
+                          {label}
+                          {group.count > 1 ? ` (${group.count} checks)` : ""}
+                        </span>
+                        <strong>Open</strong>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </details>
           ))}
         </section>
@@ -478,7 +628,7 @@ export function OperationsReportWorkspace({
             key={item.key}
             type="button"
             className={tab === item.key ? "active" : ""}
-            onClick={() => setTab(item.key)}
+            onClick={() => switchTab(item.key)}
           >
             {item.label}
           </button>
@@ -747,11 +897,37 @@ export function OperationsReportWorkspace({
       )}
 
       {tab === "findings" && (
-        <section className="ops-report-findings-layout">
-          <div className="ops-panel">
+        <section
+          className={`ops-report-findings-layout ${findingDetailOpen ? "detail-open" : ""}`}
+        >
+          <div className="ops-panel ops-report-review-queue">
             <div className="ops-panel__header">
-              <h2>Findings</h2>
-              <span className="ops-muted">{filtered.length} shown</span>
+              <div>
+                <h2>Findings review</h2>
+                <span className="ops-muted">
+                  {reviewedIncludedCount} of {includedCount} included findings
+                  reviewed
+                </span>
+              </div>
+              <span className="ops-badge">{filtered.length} shown</span>
+            </div>
+            <div className="ops-report-progress">
+              <div>
+                <strong>{remainingIncludedCount}</strong>
+                <small>Remaining</small>
+              </div>
+              <div>
+                <strong>{includedCount}</strong>
+                <small>Included</small>
+              </div>
+              <div>
+                <strong>{excludedCount}</strong>
+                <small>Excluded</small>
+              </div>
+              <div>
+                <strong>{falsePositiveCount}</strong>
+                <small>False positive</small>
+              </div>
             </div>
             <div className="ops-filterbar ops-report-filterbar">
               <input
@@ -770,6 +946,20 @@ export function OperationsReportWorkspace({
                   </option>
                 ))}
               </select>
+              <select
+                value={sort}
+                onChange={(event) =>
+                  setSort(event.target.value as ReportFindingSort)
+                }
+                aria-label="Sort findings"
+              >
+                <option value="review_state">Review state</option>
+                <option value="priority">Priority</option>
+                <option value="display_order">Display order</option>
+                <option value="occurrence_count">Occurrence count</option>
+                <option value="affected_page_count">Affected pages</option>
+                <option value="title">Title</option>
+              </select>
             </div>
             <div className="ops-segmented">
               {filterButtons.map(([key, label]) => (
@@ -782,26 +972,57 @@ export function OperationsReportWorkspace({
                 </button>
               ))}
             </div>
-            <div className="ops-inline-actions">
+            <div className="ops-report-bulkbar">
+              <span>
+                {selectedVisibleCount} selected
+                {selectedIds.size > selectedVisibleCount
+                  ? ` (${selectedIds.size - selectedVisibleCount} hidden)`
+                  : ""}
+              </span>
               <button
                 className="ops-button"
+                onClick={() =>
+                  setSelectedIds(new Set(filtered.map((finding) => finding.id)))
+                }
+              >
+                Select visible
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => setSelectedIds(new Set())}
+              >
+                Clear selection
+              </button>
+              <button
+                className="ops-button"
+                disabled={selectedVisibleCount === 0}
                 onClick={() => void runBulk("include")}
               >
                 Include selected
               </button>
               <button
                 className="ops-button"
+                disabled={selectedVisibleCount === 0}
                 onClick={() => void runBulk("exclude")}
               >
                 Exclude selected
               </button>
               <button
                 className="ops-button"
+                disabled={selectedVisibleCount === 0}
                 onClick={() => void runBulk("mark_reviewed")}
               >
                 Mark reviewed
               </button>
+              <button
+                className="ops-button"
+                disabled={selectedVisibleCount === 0}
+                onClick={() => void runBulk("restore")}
+              >
+                Restore selected
+              </button>
               <select
+                disabled={selectedVisibleCount === 0}
                 onChange={(event) => {
                   const value = event.target.value as OperationsReportPriority;
                   if (value) void runBulk("change_priority", value);
@@ -819,17 +1040,26 @@ export function OperationsReportWorkspace({
             <div className="ops-report-findings-list">
               {filtered.map((finding) => {
                 const missing = missingFindingReadinessFields(finding);
-                const included =
-                  finding.is_included && !finding.is_false_positive;
+                const included = findingIsIncluded(finding);
+                const state = reviewStateLabel(finding);
+                const example = firstExampleText(finding);
                 return (
-                  <button
+                  <div
                     key={finding.id}
-                    type="button"
-                    className={`ops-report-finding-row ${selectedFindingId === finding.id ? "active" : ""}`}
-                    onClick={() => setSelectedFindingId(finding.id)}
+                    role="button"
+                    tabIndex={0}
+                    className={`ops-report-finding-row ${selectedFindingId === finding.id ? "active" : ""} state-${state.toLowerCase().replace(/\s+/g, "-")}`}
+                    onClick={() => selectFinding(finding.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        selectFinding(finding.id);
+                      }
+                    }}
                   >
                     <input
                       type="checkbox"
+                      aria-label={`Select ${finding.title}`}
                       checked={selectedIds.has(finding.id)}
                       onChange={(event) => {
                         event.stopPropagation();
@@ -840,32 +1070,29 @@ export function OperationsReportWorkspace({
                     <span>
                       <strong>{finding.title}</strong>
                       <small>
-                        {finding.occurrence_count} occurrence
-                        {finding.occurrence_count === 1 ? "" : "s"} ·{" "}
-                        {finding.affected_page_count} page
-                        {finding.affected_page_count === 1 ? "" : "s"} ·{" "}
-                        {finding.affected_resource_count} resource
-                        {finding.affected_resource_count === 1 ? "" : "s"}
+                        {included ? "Included" : "Not in client report"} ·{" "}
+                        {priorityLabel(finding.client_priority)} ·{" "}
+                        {finding.category}
                       </small>
+                      {example && <small>{example}</small>}
                     </span>
-                    <small>{priorityLabel(finding.client_priority)}</small>
-                    <small>{finding.category}</small>
-                    <small>{finding.group_label ?? "Ungrouped"}</small>
+                    <small>{finding.occurrence_count} occ.</small>
+                    <small>{finding.affected_page_count} pages</small>
+                    <small>{finding.group_label ?? "Grouped"}</small>
+                    <small className="ops-status-pill">{state}</small>
                     <small>
-                      {finding.is_false_positive
-                        ? "False positive"
-                        : included
-                          ? missing.length
-                            ? "Needs editing"
-                            : "Ready"
-                          : "Excluded"}
+                      {missing.length > 0
+                        ? missing.slice(0, 2).join(", ")
+                        : (finding.recommended_action ?? "No action yet")}
                     </small>
-                    <small>
-                      {finding.recommended_action ?? "No action yet"}
-                    </small>
-                  </button>
+                  </div>
                 );
               })}
+              {filtered.length === 0 && (
+                <div className="ops-empty-card">
+                  No findings match the current filters.
+                </div>
+              )}
             </div>
           </div>
           {findingDraft.draft &&
@@ -879,9 +1106,13 @@ export function OperationsReportWorkspace({
                   )}
                   previousIncomplete={previousIncomplete}
                   nextIncomplete={nextIncomplete}
+                  allIncompleteReviewed={incomplete.length === 0}
                   dirty={findingDraft.dirty}
+                  saveState={findingSaveState}
+                  trapFocus={findingDetailOpen}
                   onChange={findingDraft.updateDraft}
                   onSave={saveFindingAndContinue}
+                  onBack={() => setFindingDetailOpen(false)}
                   onPatchFinding={onPatchFinding}
                 />
               );
@@ -1057,110 +1288,319 @@ function FindingEditor({
   sources,
   previousIncomplete,
   nextIncomplete,
+  allIncompleteReviewed,
   dirty,
+  saveState,
+  trapFocus,
   onChange,
   onSave,
+  onBack,
   onPatchFinding,
 }: {
   finding: OperationsReportFinding;
   sources: OperationsReportFindingSource[];
   previousIncomplete?: OperationsReportFinding;
   nextIncomplete?: OperationsReportFinding;
+  allIncompleteReviewed: boolean;
   dirty: boolean;
+  saveState: "saved" | "saving" | "unsaved" | "error";
+  trapFocus: boolean;
   onChange: (patch: Partial<OperationsReportFinding>) => void;
-  onSave: (nextId?: string) => Promise<void>;
+  onSave: (options?: {
+    nextId?: string;
+    markReviewed?: boolean;
+  }) => Promise<void>;
+  onBack: () => void;
   onPatchFinding: (
     findingId: string,
     input: Record<string, unknown>,
   ) => Promise<void>;
 }) {
+  const editorRef = useRef<HTMLElement | null>(null);
   const missing = missingFindingReadinessFields(finding);
+  const reviewedNextId = nextIncomplete?.id;
+  const saveStateLabel =
+    saveState === "saving"
+      ? "Saving"
+      : saveState === "error"
+        ? "Error"
+        : dirty
+          ? "Unsaved"
+          : "Saved";
+
+  const appendClientEvidence = (text: string) => {
+    const current = finding.client_evidence?.trim();
+    onChange({
+      client_evidence: current ? `${current}\n${text}` : text,
+    });
+  };
+
+  const saveThenPatch = async (input: Record<string, unknown>) => {
+    await onSave();
+    await onPatchFinding(finding.id, input);
+  };
+
+  const exampleText = (
+    example: OperationsReportFinding["representative_examples_json"][number],
+  ) =>
+    [
+      example.affectedPageUrl ? `Page: ${example.affectedPageUrl}` : null,
+      example.affectedResourceUrl
+        ? `Resource: ${example.affectedResourceUrl}`
+        : null,
+      example.result ? `Result: ${example.result}` : null,
+      example.note,
+    ]
+      .filter(Boolean)
+      .join(" - ");
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName.toLowerCase();
+      const isEditing =
+        tagName === "input" || tagName === "textarea" || tagName === "select";
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        void onSave({ nextId: reviewedNextId, markReviewed: true });
+        return;
+      }
+      if (isEditing) return;
+      if (event.key.toLowerCase() === "e") {
+        event.preventDefault();
+        void saveThenPatch({ isIncluded: false });
+      } else if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        void onSave({ markReviewed: true });
+      } else if (
+        event.key === "ArrowRight" ||
+        event.key.toLowerCase() === "j"
+      ) {
+        event.preventDefault();
+        if (nextIncomplete) void onSave({ nextId: nextIncomplete.id });
+      } else if (event.key === "ArrowLeft" || event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        if (previousIncomplete) {
+          void onSave({ nextId: previousIncomplete.id });
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [
+    finding.id,
+    nextIncomplete,
+    onPatchFinding,
+    onSave,
+    previousIncomplete,
+    reviewedNextId,
+  ]);
+
+  useEffect(() => {
+    if (!trapFocus || !window.matchMedia("(max-width: 980px)").matches) {
+      return;
+    }
+    const editor = editorRef.current;
+    if (!editor) return;
+    const selector =
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusable = Array.from(
+      editor.querySelectorAll<HTMLElement>(selector),
+    );
+    focusable[0]?.focus();
+    const handleTrap = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onBack();
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    editor.addEventListener("keydown", handleTrap);
+    return () => editor.removeEventListener("keydown", handleTrap);
+  }, [onBack, trapFocus]);
+
   return (
-    <aside className="ops-panel ops-report-finding-editor ops-form">
+    <aside
+      ref={editorRef}
+      className="ops-panel ops-report-finding-editor ops-form"
+    >
+      <div className="ops-report-editor-toolbar">
+        <button className="ops-button ops-report-back" onClick={onBack}>
+          Back to findings
+        </button>
+        <button
+          className="ops-button"
+          disabled={!previousIncomplete || saveState === "saving"}
+          onClick={() =>
+            previousIncomplete && void onSave({ nextId: previousIncomplete.id })
+          }
+        >
+          Previous incomplete
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving" || finding.is_included}
+          onClick={() =>
+            void saveThenPatch({
+              isIncluded: true,
+              isFalsePositive: false,
+            })
+          }
+        >
+          Restore to report
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving" || !finding.is_included}
+          onClick={() =>
+            window.confirm(
+              "Exclude this finding from the client report? Technical source issues and evidence will be preserved, and linked action-plan output for this finding will be hidden from the client report.",
+            ) && void saveThenPatch({ isIncluded: false })
+          }
+        >
+          Exclude from client report
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving"}
+          onClick={() =>
+            window.confirm(
+              "Mark this finding as a false positive for this client report? Technical source records will be preserved.",
+            ) &&
+            void saveThenPatch({
+              isIncluded: false,
+              isFalsePositive: true,
+            })
+          }
+        >
+          Mark false positive
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving"}
+          onClick={() => void onSave()}
+        >
+          Save
+        </button>
+        <button
+          className="ops-button ops-button--primary"
+          disabled={saveState === "saving" || !reviewedNextId}
+          onClick={() => void onSave({ nextId: reviewedNextId })}
+        >
+          Save and next
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving"}
+          onClick={() => void onSave({ markReviewed: true })}
+        >
+          Save and mark reviewed
+        </button>
+        <button
+          className="ops-button"
+          disabled={saveState === "saving" || !nextIncomplete}
+          onClick={() =>
+            nextIncomplete &&
+            void onSave({ nextId: nextIncomplete.id, markReviewed: true })
+          }
+        >
+          Save, mark reviewed and next
+        </button>
+        <button
+          className="ops-button"
+          disabled={!nextIncomplete}
+          onClick={() =>
+            nextIncomplete && void onSave({ nextId: nextIncomplete.id })
+          }
+        >
+          Skip for now
+        </button>
+        <span className={`ops-save-state state-${saveState}`}>
+          {saveStateLabel}
+        </span>
+      </div>
+
       <div className="ops-panel__header">
-        <h2>Edit finding</h2>
+        <div>
+          <h2>{finding.title || "Untitled finding"}</h2>
+          <span className="ops-muted">
+            {reviewStateLabel(finding)} ·{" "}
+            {priorityLabel(finding.client_priority)}
+          </span>
+        </div>
         <span className={missing.length ? "ops-muted" : "ops-badge"}>
           {missing.length ? `${missing.length} incomplete` : "Ready"}
         </span>
       </div>
+      {allIncompleteReviewed && (
+        <div className="ops-success">
+          All included findings have been reviewed.
+        </div>
+      )}
       {missing.length > 0 && (
         <div className="ops-warning">Missing: {missing.join(", ")}</div>
       )}
+
       <section>
-        <h3>Internal technical context</h3>
-        <dl className="ops-definition-grid">
-          <dt>Source</dt>
-          <dd>{finding.source_type}</dd>
-          <dt>Severity</dt>
-          <dd>{finding.original_severity}</dd>
-          <dt>Category</dt>
-          <dd>{finding.category}</dd>
-          <dt>Group</dt>
-          <dd>{finding.group_label ?? finding.group_key ?? "Ungrouped"}</dd>
-          <dt>Occurrences</dt>
-          <dd>{finding.occurrence_count}</dd>
-          <dt>Affected pages</dt>
-          <dd>{finding.affected_page_count}</dd>
-          <dt>Affected resources</dt>
-          <dd>{finding.affected_resource_count}</dd>
-        </dl>
-        {finding.technical_summary && <p>{finding.technical_summary}</p>}
-        {finding.requires_merge_review && (
-          <div className="ops-warning">
-            Merged administrator wording needs review before this finding is
-            ready.
-          </div>
-        )}
-        <div className="ops-table-wrap">
-          <table className="ops-evidence-table">
-            <thead>
-              <tr>
-                <th>Affected page</th>
-                <th>Resource</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sources.slice(0, 20).map((source) => (
-                <tr key={source.id}>
-                  <td>{source.affected_page_url ?? "-"}</td>
-                  <td>{source.affected_resource_url ?? "-"}</td>
-                  <td>{source.outcome_key ?? source.source_kind}</td>
-                </tr>
+        <h3>Client-facing content</h3>
+        <div className="ops-form-grid">
+          <label className="ops-checkbox">
+            <input
+              type="checkbox"
+              checked={finding.is_included && !finding.is_false_positive}
+              onChange={(event) =>
+                void saveThenPatch({
+                  isIncluded: event.target.checked,
+                  isFalsePositive: false,
+                })
+              }
+            />
+            Included in client report
+          </label>
+          <label>
+            Review state
+            <input value={reviewStateLabel(finding)} readOnly />
+          </label>
+          <label>
+            Client priority
+            <select
+              value={finding.client_priority}
+              onChange={(event) =>
+                onChange({
+                  client_priority: event.target
+                    .value as OperationsReportPriority,
+                })
+              }
+            >
+              {priorityOptions.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
               ))}
-              {sources.length === 0 && (
-                <tr>
-                  <td colSpan={3}>No normalized source records yet.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+            </select>
+          </label>
+          <label>
+            Display order
+            <input
+              type="number"
+              min="0"
+              value={finding.display_order}
+              onChange={(event) =>
+                onChange({ display_order: Number(event.target.value) || 0 })
+              }
+            />
+          </label>
         </div>
-        {sources.length > 20 && (
-          <p className="ops-muted">
-            Showing 20 of {sources.length} source records.
-          </p>
-        )}
-      </section>
-      <section>
-        <h3>Client-visible content</h3>
-        <label>
-          Client priority
-          <select
-            value={finding.client_priority}
-            onChange={(event) =>
-              onChange({
-                client_priority: event.target.value as OperationsReportPriority,
-              })
-            }
-          >
-            {priorityOptions.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
         <label>
           Client-facing title
           <input
@@ -1195,22 +1635,26 @@ function FindingEditor({
             }
           />
         </label>
-        <label>
-          Affected page
-          <input
-            value={finding.affected_url ?? ""}
-            onChange={(event) => onChange({ affected_url: event.target.value })}
-          />
-        </label>
-        <label>
-          No-URL reason or affected URL note
-          <input
-            value={finding.affected_url_note ?? ""}
-            onChange={(event) =>
-              onChange({ affected_url_note: event.target.value })
-            }
-          />
-        </label>
+        <div className="ops-form-grid">
+          <label>
+            Affected page
+            <input
+              value={finding.affected_url ?? ""}
+              onChange={(event) =>
+                onChange({ affected_url: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            No-URL reason or affected URL note
+            <input
+              value={finding.affected_url_note ?? ""}
+              onChange={(event) =>
+                onChange({ affected_url_note: event.target.value })
+              }
+            />
+          </label>
+        </div>
         <label>
           Evidence shown to client
           <textarea
@@ -1220,31 +1664,102 @@ function FindingEditor({
             }
           />
         </label>
-        <div className="ops-form-grid">
-          <label>
-            Estimated effort
-            <input
-              value={finding.estimated_effort ?? ""}
-              onChange={(event) =>
-                onChange({ estimated_effort: event.target.value })
-              }
-            />
-          </label>
-          <label>
-            Display order
-            <input
-              type="number"
-              min="0"
-              value={finding.display_order}
-              onChange={(event) =>
-                onChange({ display_order: Number(event.target.value) || 0 })
-              }
-            />
-          </label>
-        </div>
+        {finding.representative_examples_json.length > 0 && (
+          <div className="ops-report-example-list">
+            <strong>Representative examples</strong>
+            {finding.representative_examples_json
+              .slice(0, 5)
+              .map((example, index) => {
+                const text = exampleText(example);
+                return (
+                  <div key={`${finding.id}-example-${index}`}>
+                    <span>{text || "Example"}</span>
+                    <button
+                      className="ops-button"
+                      type="button"
+                      onClick={() => text && appendClientEvidence(text)}
+                    >
+                      Use in client evidence
+                    </button>
+                  </div>
+                );
+              })}
+            {finding.affected_page_count > 5 && (
+              <small>
+                {finding.affected_page_count} pages affected -{" "}
+                {Math.min(5, finding.representative_examples_json.length)}{" "}
+                examples shown
+              </small>
+            )}
+          </div>
+        )}
+        <label>
+          Estimated effort
+          <input
+            value={finding.estimated_effort ?? ""}
+            onChange={(event) =>
+              onChange({ estimated_effort: event.target.value })
+            }
+          />
+        </label>
       </section>
-      <section>
-        <h3>Internal-only fields</h3>
+
+      <details className="ops-report-collapsible">
+        <summary>Technical evidence</summary>
+        <dl className="ops-definition-grid">
+          <dt>Source</dt>
+          <dd>{finding.source_type}</dd>
+          <dt>Original severity</dt>
+          <dd>{finding.original_severity}</dd>
+          <dt>Category</dt>
+          <dd>{finding.category}</dd>
+          <dt>Group</dt>
+          <dd>{finding.group_label ?? finding.group_key ?? "Ungrouped"}</dd>
+          <dt>Occurrences</dt>
+          <dd>{finding.occurrence_count}</dd>
+          <dt>Affected pages</dt>
+          <dd>{finding.affected_page_count}</dd>
+          <dt>Affected resources</dt>
+          <dd>{finding.affected_resource_count}</dd>
+        </dl>
+        {finding.technical_summary && <p>{finding.technical_summary}</p>}
+        {finding.requires_merge_review && (
+          <div className="ops-warning">
+            Merged administrator wording needs review before this finding is
+            ready.
+          </div>
+        )}
+        <div className="ops-table-wrap">
+          <table className="ops-evidence-table">
+            <thead>
+              <tr>
+                <th>Affected page</th>
+                <th>Resource</th>
+                <th>Result</th>
+                <th>Client reviewed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sources.map((source) => (
+                <tr key={source.id}>
+                  <td>{source.affected_page_url ?? "-"}</td>
+                  <td>{source.affected_resource_url ?? "-"}</td>
+                  <td>{source.outcome_key ?? source.source_kind}</td>
+                  <td>{source.reviewed_for_client ? "Yes" : "No"}</td>
+                </tr>
+              ))}
+              {sources.length === 0 && (
+                <tr>
+                  <td colSpan={4}>No normalized source records yet.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </details>
+
+      <details className="ops-report-collapsible">
+        <summary>Internal only - never included in the client report</summary>
         <label>
           Internal note
           <textarea
@@ -1270,72 +1785,13 @@ function FindingEditor({
             onChange={(event) => onChange({ review_note: event.target.value })}
           />
         </label>
-      </section>
-      <div className="ops-inline-actions">
-        <button
-          className="ops-button"
-          onClick={() =>
-            void (async () => {
-              await onSave();
-              await onPatchFinding(finding.id, {
-                isIncluded: true,
-                isFalsePositive: false,
-              });
-            })()
-          }
-        >
-          Include
-        </button>
-        <button
-          className="ops-button"
-          onClick={() =>
-            void (async () => {
-              await onSave();
-              await onPatchFinding(finding.id, { isIncluded: false });
-            })()
-          }
-        >
-          Exclude
-        </button>
-        <button
-          className="ops-button"
-          onClick={() =>
-            void (async () => {
-              await onSave();
-              await onPatchFinding(finding.id, {
-                isIncluded: false,
-                isFalsePositive: true,
-              });
-            })()
-          }
-        >
-          Mark false positive
-        </button>
-      </div>
-      <div className="ops-inline-actions">
-        <button
-          className="ops-button"
-          disabled={!previousIncomplete}
-          onClick={() =>
-            previousIncomplete && void onSave(previousIncomplete.id)
-          }
-        >
-          Previous incomplete
-        </button>
-        <button
-          className="ops-button ops-button--primary"
-          onClick={() => void onSave(nextIncomplete?.id)}
-        >
-          {dirty ? "Save and continue" : "Save reviewed"}
-        </button>
-        <button
-          className="ops-button"
-          disabled={!nextIncomplete}
-          onClick={() => nextIncomplete && void onSave(nextIncomplete.id)}
-        >
-          Next incomplete
-        </button>
-      </div>
+      </details>
+
+      <p className="ops-muted">
+        Shortcuts: Ctrl/Cmd + Enter saves and opens the next incomplete finding.
+        E excludes. R marks reviewed. J/K or arrow keys move between incomplete
+        findings when focus is outside a form field.
+      </p>
     </aside>
   );
 }

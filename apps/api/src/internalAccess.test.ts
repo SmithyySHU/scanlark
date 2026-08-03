@@ -55,6 +55,7 @@ import {
   siteAccessPredicate,
   siteManagePredicate,
 } from "../../../packages/db/src/internalWorkspaces";
+import { getReportFindingsView } from "../../../apps/web/src/hooks/useReportFindings";
 import {
   operationsReportPdfFilename,
   renderOperationsReportHtml,
@@ -211,6 +212,87 @@ test("shared Operations site access keeps owner fallback and active workspace me
     /access_membership\.role IN \('owner', 'operations_admin', 'operations_member'\)/,
   );
   assert.match(manageSql, /access_membership\.is_active = true/);
+});
+
+test("operations report finding review filters count and sort grouped findings", () => {
+  const finding = (
+    id: string,
+    overrides: Partial<
+      Parameters<typeof getReportFindingsView>[0][number]
+    > = {},
+  ): Parameters<typeof getReportFindingsView>[0][number] => ({
+    id,
+    client_priority: "important",
+    title: `Finding ${id}`,
+    client_explanation: "What was found",
+    why_it_matters: "Why it matters",
+    recommended_action: "Recommended action",
+    affected_url: "https://example.com/page",
+    affected_url_note: null,
+    is_included: true,
+    is_false_positive: false,
+    reviewed_at: "2026-08-03T09:00:00.000Z",
+    requires_merge_review: false,
+    category: "seo_basic",
+    original_severity: "high",
+    occurrence_count: 1,
+    affected_page_count: 1,
+    affected_resource_count: 0,
+    group_label: "Grouped",
+    display_order: 10,
+    ...overrides,
+  });
+  const findings = [
+    finding("needs-review", {
+      reviewed_at: null,
+      occurrence_count: 12,
+      affected_page_count: 8,
+      display_order: 2,
+    }),
+    finding("ready", {
+      client_priority: "critical",
+      display_order: 1,
+    }),
+    finding("excluded", {
+      is_included: false,
+      reviewed_at: null,
+      display_order: 3,
+    }),
+    finding("false-positive", {
+      is_included: false,
+      is_false_positive: true,
+      reviewed_at: null,
+      display_order: 4,
+    }),
+  ];
+
+  const needsReview = getReportFindingsView(
+    findings,
+    "needs_editing",
+    "",
+    "",
+    "review_state",
+  );
+  assert.deepEqual(
+    needsReview.filtered.map((item) => item.id),
+    ["needs-review"],
+  );
+  assert.equal(needsReview.counts.included, 2);
+  assert.equal(needsReview.counts.excluded, 1);
+  assert.equal(needsReview.counts.possible_false_positive, 1);
+  assert.equal(needsReview.counts.ready, 1);
+
+  const byOccurrence = getReportFindingsView(
+    findings,
+    "included",
+    "seo_basic",
+    "finding",
+    "occurrence_count",
+  );
+  assert.deepEqual(
+    byOccurrence.filtered.map((item) => item.id),
+    ["needs-review", "ready"],
+  );
 });
 
 test("operations summary serialization returns a compact safe shape", () => {
