@@ -120,7 +120,37 @@ export type OperationsReportFinding = {
   display_order: number;
   estimated_effort: string | null;
   comparison_status: OperationsComparisonStatus | null;
+  group_key: string | null;
+  group_label: string | null;
+  source_issue_count: number;
+  occurrence_count: number;
+  affected_page_count: number;
+  affected_resource_count: number;
+  representative_examples_json: OperationsReportFindingExample[];
+  requires_merge_review: boolean;
+  regrouped_at: string | null;
   updated_at: string;
+};
+
+export type OperationsReportFindingExample = {
+  affectedPageUrl: string | null;
+  affectedResourceUrl: string | null;
+  result: string | null;
+  note: string | null;
+};
+
+export type OperationsReportFindingSource = {
+  id: string;
+  report_finding_id: string;
+  source_issue_id: string | null;
+  source_link_id: string | null;
+  source_kind: "scan_issue" | "scan_link" | "manual";
+  affected_page_url: string | null;
+  affected_resource_url: string | null;
+  outcome_key: string | null;
+  evidence_json: Record<string, unknown>;
+  display_order: number;
+  reviewed_for_client: boolean;
 };
 
 export type OperationsReportPositiveObservation = {
@@ -164,6 +194,7 @@ export type OperationsReportActivity = {
 export type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFinding[];
+  findingSources: OperationsReportFindingSource[];
   positiveObservations: OperationsReportPositiveObservation[];
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
@@ -211,6 +242,12 @@ export type ClientReportPayload = {
     estimatedEffort: string | null;
     displayOrder: number;
     comparisonStatus: OperationsComparisonStatus | null;
+    groupKey: string | null;
+    groupLabel: string | null;
+    occurrenceCount: number;
+    affectedPageCount: number;
+    affectedResourceCount: number;
+    representativeExamples: OperationsReportFindingExample[];
   }>;
   actionPlan: Record<
     OperationsReportActionPlanGroup,
@@ -231,4 +268,28 @@ export type OperationsReportReadinessIssue = {
   message: string;
   section: "settings" | "summary" | "findings" | "action_plan" | "preview";
   findingId?: string;
+};
+
+export type OperationsReportRegroupPreview = {
+  reportId: string;
+  currentFindingCount: number;
+  proposedGroupedCount: number;
+  currentIncludedCount: number;
+  proposedIncludedCount: number;
+  rawSourceIssueCount: number;
+  rawOccurrenceCount: number;
+  previewHash: string;
+  blockedReason: string | null;
+  groups: Array<{
+    groupKey: string;
+    groupLabel: string;
+    title: string;
+    sourceIssueCount: number;
+    occurrenceCount: number;
+    affectedPageCount: number;
+    affectedResourceCount: number;
+    preservedFindingIds: string[];
+    mergeReviewFindingIds: string[];
+    representativeExamples: OperationsReportFindingExample[];
+  }>;
 };

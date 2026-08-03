@@ -21,6 +21,10 @@ export type FilterableReportFinding = ReviewFinding & {
   category: string;
   affected_url: string | null;
   original_severity: string;
+  occurrence_count: number;
+  affected_page_count: number;
+  affected_resource_count: number;
+  group_label: string | null;
 };
 
 export function useReportFindings(

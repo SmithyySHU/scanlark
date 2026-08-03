@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { OperationsReportWorkspace } from "./operations/reports/OperationsReportWorkspace";
-import type { OperationsReportReadinessIssue } from "./operations/reports/types";
+import type {
+  OperationsReportReadinessIssue,
+  OperationsReportRegroupPreview,
+} from "./operations/reports/types";
 
 type OperationsRouteKey =
   | "home"
@@ -500,7 +503,37 @@ type OperationsReportFinding = {
   display_order: number;
   estimated_effort: string | null;
   comparison_status: OperationsComparisonStatus | null;
+  group_key: string | null;
+  group_label: string | null;
+  source_issue_count: number;
+  occurrence_count: number;
+  affected_page_count: number;
+  affected_resource_count: number;
+  representative_examples_json: OperationsReportFindingExample[];
+  requires_merge_review: boolean;
+  regrouped_at: string | null;
   updated_at: string;
+};
+
+type OperationsReportFindingExample = {
+  affectedPageUrl: string | null;
+  affectedResourceUrl: string | null;
+  result: string | null;
+  note: string | null;
+};
+
+type OperationsReportFindingSource = {
+  id: string;
+  report_finding_id: string;
+  source_issue_id: string | null;
+  source_link_id: string | null;
+  source_kind: "scan_issue" | "scan_link" | "manual";
+  affected_page_url: string | null;
+  affected_resource_url: string | null;
+  outcome_key: string | null;
+  evidence_json: Record<string, unknown>;
+  display_order: number;
+  reviewed_for_client: boolean;
 };
 
 type OperationsReportPositiveObservation = {
@@ -562,6 +595,7 @@ type OperationsReportActivity = {
 type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFinding[];
+  findingSources: OperationsReportFindingSource[];
   positiveObservations: OperationsReportPositiveObservation[];
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
@@ -609,6 +643,12 @@ type ClientReportPayload = {
     estimatedEffort: string | null;
     displayOrder: number;
     comparisonStatus: OperationsComparisonStatus | null;
+    groupKey: string | null;
+    groupLabel: string | null;
+    occurrenceCount: number;
+    affectedPageCount: number;
+    affectedResourceCount: number;
+    representativeExamples: OperationsReportFindingExample[];
   }>;
   actionPlan: Record<
     OperationsReportActionPlanGroup,
@@ -1981,6 +2021,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [reportReadinessIssues, setReportReadinessIssues] = useState<
     OperationsReportReadinessIssue[]
   >([]);
+  const [reportRegroupPreview, setReportRegroupPreview] =
+    useState<OperationsReportRegroupPreview | null>(null);
   const [reportFormOpen, setReportFormOpen] = useState(false);
   const [reportForm, setReportForm] =
     useState<ReportFormState>(emptyReportForm);
@@ -2342,6 +2384,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as { report: OperationsReportDetail };
       setReportDetail(data.report);
+      setReportRegroupPreview(null);
     } catch (err) {
       console.warn("Failed to load operations report", err);
       setReportDetail(null);
@@ -3404,6 +3447,65 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       throw new Error(await apiErrorMessage(res, "Failed to update findings"));
     }
     await Promise.all([loadReportDetail(), loadReportPreview()]);
+  }
+
+  async function previewReportRegroup() {
+    if (!operationsReportId) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/regroup-preview`,
+        { method: "POST" },
+      );
+      const data = (await res.json().catch(() => null)) as {
+        preview?: OperationsReportRegroupPreview;
+        message?: string;
+      } | null;
+      if (!res.ok) {
+        if (data?.preview) setReportRegroupPreview(data.preview);
+        throw new Error(data?.message ?? "Failed to preview regrouping");
+      }
+      setReportRegroupPreview(data?.preview ?? null);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to preview regrouping",
+      );
+    }
+  }
+
+  async function applyReportRegroup(previewHash: string) {
+    if (!operationsReportId) return;
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/regroup`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirm: true, previewHash }),
+        },
+      );
+      const data = (await res.json().catch(() => null)) as {
+        report?: OperationsReportDetail;
+        preview?: OperationsReportRegroupPreview;
+        message?: string;
+      } | null;
+      if (!res.ok) {
+        if (data?.preview) setReportRegroupPreview(data.preview);
+        throw new Error(data?.message ?? "Failed to regroup findings");
+      }
+      setReportRegroupPreview(null);
+      await Promise.all([
+        loadReportDetail(),
+        loadReportPreview(),
+        loadReports(),
+        loadSummary(),
+      ]);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to regroup findings",
+      );
+    }
   }
 
   async function patchPositiveObservation(
@@ -8256,10 +8358,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           detail={reportDetail}
           preview={reportPreview}
           readinessIssues={reportReadinessIssues}
+          regroupPreview={reportRegroupPreview}
           actionError={actionError}
           onPatchReport={patchReport}
           onPatchFinding={patchFinding}
           onBulkFindings={bulkPatchReportFindings}
+          onPreviewRegroup={previewReportRegroup}
+          onApplyRegroup={applyReportRegroup}
           onPatchObservation={patchPositiveObservation}
           onPatchActionPlanItem={patchActionPlanItem}
           onMarkReady={() => runReportAction("mark-ready")}
@@ -10858,6 +10963,19 @@ const operationsStyles = `
     display: grid;
     gap: 6px;
   }
+  .ops-readiness-list details {
+    border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+  }
+  .ops-readiness-list summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    cursor: pointer;
+    font-weight: 800;
+  }
   .ops-readiness-list button {
     display: flex;
     justify-content: space-between;
@@ -10873,6 +10991,33 @@ const operationsStyles = `
   .ops-readiness-list strong {
     color: var(--text);
     white-space: nowrap;
+  }
+  .ops-regroup-preview {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  .ops-table-wrap {
+    overflow-x: auto;
+  }
+  .ops-evidence-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-size: 12px;
+  }
+  .ops-evidence-table th,
+  .ops-evidence-table td {
+    border: 1px solid var(--border);
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .ops-evidence-table th {
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--panel-strong) 70%, transparent);
   }
   .ops-report-findings-layout {
     display: grid;

@@ -166,13 +166,24 @@ export function ReportClientPreview({
           <section>
             <h2>Key findings</h2>
             <div className="ops-list">
-              {payload.findings.map((finding) => (
+              {payload.findings.map((finding, findingIndex) => (
                 <article
-                  key={`${finding.priority}-${finding.title}-${finding.affectedUrl ?? ""}`}
+                  key={`${findingIndex}-${finding.priority}-${finding.title}-${finding.affectedUrl ?? ""}`}
                   className="ops-list-card"
                 >
                   <small>{priorityLabel(finding.priority)}</small>
                   <strong>{finding.title}</strong>
+                  <span>
+                    {finding.occurrenceCount} technical occurrence
+                    {finding.occurrenceCount === 1 ? "" : "s"} ·{" "}
+                    {finding.affectedPageCount} affected page
+                    {finding.affectedPageCount === 1 ? "" : "s"}
+                    {finding.affectedResourceCount > 0
+                      ? ` · ${finding.affectedResourceCount} affected resource${
+                          finding.affectedResourceCount === 1 ? "" : "s"
+                        }`
+                      : ""}
+                  </span>
                   {finding.affectedUrl ? (
                     <span>{finding.affectedUrl}</span>
                   ) : (
@@ -186,6 +197,36 @@ export function ReportClientPreview({
                     <p>{finding.recommendedAction}</p>
                   )}
                   {finding.clientEvidence && <p>{finding.clientEvidence}</p>}
+                  {finding.representativeExamples.length > 0 && (
+                    <div className="ops-table-wrap">
+                      <table className="ops-evidence-table">
+                        <thead>
+                          <tr>
+                            <th>Affected page/resource</th>
+                            <th>Result</th>
+                            <th>Notes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {finding.representativeExamples
+                            .slice(0, 5)
+                            .map((example, index) => (
+                              <tr
+                                key={`${finding.title}-${example.affectedPageUrl ?? ""}-${example.affectedResourceUrl ?? ""}-${index}`}
+                              >
+                                <td>
+                                  {example.affectedResourceUrl ??
+                                    example.affectedPageUrl ??
+                                    "-"}
+                                </td>
+                                <td>{example.result ?? "-"}</td>
+                                <td>{example.note ?? "-"}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                   {finding.estimatedEffort && (
                     <small>Estimated effort: {finding.estimatedEffort}</small>
                   )}
@@ -203,9 +244,9 @@ export function ReportClientPreview({
               items.length > 0 ? (
                 <div key={group} className="ops-list">
                   <h3>{actionPlanLabel(group)}</h3>
-                  {items.map((item) => (
+                  {items.map((item, itemIndex) => (
                     <article
-                      key={`${group}-${item.title}`}
+                      key={`${group}-${itemIndex}-${item.title}`}
                       className="ops-list-card"
                     >
                       <strong>{item.title}</strong>
@@ -222,8 +263,11 @@ export function ReportClientPreview({
             <section>
               <h2>Positive observations</h2>
               <div className="ops-list">
-                {payload.positiveObservations.map((item) => (
-                  <article key={item.title} className="ops-list-card">
+                {payload.positiveObservations.map((item, itemIndex) => (
+                  <article
+                    key={`${itemIndex}-${item.title}`}
+                    className="ops-list-card"
+                  >
                     <strong>{item.title}</strong>
                     {item.description && <p>{item.description}</p>}
                   </article>
@@ -263,6 +307,34 @@ export function ReportClientPreview({
               {payload.scan.totalLinks} discovered.
             </p>
             <p>Included reviewed findings: {payload.findings.length}</p>
+            <div className="ops-list">
+              {payload.findings.map((finding, findingIndex) => (
+                <article
+                  key={`${findingIndex}-${finding.title}`}
+                  className="ops-list-card"
+                >
+                  <strong>{finding.title}</strong>
+                  <p>
+                    {finding.occurrenceCount} technical occurrence
+                    {finding.occurrenceCount === 1 ? "" : "s"} reviewed.
+                  </p>
+                  {finding.representativeExamples.length > 0 && (
+                    <ul>
+                      {finding.representativeExamples.map((example, index) => (
+                        <li
+                          key={`${finding.title}-appendix-${example.affectedPageUrl ?? ""}-${example.affectedResourceUrl ?? ""}-${index}`}
+                        >
+                          {example.affectedResourceUrl ??
+                            example.affectedPageUrl ??
+                            "Reviewed source"}{" "}
+                          {example.result ? `- ${example.result}` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </article>
+              ))}
+            </div>
           </section>
         )}
       </div>
