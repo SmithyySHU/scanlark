@@ -19,6 +19,7 @@ import type {
 import {
   applyIgnoreRulesForScanRun,
   cacheSiteAvatarForUser,
+  canAccessOperationsBusiness,
   cancelScanJob,
   cancelScanRun,
   createSiteForUser,
@@ -86,6 +87,7 @@ import {
   listIssuesForScanRun,
   listIssuesForScanRunForUser,
   listLinkNotesForSiteForUser,
+  linkOperationsBusinessSite,
   markAllAppNotificationsReadForUser,
   markAppNotificationReadForUser,
   markSiteAvatarUnavailableForUser,
@@ -182,6 +184,8 @@ const DIFF_CHANGE_TYPES = new Set<ScanDiffChangeType>([
   "removed",
 ]);
 const SCHEDULE_FREQUENCIES = new Set(["manual", "daily", "weekly", "monthly"]);
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NOTIFY_ON_OPTIONS = new Set([
   "always",
   "issues",
@@ -1015,15 +1019,13 @@ app.get("/public/config", (_req, res) => {
 app.use("/public/reports", publicReportLimiter);
 app.use(authMiddleware);
 
-function getAuthenticatedUserPayload(
-  user: {
-    id: string;
-    email: string;
-    displayName?: string | null;
-    name?: string | null;
-    isAdmin?: boolean;
-  },
-) {
+function getAuthenticatedUserPayload(user: {
+  id: string;
+  email: string;
+  displayName?: string | null;
+  name?: string | null;
+  isAdmin?: boolean;
+}) {
   const displayName = user.displayName ?? user.name ?? null;
   return {
     id: user.id,
@@ -3076,6 +3078,7 @@ app.post("/sites", async (req, res) => {
       internalNotes?: string | null;
       developerTabsEnabled?: boolean;
       permissionConfirmed?: boolean;
+      operationsBusinessId?: string | null;
     };
     const url = body.url;
 
@@ -3125,6 +3128,11 @@ app.post("/sites", async (req, res) => {
       body.reportDisplayName,
     );
     const internalNotes = parseOptionalSiteMetadataField(body.internalNotes);
+    const operationsBusinessId =
+      typeof body.operationsBusinessId === "string" &&
+      body.operationsBusinessId.trim()
+        ? body.operationsBusinessId.trim()
+        : null;
 
     if (
       siteDisplayName === "__invalid__" ||
@@ -3137,6 +3145,25 @@ app.post("/sites", async (req, res) => {
         400,
         "invalid_site_metadata",
         "Site metadata fields must be strings when provided",
+      );
+    }
+    if (operationsBusinessId && !UUID_RE.test(operationsBusinessId)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_operations_business_id",
+        "Operations business id is invalid",
+      );
+    }
+    if (
+      operationsBusinessId &&
+      !(await canAccessOperationsBusiness(userId, operationsBusinessId))
+    ) {
+      return sendApiError(
+        res,
+        403,
+        "operations_business_access_required",
+        "Operations business access required",
       );
     }
 
@@ -3174,6 +3201,21 @@ app.post("/sites", async (req, res) => {
     );
 
     startSiteAvatarRefresh(userId, site.id);
+    if (operationsBusinessId) {
+      const linkResult = await linkOperationsBusinessSite(
+        { id: userId, email: req.user!.email },
+        operationsBusinessId,
+        site.id,
+      );
+      if (linkResult !== "linked" && linkResult !== "duplicate") {
+        return sendApiError(
+          res,
+          500,
+          "operations_site_link_failed",
+          "Site was created but could not be linked to the Operations business",
+        );
+      }
+    }
 
     res.status(201).json({ site });
   } catch (err: unknown) {

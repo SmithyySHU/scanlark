@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 import type { LinkClassification } from "./scanRuns";
 
 async function isScanRunOwnedByUser(
@@ -11,7 +12,8 @@ async function isScanRunOwnedByUser(
       SELECT 1
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
-      WHERE r.id = $1 AND s.user_id = $2
+      WHERE r.id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       LIMIT 1
     `,
     [scanRunId, userId],
@@ -30,7 +32,8 @@ async function getScanLinkOwnership(
       FROM scan_links l
       JOIN scan_runs r ON r.id = l.scan_run_id
       JOIN sites s ON s.id = r.site_id
-      WHERE l.id = $1 AND s.user_id = $2
+      WHERE l.id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       LIMIT 1
     `,
     [scanLinkId, userId],

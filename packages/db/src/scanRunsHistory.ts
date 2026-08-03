@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 import type { LinkClassification } from "./scanRuns";
 import { getRecentScansForSiteForUser } from "./scans";
 
@@ -170,7 +171,8 @@ export async function getDiffBetweenRunsForUser(
       SELECT r.id
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
-      WHERE s.user_id = $1 AND r.id IN ($2, $3)
+      WHERE ${siteAccessPredicate("s", "$1")}
+        AND r.id IN ($2, $3)
     `,
     [userId, runA, runB],
   );

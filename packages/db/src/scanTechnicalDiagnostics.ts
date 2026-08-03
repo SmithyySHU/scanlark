@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 
 export interface ScanTechnicalDiagnosticsSummary {
   scanRunId: string;
@@ -97,13 +98,13 @@ export async function getScanTechnicalDiagnostics(
   const siteJoin = userId ? "JOIN sites s ON s.id = sc.site_id" : "";
   const issueJoin = userId ? "JOIN sites s ON s.id = si.site_id" : "";
   const pageWhere = userId
-    ? "WHERE pc.scan_run_id = $1 AND s.user_id = $2"
+    ? `WHERE pc.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")}`
     : "WHERE pc.scan_run_id = $1";
   const siteWhere = userId
-    ? "WHERE sc.scan_run_id = $1 AND s.user_id = $2"
+    ? `WHERE sc.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")}`
     : "WHERE sc.scan_run_id = $1";
   const issueWhere = userId
-    ? "WHERE si.scan_run_id = $1 AND s.user_id = $2 AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')"
+    ? `WHERE si.scan_run_id = $1 AND ${siteAccessPredicate("s", "$2")} AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')`
     : "WHERE si.scan_run_id = $1 AND si.category IN ('seo_basic', 'robots', 'sitemap', 'ssl_https', 'security_header', 'performance_basic')";
 
   const pageChecksRes = await client.query<{ count: string }>(

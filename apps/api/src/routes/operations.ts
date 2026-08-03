@@ -56,8 +56,12 @@ import {
   getOperationsServiceSchedule,
   getOperationsSummary,
   getOperationsWorkOrderDetail,
+  getInternalWorkspaceByCode,
+  getUserByEmail,
+  getUserInternalWorkspaceMemberships,
   generateOperationsServiceTasks,
   linkOperationsBusinessSite,
+  listInternalWorkspaceMembers,
   listOperationsClientServices,
   listOperationsClientServiceUsage,
   listOperationsCommunicationTemplates,
@@ -137,8 +141,12 @@ import {
   type OperationsServiceBillingCadence,
   type OperationsServicePlanType,
   type OperationsTaskStatus,
+  SCANLARK_OPERATIONS_WORKSPACE_CODE,
+  setInternalWorkspaceMembershipActive,
+  upsertInternalWorkspaceMembership,
+  type InternalWorkspaceRole,
 } from "@scanlark/db";
-import { adminGuard } from "../adminAccess";
+import { isAdminEmail } from "../adminAccess";
 import {
   operationsReportPdfFilename,
   renderOperationsReportPdf,
@@ -211,6 +219,12 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TASK_STATUS_SET = new Set<string>(OPERATIONS_TASK_STATUSES);
 const SORT_SET = new Set(["name", "updated_desc", "next_follow_up"]);
+const INTERNAL_WORKSPACE_ROLES = new Set<InternalWorkspaceRole>([
+  "owner",
+  "operations_admin",
+  "operations_member",
+  "viewer",
+]);
 
 function serializeObject(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
@@ -239,6 +253,87 @@ function sendApiError(
 function getActor(req: Request): AdminActor {
   if (!req.user) throw new Error("admin_actor_missing");
   return { id: req.user.id, email: req.user.email };
+}
+
+async function operationsWorkspaceGuard(
+  req: Request,
+  res: Response,
+  next: express.NextFunction,
+) {
+  if (!req.user) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  try {
+    const memberships = await getUserInternalWorkspaceMemberships(req.user.id);
+    if (
+      memberships.some(
+        (row) =>
+          row.is_active &&
+          row.workspace_code === SCANLARK_OPERATIONS_WORKSPACE_CODE,
+      )
+    ) {
+      return next();
+    }
+    if (isAdminEmail(req.user.email)) return next();
+    return sendApiError(
+      res,
+      403,
+      "operations_workspace_required",
+      "Operations workspace access required",
+    );
+  } catch (err) {
+    console.error("Operations workspace access check failed", err);
+    return sendApiError(
+      res,
+      500,
+      "operations_workspace_access_failed",
+      "Failed to verify Operations workspace access",
+    );
+  }
+}
+
+async function requireOperationsMembershipAdmin(req: Request, res: Response) {
+  if (!req.user) {
+    sendApiError(res, 401, "unauthorized", "Unauthorized");
+    return null;
+  }
+  const workspace = await getInternalWorkspaceByCode(
+    SCANLARK_OPERATIONS_WORKSPACE_CODE,
+  );
+  if (!workspace) {
+    sendApiError(
+      res,
+      503,
+      "operations_workspace_missing",
+      "Operations workspace is not configured",
+    );
+    return null;
+  }
+  if (isAdminEmail(req.user.email)) return workspace;
+  const memberships = await getUserInternalWorkspaceMemberships(req.user.id);
+  const canManage = memberships.some(
+    (membership) =>
+      membership.workspace_id === workspace.id &&
+      membership.is_active &&
+      membership.role === "owner",
+  );
+  if (!canManage) {
+    sendApiError(
+      res,
+      403,
+      "operations_workspace_owner_required",
+      "Operations workspace owner access required",
+    );
+    return null;
+  }
+  return workspace;
+}
+
+function parseInternalWorkspaceRole(value: unknown) {
+  return typeof value === "string" &&
+    INTERNAL_WORKSPACE_ROLES.has(value as InternalWorkspaceRole)
+    ? (value as InternalWorkspaceRole)
+    : null;
 }
 
 function getUuidParam(req: Request, res: Response, key: string) {
@@ -677,7 +772,177 @@ function handleValidationError(res: Response, err: unknown) {
 
 export function mountOperationsRoutes(app: express.Application) {
   const router = express.Router();
-  router.use(adminGuard);
+  router.use(operationsWorkspaceGuard);
+
+  router.get("/staff/workspace", async (req, res) => {
+    try {
+      const workspace = await getInternalWorkspaceByCode(
+        SCANLARK_OPERATIONS_WORKSPACE_CODE,
+      );
+      if (!workspace) {
+        return sendApiError(
+          res,
+          503,
+          "operations_workspace_missing",
+          "Operations workspace is not configured",
+        );
+      }
+      const memberships = await getUserInternalWorkspaceMemberships(
+        req.user!.id,
+      );
+      return res.json({
+        workspace: serializeObject(workspace),
+        memberships: serializeObject(
+          memberships.filter(
+            (membership) => membership.workspace_id === workspace.id,
+          ),
+        ),
+        canManageMembers:
+          isAdminEmail(req.user!.email) ||
+          memberships.some(
+            (membership) =>
+              membership.workspace_id === workspace.id &&
+              membership.is_active &&
+              membership.role === "owner",
+          ),
+      });
+    } catch (err) {
+      console.error("Operations staff workspace failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_staff_workspace_failed",
+        "Failed to load Operations workspace",
+      );
+    }
+  });
+
+  router.get("/staff/members", async (req, res) => {
+    try {
+      const workspace = await requireOperationsMembershipAdmin(req, res);
+      if (!workspace) return;
+      return res.json({
+        workspace: serializeObject(workspace),
+        members: serializeObject(
+          await listInternalWorkspaceMembers(workspace.id),
+        ),
+      });
+    } catch (err) {
+      console.error("Operations staff members failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_staff_members_failed",
+        "Failed to load Operations staff members",
+      );
+    }
+  });
+
+  router.post("/staff/members", async (req, res) => {
+    try {
+      const workspace = await requireOperationsMembershipAdmin(req, res);
+      if (!workspace) return;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const email =
+        typeof (body as Record<string, unknown>).email === "string"
+          ? ((body as Record<string, unknown>).email as string)
+              .trim()
+              .toLowerCase()
+          : "";
+      const role = parseInternalWorkspaceRole(
+        (body as Record<string, unknown>).role,
+      );
+      if (!email) {
+        return sendApiError(res, 400, "invalid_email", "Email is required");
+      }
+      if (!role) {
+        return sendApiError(res, 400, "invalid_role", "Role is invalid");
+      }
+      const user = await getUserByEmail(email);
+      if (!user) {
+        return sendApiError(
+          res,
+          404,
+          "user_not_found",
+          "User must already exist before adding staff membership",
+        );
+      }
+      const membership = await upsertInternalWorkspaceMembership({
+        workspaceId: workspace.id,
+        userId: user.id,
+        role,
+        isActive: true,
+      });
+      return res.status(201).json({ member: serializeObject(membership) });
+    } catch (err) {
+      console.error("Operations staff member add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_staff_member_add_failed",
+        "Failed to add Operations staff member",
+      );
+    }
+  });
+
+  router.patch("/staff/members/:userId", async (req, res) => {
+    try {
+      const workspace = await requireOperationsMembershipAdmin(req, res);
+      if (!workspace) return;
+      const userId = getUuidParam(req, res, "userId");
+      if (!userId) return;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const roleValue = (body as Record<string, unknown>).role;
+      const activeValue = (body as Record<string, unknown>).isActive;
+      const role =
+        roleValue === undefined ? null : parseInternalWorkspaceRole(roleValue);
+      if (roleValue !== undefined && !role) {
+        return sendApiError(res, 400, "invalid_role", "Role is invalid");
+      }
+      if (activeValue !== undefined && typeof activeValue !== "boolean") {
+        return sendApiError(
+          res,
+          400,
+          "invalid_active_state",
+          "isActive must be boolean",
+        );
+      }
+      if (role) {
+        const membership = await upsertInternalWorkspaceMembership({
+          workspaceId: workspace.id,
+          userId,
+          role,
+          isActive: activeValue === undefined ? true : activeValue,
+        });
+        return res.json({ member: serializeObject(membership) });
+      }
+      if (typeof activeValue === "boolean") {
+        const membership = await setInternalWorkspaceMembershipActive({
+          workspaceId: workspace.id,
+          userId,
+          isActive: activeValue,
+        });
+        if (!membership) {
+          return sendApiError(res, 404, "not_found", "Member not found");
+        }
+        return res.json({ member: serializeObject(membership) });
+      }
+      return sendApiError(
+        res,
+        400,
+        "empty_patch",
+        "Role or isActive must be provided",
+      );
+    } catch (err) {
+      console.error("Operations staff member update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_staff_member_update_failed",
+        "Failed to update Operations staff member",
+      );
+    }
+  });
 
   router.get("/summary", async (_req, res) => {
     try {

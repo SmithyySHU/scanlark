@@ -9614,7 +9614,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           <div className="ops-panel">
             <div className="ops-panel__header">
               <h2>Websites</h2>
-              {renderLink("/sites/new", "Add and monitor new site")}
+              {renderLink(
+                `/sites/new?operationsBusinessId=${encodeURIComponent(b.id)}`,
+                "Add and monitor new site",
+              )}
             </div>
             <form className="ops-inline-form" onSubmit={linkSite}>
               <select

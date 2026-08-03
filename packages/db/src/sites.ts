@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate, siteManagePredicate } from "./internalWorkspaces";
 
 export interface DbSiteRow {
   id: string;
@@ -44,6 +45,8 @@ export interface DbSiteRow {
   avatar_fetched_at: Date | null;
   avatar_checked_at: Date | null;
   avatar_error: string | null;
+  operations_business_id?: string | null;
+  operations_business_name?: string | null;
 }
 
 export type SiteAvatarStatus = DbSiteRow["avatar_status"];
@@ -137,6 +140,27 @@ const SITE_SELECT_COLUMNS = `
   avatar_error
 `;
 
+function siteOperationsBusinessContextSelect(
+  siteAlias: string,
+  userParam: string,
+) {
+  const businessFilter = `
+    FROM operations_business_sites obs
+    JOIN operations_businesses ob ON ob.id = obs.business_id
+    JOIN internal_workspace_memberships m
+      ON m.workspace_id = ob.internal_workspace_id
+    WHERE obs.site_id = ${siteAlias}.id
+      AND m.user_id = ${userParam}
+      AND m.is_active = true
+    ORDER BY obs.created_at DESC
+    LIMIT 1
+  `;
+  return `
+    (SELECT ob.id ${businessFilter}) AS operations_business_id,
+    (SELECT ob.name ${businessFilter}) AS operations_business_name
+  `;
+}
+
 function normalizeSiteMetadataValue(value: string | null | undefined) {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -164,10 +188,11 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
 
   const result = await db.query<DbSiteRow>(
     `
-    SELECT ${SITE_SELECT_COLUMNS}
-    FROM sites
-    WHERE user_id = $1
-    ORDER BY created_at DESC
+    SELECT ${SITE_SELECT_COLUMNS},
+           ${siteOperationsBusinessContextSelect("s", "$1")}
+    FROM sites s
+    WHERE ${siteAccessPredicate("s", "$1")}
+    ORDER BY s.created_at DESC
     `,
     [userId],
   );
@@ -216,9 +241,11 @@ export async function getSiteByIdForUser(
 
   const result = await db.query<DbSiteRow>(
     `
-    SELECT ${SITE_SELECT_COLUMNS}
-    FROM sites
-    WHERE id = $1 AND user_id = $2
+    SELECT ${SITE_SELECT_COLUMNS},
+           ${siteOperationsBusinessContextSelect("s", "$2")}
+    FROM sites s
+    WHERE s.id = $1
+      AND ${siteAccessPredicate("s", "$2")}
     `,
     [siteId, userId],
   );
@@ -334,7 +361,8 @@ export async function updateSiteMetadataForUser(
         report_display_name = $5,
         internal_notes = $6,
         developer_tabs_enabled = $7
-    WHERE id = $1 AND user_id = $2
+    WHERE id = $1
+      AND ${siteManagePredicate("sites", "$2")}
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [
@@ -368,7 +396,8 @@ export async function cacheSiteAvatarForUser(
         avatar_fetched_at = NOW(),
         avatar_checked_at = NOW(),
         avatar_error = NULL
-    WHERE id = $1 AND user_id = $2
+    WHERE id = $1
+      AND ${siteManagePredicate("sites", "$2")}
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [
@@ -401,7 +430,8 @@ export async function markSiteAvatarUnavailableForUser(
         avatar_fetched_at = NULL,
         avatar_checked_at = NOW(),
         avatar_error = $4
-    WHERE id = $1 AND user_id = $2
+    WHERE id = $1
+      AND ${siteManagePredicate("sites", "$2")}
     RETURNING ${SITE_SELECT_COLUMNS}
     `,
     [siteId, userId, status, error],
@@ -437,7 +467,8 @@ export async function getSiteAvatarForUser(
       avatar_checked_at,
       avatar_error
     FROM sites
-    WHERE id = $1 AND user_id = $2
+    WHERE id = $1
+      AND ${siteAccessPredicate("sites", "$2")}
     LIMIT 1
     `,
     [siteId, userId],

@@ -1,4 +1,5 @@
 import { ensureConnected } from "./client";
+import { siteAccessPredicate } from "./internalWorkspaces";
 
 export type ScanIssueCategory =
   | "link_integrity"
@@ -1785,7 +1786,7 @@ export async function listIssuesForScanRun(
 
   if (userId) {
     params.push(userId);
-    filters.push("s.user_id = $2");
+    filters.push(siteAccessPredicate("s", "$2"));
   }
 
   if (options?.status) {
@@ -1846,7 +1847,7 @@ export async function listIssuesForScanRun(
   const resolvedFilters = ["sis.resolved_scan_run_id = $1"];
   if (userId) {
     resolvedParams.push(userId);
-    resolvedFilters.push("s.user_id = $2");
+    resolvedFilters.push(siteAccessPredicate("s", "$2"));
   }
   if (options?.severity) {
     resolvedParams.push(options.severity);

@@ -1,5 +1,6 @@
 import { ensureConnected } from "./client";
 import { computeSeverityScore } from "./scanCategoryScores";
+import { siteAccessPredicate } from "./internalWorkspaces";
 
 export type ScanStatus =
   | "queued"
@@ -203,7 +204,8 @@ export async function getLatestScanForSiteForUser(
         r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
-      WHERE r.site_id = $1 AND s.user_id = $2
+      WHERE r.site_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       ORDER BY r.started_at DESC
       LIMIT 1
     `,
@@ -243,7 +245,7 @@ export async function getLatestCompletedScanForSiteForUser(
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       WHERE r.site_id = $1
-        AND s.user_id = $2
+        AND ${siteAccessPredicate("s", "$2")}
         AND r.status = 'completed'
         AND r.finished_at IS NOT NULL
       ORDER BY r.finished_at DESC
@@ -308,7 +310,8 @@ export async function getRecentScansForSiteForUser(
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
       ${runSummaryJoins}
-      WHERE r.site_id = $1 AND s.user_id = $2
+      WHERE r.site_id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       ORDER BY r.started_at DESC
       LIMIT $3
     `,
@@ -377,7 +380,8 @@ export async function getScanRunByIdForUser(
         r.issue_generation_error
       FROM scan_runs r
       JOIN sites s ON s.id = r.site_id
-      WHERE r.id = $1 AND s.user_id = $2
+      WHERE r.id = $1
+        AND ${siteAccessPredicate("s", "$2")}
       LIMIT 1
     `,
     [scanRunId, userId],

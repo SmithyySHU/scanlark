@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Request, Response } from "express";
 import {
@@ -49,6 +50,11 @@ import {
   type OperationsReportActionPlanItemRow,
   type OperationsReportRow,
 } from "../../../packages/db/src/operationsReports";
+import {
+  SCANLARK_OPERATIONS_WORKSPACE_CODE,
+  siteAccessPredicate,
+  siteManagePredicate,
+} from "../../../packages/db/src/internalWorkspaces";
 import {
   operationsReportPdfFilename,
   renderOperationsReportHtml,
@@ -186,6 +192,25 @@ test("public config exposes only non-sensitive client configuration", () => {
   assert(!("internalAdminEmails" in config));
   assert(!("apiInternalToken" in config));
   assert(!("sessionSecret" in config));
+});
+
+test("shared Operations site access keeps owner fallback and active workspace membership checks", () => {
+  assert.equal(SCANLARK_OPERATIONS_WORKSPACE_CODE, "scanlark-operations");
+
+  const accessSql = siteAccessPredicate("s", "$1");
+  assert.match(accessSql, /s\.user_id = \$1/);
+  assert.match(accessSql, /operations_business_sites access_obs/);
+  assert.match(accessSql, /internal_workspace_memberships access_membership/);
+  assert.match(accessSql, /access_membership\.is_active = true/);
+  assert.doesNotMatch(accessSql, /operations_admin/);
+
+  const manageSql = siteManagePredicate("site", "$2");
+  assert.match(manageSql, /site\.user_id = \$2/);
+  assert.match(
+    manageSql,
+    /access_membership\.role IN \('owner', 'operations_admin', 'operations_member'\)/,
+  );
+  assert.match(manageSql, /access_membership\.is_active = true/);
 });
 
 test("operations summary serialization returns a compact safe shape", () => {
@@ -728,6 +753,62 @@ test("operations report regroup validation requires confirmation and preview has
     () => parseOperationsReportRegroupInput({ confirm: true }),
     /regroup_preview_hash_required/,
   );
+});
+
+function splitTopLevelSqlList(value: string) {
+  const parts: string[] = [];
+  let current = "";
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    const next = value[index + 1];
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        if (next === quote) {
+          current += next;
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      parts.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+test("operations report finding insert SQL keeps target columns aligned with values", () => {
+  const source = readFileSync(
+    new URL("../../../packages/db/src/operationsReports.ts", import.meta.url),
+    "utf8",
+  );
+  const insertMatches = [
+    ...source.matchAll(
+      /INSERT INTO operations_report_findings \(\s*([\s\S]*?)\s*\)\s*VALUES \(([\s\S]*?)\)\s*RETURNING id/g,
+    ),
+  ];
+  assert.equal(insertMatches.length, 2);
+  for (const match of insertMatches) {
+    const columns = splitTopLevelSqlList(match[1]);
+    const values = splitTopLevelSqlList(match[2]);
+    assert.equal(values.length, columns.length);
+  }
 });
 
 test("operations report grouping consolidates repeated source issues safely", () => {
