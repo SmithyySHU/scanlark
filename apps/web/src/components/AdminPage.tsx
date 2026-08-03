@@ -213,6 +213,7 @@ type AdminPageProps = {
   apiFetch: ApiFetch;
   authUser: AuthUser;
   onBackToDashboard: () => void;
+  embedded?: boolean;
 };
 
 const TABS: Array<{ key: AdminTab; label: string }> = [
@@ -292,6 +293,7 @@ export function AdminPage({
   apiFetch,
   authUser,
   onBackToDashboard,
+  embedded = false,
 }: AdminPageProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>("overview");
   const [search, setSearch] = useState("");
@@ -1612,22 +1614,24 @@ export function AdminPage({
   }
 
   return (
-    <div className="admin-page">
+    <div className={`admin-page ${embedded ? "admin-page--embedded" : ""}`}>
       <style>{adminStyles}</style>
-      <header className="admin-header">
-        <div>
-          <span className="admin-warning">Internal admin</span>
-          <h1>Scanlark Admin</h1>
-          <p>{authUser.email}</p>
-        </div>
-        <button
-          type="button"
-          className="admin-button admin-button--secondary"
-          onClick={onBackToDashboard}
-        >
-          Dashboard
-        </button>
-      </header>
+      {!embedded && (
+        <header className="admin-header">
+          <div>
+            <span className="admin-warning">Internal admin</span>
+            <h1>Scanlark Admin</h1>
+            <p>{authUser.email}</p>
+          </div>
+          <button
+            type="button"
+            className="admin-button admin-button--secondary"
+            onClick={onBackToDashboard}
+          >
+            Dashboard
+          </button>
+        </header>
+      )}
 
       <div className="admin-shell">
         <nav className="admin-tabs" aria-label="Admin sections">
@@ -1678,6 +1682,10 @@ const adminStyles = `
     color: var(--text);
     padding: 18px;
   }
+  .admin-page--embedded {
+    min-height: auto;
+    padding: 0;
+  }
   .admin-header {
     display: flex;
     justify-content: space-between;
@@ -1715,13 +1723,20 @@ const adminStyles = `
     max-width: 1480px;
     margin: 0 auto;
   }
+  .admin-page--embedded .admin-shell {
+    max-width: none;
+  }
   .admin-tabs {
     display: flex;
     flex-direction: column;
     gap: 6px;
     align-self: start;
     position: sticky;
-    top: 16px;
+    top: 96px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 8px;
   }
   .admin-tabs button,
   .admin-actions button,
@@ -1848,9 +1863,12 @@ const adminStyles = `
   .admin-table th,
   .admin-table td {
     border-bottom: 1px solid var(--border);
-    padding: 10px 8px;
+    padding: 8px 8px;
     text-align: left;
     vertical-align: top;
+  }
+  .admin-table tr {
+    min-height: 42px;
   }
   .admin-table th {
     color: var(--text-muted);
@@ -1874,9 +1892,13 @@ const adminStyles = `
     color: var(--text-muted);
   }
   .admin-code {
+    max-height: 74px;
+    overflow: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.45;
   }
   .admin-status {
     display: inline-flex;

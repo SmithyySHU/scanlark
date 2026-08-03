@@ -40,7 +40,7 @@
 		respond `{"error":"not_found"}` 404
 	}
 
-	@privateAppRoutes path /login* /dashboard* /account* /settings* /sites* /admin* /operations* /shared-reports* /shared-results* /report* /onboarding*
+	@privateAppRoutes path /login* /register* /dashboard* /monitoring* /account* /settings* /sites* /admin* /operations* /shared-reports* /shared-results* /report* /onboarding*
 	handle @privateAppRoutes {
 		redir https://{$SCANLARK_APP_DOMAIN:app.scanlark.com}{uri} permanent
 	}

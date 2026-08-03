@@ -2,15 +2,19 @@ import type { CSSProperties } from "react";
 
 export type ScanlarkLogoVariant = "horizontal" | "stacked" | "mark";
 export type ScanlarkLogoTheme = "light" | "dark";
+export type ScanlarkLogoSize = "compact" | "default" | "large";
 
 export interface ScanlarkLogoProps {
   variant?: ScanlarkLogoVariant;
   theme?: ScanlarkLogoTheme;
+  size?: ScanlarkLogoSize;
   width?: number | string;
   linked?: boolean;
   href?: string;
   className?: string;
   priority?: boolean;
+  alt?: string;
+  tagline?: string;
 }
 
 function logoPath(
@@ -33,15 +37,31 @@ function logoPath(
 export function ScanlarkLogo({
   variant = "horizontal",
   theme = "light",
-  width = variant === "mark" ? 42 : 190,
+  size = "default",
+  width,
   linked = false,
   href = "/",
   className,
   priority = false,
+  alt = "Scanlark",
+  tagline,
 }: ScanlarkLogoProps) {
+  const resolvedWidth =
+    width ??
+    (variant === "mark"
+      ? size === "large"
+        ? 52
+        : size === "compact"
+          ? 34
+          : 42
+      : size === "large"
+        ? 216
+        : size === "compact"
+          ? 156
+          : 190);
   const style: CSSProperties = {
     display: "block",
-    width,
+    width: resolvedWidth,
     height: "auto",
     maxWidth: "100%",
   };
@@ -49,7 +69,7 @@ export function ScanlarkLogo({
   const image = (
     <img
       src={logoPath(variant, theme)}
-      alt={linked ? "Scanlark" : ""}
+      alt={linked ? alt : ""}
       aria-hidden={linked ? undefined : true}
       className={className}
       style={style}
@@ -58,13 +78,22 @@ export function ScanlarkLogo({
     />
   );
 
+  const content = tagline ? (
+    <span className="scanlark-logo-lockup">
+      {image}
+      <span>{tagline}</span>
+    </span>
+  ) : (
+    image
+  );
+
   if (!linked) {
-    return image;
+    return content;
   }
 
   return (
     <a href={href} aria-label="Scanlark home">
-      {image}
+      {content}
     </a>
   );
 }

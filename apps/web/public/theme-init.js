@@ -7,11 +7,13 @@
     var mode =
       stored === "dark" || stored === "light"
         ? stored
-        : prefersDark
-          ? "dark"
+        : stored === "system"
+          ? prefersDark
+            ? "dark"
+            : "light"
           : "light";
     document.documentElement.dataset.theme = mode;
   } catch (e) {
-    document.documentElement.dataset.theme = "dark";
+    document.documentElement.dataset.theme = "light";
   }
 })();

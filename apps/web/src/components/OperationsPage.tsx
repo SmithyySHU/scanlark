@@ -1186,6 +1186,7 @@ type OperationsPageProps = {
   authEmail: string;
   onNavigate: (href: string) => void;
   onLogout: () => void;
+  embedded?: boolean;
 };
 
 const pipelineStageOptions: Array<{ value: PipelineStage; label: string }> = [
@@ -1945,6 +1946,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   authEmail,
   onNavigate,
   onLogout,
+  embedded = false,
 }) => {
   const activeRoute = getRouteKey(currentPath);
   const businessId = getBusinessIdFromPath(currentPath);
@@ -10261,25 +10263,27 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   return (
-    <div className="ops-page">
+    <div className={`ops-page ${embedded ? "ops-page--embedded" : ""}`}>
       <style>{operationsStyles}</style>
-      <header className="ops-topbar">
-        <div>
-          <strong>Scanlark</strong>
-          <span>Founder operations workspace</span>
-        </div>
-        <nav className="ops-global-nav" aria-label="Internal workspaces">
-          {renderLink("/operations", "Operations")}
-          {renderLink("/dashboard?selectSite=1", "Monitoring")}
-          {renderLink("/admin", "System Admin")}
-        </nav>
-        <div className="ops-account">
-          <span>{authEmail}</span>
-          <button type="button" onClick={onLogout}>
-            Log out
-          </button>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="ops-topbar">
+          <div>
+            <strong>Scanlark</strong>
+            <span>Founder operations workspace</span>
+          </div>
+          <nav className="ops-global-nav" aria-label="Internal workspaces">
+            {renderLink("/operations", "Operations")}
+            {renderLink("/dashboard?selectSite=1", "Monitoring")}
+            {renderLink("/admin", "System Admin")}
+          </nav>
+          <div className="ops-account">
+            <span>{authEmail}</span>
+            <button type="button" onClick={onLogout}>
+              Log out
+            </button>
+          </div>
+        </header>
+      )}
       <div className="ops-shell">
         <aside className="ops-sidebar">
           <div className="ops-sidebar__title">Operations</div>
@@ -10333,6 +10337,10 @@ const operationsStyles = `
     background: var(--bg);
     color: var(--text);
     padding: 16px;
+  }
+  .ops-page--embedded {
+    min-height: auto;
+    padding: 0;
   }
   .ops-topbar {
     position: sticky;
@@ -10413,6 +10421,9 @@ const operationsStyles = `
     grid-template-columns: 220px minmax(0, 1fr);
     gap: 16px;
     align-items: start;
+  }
+  .ops-page--embedded .ops-shell {
+    max-width: none;
   }
   .ops-sidebar,
   .ops-panel,

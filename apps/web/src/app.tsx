@@ -38,6 +38,11 @@ import {
   type LegalPageSlug,
 } from "./legalPages";
 import { ScanProgressHero } from "./components/ScanProgressHero";
+import { ScanlarkLogo } from "./components/brand/ScanlarkLogo";
+import {
+  buildAppUrl as buildCanonicalAppUrl,
+  getAppHostnameRedirectUrl,
+} from "./appLinks";
 
 type ScanStatus =
   | "queued"
@@ -200,6 +205,41 @@ interface PublicConfig {
   internalOnlyMode: boolean;
   registrationAvailable: boolean;
   contactEmail: string;
+}
+
+function parseAuthErrorCode(responseText: string): string | null {
+  try {
+    const parsed = JSON.parse(responseText) as { error?: unknown };
+    return typeof parsed.error === "string" ? parsed.error : null;
+  } catch {
+    return null;
+  }
+}
+
+function getAuthFailureMessage(
+  endpoint: "login" | "register",
+  status: number,
+  responseText: string,
+): string {
+  const errorCode = parseAuthErrorCode(responseText);
+
+  if (endpoint === "login") {
+    if (status === 401 && errorCode === "invalid_credentials") {
+      return "Invalid credentials.";
+    }
+    if (status === 403) {
+      return "Request origin is not permitted.";
+    }
+    return "Login service unavailable.";
+  }
+
+  if (status === 403 && errorCode === "registration_closed") {
+    return "Scanlark is currently operating as a managed website health service. Public access is temporarily closed.";
+  }
+  if (status === 409 && errorCode === "email_exists") {
+    return "Email already registered.";
+  }
+  return "Could not create account. Please try again.";
 }
 
 interface AccountProfileResponse {
@@ -945,6 +985,7 @@ type SsePayload =
   | NotificationCreatedEventPayload
   | NotificationCountUpdatedEventPayload;
 
+const APP_LINK_ENV = import.meta.env as Record<string, string | undefined>;
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const DEFAULT_PUBLIC_CONFIG: PublicConfig = {
   internalOnlyMode: false,
@@ -2730,7 +2771,7 @@ function getWhyDetails(row: ScanLink) {
 
 function getSystemTheme(): ThemeMode {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function")
-    return "dark";
+    return "light";
   return window.matchMedia("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
@@ -3718,8 +3759,8 @@ const App: React.FC = () => {
     "hidden" | "running" | "completed"
   >("hidden");
   const [themePreference, setThemePreference] =
-    useState<ThemePreference>("system");
-  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+    useState<ThemePreference>("light");
+  const [themeMode, setThemeMode] = useState<ThemeMode>("light");
   const [paneWidth, setPaneWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("all");
@@ -5953,6 +5994,26 @@ const App: React.FC = () => {
     () => (legalPageSlug ? LEGAL_PAGE_BY_SLUG[legalPageSlug] : null),
     [legalPageSlug],
   );
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const metaDescription = document.querySelector<HTMLMetaElement>(
+      'meta[name="description"]',
+    );
+    if (currentLegalPage) {
+      document.title = `${currentLegalPage.title} | Scanlark`;
+      metaDescription?.setAttribute("content", currentLegalPage.intro);
+      return;
+    }
+    if (route === "landing") {
+      document.title = "Scanlark | Website Health Checks and Monitoring";
+      metaDescription?.setAttribute(
+        "content",
+        "Scanlark provides founder-operated website health checks and managed monitoring for businesses that want to find website problems before customers do.",
+      );
+      return;
+    }
+    document.title = "Scanlark App | Website Health Monitoring";
+  }, [currentLegalPage, route]);
   const featuredLearnArticles = useMemo(
     () =>
       FEATURED_LEARN_ARTICLE_SLUGS.map(
@@ -6479,10 +6540,6 @@ const App: React.FC = () => {
       : ignoreRules.length === 0
         ? "No ignore rules configured"
         : `${ignoreRules.filter((rule) => rule.is_enabled).length} enabled of ${ignoreRules.length} total`;
-  const primaryAppSections: Array<{ key: AppSection; label: string }> = [
-    { key: "dashboard", label: "Dashboard" },
-    { key: "reports", label: "Reports" },
-  ];
   const isPublicLandingRoute = route === "landing";
   const isManagedPublicLandingRoute =
     isPublicLandingRoute || (internalOnlyMode && route === "learn");
@@ -6535,32 +6592,153 @@ const App: React.FC = () => {
         ? "Public access is temporarily closed. Approved internal operators can sign in."
         : "Use your Scanlark account to open the monitoring dashboard.";
 
-  const renderWorkspaceSwitcher = () =>
-    hasOperationsWorkspaceAccess ? (
-      <div className="app-workspace-switcher">
-        <button
-          type="button"
-          className={`app-workspace-tab ${isMonitoringWorkspace ? "active" : ""}`}
-          onClick={() => navigateTo("/dashboard")}
-        >
-          Monitoring
-        </button>
-        <button
-          type="button"
-          className={`app-workspace-tab ${isOperationsRoute ? "active" : ""}`}
-          onClick={() => navigateTo("/operations")}
-        >
-          Operations
-        </button>
-        <button
-          type="button"
-          className={`app-workspace-tab ${isAdminRoute ? "active" : ""}`}
-          onClick={() => navigateTo("/admin")}
-        >
-          System Admin
-        </button>
-      </div>
-    ) : null;
+  const renderAppWorkspaceTabs = () => (
+    <div className="app-nav-tabs" aria-label="Primary workspace navigation">
+      {[
+        {
+          key: "dashboard",
+          label: "Dashboard",
+          active:
+            route === "app" &&
+            (appSection === "dashboard" ||
+              appSection === "site_settings" ||
+              appSection === "account"),
+          onClick: () => openAppSection("dashboard"),
+        },
+        {
+          key: "monitoring",
+          label: "Monitoring",
+          active:
+            appSection === "reports" ||
+            isReportRoute ||
+            isSiteSelectionRoute ||
+            isSiteSetupRoute,
+          onClick: () => openAppSection("reports"),
+        },
+        {
+          key: "operations",
+          label: "Operations",
+          active: isOperationsRoute,
+          onClick: () => navigateTo("/operations"),
+          hidden: !hasOperationsWorkspaceAccess,
+        },
+        {
+          key: "admin",
+          label: "System Admin",
+          active: isAdminRoute,
+          onClick: () => navigateTo("/admin"),
+          hidden: !hasOperationsWorkspaceAccess,
+        },
+      ]
+        .filter((item) => !item.hidden)
+        .map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={`app-nav-tab ${item.active ? "active" : ""}`}
+            onClick={item.onClick}
+          >
+            {item.label}
+          </button>
+        ))}
+    </div>
+  );
+
+  const renderWorkspaceSwitcher = () => renderAppWorkspaceTabs();
+
+  const renderAppTopNav = (options?: {
+    showSiteSwitcher?: boolean;
+    contextLabel?: string;
+  }) => {
+    const showSiteSwitcher = options?.showSiteSwitcher ?? true;
+    return (
+      <nav className="top-nav app-shell-top-nav">
+        <div className="app-brand-block">
+          <ScanlarkLogo
+            variant="mark"
+            size="compact"
+            theme={themeMode === "dark" ? "dark" : "light"}
+            className="app-brand-mark"
+          />
+          <div>
+            <div
+              style={{
+                fontWeight: 800,
+                fontSize: "18px",
+                fontFamily: "var(--font-display)",
+              }}
+            >
+              Scanlark
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+              Internal website health workspace
+            </div>
+            {internalOnlyMode && (
+              <div className="internal-mode-label">Internal Operations</div>
+            )}
+          </div>
+          {renderAppWorkspaceTabs()}
+        </div>
+
+        {showSiteSwitcher ? (
+          <div className="app-site-switcher">
+            <div style={{ minWidth: 0 }}>
+              <div className="app-site-switcher__label">Selected Site</div>
+              <select
+                value={selectedSiteId ?? ""}
+                onChange={(event) => {
+                  const nextSite = sites.find(
+                    (site) => site.id === event.target.value,
+                  );
+                  if (nextSite) void handleSelectSiteFromNavigation(nextSite);
+                }}
+                className="app-input"
+                style={{ minHeight: "44px" }}
+              >
+                {!selectedSiteId && <option value="">Select a site</option>}
+                {sites.map((site) => (
+                  <option key={site.id} value={site.id}>
+                    {getSiteOptionLabel(site).slice(0, 90)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button onClick={openAddSiteModal} className="secondary-button">
+              Add site
+            </button>
+          </div>
+        ) : (
+          <div className="app-shell-context">{options?.contextLabel}</div>
+        )}
+
+        <div className="app-toolbar">
+          {authUser && renderNotificationBell()}
+          {authUser && (
+            <div
+              ref={userMenuRef}
+              style={{
+                position: "relative",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                {getUserDisplayName(authUser) ?? authUser.email}
+              </div>
+              <button
+                onClick={() => setUserMenuOpen((prev) => !prev)}
+                className="secondary-button"
+              >
+                Account
+              </button>
+              {userMenuOpen && renderAccountMenu()}
+            </div>
+          )}
+        </div>
+      </nav>
+    );
+  };
 
   const formatReportUrlLabel = (url: string) => {
     try {
@@ -8909,6 +9087,17 @@ const App: React.FC = () => {
   }
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const redirectUrl = getAppHostnameRedirectUrl(
+      window.location,
+      APP_LINK_ENV,
+    );
+    if (redirectUrl) {
+      window.location.replace(redirectUrl);
+    }
+  }, [locationPathname, locationSearch]);
+
+  useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
@@ -9293,7 +9482,7 @@ const App: React.FC = () => {
     if (stored === "dark" || stored === "light" || stored === "system") {
       setThemePreference(stored);
     } else {
-      setThemePreference("system");
+      setThemePreference("light");
     }
   }, []);
 
@@ -9712,6 +9901,17 @@ const App: React.FC = () => {
       setAuthError("Email and password are required.");
       return;
     }
+    if (typeof window !== "undefined") {
+      const redirectUrl = getAppHostnameRedirectUrl(
+        window.location,
+        APP_LINK_ENV,
+      );
+      if (redirectUrl) {
+        setAuthError("Open the secure Scanlark application to sign in.");
+        window.location.assign(redirectUrl);
+        return;
+      }
+    }
     setAuthWorking(true);
     setAuthError(null);
     try {
@@ -9728,16 +9928,7 @@ const App: React.FC = () => {
           status: res.status,
           body: text.slice(0, 200),
         });
-        if (res.status === 403 && !registrationAvailable) {
-          throw new Error(
-            "Scanlark is currently operating as a managed website health service. Public access is temporarily closed.",
-          );
-        }
-        throw new Error(
-          endpoint === "login"
-            ? "Invalid email or password."
-            : "Could not create account. Please try again.",
-        );
+        throw new Error(getAuthFailureMessage(endpoint, res.status, text));
       }
       const data = (await res.json()) as AuthUser;
       setAuthUser(data);
@@ -9756,7 +9947,7 @@ const App: React.FC = () => {
         getErrorMessage(
           err,
           authMode === "login" || !registrationAvailable
-            ? "Invalid email or password."
+            ? "Login service unavailable."
             : "Could not create account. Please try again.",
         ),
       );
@@ -9779,7 +9970,33 @@ const App: React.FC = () => {
 
   function openAuth(mode: "login" | "register") {
     setAuthMode(registrationAvailable ? mode : "login");
-    navigateTo("/login");
+    openApplicationPath("/login");
+  }
+
+  function getApplicationHref(
+    pathname: string,
+    searchParams?: Record<string, string | null | undefined>,
+  ) {
+    const params = new URLSearchParams();
+    if (searchParams) {
+      Object.entries(searchParams).forEach(([key, value]) => {
+        if (value != null) params.set(key, value);
+      });
+    }
+    return buildCanonicalAppUrl(
+      pathname,
+      params,
+      APP_LINK_ENV,
+      typeof window === "undefined" ? undefined : window.location.origin,
+    );
+  }
+
+  function openApplicationPath(
+    pathname: string,
+    searchParams?: Record<string, string | null | undefined>,
+  ) {
+    if (typeof window === "undefined") return;
+    window.location.assign(getApplicationHref(pathname, searchParams));
   }
 
   function openManagedServiceContact() {
@@ -16537,13 +16754,19 @@ const App: React.FC = () => {
           );
           box-shadow: var(--shadow);
         }
+        .app-shell-top-nav {
+          margin-bottom: 18px;
+        }
         .top-nav--select-site {
           grid-template-columns: minmax(0, 1fr) auto;
+        }
+        .app-brand-mark {
+          flex: 0 0 auto;
         }
         .app-brand-block {
           display: flex;
           align-items: center;
-          gap: 18px;
+          gap: 14px;
           min-width: 0;
         }
         .select-site-topbar-brand {
@@ -16622,6 +16845,25 @@ const App: React.FC = () => {
           color: var(--text);
           border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
           box-shadow: var(--soft-shadow);
+        }
+        .app-shell-context {
+          justify-self: stretch;
+          min-height: 44px;
+          display: flex;
+          align-items: center;
+          border: 1px solid var(--border);
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--panel-elev) 72%, transparent);
+          color: var(--text-muted);
+          padding: 0 14px;
+          font-size: 12px;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+        }
+        .app-shell-embedded-page {
+          width: min(1480px, 100%);
+          margin: 0 auto;
         }
         .app-workspace-switcher {
           display: flex;
@@ -20060,6 +20302,22 @@ const App: React.FC = () => {
             page={currentLegalPage}
             isAuthenticated={!!authUser}
             onNavigate={(path) => navigateTo(path)}
+            onOpenPrimary={openManagedServiceContact}
+            onOpenSecondary={() =>
+              authUser && hasOperationsWorkspaceAccess
+                ? openApplicationPath("/operations")
+                : authUser
+                  ? openApplicationPath("/dashboard/account")
+                  : openAuth("login")
+            }
+            secondaryHref={
+              authUser && hasOperationsWorkspaceAccess
+                ? getApplicationHref("/operations")
+                : authUser
+                  ? getApplicationHref("/dashboard/account")
+                  : getApplicationHref("/login")
+            }
+            themeControl={renderThemeSegmentedControl()}
           />
         ) : authLoading || publicConfigLoading ? (
           <div
@@ -20084,11 +20342,14 @@ const App: React.FC = () => {
               secondaryLabel="Login"
               onOpenPrimary={openManagedServiceContact}
               onOpenSecondary={() => openAuth("login")}
+              secondaryHref={getApplicationHref("/login")}
               onOpenLearn={() => navigateTo("/learn")}
               legalLinks={LEGAL_PAGE_LINKS}
               onOpenLegal={(path) => navigateTo(path)}
+              onNavigate={(path) => navigateTo(path)}
               onOpenAccount={undefined}
               managedMode={internalOnlyMode}
+              themeControl={renderThemeSegmentedControl()}
             />
           ) : isLoginRoute || protectedRouteRequiresAuth ? (
             <AuthPage
@@ -20113,39 +20374,57 @@ const App: React.FC = () => {
         ) : isManagedPublicLandingRoute ? (
           <MarketingPage
             isAuthenticated
-            primaryLabel={
+            primaryLabel="Request a website health check"
+            secondaryLabel={
               hasOperationsWorkspaceAccess
-                ? "Open operations"
-                : "Open dashboard"
+                ? "Open Operations"
+                : "Open Dashboard"
             }
-            secondaryLabel="Account"
-            onOpenPrimary={() =>
+            onOpenPrimary={openManagedServiceContact}
+            onOpenSecondary={() =>
               hasOperationsWorkspaceAccess
-                ? navigateTo("/operations")
-                : navigateTo("/dashboard", {
+                ? openApplicationPath("/operations")
+                : openApplicationPath("/dashboard", {
                     [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
                   })
             }
-            onOpenSecondary={() => navigateTo("/dashboard/account")}
+            secondaryHref={
+              hasOperationsWorkspaceAccess
+                ? getApplicationHref("/operations")
+                : getApplicationHref("/dashboard", {
+                    [LANDING_DASHBOARD_SELECT_QUERY_PARAM]: "1",
+                  })
+            }
             onOpenLearn={() => navigateTo("/learn")}
             legalLinks={LEGAL_PAGE_LINKS}
             onOpenLegal={(path) => navigateTo(path)}
-            onOpenAccount={() => navigateTo("/dashboard/account")}
+            onNavigate={(path) => navigateTo(path)}
+            onOpenAccount={() => openApplicationPath("/dashboard/account")}
             managedMode={internalOnlyMode}
+            themeControl={renderThemeSegmentedControl()}
           />
         ) : isOperationsRoute ? (
           authUser && hasOperationsWorkspaceAccess ? (
-            <OperationsPage
-              apiBase={API_BASE}
-              apiFetch={apiFetch}
-              currentPath={locationPathname}
-              currentSearch={locationSearch}
-              authEmail={authUser?.email ?? ""}
-              onNavigate={navigateToHref}
-              onLogout={() => {
-                void handleLogout();
-              }}
-            />
+            <>
+              {renderAppTopNav({
+                showSiteSwitcher: false,
+                contextLabel: "Operations",
+              })}
+              <div className="app-shell-embedded-page">
+                <OperationsPage
+                  apiBase={API_BASE}
+                  apiFetch={apiFetch}
+                  currentPath={locationPathname}
+                  currentSearch={locationSearch}
+                  authEmail={authUser?.email ?? ""}
+                  onNavigate={navigateToHref}
+                  onLogout={() => {
+                    void handleLogout();
+                  }}
+                  embedded
+                />
+              </div>
+            </>
           ) : (
             <div
               style={{
@@ -20214,12 +20493,21 @@ const App: React.FC = () => {
           )
         ) : isAdminRoute ? (
           authUser && hasOperationsWorkspaceAccess ? (
-            <AdminPage
-              apiBase={API_BASE}
-              apiFetch={apiFetch}
-              authUser={authUser}
-              onBackToDashboard={() => navigateTo("/dashboard")}
-            />
+            <>
+              {renderAppTopNav({
+                showSiteSwitcher: false,
+                contextLabel: "System Admin",
+              })}
+              <div className="app-shell-embedded-page">
+                <AdminPage
+                  apiBase={API_BASE}
+                  apiFetch={apiFetch}
+                  authUser={authUser}
+                  onBackToDashboard={() => navigateTo("/dashboard")}
+                  embedded
+                />
+              </div>
+            </>
           ) : (
             <div
               style={{
@@ -21181,109 +21469,7 @@ const App: React.FC = () => {
           </div>
         ) : reportView ? (
           <>
-            {!isReadOnlyReport && (
-              <nav className="top-nav">
-                <div className="app-brand-block">
-                  <div>
-                    <div
-                      style={{
-                        fontWeight: 700,
-                        fontSize: "18px",
-                        fontFamily: "var(--font-display)",
-                      }}
-                    >
-                      Scanlark
-                    </div>
-                    <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                      Customer monitoring control centre
-                    </div>
-                  </div>
-                  <div className="app-nav-tabs">
-                    {primaryAppSections.map((item) => {
-                      const isActive =
-                        appSection === item.key ||
-                        (item.key === "dashboard" &&
-                          appSection === "site_settings");
-                      return (
-                        <button
-                          key={item.key}
-                          className={`app-nav-tab ${isActive ? "active" : ""}`}
-                          onClick={() => openAppSection(item.key)}
-                        >
-                          {item.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  {renderWorkspaceSwitcher()}
-                </div>
-
-                <div className="app-site-switcher">
-                  <div style={{ minWidth: 0 }}>
-                    <div className="app-site-switcher__label">
-                      Selected Site
-                    </div>
-                    <select
-                      value={selectedSiteId ?? ""}
-                      onChange={(event) => {
-                        const nextSite = sites.find(
-                          (site) => site.id === event.target.value,
-                        );
-                        if (nextSite) {
-                          void (async () => {
-                            await handleSelectSite(nextSite);
-                            navigateToDashboard({ skipPicker: true });
-                          })();
-                        }
-                      }}
-                      className="app-input"
-                      style={{ minHeight: "44px" }}
-                    >
-                      {!selectedSiteId && (
-                        <option value="">Select a site</option>
-                      )}
-                      {sites.map((site) => (
-                        <option key={site.id} value={site.id}>
-                          {getSiteOptionLabel(site).slice(0, 90)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    onClick={openAddSiteModal}
-                    className="secondary-button"
-                  >
-                    Add site
-                  </button>
-                </div>
-
-                <div className="app-toolbar">
-                  {authUser && <>{renderNotificationBell()}</>}
-                  {authUser && (
-                    <div
-                      ref={userMenuRef}
-                      style={{
-                        position: "relative",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "8px",
-                      }}
-                    >
-                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        {getUserDisplayName(authUser) ?? authUser.email}
-                      </div>
-                      <button
-                        onClick={() => setUserMenuOpen((prev) => !prev)}
-                        className="secondary-button"
-                      >
-                        Account
-                      </button>
-                      {userMenuOpen && renderAccountMenu()}
-                    </div>
-                  )}
-                </div>
-              </nav>
-            )}
+            {!isReadOnlyReport && renderAppTopNav()}
             <div className="report-page">
               <div className="report-header">
                 <div>
@@ -22140,101 +22326,7 @@ const App: React.FC = () => {
           </>
         ) : (
           <>
-            <nav className="top-nav">
-              <div className="app-brand-block">
-                <div>
-                  <div
-                    style={{
-                      fontWeight: 700,
-                      fontSize: "18px",
-                      fontFamily: "var(--font-display)",
-                    }}
-                  >
-                    Scanlark
-                  </div>
-                  <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                    Customer monitoring control centre
-                  </div>
-                  {internalOnlyMode && (
-                    <div className="internal-mode-label">
-                      Internal Operations
-                    </div>
-                  )}
-                </div>
-                <div className="app-nav-tabs">
-                  {primaryAppSections.map((item) => {
-                    const isActive =
-                      appSection === item.key ||
-                      (item.key === "dashboard" &&
-                        appSection === "site_settings");
-                    return (
-                      <button
-                        key={item.key}
-                        className={`app-nav-tab ${isActive ? "active" : ""}`}
-                        onClick={() => openAppSection(item.key)}
-                      >
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                {renderWorkspaceSwitcher()}
-              </div>
-
-              <div className="app-site-switcher">
-                <div style={{ minWidth: 0 }}>
-                  <div className="app-site-switcher__label">Selected Site</div>
-                  <select
-                    value={selectedSiteId ?? ""}
-                    onChange={(event) => {
-                      const nextSite = sites.find(
-                        (site) => site.id === event.target.value,
-                      );
-                      if (nextSite)
-                        void handleSelectSiteFromNavigation(nextSite);
-                    }}
-                    className="app-input"
-                    style={{ minHeight: "44px" }}
-                  >
-                    {!selectedSiteId && <option value="">Select a site</option>}
-                    {sites.map((site) => (
-                      <option key={site.id} value={site.id}>
-                        {getSiteOptionLabel(site).slice(0, 90)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <button onClick={openAddSiteModal} className="secondary-button">
-                  Add site
-                </button>
-              </div>
-
-              <div className="app-toolbar">
-                {authUser && renderNotificationBell()}
-                {authUser && (
-                  <div
-                    ref={userMenuRef}
-                    style={{
-                      position: "relative",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                    }}
-                  >
-                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      {getUserDisplayName(authUser) ?? authUser.email}
-                    </div>
-                    <button
-                      onClick={() => setUserMenuOpen((prev) => !prev)}
-                      className="secondary-button"
-                    >
-                      Account
-                    </button>
-                    {userMenuOpen && renderAccountMenu()}
-                  </div>
-                )}
-              </div>
-            </nav>
+            {renderAppTopNav()}
 
             <div className="shell">
               <aside
