@@ -1,0 +1,8 @@
+Add these to apps/web/index.html:
+
+<link rel="icon" type="image/png" sizes="32x32" href="/brand/icons/favicon-32x32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="/brand/icons/favicon-16x16.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="/brand/icons/apple-touch-icon.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta property="og:image" content="https://YOUR-DOMAIN/brand/social/scanlark-og-1200x630.png" />
+<meta name="twitter:card" content="summary_large_image" />
