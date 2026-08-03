@@ -756,6 +756,35 @@ test("operations communication validation distinguishes drafts from sent records
   );
 });
 
+test("operations communication insert SQL keeps target columns aligned with values", () => {
+  const source = readFileSync(
+    new URL(
+      "../../../packages/db/src/operationsCommunications.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const insertMatch = source.match(
+    /INSERT INTO operations_communications\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*?)\)\s*RETURNING \*/m,
+  );
+  assert(insertMatch, "operations communications insert SQL was not found");
+  const columns = insertMatch[1]
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const values = insertMatch[2]
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  assert.equal(values.length, columns.length);
+  assert.equal(columns[20], "template_snapshot_json");
+  assert.equal(values[20], "$21::jsonb");
+  assert.equal(columns[21], "public_asset_urls_json");
+  assert.equal(values[21], "$22::jsonb");
+  assert.equal(columns[22], "attachment_requirements_json");
+  assert.equal(values[22], "$23::jsonb");
+});
+
 test("operations task validation supports follow-up scheduling and snoozing inputs", () => {
   const task = parseOperationsTaskInput({
     businessId: "11111111-1111-4111-8111-111111111111",

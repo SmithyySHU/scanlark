@@ -42,10 +42,13 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
-    WHERE conname = 'operations_client_communication_templates_attachment_policy_check'
+    WHERE conname IN (
+      'operations_client_communication_templates_attachment_policy_che',
+      'ops_comm_template_attachment_policy_check'
+    )
   ) THEN
     ALTER TABLE operations_client_communication_templates
-      ADD CONSTRAINT operations_client_communication_templates_attachment_policy_check
+      ADD CONSTRAINT ops_comm_template_attachment_policy_check
       CHECK (attachment_policy IN ('none', 'client_report_pdf', 'quote_pdf', 'updated_report_pdf'));
   END IF;
 

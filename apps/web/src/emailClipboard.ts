@@ -1,10 +1,9 @@
 export type RichEmailCopyResult =
   | { ok: true; mode: "html_and_plain_text"; message: string }
-  | { ok: false; mode: "plain_text_fallback"; message: string };
+  | { ok: false; mode: "rich_unavailable"; message: string };
 
 type ClipboardLike = {
   write?: (items: ClipboardItem[]) => Promise<void>;
-  writeText?: (text: string) => Promise<void>;
 };
 
 type ClipboardItemConstructor = new (
@@ -33,17 +32,19 @@ export async function copyRichEmailToClipboard(
         message: "Formatted email copied.",
       };
     } catch {
-      // Fall back to plain text below.
+      return {
+        ok: false,
+        mode: "rich_unavailable",
+        message:
+          "Rich formatting could not be copied. Use Copy plain text, or try a supported browser.",
+      };
     }
   }
 
-  if (clipboard?.writeText) {
-    await clipboard.writeText(input.plainText);
-  }
   return {
     ok: false,
-    mode: "plain_text_fallback",
+    mode: "rich_unavailable",
     message:
-      "Your browser could not copy the formatted version. The plain-text version has been copied instead.",
+      "Rich formatting could not be copied. Use Copy plain text, or try a supported browser.",
   };
 }

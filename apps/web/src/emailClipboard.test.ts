@@ -31,22 +31,23 @@ test("rich email clipboard writes html and plain text", async () => {
   );
 });
 
-test("rich email clipboard falls back to plain text", async () => {
+test("rich email clipboard failure is reported honestly without plain text fallback", async () => {
   let copied = "";
+  const clipboard = {
+    write: async () => {
+      throw new Error("permission denied");
+    },
+    writeText: async (text: string) => {
+      copied = text;
+    },
+  };
   const result = await copyRichEmailToClipboard(
     { html: "<p>Hello</p>", plainText: "Hello" },
-    {
-      write: async () => {
-        throw new Error("permission denied");
-      },
-      writeText: async (text) => {
-        copied = text;
-      },
-    },
+    clipboard,
     TestClipboardItem as unknown as typeof ClipboardItem,
   );
 
   assert.equal(result.ok, false);
-  assert.equal(result.mode, "plain_text_fallback");
-  assert.equal(copied, "Hello");
+  assert.equal(result.mode, "rich_unavailable");
+  assert.equal(copied, "");
 });

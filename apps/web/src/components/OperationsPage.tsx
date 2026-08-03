@@ -2167,6 +2167,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [selectedCommunicationId, setSelectedCommunicationId] = useState<
     string | null
   >(null);
+  const [communicationCopyStatus, setCommunicationCopyStatus] = useState("");
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   const [editingTemplateId, setEditingTemplateId] = useState<string | null>(
     null,
@@ -4592,11 +4593,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       return;
     }
     const html = communicationForm.htmlFragment;
+    if (!html.trim()) {
+      setCommunicationForm((prev) => ({
+        ...prev,
+        copyStatus:
+          "Generate the rendered HTML email before copying formatted email.",
+      }));
+      return;
+    }
     const plainText =
       communicationForm.plainTextBody ||
       `Subject: ${communicationForm.subject}\n\n${communicationForm.body}`;
     const result = await copyRichEmailToClipboard({
-      html: html || plainText.replace(/\n/g, "<br>"),
+      html,
       plainText,
     });
     setCommunicationForm((prev) => ({
@@ -6008,7 +6017,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         className={`ops-activity ${
                           selectedCommunication?.id === item.id ? "active" : ""
                         }`}
-                        onClick={() => setSelectedCommunicationId(item.id)}
+                        onClick={() => {
+                          setSelectedCommunicationId(item.id);
+                          setCommunicationCopyStatus("");
+                        }}
                       >
                         <strong>
                           {item.business_name ?? "Business"} ·{" "}
@@ -6096,6 +6108,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       title="Saved email HTML preview"
                     />
                   )}
+                  {communicationCopyStatus && (
+                    <div className="ops-muted">{communicationCopyStatus}</div>
+                  )}
                   <div className="ops-form-actions">
                     <button
                       type="button"
@@ -6135,17 +6150,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     <button
                       type="button"
                       className="ops-button"
-                      onClick={() =>
+                      onClick={() => {
                         void copyRichEmailToClipboard({
-                          html:
-                            selectedCommunication.html_fragment ??
-                            selectedCommunication.body.replace(/\n/g, "<br>"),
+                          html: selectedCommunication.html_fragment ?? "",
                           plainText:
                             selectedCommunication.plain_text_body ??
                             selectedCommunication.body,
-                        })
-                      }
-                      disabled={!selectedCommunication.body}
+                        }).then((result) =>
+                          setCommunicationCopyStatus(result.message),
+                        );
+                      }}
+                      disabled={!selectedCommunication.html_fragment}
                     >
                       Copy formatted email
                     </button>
