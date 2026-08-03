@@ -158,6 +158,10 @@ import {
   OPERATIONS_TASK_STATUSES,
   SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
   findUnresolvedClientCommunicationPlaceholders,
+  getEmailAssetBaseUrl,
+  getOperationsDefaultSignatureMode,
+  getOperationsSenderIdentities,
+  getPublicSiteUrl,
   parseOperationsBusinessInput,
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
@@ -208,6 +212,7 @@ import {
   parseRelationshipType,
   parseRequiredDateField,
   renderClientCommunicationTemplate,
+  type OperationsSenderIdentity,
   serializeDate,
   serializeOperationsSummary,
   textField,
@@ -345,10 +350,32 @@ function getUuidParam(req: Request, res: Response, key: string) {
   return value;
 }
 
-function getSenderDefaults() {
+function senderIdentityForKey(
+  key: string | null | undefined,
+  identities: OperationsSenderIdentity[] = getOperationsSenderIdentities(),
+) {
+  return identities.find((identity) => identity.key === key) ?? identities[0];
+}
+
+function getCommunicationRenderOptions(record: Record<string, unknown>) {
+  const identities = getOperationsSenderIdentities();
+  const senderIdentity = senderIdentityForKey(
+    optionalTextField(record, "senderIdentityKey"),
+    identities,
+  );
   return {
-    senderName: process.env.OPERATIONS_SENDER_NAME ?? "",
-    senderEmail: process.env.OPERATIONS_SENDER_EMAIL ?? "",
+    senderIdentity,
+    identities,
+    signatureMode:
+      record.signatureMode === "use_mailbox_signature" ||
+      record.signatureMode === "include_scanlark_signature"
+        ? record.signatureMode
+        : getOperationsDefaultSignatureMode(),
+    wordingVariantKey: optionalTextField(record, "wordingVariantKey"),
+    publicSiteUrl: getPublicSiteUrl(),
+    emailAssetBaseUrl: getEmailAssetBaseUrl(),
+    publicContactEmail:
+      process.env.PUBLIC_CONTACT_EMAIL ?? "contact@scanlark.com",
   };
 }
 
@@ -592,6 +619,34 @@ function assertCommunicationCanTransition(input: {
   }
 }
 
+function assertSentCommunicationMetadata(
+  record: Record<string, unknown>,
+  options: { force?: boolean } = {},
+) {
+  const status = typeof record.status === "string" ? record.status : null;
+  if (status !== "sent" && !options.force) return;
+  const senderName = optionalTextField(record, "senderName");
+  const senderEmail = optionalTextField(record, "senderEmail");
+  const recipientEmail = optionalTextField(record, "recipientEmail");
+  if (!senderName || !senderEmail) throw new Error("sender_identity_required");
+  if (!recipientEmail) throw new Error("recipient_email_required");
+  const attachmentRequirements = Array.isArray(
+    record.attachmentRequirementsJson,
+  )
+    ? record.attachmentRequirementsJson
+    : [];
+  const requiresAttachment = attachmentRequirements.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      (item as { required?: unknown }).required !== false,
+  );
+  const confirmed = parseDateField(record, "attachmentConfirmedAt");
+  if (requiresAttachment && !confirmed) {
+    throw new Error("attachment_confirmation_required");
+  }
+}
+
 function suggestedFollowUpDateForTemplate(
   template: OperationsCommunicationTemplateRow,
 ) {
@@ -711,6 +766,13 @@ function handleValidationError(res: Response, err: unknown) {
       "unresolved_communication_placeholders",
       "Resolve unresolved placeholders before this communication can be marked ready or sent.",
     );
+  }
+  if (
+    message === "sender_identity_required" ||
+    message === "recipient_email_required" ||
+    message === "attachment_confirmation_required"
+  ) {
+    return sendApiError(res, 400, message, message.replace(/_/g, " "));
   }
   if (message === "communication_sent_locked") {
     return sendApiError(
@@ -3813,6 +3875,10 @@ export function mountOperationsRoutes(app: express.Application) {
         ),
         categories: OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES,
         placeholders: SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS,
+        senderIdentities: getOperationsSenderIdentities(),
+        defaultSignatureMode: getOperationsDefaultSignatureMode(),
+        publicSiteUrl: getPublicSiteUrl(),
+        emailAssetBaseUrl: getEmailAssetBaseUrl(),
       });
     } catch (err) {
       console.error("Operations communication templates failed", err);
@@ -3835,6 +3901,22 @@ export function mountOperationsRoutes(app: express.Application) {
           category: OperationsCommunicationTemplateCategory;
           subjectTemplate: string;
           bodyTemplate: string;
+          preheaderTemplate?: string | null;
+          htmlBodyTemplate?: string | null;
+          plainTextTemplate?: string | null;
+          layoutKey?: Parameters<
+            typeof createOperationsCommunicationTemplate
+          >[1]["layoutKey"];
+          contentVariantsJson?: Parameters<
+            typeof createOperationsCommunicationTemplate
+          >[1]["contentVariantsJson"];
+          subjectSuggestionsJson?: string[];
+          attachmentPolicy?: Parameters<
+            typeof createOperationsCommunicationTemplate
+          >[1]["attachmentPolicy"];
+          signatureMode?: Parameters<
+            typeof createOperationsCommunicationTemplate
+          >[1]["signatureMode"];
           defaultFollowUpBusinessDays?: number | null;
           isActive?: boolean;
         },
@@ -3890,6 +3972,7 @@ export function mountOperationsRoutes(app: express.Application) {
         const contactId = optionalUuidField(record, "contactId");
         const followUpAt = parseDateField(record, "followUpAt");
         const reportName = optionalTextField(record, "reportName");
+        const renderOptions = getCommunicationRenderOptions(record);
         const template = await getOperationsCommunicationTemplate(templateId);
         if (!template)
           return sendApiError(res, 404, "not_found", "Template not found");
@@ -3904,15 +3987,33 @@ export function mountOperationsRoutes(app: express.Application) {
         const suggestedFollowUpAt =
           followUpAt ?? suggestedFollowUpDateForTemplate(template);
         const rendered = renderClientCommunicationTemplate(template, context, {
-          ...getSenderDefaults(),
+          senderIdentityKey: renderOptions.senderIdentity.key,
+          senderName: renderOptions.senderIdentity.name,
+          senderEmail: renderOptions.senderIdentity.email,
+          signatureMode: renderOptions.signatureMode,
+          wordingVariantKey: renderOptions.wordingVariantKey,
+          publicSiteUrl: renderOptions.publicSiteUrl,
+          emailAssetBaseUrl: renderOptions.emailAssetBaseUrl,
+          publicContactEmail: renderOptions.publicContactEmail,
           followUpDate: suggestedFollowUpAt,
           reportName,
         });
         return res.json({
           preview: {
             subject: rendered.subject,
+            preheader: rendered.preheader,
             body: rendered.body,
+            htmlFragment: rendered.htmlFragment,
+            htmlDocument: rendered.htmlDocument,
+            plainText: rendered.plainText,
             unresolvedPlaceholders: rendered.unresolvedPlaceholders,
+            warnings: rendered.warnings,
+            publicAssetUrls: rendered.publicAssetUrls,
+            attachmentRequirements: rendered.attachmentRequirements,
+            layoutKey: rendered.layoutKey,
+            signatureMode: rendered.signatureMode,
+            senderIdentityKey: rendered.senderIdentityKey,
+            templateSnapshot: rendered.templateSnapshot,
             suggestedFollowUpAt: serializeDate(suggestedFollowUpAt),
           },
         });
@@ -3998,6 +4099,14 @@ export function mountOperationsRoutes(app: express.Application) {
             category: template.category,
             subjectTemplate: template.subject_template,
             bodyTemplate: template.body_template,
+            preheaderTemplate: template.preheader_template,
+            htmlBodyTemplate: template.html_body_template,
+            plainTextTemplate: template.plain_text_template,
+            layoutKey: template.layout_key,
+            contentVariantsJson: template.content_variants_json,
+            subjectSuggestionsJson: template.subject_suggestions_json,
+            attachmentPolicy: template.attachment_policy,
+            signatureMode: template.signature_mode,
             defaultFollowUpBusinessDays:
               template.default_follow_up_business_days,
             isActive: false,
@@ -4074,6 +4183,7 @@ export function mountOperationsRoutes(app: express.Application) {
         "businessId",
       );
       if (!businessId) throw new Error("invalid_businessId");
+      assertSentCommunicationMetadata(body as Record<string, unknown>);
       const input = parseOperationsCommunicationInput(req.body);
       const communication = await createOperationsCommunication(
         getActor(req),
@@ -4179,6 +4289,7 @@ export function mountOperationsRoutes(app: express.Application) {
         });
         const body = req.body && typeof req.body === "object" ? req.body : {};
         const record = body as Record<string, unknown>;
+        assertSentCommunicationMetadata(record, { force: true });
         assertCommunicationCanTransition({
           status: "sent",
           subject: input.subject ?? existing.subject,
@@ -4681,6 +4792,7 @@ export function mountOperationsRoutes(app: express.Application) {
         const contactId = optionalUuidField(record, "contactId");
         const followUpAt = parseDateField(record, "followUpAt");
         const reportName = optionalTextField(record, "reportName");
+        const renderOptions = getCommunicationRenderOptions(record);
         const [template, context] = await Promise.all([
           getOperationsCommunicationTemplate(templateId),
           getOperationsCommunicationDraftContext(businessId, { contactId }),
@@ -4692,7 +4804,14 @@ export function mountOperationsRoutes(app: express.Application) {
         const suggestedFollowUpAt =
           followUpAt ?? suggestedFollowUpDateForTemplate(template);
         const rendered = renderClientCommunicationTemplate(template, context, {
-          ...getSenderDefaults(),
+          senderIdentityKey: renderOptions.senderIdentity.key,
+          senderName: renderOptions.senderIdentity.name,
+          senderEmail: renderOptions.senderIdentity.email,
+          signatureMode: renderOptions.signatureMode,
+          wordingVariantKey: renderOptions.wordingVariantKey,
+          publicSiteUrl: renderOptions.publicSiteUrl,
+          emailAssetBaseUrl: renderOptions.emailAssetBaseUrl,
+          publicContactEmail: renderOptions.publicContactEmail,
           followUpDate: suggestedFollowUpAt,
           reportName,
         });
@@ -4710,8 +4829,19 @@ export function mountOperationsRoutes(app: express.Application) {
                 }
               : null,
             subject: rendered.subject,
+            preheader: rendered.preheader,
             body: rendered.body,
+            htmlFragment: rendered.htmlFragment,
+            htmlDocument: rendered.htmlDocument,
+            plainText: rendered.plainText,
             unresolvedPlaceholders: rendered.unresolvedPlaceholders,
+            warnings: rendered.warnings,
+            publicAssetUrls: rendered.publicAssetUrls,
+            attachmentRequirements: rendered.attachmentRequirements,
+            layoutKey: rendered.layoutKey,
+            signatureMode: rendered.signatureMode,
+            senderIdentityKey: rendered.senderIdentityKey,
+            templateSnapshot: rendered.templateSnapshot,
           },
         });
       } catch (err) {
@@ -4733,6 +4863,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId) return;
     try {
       const input = parseOperationsCommunicationInput(req.body);
+      assertSentCommunicationMetadata(req.body as Record<string, unknown>);
       const communication = await createOperationsCommunication(
         getActor(req),
         businessId,
@@ -4829,6 +4960,7 @@ export function mountOperationsRoutes(app: express.Application) {
         });
         const body = req.body && typeof req.body === "object" ? req.body : {};
         const record = body as Record<string, unknown>;
+        assertSentCommunicationMetadata(record, { force: true });
         assertCommunicationCanTransition({
           status: "sent",
           subject: input.subject ?? existing.subject,

@@ -309,11 +309,16 @@ export {
 } from "./operationsCommunications";
 export type {
   OperationsCommunicationChannel,
+  OperationsCommunicationAttachmentPolicy,
+  OperationsCommunicationAttachmentRequirement,
+  OperationsCommunicationContentVariant,
   OperationsCommunicationDirection,
   OperationsCommunicationDraftContext,
   OperationsCommunicationInput,
+  OperationsCommunicationLayoutKey,
   OperationsCommunicationListOptions,
   OperationsCommunicationRow,
+  OperationsCommunicationSignatureMode,
   OperationsCommunicationStatus,
   OperationsCommunicationTemplateCategory,
   OperationsCommunicationTemplateRow,

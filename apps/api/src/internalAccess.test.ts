@@ -38,6 +38,7 @@ import {
   parseOperationsQuoteItemInput,
   parseOperationsTaskInput,
   renderClientCommunicationTemplate,
+  sanitizeClientEmailHtml,
   serializeOperationsSummary,
 } from "./operationsHelpers";
 import {
@@ -618,6 +619,109 @@ test("operations communication missing first name stays visible until resolved",
 
   assert.equal(rendered.body, "Hi {{firstName}},");
   assert.deepEqual(rendered.unresolvedPlaceholders, ["firstName"]);
+});
+
+test("operations html communication renderer keeps plain text compatible", () => {
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "Hello {{businessName}}",
+      body_template: "Hi {{contactName}},\n\nPlain text only.",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://example.com",
+        general_email: "hello@example.com",
+      },
+      contact: null,
+      site: null,
+    },
+    {
+      senderName: "Connor Smith",
+      senderEmail: "connor@scanlark.com",
+      publicSiteUrl: "https://scanlark.com",
+      emailAssetBaseUrl: "https://scanlark.com/assets/email",
+    },
+  );
+
+  assert.equal(rendered.subject, "Hello Example Co");
+  assert.equal(rendered.body, "Hi Example Co,\n\nPlain text only.");
+  assert(rendered.htmlFragment.includes("https://scanlark.com/assets/email/"));
+  assert(rendered.htmlFragment.includes('alt="Scanlark"'));
+  assert(rendered.plainText.includes("Plain text only."));
+  assert.deepEqual(rendered.attachmentRequirements, []);
+});
+
+test("operations html communication renderer escapes placeholder injection and flags assets", () => {
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "Report for {{businessName}}",
+      body_template: "Hi {{firstName}}, {{topFinding}}",
+      html_body_template: "<p>{{topFinding}}</p>",
+      layout_key: "report_delivery",
+      attachment_policy: "client_report_pdf",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://example.com",
+        general_email: null,
+      },
+      contact: {
+        id: "contact_1",
+        first_name: "Ada",
+        last_name: null,
+        email: "ada@example.com",
+        do_not_contact: false,
+        do_not_contact_reason: null,
+        preferred_channel: null,
+      },
+      site: {
+        site_id: "site_1",
+        url: "https://example.com",
+        site_display_name: null,
+        latest_scan_id: "scan_1",
+        critical_issue_count: 1,
+        high_issue_count: 2,
+        top_finding: "<img src=x onerror=alert(1)>",
+      },
+    },
+    {
+      senderName: "Connor Smith",
+      senderEmail: "connor@scanlark.com",
+      publicSiteUrl: "https://scanlark.com",
+      emailAssetBaseUrl: "https://scanlark.com/assets/email",
+    },
+  );
+
+  assert(rendered.htmlFragment.includes("&lt;img"));
+  assert(!rendered.htmlFragment.includes("<img src=x"));
+  assert.deepEqual(rendered.attachmentRequirements, [
+    {
+      key: "client_report_pdf",
+      label: "Attach client report PDF",
+      required: true,
+    },
+  ]);
+  assert(
+    rendered.publicAssetUrls.every((url) =>
+      url.startsWith("https://scanlark.com/assets/email/"),
+    ),
+  );
+});
+
+test("operations email html sanitizer removes unsafe tags, attributes and urls", () => {
+  const sanitized = sanitizeClientEmailHtml(
+    '<p onclick="alert(1)">Hi</p><script>alert(1)</script><a href="javascript:alert(1)">bad</a><img src="data:image/png;base64,abc"><iframe src="https://example.com"></iframe>',
+  );
+
+  assert(!sanitized.includes("script"));
+  assert(!sanitized.includes("onclick"));
+  assert(!sanitized.includes("javascript:"));
+  assert(!sanitized.includes("data:image"));
+  assert(!sanitized.includes("iframe"));
 });
 
 test("operations communication validation distinguishes drafts from sent records", () => {

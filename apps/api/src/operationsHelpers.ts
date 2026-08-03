@@ -4,7 +4,12 @@ import type {
   OperationsCommunicationDirection,
   OperationsCommunicationDraftContext,
   OperationsCommunicationInput,
+  OperationsCommunicationAttachmentPolicy,
+  OperationsCommunicationAttachmentRequirement,
   OperationsCommunicationStatus,
+  OperationsCommunicationLayoutKey,
+  OperationsCommunicationSignatureMode,
+  OperationsCommunicationContentVariant,
   OperationsCommunicationTemplateCategory,
   OperationsContactInput,
   OperationsAccessRequirementInput,
@@ -49,6 +54,7 @@ import type {
   OperationsWorkOrderStatus,
   OperationsWorkOrderUpdateInput,
 } from "@scanlark/db";
+import * as cheerio from "cheerio";
 import { normalizeSiteUrlInput } from "./siteUrl";
 
 export const OPERATIONS_PIPELINE_STAGES = [
@@ -323,12 +329,47 @@ export const SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS = [
   "websiteDomain",
   "senderName",
   "senderEmail",
+  "publicContactEmail",
+  "privacyUrl",
   "reportName",
   "criticalIssueCount",
+  "importantIssueCount",
+  "improvementIssueCount",
   "highIssueCount",
+  "topFindingTitle",
   "topFinding",
+  "quoteNumber",
+  "quoteTotal",
+  "quoteValidUntil",
+  "quoteScope",
+  "observationTime",
   "followUpDate",
 ] as const;
+
+export const OPERATIONS_EMAIL_LAYOUT_KEYS = [
+  "personal_letter",
+  "report_delivery",
+  "commercial_document",
+  "status_alert",
+] as const;
+
+export const OPERATIONS_EMAIL_ATTACHMENT_POLICIES = [
+  "none",
+  "client_report_pdf",
+  "quote_pdf",
+  "updated_report_pdf",
+] as const;
+
+export const OPERATIONS_EMAIL_SIGNATURE_MODES = [
+  "include_scanlark_signature",
+  "use_mailbox_signature",
+] as const;
+
+export type OperationsSenderIdentity = {
+  key: string;
+  name: string;
+  email: string;
+};
 
 type ClientTemplatePlaceholder =
   (typeof SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS)[number];
@@ -416,6 +457,13 @@ const COMMUNICATION_CHANNEL_SET = new Set<string>(
 );
 const COMMUNICATION_STATUS_SET = new Set<string>(
   OPERATIONS_COMMUNICATION_STATUSES,
+);
+const EMAIL_LAYOUT_KEY_SET = new Set<string>(OPERATIONS_EMAIL_LAYOUT_KEYS);
+const EMAIL_ATTACHMENT_POLICY_SET = new Set<string>(
+  OPERATIONS_EMAIL_ATTACHMENT_POLICIES,
+);
+const EMAIL_SIGNATURE_MODE_SET = new Set<string>(
+  OPERATIONS_EMAIL_SIGNATURE_MODES,
 );
 const TASK_STATUS_SET = new Set<string>(OPERATIONS_TASK_STATUSES);
 const REPORT_STATUS_SET = new Set<string>(OPERATIONS_REPORT_STATUSES);
@@ -673,6 +721,33 @@ function parseCommunicationStatus(
     : null;
 }
 
+function parseEmailLayoutKey(
+  value: unknown,
+): OperationsCommunicationLayoutKey | null {
+  if (typeof value !== "string") return null;
+  return EMAIL_LAYOUT_KEY_SET.has(value)
+    ? (value as OperationsCommunicationLayoutKey)
+    : null;
+}
+
+function parseEmailAttachmentPolicy(
+  value: unknown,
+): OperationsCommunicationAttachmentPolicy | null {
+  if (typeof value !== "string") return null;
+  return EMAIL_ATTACHMENT_POLICY_SET.has(value)
+    ? (value as OperationsCommunicationAttachmentPolicy)
+    : null;
+}
+
+function parseEmailSignatureMode(
+  value: unknown,
+): OperationsCommunicationSignatureMode | null {
+  if (typeof value !== "string") return null;
+  return EMAIL_SIGNATURE_MODE_SET.has(value)
+    ? (value as OperationsCommunicationSignatureMode)
+    : null;
+}
+
 export function parseTaskStatus(value: unknown): OperationsTaskStatus | null {
   if (typeof value !== "string") return null;
   return TASK_STATUS_SET.has(value) ? (value as OperationsTaskStatus) : null;
@@ -873,6 +948,73 @@ function getWebsiteDomain(websiteUrl: string | null | undefined) {
   }
 }
 
+function normalizePublicUrl(value: string | undefined, fallback: string) {
+  const raw = value?.trim() || fallback;
+  return raw.replace(/\/+$/, "");
+}
+
+export function getPublicSiteUrl(
+  env: Record<string, string | undefined> = process.env,
+) {
+  return normalizePublicUrl(
+    env.PUBLIC_SITE_URL ?? env.VITE_PUBLIC_SITE_URL,
+    "https://scanlark.com",
+  );
+}
+
+export function getEmailAssetBaseUrl(
+  env: Record<string, string | undefined> = process.env,
+) {
+  return normalizePublicUrl(
+    env.EMAIL_ASSET_BASE_URL,
+    `${getPublicSiteUrl(env)}/assets/email`,
+  );
+}
+
+export function getOperationsDefaultSignatureMode(
+  env: Record<string, string | undefined> = process.env,
+): OperationsCommunicationSignatureMode {
+  return (
+    parseEmailSignatureMode(env.OPERATIONS_DEFAULT_SIGNATURE_MODE) ??
+    "include_scanlark_signature"
+  );
+}
+
+export function getOperationsSenderIdentities(
+  env: Record<string, string | undefined> = process.env,
+): OperationsSenderIdentity[] {
+  const configured = env.OPERATIONS_SENDER_IDENTITIES?.trim();
+  if (configured) {
+    try {
+      const parsed = JSON.parse(configured) as unknown;
+      if (Array.isArray(parsed)) {
+        const identities = parsed
+          .map((item, index): OperationsSenderIdentity | null => {
+            if (!item || typeof item !== "object") return null;
+            const record = item as Record<string, unknown>;
+            const name =
+              typeof record.name === "string" ? record.name.trim() : "";
+            const email =
+              typeof record.email === "string" ? record.email.trim() : "";
+            const key =
+              typeof record.key === "string" && record.key.trim()
+                ? record.key.trim()
+                : `sender_${index + 1}`;
+            if (!name || !isValidEmailAddress(email)) return null;
+            return { key, name, email };
+          })
+          .filter((item): item is OperationsSenderIdentity => item != null);
+        if (identities.length > 0) return identities;
+      }
+    } catch {
+      // Fall back to the single legacy sender env below.
+    }
+  }
+  const name = env.OPERATIONS_SENDER_NAME?.trim() || "Connor Smith";
+  const email = env.OPERATIONS_SENDER_EMAIL?.trim() || "connor@scanlark.com";
+  return [{ key: "default", name, email }];
+}
+
 function formatTemplateDate(value: Date | null | undefined) {
   if (!value) return "";
   return new Intl.DateTimeFormat("en-GB", {
@@ -894,18 +1036,468 @@ function contactParts(context: OperationsCommunicationDraftContext | null) {
   };
 }
 
+function escapeHtml(value: string | null | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeAttribute(value: string | null | undefined) {
+  return escapeHtml(value).replace(/`/g, "&#96;");
+}
+
+function nl2brEscaped(value: string) {
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function plainTextToParagraphs(value: string) {
+  return value
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .map((paragraph) => `<p>${nl2brEscaped(paragraph)}</p>`)
+    .join("");
+}
+
+function stripHtmlToText(value: string) {
+  return cheerio
+    .load(value)
+    .text()
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function isSafeUrl(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("#")) return true;
+  if (trimmed.startsWith("mailto:")) return true;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const EMAIL_ALLOWED_TAGS = new Set([
+  "table",
+  "tbody",
+  "thead",
+  "tr",
+  "td",
+  "div",
+  "p",
+  "span",
+  "strong",
+  "em",
+  "br",
+  "a",
+  "img",
+  "ul",
+  "ol",
+  "li",
+  "h1",
+  "h2",
+  "h3",
+]);
+
+const EMAIL_ALLOWED_ATTRIBUTES = new Set([
+  "href",
+  "src",
+  "alt",
+  "width",
+  "height",
+  "style",
+  "align",
+  "valign",
+  "role",
+  "aria-label",
+  "cellpadding",
+  "cellspacing",
+  "border",
+]);
+
+const EMAIL_ALLOWED_STYLE_PROPERTIES = new Set([
+  "background",
+  "background-color",
+  "border",
+  "border-bottom",
+  "border-collapse",
+  "border-radius",
+  "color",
+  "display",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "line-height",
+  "margin",
+  "margin-bottom",
+  "margin-top",
+  "max-width",
+  "mso-line-height-rule",
+  "padding",
+  "padding-bottom",
+  "padding-left",
+  "padding-right",
+  "padding-top",
+  "text-align",
+  "text-decoration",
+  "vertical-align",
+  "width",
+]);
+
+function sanitizeInlineStyle(value: string) {
+  return value
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf(":");
+      if (separator === -1) return null;
+      const property = part.slice(0, separator).trim().toLowerCase();
+      const cssValue = part.slice(separator + 1).trim();
+      if (!EMAIL_ALLOWED_STYLE_PROPERTIES.has(property)) return null;
+      if (/expression\s*\(|javascript:|url\s*\(/i.test(cssValue)) return null;
+      return `${property}: ${cssValue}`;
+    })
+    .filter((part): part is string => part != null)
+    .join("; ");
+}
+
+export function sanitizeClientEmailHtml(input: string) {
+  const $ = cheerio.load(input, { xmlMode: false }, false);
+  $("*").each((_index, element) => {
+    if (!("name" in element) || !("attribs" in element)) return;
+    const tag = String(element.name).toLowerCase();
+    const node = $(element);
+    if (!EMAIL_ALLOWED_TAGS.has(tag)) {
+      node.replaceWith(node.text());
+      return;
+    }
+    for (const [attr, raw] of Object.entries(element.attribs ?? {})) {
+      const name = attr.toLowerCase();
+      const value = String(raw ?? "");
+      if (name.startsWith("on") || !EMAIL_ALLOWED_ATTRIBUTES.has(name)) {
+        node.removeAttr(attr);
+        continue;
+      }
+      if ((name === "href" || name === "src") && !isSafeUrl(value)) {
+        node.removeAttr(attr);
+        continue;
+      }
+      if (name === "src") {
+        const absolute = value.trim();
+        if (!absolute.startsWith("https://")) node.removeAttr(attr);
+      }
+      if (name === "style") {
+        const safeStyle = sanitizeInlineStyle(value);
+        if (safeStyle) node.attr(attr, safeStyle);
+        else node.removeAttr(attr);
+      }
+    }
+  });
+  return $.root().html()?.trim() ?? "";
+}
+
+function templateBodyForVariant(
+  template: {
+    body_template: string;
+    html_body_template?: string | null;
+    plain_text_template?: string | null;
+    content_variants_json?: OperationsCommunicationContentVariant[] | null;
+  },
+  variantKey: string | null | undefined,
+) {
+  const variant = template.content_variants_json?.find(
+    (item) => item.key === variantKey,
+  );
+  return {
+    body: variant?.body ?? template.body_template,
+    html: variant?.html ?? template.html_body_template ?? null,
+    plainText:
+      variant?.plainText ??
+      template.plain_text_template ??
+      template.body_template,
+    preheader: variant?.preheader ?? null,
+  };
+}
+
+function attachmentRequirementsForPolicy(
+  policy: OperationsCommunicationAttachmentPolicy,
+): OperationsCommunicationAttachmentRequirement[] {
+  if (policy === "none") return [];
+  const labels: Record<
+    Exclude<OperationsCommunicationAttachmentPolicy, "none">,
+    string
+  > = {
+    client_report_pdf: "Attach client report PDF",
+    quote_pdf: "Attach quote PDF",
+    updated_report_pdf: "Attach updated/re-test report",
+  };
+  return [{ key: policy, label: labels[policy], required: true }];
+}
+
+function parseStringArray(value: unknown, key: string) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error(`invalid_${key}`);
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean)
+    .slice(0, 12);
+}
+
+function parseContentVariants(value: unknown) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error("invalid_content_variants");
+  return value
+    .map((item): OperationsCommunicationContentVariant | null => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const key = typeof record.key === "string" ? record.key.trim() : "";
+      const label = typeof record.label === "string" ? record.label.trim() : "";
+      if (!key || !label || !/^[a-z0-9_-]{1,48}$/.test(key)) return null;
+      return {
+        key,
+        label,
+        body: typeof record.body === "string" ? record.body.trim() : undefined,
+        html: typeof record.html === "string" ? record.html.trim() : undefined,
+        plainText:
+          typeof record.plainText === "string"
+            ? record.plainText.trim()
+            : undefined,
+        preheader:
+          typeof record.preheader === "string"
+            ? record.preheader.trim()
+            : undefined,
+      };
+    })
+    .filter(
+      (item): item is OperationsCommunicationContentVariant => item != null,
+    )
+    .slice(0, 8);
+}
+
+function buildTemplateSnapshot(template: {
+  id?: string;
+  system_key?: string | null;
+  name?: string;
+  category?: string;
+  subject_template: string;
+  preheader_template?: string | null;
+  body_template: string;
+  html_body_template?: string | null;
+  plain_text_template?: string | null;
+  layout_key?: string | null;
+  attachment_policy?: string | null;
+  signature_mode?: string | null;
+  updated_at?: Date | string;
+}) {
+  return {
+    id: template.id ?? null,
+    systemKey: template.system_key ?? null,
+    name: template.name ?? null,
+    category: template.category ?? null,
+    subjectTemplate: template.subject_template,
+    preheaderTemplate: template.preheader_template ?? null,
+    bodyTemplate: template.body_template,
+    htmlBodyTemplate: template.html_body_template ?? null,
+    plainTextTemplate: template.plain_text_template ?? null,
+    layoutKey: template.layout_key ?? null,
+    attachmentPolicy: template.attachment_policy ?? null,
+    signatureMode: template.signature_mode ?? null,
+    updatedAt:
+      template.updated_at instanceof Date
+        ? template.updated_at.toISOString()
+        : (template.updated_at ?? null),
+  };
+}
+
+function emailButton(url: string, label: string) {
+  if (!isSafeUrl(url)) return "";
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 22px 0 4px;">
+      <tr>
+        <td style="background-color: #0f2f5f; border-radius: 6px;">
+          <a href="${escapeAttribute(url)}" style="display: inline-block; padding: 11px 16px; color: #ffffff; font-family: Arial, Helvetica, sans-serif; font-size: 14px; font-weight: 700; text-decoration: none;">${escapeHtml(label)}</a>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function renderSignature(input: {
+  mode: OperationsCommunicationSignatureMode;
+  senderName: string;
+  senderEmail: string;
+  publicContactEmail: string;
+  publicSiteUrl: string;
+  markUrl: string;
+}) {
+  if (input.mode === "use_mailbox_signature") {
+    return `<p style="color: #6b7280; font-size: 13px;">Signature will be added by the selected IONOS mailbox.</p>`;
+  }
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top: 26px; border-top: 1px solid #dbe4ef; padding-top: 16px; width: 100%;">
+      <tr>
+        <td style="width: 56px; padding-right: 12px; vertical-align: top;">
+          <img src="${escapeAttribute(input.markUrl)}" width="56" height="56" alt="Scanlark" style="display: block; width: 56px; height: 56px;">
+        </td>
+        <td style="vertical-align: top; font-family: Arial, Helvetica, sans-serif; color: #1f2937; font-size: 14px; line-height: 1.45;">
+          <strong>${escapeHtml(input.senderName)}</strong><br>
+          Scanlark<br>
+          <a href="mailto:${escapeAttribute(input.publicContactEmail)}" style="color: #0f2f5f;">${escapeHtml(input.publicContactEmail)}</a><br>
+          <a href="${escapeAttribute(input.publicSiteUrl)}" style="color: #0f2f5f;">scanlark.com</a>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function renderLayout(input: {
+  layoutKey: OperationsCommunicationLayoutKey;
+  subject: string;
+  preheader: string;
+  bodyHtml: string;
+  plainText: string;
+  signatureHtml: string;
+  assetBaseUrl: string;
+  publicSiteUrl: string;
+  privacyUrl: string;
+  attachmentRequirements: OperationsCommunicationAttachmentRequirement[];
+}) {
+  const navyLogo = `${input.assetBaseUrl}/scanlark-email-logo-navy.png`;
+  const whiteLogo = `${input.assetBaseUrl}/scanlark-email-logo-white.png`;
+  const headerDark =
+    input.layoutKey === "report_delivery" ||
+    input.layoutKey === "commercial_document" ||
+    input.layoutKey === "status_alert";
+  const headerBackground =
+    input.layoutKey === "status_alert"
+      ? "#102a43"
+      : headerDark
+        ? "#0f2f5f"
+        : "#ffffff";
+  const logo = headerDark ? whiteLogo : navyLogo;
+  const headerTextColor = headerDark ? "#ffffff" : "#0f2f5f";
+  const attachmentHtml =
+    input.attachmentRequirements.length > 0
+      ? `<div style="margin: 20px 0; padding: 12px 14px; border: 1px solid #d9e2ec; background-color: #f8fafc; color: #334155; font-size: 14px;"><strong>Attachment reminder:</strong> ${escapeHtml(input.attachmentRequirements.map((item) => item.label).join(", "))}</div>`
+      : "";
+  const footer = `
+    <p style="margin-top: 22px; color: #667085; font-size: 12px; line-height: 1.5;">
+      Scanlark prepares practical website-health communications manually. No tracking pixels are used.
+      <a href="${escapeAttribute(input.privacyUrl)}" style="color: #0f2f5f;">Privacy</a>
+    </p>
+  `;
+  const summaryCard =
+    input.layoutKey === "report_delivery"
+      ? `<div style="margin: 18px 0; padding: 14px; border: 1px solid #d9e2ec; background-color: #f8fafc;"><strong>Report attached</strong><br><span style="color: #475569;">Review the grouped findings first, then reply if you would like the practical next steps explained.</span></div>`
+      : input.layoutKey === "commercial_document"
+        ? `<div style="margin: 18px 0; padding: 14px; border: 1px solid #d9e2ec; background-color: #f8fafc;"><strong>Document attached</strong><br><span style="color: #475569;">Please review the scope and reply with any questions before work begins.</span></div>`
+        : input.layoutKey === "status_alert"
+          ? `<div style="margin: 18px 0; padding: 14px; border-left: 4px solid #0f2f5f; background-color: #f8fafc;"><strong>Status update</strong><br><span style="color: #475569;">A calm summary of the issue and suggested next action.</span></div>`
+          : "";
+
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f4f7fb; width: 100%; border-collapse: collapse;">
+      <tr>
+        <td align="center" style="padding: 24px 12px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="640" style="max-width: 640px; width: 100%; background-color: #ffffff; border-collapse: collapse;">
+            <tr>
+              <td style="background-color: ${headerBackground}; padding: 20px 24px; color: ${headerTextColor}; font-family: Arial, Helvetica, sans-serif;">
+                <img src="${escapeAttribute(logo)}" width="180" height="47" alt="Scanlark" style="display: block; width: 180px; height: 47px;">
+                <div style="margin-top: 8px; font-size: 14px; font-weight: 700; color: ${headerTextColor};">Scanlark</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 28px 24px 24px; font-family: Arial, Helvetica, sans-serif; color: #243447; font-size: 15px; line-height: 1.6;">
+                <div style="display: none; max-height: 0; overflow: hidden; color: transparent;">${escapeHtml(input.preheader)}</div>
+                ${summaryCard}
+                ${input.bodyHtml}
+                ${attachmentHtml}
+                ${input.signatureHtml}
+                ${footer}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
 export function renderClientCommunicationTemplate(
-  template: { subject_template: string; body_template: string },
+  template: {
+    id?: string;
+    system_key?: string | null;
+    name?: string;
+    category?: OperationsCommunicationTemplateCategory;
+    subject_template: string;
+    preheader_template?: string | null;
+    body_template: string;
+    html_body_template?: string | null;
+    plain_text_template?: string | null;
+    layout_key?: OperationsCommunicationLayoutKey | null;
+    content_variants_json?: OperationsCommunicationContentVariant[] | null;
+    attachment_policy?: OperationsCommunicationAttachmentPolicy | null;
+    signature_mode?: OperationsCommunicationSignatureMode | null;
+    updated_at?: Date | string;
+  },
   context: OperationsCommunicationDraftContext | null,
   options: {
     senderName?: string | null;
     senderEmail?: string | null;
+    senderIdentityKey?: string | null;
+    publicContactEmail?: string | null;
+    publicSiteUrl?: string | null;
+    emailAssetBaseUrl?: string | null;
+    signatureMode?: OperationsCommunicationSignatureMode | null;
+    wordingVariantKey?: string | null;
     followUpDate?: Date | null;
     reportName?: string | null;
+    quoteNumber?: string | null;
+    quoteTotal?: string | null;
+    quoteValidUntil?: string | null;
+    quoteScope?: string | null;
+    topFindingTitle?: string | null;
+    topFinding?: string | null;
+    observationTime?: Date | string | null;
+    manualSubject?: string | null;
+    manualBody?: string | null;
+    manualPreheader?: string | null;
+    manualHtml?: string | null;
+    manualPlainText?: string | null;
   } = {},
 ) {
   const contacts = contactParts(context);
   const websiteUrl = context?.site?.url ?? context?.business.website_url ?? "";
+  const publicSiteUrl = normalizePublicUrl(
+    options.publicSiteUrl ?? undefined,
+    getPublicSiteUrl(),
+  );
+  const assetBaseUrl = normalizePublicUrl(
+    options.emailAssetBaseUrl ?? undefined,
+    `${publicSiteUrl}/assets/email`,
+  );
+  const privacyUrl = `${publicSiteUrl}/privacy`;
+  const publicContactEmail =
+    options.publicContactEmail?.trim() || "contact@scanlark.com";
+  const senderName = options.senderName?.trim() ?? "";
+  const senderEmail = options.senderEmail?.trim() ?? "";
+  const signatureMode =
+    options.signatureMode ??
+    template.signature_mode ??
+    "include_scanlark_signature";
+  const layoutKey = template.layout_key ?? "personal_letter";
+  const attachmentPolicy = template.attachment_policy ?? "none";
+  const selected = templateBodyForVariant(template, options.wordingVariantKey);
+  const observation =
+    options.observationTime instanceof Date
+      ? formatTemplateDate(options.observationTime)
+      : options.observationTime?.trim() || formatTemplateDate(new Date());
   const values: Record<ClientTemplatePlaceholder, string> = {
     firstName: contacts.firstName,
     lastName: contacts.lastName,
@@ -913,23 +1505,40 @@ export function renderClientCommunicationTemplate(
     businessName: context?.business.name ?? "",
     websiteUrl,
     websiteDomain: getWebsiteDomain(websiteUrl),
-    senderName: options.senderName?.trim() ?? "",
-    senderEmail: options.senderEmail?.trim() ?? "",
+    senderName,
+    senderEmail,
+    publicContactEmail,
+    privacyUrl,
     reportName: options.reportName?.trim() ?? "",
     criticalIssueCount:
       context?.site?.critical_issue_count == null
         ? ""
         : String(context.site.critical_issue_count),
+    importantIssueCount:
+      context?.site?.high_issue_count == null
+        ? ""
+        : String(context.site.high_issue_count),
+    improvementIssueCount: "0",
     highIssueCount:
       context?.site?.high_issue_count == null
         ? ""
         : String(context.site.high_issue_count),
-    topFinding: context?.site?.top_finding?.trim() ?? "",
+    topFindingTitle:
+      options.topFindingTitle?.trim() ??
+      context?.site?.top_finding?.split(" on ")[0]?.trim() ??
+      "",
+    topFinding:
+      options.topFinding?.trim() ?? context?.site?.top_finding?.trim() ?? "",
+    quoteNumber: options.quoteNumber?.trim() ?? "",
+    quoteTotal: options.quoteTotal?.trim() ?? "",
+    quoteValidUntil: options.quoteValidUntil?.trim() ?? "",
+    quoteScope: options.quoteScope?.trim() ?? "",
+    observationTime: observation,
     followUpDate: formatTemplateDate(options.followUpDate),
   };
   const unresolved = new Set<string>();
   const supported = new Set<string>(SUPPORTED_CLIENT_TEMPLATE_PLACEHOLDERS);
-  const render = (value: string) => {
+  const render = (value: string, mode: "text" | "html" = "text") => {
     if (/{{|}}/.test(value.replace(CLIENT_TEMPLATE_TOKEN_RE, ""))) {
       unresolved.add("invalidSyntax");
     }
@@ -945,13 +1554,84 @@ export function renderClientCommunicationTemplate(
         unresolved.add(key);
         return match;
       }
-      return rendered;
+      return mode === "html" ? escapeHtml(rendered) : rendered;
     });
   };
+  const subjectSource = options.manualSubject ?? template.subject_template;
+  const preheaderSource =
+    options.manualPreheader ??
+    selected.preheader ??
+    template.preheader_template ??
+    "";
+  const bodySource = options.manualBody ?? selected.body;
+  const plainTextSource = options.manualPlainText ?? selected.plainText;
+  const rawHtmlSource =
+    options.manualHtml ?? selected.html ?? plainTextToParagraphs(bodySource);
+  const subject = render(subjectSource);
+  const preheader = render(preheaderSource);
+  const plainText = render(plainTextSource);
+  const body = render(bodySource);
+  const renderedBodyHtml = sanitizeClientEmailHtml(
+    render(rawHtmlSource, "html"),
+  );
+  const assetUrls = [
+    `${assetBaseUrl}/scanlark-email-logo-navy.png`,
+    `${assetBaseUrl}/scanlark-email-logo-white.png`,
+    `${assetBaseUrl}/scanlark-email-mark.png`,
+  ];
+  const signatureHtml = renderSignature({
+    mode: signatureMode,
+    senderName,
+    senderEmail,
+    publicContactEmail,
+    publicSiteUrl,
+    markUrl: assetUrls[2],
+  });
+  const attachmentRequirements =
+    attachmentRequirementsForPolicy(attachmentPolicy);
+  const htmlFragment = sanitizeClientEmailHtml(
+    renderLayout({
+      layoutKey,
+      subject,
+      preheader,
+      bodyHtml: renderedBodyHtml,
+      plainText,
+      signatureHtml,
+      assetBaseUrl,
+      publicSiteUrl,
+      privacyUrl,
+      attachmentRequirements,
+    }),
+  );
+  const htmlDocument = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(subject || "Scanlark email preview")}</title><meta name="viewport" content="width=device-width, initial-scale=1"></head><body style="margin: 0; padding: 0; background: #f4f7fb;">${htmlFragment}</body></html>`;
+  const warnings: string[] = [];
+  if (!publicSiteUrl.startsWith("https://")) {
+    warnings.push("Public site URL is not HTTPS.");
+  }
+  if (!assetBaseUrl.startsWith("https://")) {
+    warnings.push("Email asset URL is not HTTPS.");
+  }
+  if (attachmentRequirements.length > 0) {
+    warnings.push(
+      `Manual attachment required: ${attachmentRequirements.map((item) => item.label).join(", ")}.`,
+    );
+  }
   return {
-    subject: render(template.subject_template),
-    body: render(template.body_template),
+    subject,
+    preheader,
+    body,
+    htmlFragment,
+    htmlDocument,
+    plainText,
     unresolvedPlaceholders: Array.from(unresolved).sort(),
+    warnings,
+    publicAssetUrls: assetUrls,
+    attachmentRequirements,
+    layoutKey,
+    signatureMode,
+    wordingVariantKey: options.wordingVariantKey ?? null,
+    senderIdentityKey: options.senderIdentityKey ?? null,
+    templateSnapshot: buildTemplateSnapshot(template),
   };
 }
 
@@ -1077,6 +1757,14 @@ export function parseOperationsCommunicationTemplateInput(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    preheaderTemplate: string | null;
+    htmlBodyTemplate: string | null;
+    plainTextTemplate: string | null;
+    layoutKey: OperationsCommunicationLayoutKey;
+    contentVariantsJson: OperationsCommunicationContentVariant[];
+    subjectSuggestionsJson: string[];
+    attachmentPolicy: OperationsCommunicationAttachmentPolicy;
+    signatureMode: OperationsCommunicationSignatureMode;
     defaultFollowUpBusinessDays: number | null;
     isActive: boolean;
   }> = {};
@@ -1094,6 +1782,44 @@ export function parseOperationsCommunicationTemplateInput(
   }
   if (!options.partial || "bodyTemplate" in record) {
     parsed.bodyTemplate = requiredTextField(record, "bodyTemplate");
+  }
+  if ("preheaderTemplate" in record) {
+    parsed.preheaderTemplate =
+      optionalTextField(record, "preheaderTemplate") ?? null;
+  }
+  if ("htmlBodyTemplate" in record) {
+    parsed.htmlBodyTemplate =
+      optionalTextField(record, "htmlBodyTemplate") ?? null;
+  }
+  if ("plainTextTemplate" in record) {
+    parsed.plainTextTemplate =
+      optionalTextField(record, "plainTextTemplate") ?? null;
+  }
+  if ("layoutKey" in record) {
+    const layoutKey = parseEmailLayoutKey(record.layoutKey);
+    if (!layoutKey) throw new Error("invalid_layout_key");
+    parsed.layoutKey = layoutKey;
+  }
+  if ("contentVariantsJson" in record) {
+    parsed.contentVariantsJson = parseContentVariants(
+      record.contentVariantsJson,
+    );
+  }
+  if ("subjectSuggestionsJson" in record) {
+    parsed.subjectSuggestionsJson = parseStringArray(
+      record.subjectSuggestionsJson,
+      "subject_suggestions",
+    );
+  }
+  if ("attachmentPolicy" in record) {
+    const policy = parseEmailAttachmentPolicy(record.attachmentPolicy);
+    if (!policy) throw new Error("invalid_attachment_policy");
+    parsed.attachmentPolicy = policy;
+  }
+  if ("signatureMode" in record) {
+    const mode = parseEmailSignatureMode(record.signatureMode);
+    if (!mode) throw new Error("invalid_signature_mode");
+    parsed.signatureMode = mode;
   }
   if ("isActive" in record) {
     parsed.isActive = record.isActive !== false;
@@ -1137,6 +1863,92 @@ export function parseOperationsCommunicationInput(
   }
   if ("subject" in record)
     parsed.subject = optionalTextField(record, "subject");
+  if ("preheader" in record) {
+    parsed.preheader = optionalTextField(record, "preheader");
+  }
+  if ("htmlFragment" in record) {
+    parsed.htmlFragment = optionalTextField(record, "htmlFragment");
+  }
+  if ("htmlDocument" in record) {
+    parsed.htmlDocument = optionalTextField(record, "htmlDocument");
+  }
+  if ("plainTextBody" in record) {
+    parsed.plainTextBody = optionalTextField(record, "plainTextBody");
+  }
+  if ("layoutKey" in record) {
+    const layoutKey = parseEmailLayoutKey(record.layoutKey);
+    if (!layoutKey && record.layoutKey != null && record.layoutKey !== "") {
+      throw new Error("invalid_layout_key");
+    }
+    parsed.layoutKey = layoutKey;
+  }
+  if ("wordingVariantKey" in record) {
+    parsed.wordingVariantKey = optionalTextField(record, "wordingVariantKey");
+  }
+  if ("signatureMode" in record) {
+    const mode = parseEmailSignatureMode(record.signatureMode);
+    if (!mode && record.signatureMode != null && record.signatureMode !== "") {
+      throw new Error("invalid_signature_mode");
+    }
+    parsed.signatureMode = mode;
+  }
+  if ("senderIdentityKey" in record) {
+    parsed.senderIdentityKey = optionalTextField(record, "senderIdentityKey");
+  }
+  if ("senderName" in record) {
+    parsed.senderName = optionalTextField(record, "senderName");
+  }
+  if ("senderEmail" in record) {
+    parsed.senderEmail = optionalTextField(record, "senderEmail");
+  }
+  if ("recipientName" in record) {
+    parsed.recipientName = optionalTextField(record, "recipientName");
+  }
+  if ("recipientEmail" in record) {
+    parsed.recipientEmail = optionalTextField(record, "recipientEmail");
+  }
+  if ("templateSnapshotJson" in record) {
+    parsed.templateSnapshotJson =
+      record.templateSnapshotJson &&
+      typeof record.templateSnapshotJson === "object"
+        ? (record.templateSnapshotJson as Record<string, unknown>)
+        : null;
+  }
+  if ("publicAssetUrlsJson" in record) {
+    parsed.publicAssetUrlsJson = parseStringArray(
+      record.publicAssetUrlsJson,
+      "public_asset_urls",
+    );
+  }
+  if ("attachmentRequirementsJson" in record) {
+    const value = record.attachmentRequirementsJson;
+    parsed.attachmentRequirementsJson = Array.isArray(value)
+      ? value
+          .map((item): OperationsCommunicationAttachmentRequirement | null => {
+            if (!item || typeof item !== "object") return null;
+            const entry = item as Record<string, unknown>;
+            const key = parseEmailAttachmentPolicy(entry.key);
+            const label =
+              typeof entry.label === "string" ? entry.label.trim() : "";
+            if (!key || !label) return null;
+            return { key, label, required: entry.required !== false };
+          })
+          .filter(
+            (item): item is OperationsCommunicationAttachmentRequirement =>
+              item != null,
+          )
+      : [];
+  }
+  parsed.attachmentConfirmedAt = parseDateField(
+    record,
+    "attachmentConfirmedAt",
+  );
+  if ("attachmentConfirmationNote" in record) {
+    parsed.attachmentConfirmationNote = optionalTextField(
+      record,
+      "attachmentConfirmationNote",
+    );
+  }
   parsed.occurredAt = parseDateField(record, "occurredAt");
   parsed.sentAt = parseDateField(record, "sentAt");
   parsed.receivedAt = parseDateField(record, "receivedAt");

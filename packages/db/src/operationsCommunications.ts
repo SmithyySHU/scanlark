@@ -79,6 +79,14 @@ export type OperationsCommunicationTemplateRow = {
   category: OperationsCommunicationTemplateCategory;
   subject_template: string;
   body_template: string;
+  preheader_template: string | null;
+  html_body_template: string | null;
+  plain_text_template: string | null;
+  layout_key: OperationsCommunicationLayoutKey;
+  content_variants_json: OperationsCommunicationContentVariant[];
+  subject_suggestions_json: string[];
+  attachment_policy: OperationsCommunicationAttachmentPolicy;
+  signature_mode: OperationsCommunicationSignatureMode;
   default_follow_up_business_days: number | null;
   is_active: boolean;
   is_system_default: boolean;
@@ -97,6 +105,23 @@ export type OperationsCommunicationRow = {
   status: OperationsCommunicationStatus;
   subject: string | null;
   body: string;
+  preheader: string | null;
+  html_fragment: string | null;
+  html_document: string | null;
+  plain_text_body: string | null;
+  layout_key: OperationsCommunicationLayoutKey | null;
+  wording_variant_key: string | null;
+  signature_mode: OperationsCommunicationSignatureMode | null;
+  sender_identity_key: string | null;
+  sender_name: string | null;
+  sender_email: string | null;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  template_snapshot_json: Record<string, unknown> | null;
+  public_asset_urls_json: string[];
+  attachment_requirements_json: OperationsCommunicationAttachmentRequirement[];
+  attachment_confirmed_at: Date | null;
+  attachment_confirmation_note: string | null;
   sent_at: Date | null;
   received_at: Date | null;
   occurred_at: Date;
@@ -136,6 +161,37 @@ export type OperationsTaskRow = {
   contact_email?: string | null;
 };
 
+export type OperationsCommunicationLayoutKey =
+  | "personal_letter"
+  | "report_delivery"
+  | "commercial_document"
+  | "status_alert";
+
+export type OperationsCommunicationAttachmentPolicy =
+  | "none"
+  | "client_report_pdf"
+  | "quote_pdf"
+  | "updated_report_pdf";
+
+export type OperationsCommunicationSignatureMode =
+  | "include_scanlark_signature"
+  | "use_mailbox_signature";
+
+export type OperationsCommunicationContentVariant = {
+  key: string;
+  label: string;
+  body?: string;
+  html?: string;
+  plainText?: string;
+  preheader?: string;
+};
+
+export type OperationsCommunicationAttachmentRequirement = {
+  key: OperationsCommunicationAttachmentPolicy;
+  label: string;
+  required: boolean;
+};
+
 export type OperationsCommunicationInput = {
   contactId?: string | null;
   templateId?: string | null;
@@ -144,6 +200,23 @@ export type OperationsCommunicationInput = {
   status?: OperationsCommunicationStatus;
   subject?: string | null;
   body: string;
+  preheader?: string | null;
+  htmlFragment?: string | null;
+  htmlDocument?: string | null;
+  plainTextBody?: string | null;
+  layoutKey?: OperationsCommunicationLayoutKey | null;
+  wordingVariantKey?: string | null;
+  signatureMode?: OperationsCommunicationSignatureMode | null;
+  senderIdentityKey?: string | null;
+  senderName?: string | null;
+  senderEmail?: string | null;
+  recipientName?: string | null;
+  recipientEmail?: string | null;
+  templateSnapshotJson?: Record<string, unknown> | null;
+  publicAssetUrlsJson?: string[];
+  attachmentRequirementsJson?: OperationsCommunicationAttachmentRequirement[];
+  attachmentConfirmedAt?: Date | null;
+  attachmentConfirmationNote?: string | null;
   occurredAt?: Date | null;
   sentAt?: Date | null;
   receivedAt?: Date | null;
@@ -413,6 +486,14 @@ export async function createOperationsCommunicationTemplate(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    preheaderTemplate?: string | null;
+    htmlBodyTemplate?: string | null;
+    plainTextTemplate?: string | null;
+    layoutKey?: OperationsCommunicationLayoutKey;
+    contentVariantsJson?: OperationsCommunicationContentVariant[];
+    subjectSuggestionsJson?: string[];
+    attachmentPolicy?: OperationsCommunicationAttachmentPolicy;
+    signatureMode?: OperationsCommunicationSignatureMode;
     defaultFollowUpBusinessDays?: number | null;
     isActive?: boolean;
   },
@@ -432,11 +513,19 @@ export async function createOperationsCommunicationTemplate(
         category,
         subject_template,
         body_template,
+        preheader_template,
+        html_body_template,
+        plain_text_template,
+        layout_key,
+        content_variants_json,
+        subject_suggestions_json,
+        attachment_policy,
+        signature_mode,
         default_follow_up_business_days,
         is_active,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15)
       RETURNING *
     `,
     [
@@ -444,6 +533,14 @@ export async function createOperationsCommunicationTemplate(
       input.category,
       subject,
       body,
+      textValue(input.preheaderTemplate),
+      textValue(input.htmlBodyTemplate),
+      textValue(input.plainTextTemplate),
+      input.layoutKey ?? "personal_letter",
+      JSON.stringify(input.contentVariantsJson ?? []),
+      JSON.stringify(input.subjectSuggestionsJson ?? []),
+      input.attachmentPolicy ?? "none",
+      input.signatureMode ?? "include_scanlark_signature",
       input.defaultFollowUpBusinessDays ?? null,
       input.isActive !== false,
       actor.id,
@@ -466,6 +563,14 @@ export async function updateOperationsCommunicationTemplate(
     category: OperationsCommunicationTemplateCategory;
     subjectTemplate: string;
     bodyTemplate: string;
+    preheaderTemplate: string | null;
+    htmlBodyTemplate: string | null;
+    plainTextTemplate: string | null;
+    layoutKey: OperationsCommunicationLayoutKey;
+    contentVariantsJson: OperationsCommunicationContentVariant[];
+    subjectSuggestionsJson: string[];
+    attachmentPolicy: OperationsCommunicationAttachmentPolicy;
+    signatureMode: OperationsCommunicationSignatureMode;
     defaultFollowUpBusinessDays: number | null;
     isActive: boolean;
   }>,
@@ -491,6 +596,34 @@ export async function updateOperationsCommunicationTemplate(
     const body = textValue(input.bodyTemplate);
     if (!body) throw new Error("template_body_required");
     setColumn("body_template", body);
+  }
+  if (input.preheaderTemplate !== undefined) {
+    setColumn("preheader_template", textValue(input.preheaderTemplate));
+  }
+  if (input.htmlBodyTemplate !== undefined) {
+    setColumn("html_body_template", textValue(input.htmlBodyTemplate));
+  }
+  if (input.plainTextTemplate !== undefined) {
+    setColumn("plain_text_template", textValue(input.plainTextTemplate));
+  }
+  if (input.layoutKey !== undefined) setColumn("layout_key", input.layoutKey);
+  if (input.contentVariantsJson !== undefined) {
+    setColumn(
+      "content_variants_json",
+      JSON.stringify(input.contentVariantsJson),
+    );
+  }
+  if (input.subjectSuggestionsJson !== undefined) {
+    setColumn(
+      "subject_suggestions_json",
+      JSON.stringify(input.subjectSuggestionsJson),
+    );
+  }
+  if (input.attachmentPolicy !== undefined) {
+    setColumn("attachment_policy", input.attachmentPolicy);
+  }
+  if (input.signatureMode !== undefined) {
+    setColumn("signature_mode", input.signatureMode);
   }
   if (input.defaultFollowUpBusinessDays !== undefined) {
     setColumn(
@@ -845,6 +978,23 @@ export async function createOperationsCommunication(
           status,
           subject,
           body,
+          preheader,
+          html_fragment,
+          html_document,
+          plain_text_body,
+          layout_key,
+          wording_variant_key,
+          signature_mode,
+          sender_identity_key,
+          sender_name,
+          sender_email,
+          recipient_name,
+          recipient_email,
+          template_snapshot_json,
+          public_asset_urls_json,
+          attachment_requirements_json,
+          attachment_confirmed_at,
+          attachment_confirmation_note,
           sent_at,
           received_at,
           occurred_at,
@@ -852,7 +1002,7 @@ export async function createOperationsCommunication(
           external_message_id,
           created_by_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29)
         RETURNING *
       `,
       [
@@ -864,6 +1014,25 @@ export async function createOperationsCommunication(
         status,
         textValue(input.subject),
         body,
+        textValue(input.preheader),
+        textValue(input.htmlFragment),
+        textValue(input.htmlDocument),
+        textValue(input.plainTextBody),
+        input.layoutKey ?? null,
+        textValue(input.wordingVariantKey),
+        input.signatureMode ?? null,
+        textValue(input.senderIdentityKey),
+        textValue(input.senderName),
+        textValue(input.senderEmail),
+        textValue(input.recipientName),
+        textValue(input.recipientEmail),
+        input.templateSnapshotJson == null
+          ? null
+          : JSON.stringify(input.templateSnapshotJson),
+        JSON.stringify(input.publicAssetUrlsJson ?? []),
+        JSON.stringify(input.attachmentRequirementsJson ?? []),
+        input.attachmentConfirmedAt ?? null,
+        textValue(input.attachmentConfirmationNote),
         sentAt ?? null,
         receivedAt ?? null,
         occurredAt,
@@ -978,6 +1147,69 @@ export async function updateOperationsCommunication(
     if (!body) throw new Error("communication_body_required");
     setColumn("body", body);
   }
+  if (input.preheader !== undefined) {
+    setColumn("preheader", textValue(input.preheader));
+  }
+  if (input.htmlFragment !== undefined) {
+    setColumn("html_fragment", textValue(input.htmlFragment));
+  }
+  if (input.htmlDocument !== undefined) {
+    setColumn("html_document", textValue(input.htmlDocument));
+  }
+  if (input.plainTextBody !== undefined) {
+    setColumn("plain_text_body", textValue(input.plainTextBody));
+  }
+  if (input.layoutKey !== undefined) setColumn("layout_key", input.layoutKey);
+  if (input.wordingVariantKey !== undefined) {
+    setColumn("wording_variant_key", textValue(input.wordingVariantKey));
+  }
+  if (input.signatureMode !== undefined) {
+    setColumn("signature_mode", input.signatureMode);
+  }
+  if (input.senderIdentityKey !== undefined) {
+    setColumn("sender_identity_key", textValue(input.senderIdentityKey));
+  }
+  if (input.senderName !== undefined) {
+    setColumn("sender_name", textValue(input.senderName));
+  }
+  if (input.senderEmail !== undefined) {
+    setColumn("sender_email", textValue(input.senderEmail));
+  }
+  if (input.recipientName !== undefined) {
+    setColumn("recipient_name", textValue(input.recipientName));
+  }
+  if (input.recipientEmail !== undefined) {
+    setColumn("recipient_email", textValue(input.recipientEmail));
+  }
+  if (input.templateSnapshotJson !== undefined) {
+    setColumn(
+      "template_snapshot_json",
+      input.templateSnapshotJson == null
+        ? null
+        : JSON.stringify(input.templateSnapshotJson),
+    );
+  }
+  if (input.publicAssetUrlsJson !== undefined) {
+    setColumn(
+      "public_asset_urls_json",
+      JSON.stringify(input.publicAssetUrlsJson),
+    );
+  }
+  if (input.attachmentRequirementsJson !== undefined) {
+    setColumn(
+      "attachment_requirements_json",
+      JSON.stringify(input.attachmentRequirementsJson),
+    );
+  }
+  if (input.attachmentConfirmedAt !== undefined) {
+    setColumn("attachment_confirmed_at", input.attachmentConfirmedAt);
+  }
+  if (input.attachmentConfirmationNote !== undefined) {
+    setColumn(
+      "attachment_confirmation_note",
+      textValue(input.attachmentConfirmationNote),
+    );
+  }
   if (input.occurredAt !== undefined) {
     setColumn("occurred_at", input.occurredAt);
   }
@@ -1054,6 +1286,23 @@ export async function markOperationsCommunicationSent(
   input: {
     subject?: string | null;
     body?: string | null;
+    preheader?: string | null;
+    htmlFragment?: string | null;
+    htmlDocument?: string | null;
+    plainTextBody?: string | null;
+    layoutKey?: OperationsCommunicationLayoutKey | null;
+    wordingVariantKey?: string | null;
+    signatureMode?: OperationsCommunicationSignatureMode | null;
+    senderIdentityKey?: string | null;
+    senderName?: string | null;
+    senderEmail?: string | null;
+    recipientName?: string | null;
+    recipientEmail?: string | null;
+    templateSnapshotJson?: Record<string, unknown> | null;
+    publicAssetUrlsJson?: string[];
+    attachmentRequirementsJson?: OperationsCommunicationAttachmentRequirement[];
+    attachmentConfirmedAt?: Date | null;
+    attachmentConfirmationNote?: string | null;
     followUpAt?: Date | null;
     taskTitle?: string | null;
     taskNotes?: string | null;
@@ -1077,6 +1326,93 @@ export async function markOperationsCommunicationSent(
     if (!body) throw new Error("communication_body_required");
     values.push(body);
     sets.push(`body = $${values.length}`);
+  }
+  const optionalColumns: Array<[boolean, string, unknown]> = [
+    [input.preheader !== undefined, "preheader", textValue(input.preheader)],
+    [
+      input.htmlFragment !== undefined,
+      "html_fragment",
+      textValue(input.htmlFragment),
+    ],
+    [
+      input.htmlDocument !== undefined,
+      "html_document",
+      textValue(input.htmlDocument),
+    ],
+    [
+      input.plainTextBody !== undefined,
+      "plain_text_body",
+      textValue(input.plainTextBody),
+    ],
+    [input.layoutKey !== undefined, "layout_key", input.layoutKey ?? null],
+    [
+      input.wordingVariantKey !== undefined,
+      "wording_variant_key",
+      textValue(input.wordingVariantKey),
+    ],
+    [
+      input.signatureMode !== undefined,
+      "signature_mode",
+      input.signatureMode ?? null,
+    ],
+    [
+      input.senderIdentityKey !== undefined,
+      "sender_identity_key",
+      textValue(input.senderIdentityKey),
+    ],
+    [
+      input.senderName !== undefined,
+      "sender_name",
+      textValue(input.senderName),
+    ],
+    [
+      input.senderEmail !== undefined,
+      "sender_email",
+      textValue(input.senderEmail),
+    ],
+    [
+      input.recipientName !== undefined,
+      "recipient_name",
+      textValue(input.recipientName),
+    ],
+    [
+      input.recipientEmail !== undefined,
+      "recipient_email",
+      textValue(input.recipientEmail),
+    ],
+    [
+      input.templateSnapshotJson !== undefined,
+      "template_snapshot_json",
+      input.templateSnapshotJson == null
+        ? null
+        : JSON.stringify(input.templateSnapshotJson),
+    ],
+    [
+      input.publicAssetUrlsJson !== undefined,
+      "public_asset_urls_json",
+      JSON.stringify(input.publicAssetUrlsJson ?? []),
+    ],
+    [
+      input.attachmentRequirementsJson !== undefined,
+      "attachment_requirements_json",
+      JSON.stringify(input.attachmentRequirementsJson ?? []),
+    ],
+    [
+      input.attachmentConfirmedAt !== undefined,
+      "attachment_confirmed_at",
+      input.attachmentConfirmedAt ?? null,
+    ],
+    [
+      input.attachmentConfirmationNote !== undefined,
+      "attachment_confirmation_note",
+      textValue(input.attachmentConfirmationNote),
+    ],
+  ];
+  for (const [present, column, value] of optionalColumns) {
+    if (present) {
+      values.push(value);
+      sets.push(`${column} = $${values.length}`);
+    }
   }
   if (input.followUpAt !== undefined) {
     values.push(input.followUpAt);

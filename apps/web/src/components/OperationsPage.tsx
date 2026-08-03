@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { copyRichEmailToClipboard } from "../emailClipboard";
 import { OperationsReportWorkspace } from "./operations/reports/OperationsReportWorkspace";
 import type {
   OperationsReportReadinessIssue,
@@ -53,6 +54,19 @@ type CommunicationTemplateCategory =
   | "monthly_update"
   | "testimonial_request"
   | "referral_request"
+  | "managed_service_proposal"
+  | "service_activation"
+  | "monitoring_started"
+  | "monthly_report_delivery"
+  | "website_issue_notification"
+  | "client_action_required"
+  | "allowance_nearing_limit"
+  | "work_outside_plan"
+  | "service_review"
+  | "renewal_discussion"
+  | "service_paused"
+  | "cancellation_acknowledgement"
+  | "service_ended"
   | "custom";
 
 type CommunicationDirection = "outbound" | "inbound" | "internal_note";
@@ -68,6 +82,19 @@ type CommunicationStatus =
   | "sent"
   | "received"
   | "cancelled";
+type CommunicationLayoutKey =
+  | "personal_letter"
+  | "report_delivery"
+  | "commercial_document"
+  | "status_alert";
+type CommunicationAttachmentPolicy =
+  | "none"
+  | "client_report_pdf"
+  | "quote_pdf"
+  | "updated_report_pdf";
+type CommunicationSignatureMode =
+  | "include_scanlark_signature"
+  | "use_mailbox_signature";
 type TaskStatus = "open" | "completed" | "snoozed" | "cancelled";
 type OperationsReportStatus =
   | "draft"
@@ -379,11 +406,40 @@ type CommunicationTemplate = {
   category: CommunicationTemplateCategory;
   subject_template: string;
   body_template: string;
+  preheader_template: string | null;
+  html_body_template: string | null;
+  plain_text_template: string | null;
+  layout_key: CommunicationLayoutKey;
+  content_variants_json: CommunicationVariant[];
+  subject_suggestions_json: string[];
+  attachment_policy: CommunicationAttachmentPolicy;
+  signature_mode: CommunicationSignatureMode;
   default_follow_up_business_days: number | null;
   is_active: boolean;
   is_system_default: boolean;
   created_at: string;
   updated_at: string;
+};
+
+type CommunicationVariant = {
+  key: string;
+  label: string;
+  body?: string;
+  html?: string;
+  plainText?: string;
+  preheader?: string;
+};
+
+type CommunicationAttachmentRequirement = {
+  key: CommunicationAttachmentPolicy;
+  label: string;
+  required: boolean;
+};
+
+type OperationsSenderIdentity = {
+  key: string;
+  name: string;
+  email: string;
 };
 
 type Communication = {
@@ -396,6 +452,22 @@ type Communication = {
   status: CommunicationStatus;
   subject: string | null;
   body: string;
+  preheader: string | null;
+  html_fragment: string | null;
+  html_document: string | null;
+  plain_text_body: string | null;
+  layout_key: CommunicationLayoutKey | null;
+  wording_variant_key: string | null;
+  signature_mode: CommunicationSignatureMode | null;
+  sender_identity_key: string | null;
+  sender_name: string | null;
+  sender_email: string | null;
+  recipient_name: string | null;
+  recipient_email: string | null;
+  public_asset_urls_json: string[];
+  attachment_requirements_json: CommunicationAttachmentRequirement[];
+  attachment_confirmed_at: string | null;
+  attachment_confirmation_note: string | null;
   sent_at: string | null;
   received_at: string | null;
   occurred_at: string;
@@ -1153,7 +1225,28 @@ type CommunicationFormState = {
   channel: CommunicationChannel;
   status: CommunicationStatus;
   subject: string;
+  preheader: string;
   body: string;
+  htmlFragment: string;
+  htmlDocument: string;
+  plainTextBody: string;
+  layoutKey: CommunicationLayoutKey;
+  wordingVariantKey: string;
+  signatureMode: CommunicationSignatureMode;
+  senderIdentityKey: string;
+  senderName: string;
+  senderEmail: string;
+  recipientName: string;
+  recipientEmail: string;
+  publicAssetUrls: string[];
+  attachmentRequirements: CommunicationAttachmentRequirement[];
+  attachmentConfirmed: boolean;
+  attachmentConfirmationNote: string;
+  templateSnapshot: Record<string, unknown> | null;
+  renderWarnings: string[];
+  previewMode: "desktop" | "narrow" | "images_hidden" | "plain_text";
+  copyStatus: string;
+  hasUnsavedRenderEdits: boolean;
   followUpAt: string;
   taskTitle: string;
   taskNotes: string;
@@ -1173,7 +1266,15 @@ type TemplateFormState = {
   name: string;
   category: CommunicationTemplateCategory;
   subjectTemplate: string;
+  preheaderTemplate: string;
   bodyTemplate: string;
+  htmlBodyTemplate: string;
+  plainTextTemplate: string;
+  layoutKey: CommunicationLayoutKey;
+  contentVariantsJson: CommunicationVariant[];
+  subjectSuggestionsJson: string[];
+  attachmentPolicy: CommunicationAttachmentPolicy;
+  signatureMode: CommunicationSignatureMode;
   defaultFollowUpBusinessDays: string;
   isActive: boolean;
 };
@@ -1233,7 +1334,43 @@ const communicationTemplateCategoryOptions: Array<{
   { value: "monthly_update", label: "Monthly update" },
   { value: "testimonial_request", label: "Testimonial request" },
   { value: "referral_request", label: "Referral request" },
+  { value: "managed_service_proposal", label: "Managed service proposal" },
+  { value: "service_activation", label: "Service activation" },
+  { value: "monitoring_started", label: "Monitoring started" },
+  { value: "monthly_report_delivery", label: "Monthly report delivery" },
+  { value: "website_issue_notification", label: "Website issue notification" },
+  { value: "client_action_required", label: "Client action required" },
+  { value: "allowance_nearing_limit", label: "Allowance nearing limit" },
+  { value: "work_outside_plan", label: "Work outside plan" },
+  { value: "service_review", label: "Service review" },
+  { value: "renewal_discussion", label: "Renewal discussion" },
+  { value: "service_paused", label: "Service paused" },
+  {
+    value: "cancellation_acknowledgement",
+    label: "Cancellation acknowledgement",
+  },
+  { value: "service_ended", label: "Service ended" },
   { value: "custom", label: "Custom" },
+];
+
+const communicationLayoutOptions: Array<{
+  value: CommunicationLayoutKey;
+  label: string;
+}> = [
+  { value: "personal_letter", label: "Personal letter" },
+  { value: "report_delivery", label: "Report delivery" },
+  { value: "commercial_document", label: "Commercial document" },
+  { value: "status_alert", label: "Status alert" },
+];
+
+const communicationAttachmentOptions: Array<{
+  value: CommunicationAttachmentPolicy;
+  label: string;
+}> = [
+  { value: "none", label: "No attachment required" },
+  { value: "client_report_pdf", label: "Attach client report PDF" },
+  { value: "quote_pdf", label: "Attach quote PDF" },
+  { value: "updated_report_pdf", label: "Attach updated/re-test report" },
 ];
 
 const communicationChannelOptions: Array<{
@@ -1505,7 +1642,28 @@ const emptyCommunicationForm: CommunicationFormState = {
   channel: "email",
   status: "draft",
   subject: "",
+  preheader: "",
   body: "",
+  htmlFragment: "",
+  htmlDocument: "",
+  plainTextBody: "",
+  layoutKey: "personal_letter",
+  wordingVariantKey: "",
+  signatureMode: "include_scanlark_signature",
+  senderIdentityKey: "",
+  senderName: "",
+  senderEmail: "",
+  recipientName: "",
+  recipientEmail: "",
+  publicAssetUrls: [],
+  attachmentRequirements: [],
+  attachmentConfirmed: false,
+  attachmentConfirmationNote: "",
+  templateSnapshot: null,
+  renderWarnings: [],
+  previewMode: "desktop",
+  copyStatus: "",
+  hasUnsavedRenderEdits: false,
   followUpAt: "",
   taskTitle: "",
   taskNotes: "",
@@ -1516,7 +1674,15 @@ const emptyTemplateForm: TemplateFormState = {
   name: "",
   category: "custom",
   subjectTemplate: "",
+  preheaderTemplate: "",
   bodyTemplate: "",
+  htmlBodyTemplate: "",
+  plainTextTemplate: "",
+  layoutKey: "personal_letter",
+  contentVariantsJson: [],
+  subjectSuggestionsJson: [],
+  attachmentPolicy: "none",
+  signatureMode: "include_scanlark_signature",
   defaultFollowUpBusinessDays: "",
   isActive: true,
 };
@@ -1978,6 +2144,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [communicationTemplates, setCommunicationTemplates] = useState<
     CommunicationTemplate[]
   >([]);
+  const [senderIdentities, setSenderIdentities] = useState<
+    OperationsSenderIdentity[]
+  >([]);
+  const [defaultSignatureMode, setDefaultSignatureMode] =
+    useState<CommunicationSignatureMode>("include_scanlark_signature");
   const [communications, setCommunications] = useState<Communication[]>([]);
   const [communicationsLoading, setCommunicationsLoading] = useState(false);
   const [communicationSearch, setCommunicationSearch] = useState("");
@@ -1997,6 +2168,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     string | null
   >(null);
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(
+    null,
+  );
   const [pendingSendPrompt, setPendingSendPrompt] = useState<{
     recipient: string;
     channel: "mailto" | "webmail";
@@ -2269,8 +2443,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as {
         templates: CommunicationTemplate[];
+        senderIdentities?: OperationsSenderIdentity[];
+        defaultSignatureMode?: CommunicationSignatureMode;
       };
       setCommunicationTemplates(data.templates);
+      setSenderIdentities(data.senderIdentities ?? []);
+      setDefaultSignatureMode(
+        data.defaultSignatureMode ?? "include_scanlark_signature",
+      );
     } catch (err) {
       console.warn("Failed to load communication templates", err);
       setCommunicationTemplates([]);
@@ -3209,19 +3389,41 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setActionError(null);
     const selectedBusinessId =
       overrides.businessId ?? detail?.business.id ?? "";
+    const sender = senderIdentities[0] ?? {
+      key: "default",
+      name: "Connor Smith",
+      email: "connor@scanlark.com",
+    };
+    const template =
+      communicationTemplates.find((item) => item.id === overrides.templateId) ??
+      communicationTemplates.find((item) => item.is_active);
     setCommunicationForm({
       ...emptyCommunicationForm,
       businessId: selectedBusinessId,
       contactId: overrides.contactId ?? detail?.primaryContact?.id ?? "",
-      templateId:
-        overrides.templateId ??
-        communicationTemplates.find((template) => template.is_active)?.id ??
-        "",
+      templateId: template?.id ?? "",
       direction: overrides.direction ?? "outbound",
       channel: overrides.channel ?? "email",
       status: overrides.status ?? "draft",
       subject: overrides.subject ?? "",
+      preheader: overrides.preheader ?? template?.preheader_template ?? "",
       body: overrides.body ?? "",
+      plainTextBody: overrides.plainTextBody ?? "",
+      layoutKey:
+        overrides.layoutKey ?? template?.layout_key ?? "personal_letter",
+      wordingVariantKey:
+        overrides.wordingVariantKey ??
+        template?.content_variants_json?.[0]?.key ??
+        "",
+      signatureMode:
+        overrides.signatureMode ??
+        template?.signature_mode ??
+        defaultSignatureMode,
+      senderIdentityKey: overrides.senderIdentityKey ?? sender.key,
+      senderName: overrides.senderName ?? sender.name,
+      senderEmail: overrides.senderEmail ?? sender.email,
+      recipientName: overrides.recipientName ?? "",
+      recipientEmail: overrides.recipientEmail ?? "",
       followUpAt: overrides.followUpAt ?? "",
       taskTitle: overrides.taskTitle ?? "",
       taskNotes: overrides.taskNotes ?? "",
@@ -3256,6 +3458,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setCommunicationForm((prev) => ({
       ...prev,
       subject,
+      hasUnsavedRenderEdits: true,
       unresolvedPlaceholders: findEditorPlaceholders(subject, prev.body),
     }));
   }
@@ -3264,6 +3467,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setCommunicationForm((prev) => ({
       ...prev,
       body,
+      plainTextBody: body,
+      hasUnsavedRenderEdits: true,
       unresolvedPlaceholders: findEditorPlaceholders(prev.subject, body),
     }));
   }
@@ -4189,6 +4394,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             templateId: communicationForm.templateId,
             contactId: communicationForm.contactId || null,
             followUpAt: localDateTimeToIso(communicationForm.followUpAt),
+            senderIdentityKey: communicationForm.senderIdentityKey,
+            wordingVariantKey: communicationForm.wordingVariantKey || null,
+            signatureMode: communicationForm.signatureMode,
           }),
         },
       );
@@ -4196,8 +4404,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       const data = (await res.json()) as {
         draft: {
           subject: string;
+          preheader: string;
           body: string;
+          htmlFragment: string;
+          htmlDocument: string;
+          plainText: string;
           unresolvedPlaceholders: string[];
+          warnings: string[];
+          publicAssetUrls: string[];
+          attachmentRequirements: CommunicationAttachmentRequirement[];
+          layoutKey: CommunicationLayoutKey;
+          signatureMode: CommunicationSignatureMode;
+          senderIdentityKey: string | null;
+          templateSnapshot: Record<string, unknown>;
           suggestedFollowUpAt?: string | null;
           contactWarning?: {
             doNotContact: boolean;
@@ -4206,10 +4425,32 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           } | null;
         };
       };
+      const selectedContact = selectedCommunicationContact();
+      const context = communicationBusinessContext();
       setCommunicationForm((prev) => ({
         ...prev,
         subject: data.draft.subject,
+        preheader: data.draft.preheader,
         body: data.draft.body,
+        htmlFragment: data.draft.htmlFragment,
+        htmlDocument: data.draft.htmlDocument,
+        plainTextBody: data.draft.plainText,
+        layoutKey: data.draft.layoutKey,
+        signatureMode: data.draft.signatureMode,
+        senderIdentityKey:
+          data.draft.senderIdentityKey ?? prev.senderIdentityKey,
+        recipientName:
+          selectedContact != null
+            ? contactName(selectedContact)
+            : (context?.business.name ?? ""),
+        recipientEmail: communicationRecipientEmail(),
+        publicAssetUrls: data.draft.publicAssetUrls,
+        attachmentRequirements: data.draft.attachmentRequirements,
+        attachmentConfirmed: data.draft.attachmentRequirements.length === 0,
+        templateSnapshot: data.draft.templateSnapshot,
+        renderWarnings: data.draft.warnings,
+        hasUnsavedRenderEdits: false,
+        copyStatus: "",
         followUpAt:
           prev.followUpAt ||
           toDateTimeLocalValue(data.draft.suggestedFollowUpAt ?? null),
@@ -4233,6 +4474,16 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         `Resolve unresolved placeholders before marking ready: ${unresolved.join(
           ", ",
         )}`,
+      );
+      return;
+    }
+    if (
+      status === "sent" &&
+      communicationForm.attachmentRequirements.some((item) => item.required) &&
+      !communicationForm.attachmentConfirmed
+    ) {
+      setActionError(
+        "Confirm the required attachment was added in IONOS before marking sent.",
       );
       return;
     }
@@ -4279,6 +4530,33 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             status,
             subject: communicationForm.subject,
             body: communicationForm.body,
+            preheader: communicationForm.preheader || null,
+            htmlFragment: communicationForm.htmlFragment || null,
+            htmlDocument: communicationForm.htmlDocument || null,
+            plainTextBody:
+              communicationForm.plainTextBody || communicationForm.body,
+            layoutKey: communicationForm.layoutKey,
+            wordingVariantKey: communicationForm.wordingVariantKey || null,
+            signatureMode: communicationForm.signatureMode,
+            senderIdentityKey: communicationForm.senderIdentityKey || null,
+            senderName: communicationForm.senderName || null,
+            senderEmail: communicationForm.senderEmail || null,
+            recipientName: communicationForm.recipientName || null,
+            recipientEmail:
+              communicationForm.recipientEmail ||
+              communicationRecipientEmail() ||
+              null,
+            templateSnapshotJson: communicationForm.templateSnapshot,
+            publicAssetUrlsJson: communicationForm.publicAssetUrls,
+            attachmentRequirementsJson:
+              communicationForm.attachmentRequirements,
+            attachmentConfirmedAt:
+              communicationForm.attachmentRequirements.length > 0 &&
+              communicationForm.attachmentConfirmed
+                ? new Date().toISOString()
+                : null,
+            attachmentConfirmationNote:
+              communicationForm.attachmentConfirmationNote || null,
             followUpAt: localDateTimeToIso(communicationForm.followUpAt),
             taskTitle: communicationForm.taskTitle,
             taskNotes: communicationForm.taskNotes,
@@ -4306,8 +4584,25 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   async function copyCommunication() {
-    const text = `Subject: ${communicationForm.subject}\n\n${communicationForm.body}`;
-    await navigator.clipboard.writeText(text);
+    if (communicationForm.hasUnsavedRenderEdits) {
+      setCommunicationForm((prev) => ({
+        ...prev,
+        copyStatus: "Regenerate the draft before copying formatted email.",
+      }));
+      return;
+    }
+    const html = communicationForm.htmlFragment;
+    const plainText =
+      communicationForm.plainTextBody ||
+      `Subject: ${communicationForm.subject}\n\n${communicationForm.body}`;
+    const result = await copyRichEmailToClipboard({
+      html: html || plainText.replace(/\n/g, "<br>"),
+      plainText,
+    });
+    setCommunicationForm((prev) => ({
+      ...prev,
+      copyStatus: result.message,
+    }));
   }
 
   async function copyCommunicationPart(kind: "recipient" | "subject" | "body") {
@@ -4316,7 +4611,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         ? communicationRecipientEmail()
         : kind === "subject"
           ? communicationForm.subject
-          : communicationForm.body;
+          : communicationForm.plainTextBody || communicationForm.body;
     await navigator.clipboard.writeText(value);
   }
 
@@ -4348,6 +4643,22 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   async function markExistingCommunicationSent(item: Communication) {
     setActionError(null);
+    const sender = senderIdentities[0] ?? {
+      key: "default",
+      name: item.sender_name ?? "Connor Smith",
+      email: item.sender_email ?? "connor@scanlark.com",
+    };
+    const requiresAttachment = item.attachment_requirements_json?.some(
+      (requirement) => requirement.required,
+    );
+    if (
+      requiresAttachment &&
+      !window.confirm(
+        "Confirm the required attachment was added in IONOS before marking sent.",
+      )
+    ) {
+      return;
+    }
     const res = await apiFetch(
       `${apiBase}/operations/businesses/${encodeURIComponent(
         item.business_id,
@@ -4358,6 +4669,22 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         body: JSON.stringify({
           subject: item.subject,
           body: item.body,
+          preheader: item.preheader,
+          htmlFragment: item.html_fragment,
+          htmlDocument: item.html_document,
+          plainTextBody: item.plain_text_body ?? item.body,
+          layoutKey: item.layout_key,
+          signatureMode: item.signature_mode ?? "include_scanlark_signature",
+          senderIdentityKey: item.sender_identity_key ?? sender.key,
+          senderName: item.sender_name ?? sender.name,
+          senderEmail: item.sender_email ?? sender.email,
+          recipientName: item.recipient_name,
+          recipientEmail: item.recipient_email ?? item.contact_email,
+          publicAssetUrlsJson: item.public_asset_urls_json ?? [],
+          attachmentRequirementsJson: item.attachment_requirements_json ?? [],
+          attachmentConfirmedAt: requiresAttachment
+            ? new Date().toISOString()
+            : item.attachment_confirmed_at,
         }),
       },
     );
@@ -4376,12 +4703,18 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setActionError(null);
     try {
       const res = await apiFetch(
-        `${apiBase}/operations/communication-templates`,
+        editingTemplateId
+          ? `${apiBase}/operations/communication-templates/${encodeURIComponent(
+              editingTemplateId,
+            )}`
+          : `${apiBase}/operations/communication-templates`,
         {
-          method: "POST",
+          method: editingTemplateId ? "PATCH" : "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             ...templateForm,
+            contentVariantsJson: templateForm.contentVariantsJson,
+            subjectSuggestionsJson: templateForm.subjectSuggestionsJson,
             defaultFollowUpBusinessDays:
               templateForm.defaultFollowUpBusinessDays.trim() === ""
                 ? null
@@ -4391,6 +4724,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       );
       if (!res.ok) throw new Error("Failed to create template");
       setTemplateForm(emptyTemplateForm);
+      setEditingTemplateId(null);
       await loadCommunicationTemplates();
     } catch (err) {
       setActionError(
@@ -4419,6 +4753,65 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         err instanceof Error ? err.message : "Failed to update template",
       );
     }
+  }
+
+  async function duplicateTemplate(template: CommunicationTemplate) {
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/communication-templates/${encodeURIComponent(
+          template.id,
+        )}/duplicate`,
+        { method: "POST" },
+      );
+      if (!res.ok) throw new Error("Failed to duplicate template");
+      await loadCommunicationTemplates();
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to duplicate template",
+      );
+    }
+  }
+
+  function openTemplateEditor(template?: CommunicationTemplate) {
+    if (!template) {
+      setEditingTemplateId(null);
+      setTemplateForm(emptyTemplateForm);
+      setTemplateEditorOpen(true);
+      return;
+    }
+    setEditingTemplateId(template.id);
+    setTemplateForm({
+      name: template.name,
+      category: template.category,
+      subjectTemplate: template.subject_template,
+      preheaderTemplate: template.preheader_template ?? "",
+      bodyTemplate: template.body_template,
+      htmlBodyTemplate: template.html_body_template ?? "",
+      plainTextTemplate: template.plain_text_template ?? "",
+      layoutKey: template.layout_key,
+      contentVariantsJson: template.content_variants_json ?? [],
+      subjectSuggestionsJson: template.subject_suggestions_json ?? [],
+      attachmentPolicy: template.attachment_policy,
+      signatureMode: template.signature_mode,
+      defaultFollowUpBusinessDays:
+        template.default_follow_up_business_days == null
+          ? ""
+          : String(template.default_follow_up_business_days),
+      isActive: template.is_active,
+    });
+    setTemplateEditorOpen(true);
+  }
+
+  function communicationPreviewDocument() {
+    const document =
+      communicationForm.htmlDocument ||
+      `<!doctype html><html><body><pre>${communicationForm.body}</pre></body></html>`;
+    if (communicationForm.previewMode !== "images_hidden") return document;
+    return document.replace(
+      "</head>",
+      "<style>img{visibility:hidden!important;} img::after{content:attr(alt);visibility:visible;}</style></head>",
+    );
   }
 
   async function runTaskAction(
@@ -4859,6 +5252,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       businessContext?.contacts.filter((contact) => !contact.archived_at) ?? [];
     const selectedContact = selectedCommunicationContact();
     const recipientEmail = communicationRecipientEmail();
+    const selectedTemplate = communicationTemplates.find(
+      (template) => template.id === communicationForm.templateId,
+    );
     return (
       <div className="ops-modal">
         <div className="ops-modal__panel ops-modal__panel--wide">
@@ -4942,12 +5338,27 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   Template
                   <select
                     value={communicationForm.templateId}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      const template = communicationTemplates.find(
+                        (item) => item.id === event.target.value,
+                      );
                       setCommunicationForm((prev) => ({
                         ...prev,
                         templateId: event.target.value,
-                      }))
-                    }
+                        layoutKey: template?.layout_key ?? prev.layoutKey,
+                        wordingVariantKey:
+                          template?.content_variants_json?.[0]?.key ?? "",
+                        signatureMode:
+                          template?.signature_mode ?? prev.signatureMode,
+                        preheader: template?.preheader_template ?? "",
+                        htmlFragment: "",
+                        htmlDocument: "",
+                        plainTextBody: "",
+                        attachmentRequirements: [],
+                        attachmentConfirmed: false,
+                        hasUnsavedRenderEdits: true,
+                      }));
+                    }}
                   >
                     <option value="">No template</option>
                     {communicationTemplates
@@ -5011,12 +5422,97 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   />
                 </label>
               </div>
+              <div className="ops-form-grid">
+                <label>
+                  Sender
+                  <select
+                    value={communicationForm.senderIdentityKey}
+                    onChange={(event) => {
+                      const sender = senderIdentities.find(
+                        (item) => item.key === event.target.value,
+                      );
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        senderIdentityKey: event.target.value,
+                        senderName: sender?.name ?? prev.senderName,
+                        senderEmail: sender?.email ?? prev.senderEmail,
+                        hasUnsavedRenderEdits: true,
+                      }));
+                    }}
+                  >
+                    {senderIdentities.length === 0 && (
+                      <option value={communicationForm.senderIdentityKey}>
+                        {communicationForm.senderName || "Default sender"}
+                      </option>
+                    )}
+                    {senderIdentities.map((identity) => (
+                      <option key={identity.key} value={identity.key}>
+                        {identity.name} · {identity.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Wording variant
+                  <select
+                    value={communicationForm.wordingVariantKey}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        wordingVariantKey: event.target.value,
+                        hasUnsavedRenderEdits: true,
+                      }))
+                    }
+                  >
+                    <option value="">Default wording</option>
+                    {selectedTemplate?.content_variants_json?.map((variant) => (
+                      <option key={variant.key} value={variant.key}>
+                        {variant.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Signature
+                  <select
+                    value={communicationForm.signatureMode}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        signatureMode: event.target
+                          .value as CommunicationSignatureMode,
+                        hasUnsavedRenderEdits: true,
+                      }))
+                    }
+                  >
+                    <option value="include_scanlark_signature">
+                      Include Scanlark signature
+                    </option>
+                    <option value="use_mailbox_signature">
+                      Use mailbox signature instead
+                    </option>
+                  </select>
+                </label>
+              </div>
               <label>
                 Subject
                 <input
                   value={communicationForm.subject}
                   onChange={(event) =>
                     setCommunicationSubject(event.target.value)
+                  }
+                />
+              </label>
+              <label>
+                Preheader
+                <input
+                  value={communicationForm.preheader}
+                  onChange={(event) =>
+                    setCommunicationForm((prev) => ({
+                      ...prev,
+                      preheader: event.target.value,
+                      hasUnsavedRenderEdits: true,
+                    }))
                   }
                 />
               </label>
@@ -5092,6 +5588,51 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   {communicationChannelLabel(selectedContact.preferred_channel)}
                 </div>
               )}
+              {communicationForm.renderWarnings.length > 0 && (
+                <div className="ops-warning">
+                  <strong>Draft warnings:</strong>{" "}
+                  {communicationForm.renderWarnings.join(" ")}
+                </div>
+              )}
+              {communicationForm.hasUnsavedRenderEdits && (
+                <div className="ops-warning">
+                  Regenerate the draft before copying formatted email or marking
+                  it sent.
+                </div>
+              )}
+              {communicationForm.attachmentRequirements.length > 0 && (
+                <div className="ops-empty-card">
+                  <strong>Attachment checklist</strong>
+                  {communicationForm.attachmentRequirements.map((item) => (
+                    <label key={item.key} className="ops-checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={communicationForm.attachmentConfirmed}
+                        onChange={(event) =>
+                          setCommunicationForm((prev) => ({
+                            ...prev,
+                            attachmentConfirmed: event.target.checked,
+                          }))
+                        }
+                      />
+                      {item.label}
+                    </label>
+                  ))}
+                  <input
+                    value={communicationForm.attachmentConfirmationNote}
+                    onChange={(event) =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        attachmentConfirmationNote: event.target.value,
+                      }))
+                    }
+                    placeholder="Optional attachment note"
+                  />
+                </div>
+              )}
+              {communicationForm.copyStatus && (
+                <div className="ops-muted">{communicationForm.copyStatus}</div>
+              )}
               <div className="ops-form-actions">
                 <button
                   type="button"
@@ -5126,7 +5667,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   onClick={() => void copyCommunicationPart("body")}
                   disabled={!communicationForm.body.trim()}
                 >
-                  Copy body
+                  Copy plain text
                 </button>
                 <button
                   type="button"
@@ -5134,7 +5675,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   onClick={() => void copyCommunication()}
                   disabled={!communicationForm.body.trim()}
                 >
-                  Copy full email
+                  Copy formatted email
                 </button>
                 <button
                   type="button"
@@ -5227,11 +5768,60 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               </div>
             </div>
             <div className="ops-preview">
-              <div className="ops-section-label">Preview</div>
-              <strong>{communicationForm.subject || "No subject"}</strong>
-              <pre>
-                {communicationForm.body || "Generate or write a draft."}
-              </pre>
+              <div className="ops-panel__header">
+                <div>
+                  <div className="ops-section-label">Preview</div>
+                  <strong>{communicationForm.subject || "No subject"}</strong>
+                </div>
+              </div>
+              <div className="ops-segmented" aria-label="Email preview modes">
+                {[
+                  ["desktop", "Desktop HTML"],
+                  ["narrow", "Narrow HTML"],
+                  ["images_hidden", "Images hidden"],
+                  ["plain_text", "Plain text"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={
+                      communicationForm.previewMode === value ? "active" : ""
+                    }
+                    onClick={() =>
+                      setCommunicationForm((prev) => ({
+                        ...prev,
+                        previewMode:
+                          value as CommunicationFormState["previewMode"],
+                      }))
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {communicationForm.previewMode === "plain_text" ? (
+                <pre>
+                  {communicationForm.plainTextBody ||
+                    communicationForm.body ||
+                    "Generate or write a draft."}
+                </pre>
+              ) : (
+                <iframe
+                  className={
+                    communicationForm.previewMode === "narrow"
+                      ? "ops-email-preview ops-email-preview--narrow"
+                      : "ops-email-preview"
+                  }
+                  sandbox=""
+                  srcDoc={communicationPreviewDocument()}
+                  title="Email HTML preview"
+                />
+              )}
+              {communicationForm.publicAssetUrls.length > 0 && (
+                <small>
+                  Assets: {communicationForm.publicAssetUrls.join(", ")}
+                </small>
+              )}
               <small>
                 Opening mailto or webmail does not mark this communication sent.
                 Attach PDFs manually where required.
@@ -5498,6 +6088,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     </strong>
                     <pre>{selectedCommunication.body}</pre>
                   </div>
+                  {selectedCommunication.html_document && (
+                    <iframe
+                      className="ops-email-preview"
+                      sandbox=""
+                      srcDoc={selectedCommunication.html_document}
+                      title="Saved email HTML preview"
+                    />
+                  )}
                   <div className="ops-form-actions">
                     <button
                       type="button"
@@ -5527,11 +6125,29 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       className="ops-button"
                       onClick={() =>
                         void navigator.clipboard.writeText(
-                          selectedCommunication.body,
+                          selectedCommunication.plain_text_body ??
+                            selectedCommunication.body,
                         )
                       }
                     >
-                      Copy body
+                      Copy plain text
+                    </button>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      onClick={() =>
+                        void copyRichEmailToClipboard({
+                          html:
+                            selectedCommunication.html_fragment ??
+                            selectedCommunication.body.replace(/\n/g, "<br>"),
+                          plainText:
+                            selectedCommunication.plain_text_body ??
+                            selectedCommunication.body,
+                        })
+                      }
+                      disabled={!selectedCommunication.body}
+                    >
+                      Copy formatted email
                     </button>
                     <button
                       type="button"
@@ -5645,10 +6261,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               </div>
               <button
                 className="ops-button ops-button--primary"
-                onClick={() => {
-                  setTemplateForm(emptyTemplateForm);
-                  setTemplateEditorOpen(true);
-                }}
+                onClick={() => openTemplateEditor()}
               >
                 Create template
               </button>
@@ -5694,12 +6307,33 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     Default follow-up:{" "}
                     {template.default_follow_up_business_days ?? "none"}
                   </small>
+                  <small>
+                    {communicationLayoutOptions.find(
+                      (item) => item.value === template.layout_key,
+                    )?.label ?? template.layout_key}{" "}
+                    ·{" "}
+                    {communicationAttachmentOptions.find(
+                      (item) => item.value === template.attachment_policy,
+                    )?.label ?? template.attachment_policy}
+                  </small>
                   <div className="ops-inline-actions">
+                    <button
+                      className="ops-button"
+                      onClick={() => openTemplateEditor(template)}
+                    >
+                      Edit
+                    </button>
                     <button
                       className="ops-button"
                       onClick={() => void toggleTemplate(template)}
                     >
                       {template.is_active ? "Archive" : "Restore"}
+                    </button>
+                    <button
+                      className="ops-button"
+                      onClick={() => void duplicateTemplate(template)}
+                    >
+                      Duplicate
                     </button>
                   </div>
                 </div>
@@ -5711,10 +6345,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           <div className="ops-modal">
             <div className="ops-modal__panel ops-modal__panel--wide">
               <div className="ops-panel__header">
-                <h2>Create communication template</h2>
+                <h2>
+                  {editingTemplateId
+                    ? "Edit communication template"
+                    : "Create communication template"}
+                </h2>
                 <button
                   className="ops-button"
-                  onClick={() => setTemplateEditorOpen(false)}
+                  onClick={() => {
+                    setTemplateEditorOpen(false);
+                    setEditingTemplateId(null);
+                  }}
                 >
                   Close
                 </button>
@@ -5781,6 +6422,64 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       }
                     />
                   </label>
+                  <label>
+                    Layout
+                    <select
+                      value={templateForm.layoutKey}
+                      onChange={(event) =>
+                        setTemplateForm((prev) => ({
+                          ...prev,
+                          layoutKey: event.target
+                            .value as CommunicationLayoutKey,
+                        }))
+                      }
+                    >
+                      {communicationLayoutOptions.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Attachment
+                    <select
+                      value={templateForm.attachmentPolicy}
+                      onChange={(event) =>
+                        setTemplateForm((prev) => ({
+                          ...prev,
+                          attachmentPolicy: event.target
+                            .value as CommunicationAttachmentPolicy,
+                        }))
+                      }
+                    >
+                      {communicationAttachmentOptions.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Signature
+                    <select
+                      value={templateForm.signatureMode}
+                      onChange={(event) =>
+                        setTemplateForm((prev) => ({
+                          ...prev,
+                          signatureMode: event.target
+                            .value as CommunicationSignatureMode,
+                        }))
+                      }
+                    >
+                      <option value="include_scanlark_signature">
+                        Include Scanlark signature
+                      </option>
+                      <option value="use_mailbox_signature">
+                        Use mailbox signature
+                      </option>
+                    </select>
+                  </label>
                 </div>
                 <label>
                   Subject template
@@ -5795,6 +6494,18 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   />
                 </label>
                 <label>
+                  Preheader template
+                  <input
+                    value={templateForm.preheaderTemplate}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        preheaderTemplate: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
                   Body template
                   <textarea
                     className="ops-communication-body"
@@ -5803,6 +6514,32 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       setTemplateForm((prev) => ({
                         ...prev,
                         bodyTemplate: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  HTML body template
+                  <textarea
+                    className="ops-communication-body"
+                    value={templateForm.htmlBodyTemplate}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        htmlBodyTemplate: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Plain-text fallback
+                  <textarea
+                    className="ops-communication-body"
+                    value={templateForm.plainTextTemplate}
+                    onChange={(event) =>
+                      setTemplateForm((prev) => ({
+                        ...prev,
+                        plainTextTemplate: event.target.value,
                       }))
                     }
                   />
@@ -5828,7 +6565,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   <button
                     type="button"
                     className="ops-button"
-                    onClick={() => setTemplateEditorOpen(false)}
+                    onClick={() => {
+                      setTemplateEditorOpen(false);
+                      setEditingTemplateId(null);
+                    }}
                   >
                     Cancel
                   </button>
@@ -10683,6 +11423,27 @@ const operationsStyles = `
   .ops-communication-body {
     min-height: 240px;
     line-height: 1.6;
+  }
+  .ops-email-preview {
+    width: 100%;
+    height: 520px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #f4f7fb;
+  }
+  .ops-email-preview--narrow {
+    max-width: 390px;
+    justify-self: center;
+  }
+  .ops-checkbox-row {
+    display: flex;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    min-height: 32px;
+  }
+  .ops-checkbox-row input {
+    min-height: auto;
   }
   .ops-template-grid {
     display: grid;
