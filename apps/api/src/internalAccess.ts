@@ -3,7 +3,7 @@ import type { NextFunction, Request, Response } from "express";
 
 type Env = Record<string, string | undefined>;
 
-export const DEFAULT_PUBLIC_CONTACT_EMAIL = "connor@scanlark.com";
+export const DEFAULT_PUBLIC_CONTACT_EMAIL = "contact@scanlark.com";
 
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase();

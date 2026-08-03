@@ -11,4 +11,4 @@ Disallow: /sites
 Disallow: /shared-reports
 Disallow: /shared-results
 
-Sitemap: https://app.scanlark.com/sitemap.xml
+Sitemap: https://scanlark.com/sitemap.xml

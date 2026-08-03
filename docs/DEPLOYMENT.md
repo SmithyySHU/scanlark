@@ -44,10 +44,12 @@ If SSH uses a custom port, allow that port instead of the `OpenSSH` profile.
 
 ## DNS
 
-Create an A record:
+Create A records:
 
 ```txt
-scanlark.example.com  A  <VPS IPv4>
+scanlark.com      A  <VPS IPv4>
+www.scanlark.com  A  <VPS IPv4>
+app.scanlark.com  A  <VPS IPv4>
 ```
 
 Add an AAAA record only if IPv6 is configured correctly on the VPS.
@@ -75,7 +77,9 @@ nano .env.production
 
 Replace every `CHANGE_ME` value. At minimum set:
 
-- `SCANLARK_DOMAIN`
+- `SCANLARK_PUBLIC_DOMAIN=scanlark.com`
+- `SCANLARK_WWW_DOMAIN=www.scanlark.com`
+- `SCANLARK_APP_DOMAIN=app.scanlark.com`
 - `CADDY_ACME_EMAIL`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
@@ -118,20 +122,31 @@ Health check:
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
-curl -fsS https://scanlark.example.com/api/health
+curl -fsS https://app.scanlark.com/api/health
 ```
 
 ## Routing
 
-Caddy serves HTTPS for `SCANLARK_DOMAIN`.
+Caddy serves HTTPS for the public root, `www`, and the private app host.
+
+- `scanlark.com` serves the public marketing site, legal pages, brand assets,
+  robots and sitemap.
+- `www.scanlark.com` redirects permanently to `https://scanlark.com`.
+- `app.scanlark.com` serves login, the private application, Operations and the
+  API.
+- The public root answers only the minimal `/api/public/config` and `/api/me`
+  probes made by the shared SPA bundle. Other `/api/*` paths on the public root
+  return 404.
+- Private app routes requested on the public root, such as `/login`,
+  `/dashboard`, `/operations`, `/admin`, `/report` and `/shared-reports`, are
+  redirected to `app.scanlark.com`.
+
+On `app.scanlark.com`:
 
 - `/api/*` proxies to `api:3001` with `/api` stripped.
 - `/api/health` reaches API `/health`.
 - `/api/events/stream` reaches API `/events/stream` and is configured for SSE.
-- `/api/public/reports/:token/...` reaches public report API routes.
-- Everything else goes to the web service so SPA routes refresh correctly:
-  `/dashboard`, `/dashboard/reports`, `/report`, `/shared-reports/:token`,
-  `/learn`, `/learn/:slug`, `/onboarding`, `/sites/new`, and `/admin`.
+- Everything else goes to the web service so app SPA routes refresh correctly.
 
 ## Migrations
 
@@ -175,7 +190,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml build
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d postgres
 docker compose --env-file .env.production -f docker-compose.prod.yml --profile tools run --rm migrate
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d api worker web caddy
-curl -fsS https://scanlark.example.com/api/health
+curl -fsS https://app.scanlark.com/api/health
 ```
 
 ## Backups
@@ -244,7 +259,7 @@ Set in `.env.production`:
 
 ```bash
 EMAIL_ENABLED=true
-EMAIL_FROM="Scanlark <alerts@scanlark.example.com>"
+EMAIL_FROM="Scanlark <alerts@scanlark.com>"
 SMTP_HOST=smtp.provider.example
 SMTP_PORT=587
 SMTP_USER=<provider-user>
@@ -265,14 +280,18 @@ Container health:
 - `web`: internal `/healthz`
 - `worker`: logs show `[scheduler ...]` and `[uptime ...]` ticks
 
-Alpha smoke checks:
+Smoke checks:
 
-- `https://scanlark.example.com` loads the landing page.
-- `https://scanlark.example.com/api/health` returns `{ "status": "ok" }`.
-- `https://scanlark.example.com/api/public/config` returns only public client
-  config.
+- `https://scanlark.com` loads the public landing page.
+- `https://www.scanlark.com` redirects to `https://scanlark.com`.
+- `https://scanlark.com/privacy`, `/cookies`, `/terms`,
+  `/website-health-check-terms`, `/methodology` and `/contact` load.
+- `https://scanlark.com/api/public/config` returns only public client config.
+- `https://scanlark.com/api/health` returns 404.
+- `https://scanlark.com/login` redirects to `https://app.scanlark.com/login`.
+- `https://app.scanlark.com/api/health` returns `{ "status": "ok" }`.
 - `/dashboard`, `/dashboard/reports`, `/report`, `/shared-reports/:token`,
-  `/learn`, `/onboarding`, and `/sites/new` refresh without 404.
+  `/onboarding`, and `/sites/new` refresh on `app.scanlark.com` without 404.
 - Login works with `DEV_BYPASS_AUTH=false`; registration is rejected while
   `INTERNAL_ONLY_MODE=true`.
 - Add site works.

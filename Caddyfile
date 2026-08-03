@@ -1,35 +1,71 @@
 {
-  email {$CADDY_ACME_EMAIL:contact@scanlark.com}
+	email {$CADDY_ACME_EMAIL:contact@scanlark.com}
 }
 
-{$SCANLARK_DOMAIN:app.scanlark.com} {
-  encode zstd gzip
-  header {
-    Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    # The one inline script is the early theme bootstrap in apps/web/index.html;
-    # it is hash-pinned here so theme selection works before first paint without
-    # allowing arbitrary inline JavaScript. The React SPA still uses inline
-    # style attributes and injected style blocks, so style-src keeps
-    # 'unsafe-inline' until the styling layer is migrated to static CSS/classes.
-    Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-ZQLjnd6ra8t2uXd/oy48JaxUfWglZF6xuKl7FaXE/MA='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; form-action 'self'; manifest-src 'self'; media-src 'none'; upgrade-insecure-requests"
-    X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
-    Referrer-Policy "no-referrer"
-    Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
-  }
+(scanlark_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# The React SPA still uses inline style attributes and injected style
+		# blocks, so style-src keeps 'unsafe-inline' until the styling layer is
+		# migrated to static CSS/classes.
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-ZQLjnd6ra8t2uXd/oy48JaxUfWglZF6xuKl7FaXE/MA='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; form-action 'self'; manifest-src 'self'; media-src 'none'; upgrade-insecure-requests"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+	}
+}
 
-  handle /api/events/stream {
-    uri strip_prefix /api
-    reverse_proxy api:3001 {
-      flush_interval -1
-    }
-  }
+{$SCANLARK_WWW_DOMAIN:www.scanlark.com} {
+	import scanlark_security_headers
+	redir https://{$SCANLARK_PUBLIC_DOMAIN:scanlark.com}{uri} permanent
+}
 
-  handle_path /api/* {
-    reverse_proxy api:3001
-  }
+{$SCANLARK_PUBLIC_DOMAIN:scanlark.com} {
+	encode zstd gzip
+	import scanlark_security_headers
 
-  handle {
-    reverse_proxy web:80
-  }
+	handle /api/public/config {
+		header Content-Type application/json
+		respond `{"internalOnlyMode":true,"registrationAvailable":false,"contactEmail":"contact@scanlark.com"}` 200
+	}
+
+	handle /api/me {
+		header Content-Type application/json
+		respond `{"error":"unauthorized"}` 401
+	}
+
+	handle /api/* {
+		header Content-Type application/json
+		respond `{"error":"not_found"}` 404
+	}
+
+	@privateAppRoutes path /login* /dashboard* /account* /settings* /sites* /admin* /operations* /shared-reports* /shared-results* /report* /onboarding*
+	handle @privateAppRoutes {
+		redir https://{$SCANLARK_APP_DOMAIN:app.scanlark.com}{uri} permanent
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+}
+
+{$SCANLARK_APP_DOMAIN:app.scanlark.com} {
+	encode zstd gzip
+	import scanlark_security_headers
+
+	handle /api/events/stream {
+		uri strip_prefix /api
+		reverse_proxy api:3001 {
+			flush_interval -1
+		}
+	}
+
+	handle_path /api/* {
+		reverse_proxy api:3001
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
 }

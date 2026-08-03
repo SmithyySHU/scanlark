@@ -949,7 +949,7 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 const DEFAULT_PUBLIC_CONFIG: PublicConfig = {
   internalOnlyMode: false,
   registrationAvailable: true,
-  contactEmail: "",
+  contactEmail: "contact@scanlark.com",
 };
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
@@ -9783,10 +9783,10 @@ const App: React.FC = () => {
   }
 
   function openManagedServiceContact() {
-    const email = publicConfig.contactEmail.trim();
+    const email = publicConfig.contactEmail.trim() || "contact@scanlark.com";
     if (!email || typeof window === "undefined") return;
     window.location.href = `mailto:${email}?subject=${encodeURIComponent(
-      "Website health check request",
+      "Website health check enquiry",
     )}`;
   }
 
@@ -20080,17 +20080,9 @@ const App: React.FC = () => {
           isManagedPublicLandingRoute ? (
             <MarketingPage
               isAuthenticated={false}
-              primaryLabel={
-                internalOnlyMode
-                  ? "Request a website health check"
-                  : "Get started"
-              }
+              primaryLabel="Request a website health check"
               secondaryLabel="Login"
-              onOpenPrimary={
-                internalOnlyMode
-                  ? openManagedServiceContact
-                  : () => openAuth("register")
-              }
+              onOpenPrimary={openManagedServiceContact}
               onOpenSecondary={() => openAuth("login")}
               onOpenLearn={() => navigateTo("/learn")}
               legalLinks={LEGAL_PAGE_LINKS}

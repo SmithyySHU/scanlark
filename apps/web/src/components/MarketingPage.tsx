@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import type { LegalPageLink } from "../legalPages";
+import { ScanlarkLogo } from "./brand/ScanlarkLogo";
 
 type MarketingPageProps = {
   isAuthenticated: boolean;
@@ -14,53 +15,68 @@ type MarketingPageProps = {
   managedMode?: boolean;
 };
 
-const featureCards = [
+const issueCards = [
   {
-    title: "Reports and scan history",
-    body: "Keep a timeline of runs with trend details, score movement, and customer-friendly history context.",
+    title: "Broken links and missing pages",
+    body: "Find visitor journeys that lead to errors, redirects that no longer help, and links that should be fixed or removed.",
   },
   {
-    title: "Website issue detection",
-    body: "Catch broken links, SEO gaps, robots/sitemap problems, SSL and security-header findings, and speed/weight checks.",
+    title: "Missing resources",
+    body: "Highlight public images, scripts, stylesheets, documents and embedded resources that fail to load correctly.",
   },
   {
-    title: "Change detection",
-    body: "See what is new, what is still present, and what changed between completed scans.",
+    title: "Availability problems",
+    body: "Check whether important public pages are reachable and whether ongoing monitoring should watch them more closely.",
   },
   {
-    title: "Uptime and availability",
-    body: "Monitor whether key pages remain reachable and keep an eye on status trends for planned checks.",
+    title: "HTTPS and configuration concerns",
+    body: "Review common public HTTPS, redirect and header signals that can affect trust and basic website hygiene.",
   },
   {
-    title: "Shareable reports and PDF export",
-    body: "Share clean report links and export PDF outputs for stakeholders when that option is enabled.",
+    title: "Search-presentation basics",
+    body: "Surface missing titles, weak descriptions, sitemap and robots issues that can affect how pages are understood.",
   },
   {
-    title: "Scanlark Learn",
-    body: "Use practical guides for interpreting issue categories, prioritizing fixes, and publishing client-facing summaries.",
+    title: "New problems after changes",
+    body: "Use repeat checks to spot issues introduced by edits, plugin updates, migrations or content changes.",
+  },
+];
+
+const serviceSteps = [
+  {
+    title: "Request a health check",
+    body: "Send the site URL and a short note about the business. Scanlark confirms scope before any review starts.",
+  },
+  {
+    title: "Public checks are run",
+    body: "Scanlark checks public website signals from the outside without logging in, submitting forms or testing private systems.",
+  },
+  {
+    title: "Findings are reviewed",
+    body: "Automated evidence is reviewed before it is turned into a practical report, reducing noise and unsupported claims.",
+  },
+  {
+    title: "You receive next steps",
+    body: "The report explains what was found, what matters most, and what can be fixed, re-tested or monitored.",
   },
 ];
 
 const faqItems = [
   {
-    q: "What does Scanlark check?",
-    a: "Scanlark performs passive external checks of public website signals: broken links, SEO basics, robots/sitemap, SSL/HTTPS, security headers, speed basics, issue changes, and scheduled uptime checks.",
+    title: "Is this a security test?",
+    body: "No. Scanlark provides passive public website health checks. It is not a penetration test, vulnerability assessment or complete security review.",
   },
   {
-    q: "How often can scans run?",
-    a: "You can run scans manually or on a daily, weekly, or monthly schedule for each site.",
+    title: "Do you guarantee rankings or revenue?",
+    body: "No. The service identifies practical website issues and public signals. It does not guarantee search rankings, traffic, conversions or revenue.",
   },
   {
-    q: "What happens when issues change?",
-    a: "Completed scans compare against the previous baseline so new, existing, and resolved issues stay visible.",
+    title: "Can you fix the issues?",
+    body: "Where suitable, Scanlark can quote for website fixes, coordination and re-testing. Work is agreed separately before it starts.",
   },
   {
-    q: "What does passive monitoring mean?",
-    a: "Scanlark checks public website signals from outside. It does not log in, submit forms, scan ports, attack, or exploit websites.",
-  },
-  {
-    q: "What is not in the current MVP?",
-    a: "We do not advertise billing/subscription tiers, teams, client portals, white-label, or private authenticated/internal security testing on this landing page.",
+    title: "Who is this for?",
+    body: "Launch services are B2B-only for businesses, sole traders, charities and organisations purchasing for work or business purposes.",
   },
 ];
 
@@ -70,391 +86,304 @@ export const MarketingPage: React.FC<MarketingPageProps> = ({
   secondaryLabel,
   onOpenPrimary,
   onOpenSecondary,
-  onOpenLearn,
   legalLinks,
   onOpenLegal,
   onOpenAccount,
-  managedMode = false,
 }) => {
-  const finalIssueCount = 18;
-  const [animatedIssueCount, setAnimatedIssueCount] = useState(0);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      setAnimatedIssueCount(finalIssueCount);
-      return;
-    }
-
-    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    if (motionQuery.matches) {
-      setAnimatedIssueCount(finalIssueCount);
-      return;
-    }
-
-    setAnimatedIssueCount(0);
-    const stepMs = 45;
-    let currentValue = 0;
-    const timer = window.setInterval(() => {
-      currentValue += 1;
-      if (currentValue >= finalIssueCount) {
-        window.clearInterval(timer);
-        setAnimatedIssueCount(finalIssueCount);
-        return;
-      }
-      setAnimatedIssueCount(currentValue);
-    }, stepMs);
-
-    return () => window.clearInterval(timer);
-  }, []);
+  const secondaryAction =
+    isAuthenticated && onOpenAccount ? onOpenAccount : onOpenSecondary;
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background:
-          "radial-gradient(1200px 560px at 10% -10%, rgba(56, 189, 248, 0.24), transparent 55%), radial-gradient(880px 420px at 88% 0%, rgba(139, 92, 246, 0.18), transparent 55%), linear-gradient(180deg, color-mix(in srgb, var(--bg) 88%, black 12%) 0%, var(--bg) 100%)",
-        color: "var(--text)",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: "1240px",
-          margin: "0 auto",
-          padding: "24px",
-          display: "grid",
-          gap: "32px",
-        }}
-      >
-        <nav
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            flexWrap: "wrap",
-            gap: "16px",
-            padding: "12px 0",
-          }}
-        >
-          <div>
-            <div
-              style={{
-                fontFamily: "var(--font-display)",
-                fontSize: "24px",
-                fontWeight: 700,
-              }}
+    <div className="scanlark-public-page">
+      <header className="scanlark-public-header">
+        <div className="scanlark-public-container scanlark-public-header__inner">
+          <ScanlarkLogo
+            linked
+            href="/"
+            width={210}
+            priority
+            theme="light"
+            className="scanlark-logo-on-surface"
+          />
+          <nav className="scanlark-public-nav" aria-label="Public navigation">
+            <a href="#problems">Problems</a>
+            <a href="#process">Process</a>
+            <a href="#report">Report</a>
+            <a href="#monitoring">Monitoring</a>
+            <a href="#faq">FAQ</a>
+          </nav>
+          <div className="scanlark-public-actions">
+            <button
+              type="button"
+              className="scanlark-public-login"
+              onClick={secondaryAction}
             >
-              Scanlark
-            </div>
-            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-              Passive website health and trust monitoring
-            </div>
-          </div>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-              flexWrap: "wrap",
-              justifyContent: "flex-end",
-            }}
-          >
-            {!managedMode && (
-              <button className="ghost-button" onClick={onOpenLearn}>
-                Learn
-              </button>
-            )}
-            {isAuthenticated && onOpenAccount ? (
-              <button className="ghost-button" onClick={onOpenAccount}>
-                Account
-              </button>
-            ) : (
-              <button className="ghost-button" onClick={onOpenSecondary}>
-                {secondaryLabel}
-              </button>
-            )}
-            <button className="primary-button" onClick={onOpenPrimary}>
+              {isAuthenticated ? "Account" : secondaryLabel}
+            </button>
+            <button
+              type="button"
+              className="scanlark-public-button scanlark-public-button--primary"
+              onClick={onOpenPrimary}
+            >
               {primaryLabel}
             </button>
           </div>
-        </nav>
+        </div>
+      </header>
 
-        <section className="marketing-hero">
-          <div className="marketing-hero__content">
-            <h1 className="marketing-hero__headline">
-              {managedMode
-                ? "Know when your website has problems before your customers do."
-                : "Monitor public website health with clean reports and change tracking."}
-            </h1>
-            <div className="marketing-hero__body">
-              {managedMode
-                ? "Scanlark helps businesses identify broken links, missing resources, website errors and other issues that can affect visitors and trust. We are currently working directly with a limited number of businesses."
-                : "Scanlark checks your public website signals from the outside and helps you track issues, score movement, and report outputs. It does not log in, submit forms, scan ports, attack, or exploit websites."}
+      <main>
+        <section className="scanlark-public-container scanlark-public-hero">
+          <div className="scanlark-public-hero__content">
+            <div className="scanlark-public-eyebrow">
+              Founder-operated website health checks
             </div>
-            <div className="marketing-hero__actions">
+            <h1>
+              Know when your website has problems before your customers do.
+            </h1>
+            <p>
+              Scanlark helps small-business owners identify broken links,
+              missing resources, website errors and other public issues that can
+              affect visitors, trust and day-to-day enquiries.
+            </p>
+            <div className="scanlark-public-hero__actions">
               <button
-                className="primary-button primary-button--large"
+                type="button"
+                className="scanlark-public-button scanlark-public-button--primary"
                 onClick={onOpenPrimary}
               >
-                {primaryLabel}
+                Request a website health check
               </button>
-              <button
-                className="secondary-button primary-button--large"
-                onClick={onOpenSecondary}
+              <a
+                className="scanlark-public-button scanlark-public-button--secondary"
+                href="#process"
               >
-                {secondaryLabel}
-              </button>
-              {!managedMode && (
-                <button
-                  className="ghost-button primary-button--large"
-                  onClick={onOpenLearn}
-                >
-                  Learn more
-                </button>
-              )}
+                See how it works
+              </a>
             </div>
-            <div className="marketing-hero__chips">
-              {(managedMode
-                ? [
-                    "Managed website health checks",
-                    "Broken link and missing resource review",
-                    "Website error monitoring",
-                    "Client-ready summaries",
-                  ]
-                : [
-                    "Manual and scheduled scans",
-                    "Issue change detection",
-                    "Email alerts and in-app notifications",
-                    "Client and site metadata context",
-                    "Shareable report links",
-                    "Raw evidence in reports",
-                  ]
-              ).map((item) => (
-                <div key={item} className="marketing-chip">
-                  {item}
-                </div>
-              ))}
+            <div className="scanlark-public-proof" aria-label="Service summary">
+              <span>Reviewed findings, not raw scan dumps</span>
+              <span>B2B-only launch service</span>
+              <span>No public self-service registration</span>
+              <span>No analytics or advertising pixels</span>
             </div>
           </div>
 
-          <div className="marketing-hero__preview-shell">
-            <div className="marketing-glow marketing-glow--primary" />
-            <div className="marketing-glow marketing-glow--secondary" />
-            <div className="marketing-mockup">
-              <div className="marketing-mockup__toolbar">
-                <span className="marketing-badge marketing-badge--warning">
-                  18 active issues
-                </span>
-                <span className="marketing-badge marketing-badge--success">
-                  Daily scan
-                </span>
-                <span className="marketing-badge marketing-badge--success">
-                  Alerts on
-                </span>
-              </div>
-              <div className="marketing-mockup__hero">
+          <div className="scanlark-public-hero__visual" id="report">
+            <div
+              className="scanlark-public-report"
+              aria-label="Example reviewed report preview"
+            >
+              <div className="scanlark-public-report__top">
                 <div>
-                  <div className="marketing-kicker">Latest site health</div>
-                  <div className="marketing-score-row">
-                    <div className="marketing-score-card">
-                      <div className="marketing-score-card__label">
-                        Overall score
-                      </div>
-                      <div className="marketing-score-card__value">78%</div>
-                    </div>
-                    <div className="marketing-score-card">
-                      <div className="marketing-score-card__label">
-                        Link integrity
-                      </div>
-                      <div className="marketing-score-card__value">81%</div>
-                    </div>
-                  </div>
+                  <div className="scanlark-public-eyebrow">Reviewed report</div>
+                  <h2>Website health summary</h2>
                 </div>
-                <div className="marketing-score-ring">
-                  <div className="marketing-score-ring__inner">
-                    <div className="marketing-score-ring__content">
-                      <strong>{animatedIssueCount}</strong>
-                      <span>new issues</span>
-                    </div>
-                  </div>
-                </div>
+                <div className="scanlark-public-report__score">18</div>
               </div>
-              <div className="marketing-category-grid">
+              <p>
+                Example issue count shown for illustration. Real reports depend
+                on the website reviewed and owner-approved scope.
+              </p>
+              <div className="scanlark-public-report__list">
                 {[
-                  ["Link integrity", "9 issues"],
-                  ["SEO basics", "4 issues"],
-                  ["Robots / sitemap", "2 issues"],
-                  ["SSL / HTTPS", "1 warning"],
-                  ["Security headers", "1 issue"],
-                  ["Speed basics", "1 warning"],
-                  ["Uptime", "Stable"],
-                ].map(([title, status]) => (
-                  <div key={title} className="marketing-category-card">
-                    <div>{title}</div>
-                    <span>{status}</span>
+                  ["High priority", "Missing pages affecting key journeys"],
+                  ["Medium priority", "Images and resources failing to load"],
+                  ["Watch list", "HTTPS, sitemap and robots signals"],
+                  ["Next steps", "Fix, re-test and monitor changes"],
+                ].map(([label, value]) => (
+                  <div className="scanlark-public-report__row" key={label}>
+                    <span>{label}</span>
+                    <span>{value}</span>
                   </div>
                 ))}
               </div>
-              <div className="marketing-history-card">
-                <div className="marketing-kicker">Recent report history</div>
-                <div className="marketing-history-row">
-                  <span>Today</span>
-                  <span>78%</span>
-                  <span>18 new</span>
-                  <span>View report</span>
-                </div>
-                <div className="marketing-history-row">
-                  <span>Yesterday</span>
-                  <span>82%</span>
-                  <span>6 fixed</span>
-                  <span>View report</span>
-                </div>
-              </div>
             </div>
           </div>
         </section>
 
-        <section className="marketing-band">
-          {[
-            "Passive external scanning",
-            "No install required",
-            "Scheduled scans",
-            "Email alerts and summaries",
-            "Evidence-rich reports",
-          ].map((item) => (
-            <div key={item} className="marketing-trust-item">
-              {item}
-            </div>
-          ))}
-        </section>
-
-        <section className="marketing-section">
-          <div className="marketing-section__heading">
-            <div className="marketing-kicker">Product overview</div>
-            <h2>
-              {managedMode
-                ? "Managed monitoring for businesses that rely on their website."
-                : "Built for customer-facing monitoring, not just raw scan tables."}
-            </h2>
-            <p>
-              {managedMode
-                ? "Scanlark reviews the public signals that shape visitor confidence and turns findings into practical, client-ready reports."
-                : "Keep the dashboard focused on health, movement, and next actions. Keep detailed evidence in reports where it belongs."}
-            </p>
-          </div>
-          <div className="marketing-feature-grid">
-            {featureCards.map((item) => (
-              <div key={item.title} className="marketing-feature-card">
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
+        <section className="scanlark-public-section" id="problems">
+          <div className="scanlark-public-container">
+            <div className="scanlark-public-section__heading">
+              <div className="scanlark-public-eyebrow">
+                What Scanlark checks
               </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="marketing-section">
-          <div className="marketing-section__heading">
-            <div className="marketing-kicker">How it works</div>
-            <h2>Start quickly, then keep the monitoring loop tight.</h2>
-          </div>
-          <div className="marketing-step-grid">
-            {[
-              "Add a site and set the canonical URL.",
-              "Run a scan now or configure the schedule.",
-              "Review issues, diagnostics, and score movement.",
-              "Receive email alerts and in-app notifications through your settings.",
-            ].map((item, index) => (
-              <div key={item} className="marketing-step-card">
-                <div className="marketing-step-card__index">0{index + 1}</div>
-                <p>{item}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="marketing-section marketing-section--split">
-          <div className="marketing-boundary-card">
-            <div className="marketing-kicker">Boundaries</div>
-            <h2>Clear passive scope, clear expectations.</h2>
-            <ul>
-              <li>Only passive checks of public URLs are in scope.</li>
-              <li>
-                Mixed-content checks are shown when present in scan results.
-              </li>
-              <li>
-                No private authenticated scanning or exploit testing is
-                presented.
-              </li>
-              <li>
-                No billing, team management, client portal, or white-label
-                claims.
-              </li>
-              <li>
-                No desktop notifications are advertised on the landing page.
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <section className="marketing-section">
-          <div className="marketing-section__heading">
-            <div className="marketing-kicker">FAQ</div>
-            <h2>Answers for evaluation and onboarding.</h2>
-          </div>
-          <div className="marketing-faq-grid">
-            {faqItems.map((item) => (
-              <div key={item.q} className="marketing-faq-card">
-                <h3>{item.q}</h3>
-                <p>{item.a}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <footer className="marketing-footer">
-          <div>
-            <div
-              style={{
-                fontFamily: "var(--font-display)",
-                fontWeight: 700,
-                fontSize: "18px",
-              }}
-            >
-              Scanlark
+              <h2>Issues that can quietly damage visitor confidence.</h2>
+              <p>
+                Scanlark focuses on practical public website problems, then
+                reviews the evidence before turning it into a client-ready
+                summary.
+              </p>
             </div>
-            <div style={{ color: "var(--muted)", fontSize: "13px" }}>
-              Public website monitoring for site health, reliability, and trust
-              signals.
-            </div>
-            <div className="marketing-footer__legal">
-              {legalLinks.map((link) => (
-                <a
-                  key={link.slug}
-                  href={link.path}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    onOpenLegal(link.path);
-                  }}
-                >
-                  {link.label}
-                </a>
+            <div className="scanlark-public-grid">
+              {issueCards.map((item) => (
+                <article className="scanlark-public-card" key={item.title}>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                </article>
               ))}
             </div>
           </div>
-          <div className="marketing-footer__actions">
-            {!managedMode && (
-              <button className="ghost-button" onClick={onOpenLearn}>
-                Learn
-              </button>
-            )}
-            <button className="ghost-button" onClick={onOpenSecondary}>
-              {secondaryLabel}
-            </button>
-            <button className="primary-button" onClick={onOpenPrimary}>
-              {primaryLabel}
-            </button>
+        </section>
+
+        <section className="scanlark-public-section" id="process">
+          <div className="scanlark-public-container">
+            <div className="scanlark-public-section__heading">
+              <div className="scanlark-public-eyebrow">Managed service</div>
+              <h2>A clear review process from first check to next action.</h2>
+              <p>
+                The launch service is founder-operated. The private Scanlark
+                application remains internal for prospect management, scanning,
+                reviewed reports, communications, quotes and work orders.
+              </p>
+            </div>
+            <div className="scanlark-public-grid">
+              {serviceSteps.map((item) => (
+                <article className="scanlark-public-card" key={item.title}>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                </article>
+              ))}
+            </div>
           </div>
-        </footer>
-      </div>
+        </section>
+
+        <section className="scanlark-public-section">
+          <div className="scanlark-public-container scanlark-public-grid scanlark-public-grid--two">
+            <article className="scanlark-public-card scanlark-public-card--accent">
+              <div className="scanlark-public-eyebrow">
+                What clients receive
+              </div>
+              <h3>A reviewed website health report</h3>
+              <ul>
+                <li>Plain-English issue summaries and priorities.</li>
+                <li>Evidence for important findings.</li>
+                <li>
+                  Positive observations where the site is already healthy.
+                </li>
+                <li>Methodology, limitations and recommended next steps.</li>
+              </ul>
+            </article>
+            <article className="scanlark-public-card">
+              <div className="scanlark-public-eyebrow">
+                Fixes and re-testing
+              </div>
+              <h3>Optional follow-up work</h3>
+              <p>
+                Where useful, Scanlark can provide a separate quote for fixes,
+                coordination or re-testing. No fix work starts until scope,
+                price and responsibilities are agreed.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section className="scanlark-public-section" id="monitoring">
+          <div className="scanlark-public-container scanlark-public-grid scanlark-public-grid--two">
+            <article className="scanlark-public-card">
+              <div className="scanlark-public-eyebrow">Ongoing monitoring</div>
+              <h3>Catch new problems after website changes.</h3>
+              <p>
+                For managed clients, repeat checks can help spot new broken
+                links, missing resources, availability concerns and public
+                configuration changes after updates.
+              </p>
+            </article>
+            <article className="scanlark-public-card">
+              <div className="scanlark-public-eyebrow">
+                Methodology and limits
+              </div>
+              <h3>Clear scope, no inflated claims.</h3>
+              <p>
+                Scanlark checks public signals only. Findings can be incomplete
+                or require context, so reports should be reviewed before making
+                operational, legal, accessibility or security decisions.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section className="scanlark-public-section" id="faq">
+          <div className="scanlark-public-container">
+            <div className="scanlark-public-section__heading">
+              <div className="scanlark-public-eyebrow">FAQ</div>
+              <h2>Straight answers before you enquire.</h2>
+            </div>
+            <div className="scanlark-public-grid">
+              {faqItems.map((item) => (
+                <article className="scanlark-public-card" key={item.title}>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="scanlark-public-section">
+          <div className="scanlark-public-container">
+            <div className="scanlark-public-final">
+              <h2>Request a website health check.</h2>
+              <p>
+                Send your website URL and a short note about what you want
+                checked. Scanlark will confirm scope before any managed review
+                starts.
+              </p>
+              <div>
+                <button
+                  type="button"
+                  className="scanlark-public-button scanlark-public-button--primary"
+                  onClick={onOpenPrimary}
+                >
+                  Request a website health check
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="scanlark-public-footer">
+        <div className="scanlark-public-container scanlark-public-footer__inner">
+          <div className="scanlark-public-footer__brand">
+            <ScanlarkLogo
+              width={180}
+              theme="light"
+              className="scanlark-logo-on-surface"
+            />
+            <p>
+              Scanlark is operated by Connor Smith in the United Kingdom.
+              Business services only. Contact: contact@scanlark.com
+            </p>
+            <p className="scanlark-public-small">
+              B2B website health checks for businesses, sole traders, charities
+              and organisations.
+            </p>
+          </div>
+          <div className="scanlark-public-footer__links">
+            {legalLinks.map((link) => (
+              <a
+                key={link.slug}
+                href={link.path}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onOpenLegal(link.path);
+                }}
+              >
+                {link.label}
+              </a>
+            ))}
+            <a
+              href="/login"
+              onClick={(event) => {
+                event.preventDefault();
+                onOpenSecondary();
+              }}
+            >
+              Internal login
+            </a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 };

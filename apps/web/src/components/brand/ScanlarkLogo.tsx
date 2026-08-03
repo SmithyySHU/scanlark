@@ -55,7 +55,6 @@ export function ScanlarkLogo({
       style={style}
       decoding="async"
       loading={priority ? "eager" : "lazy"}
-      fetchPriority={priority ? "high" : "auto"}
     />
   );
 

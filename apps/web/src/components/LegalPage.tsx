@@ -4,6 +4,7 @@ import {
   SUPPORT_EMAIL,
   type LegalPageContent,
 } from "../legalPages";
+import { ScanlarkLogo } from "./brand/ScanlarkLogo";
 
 type LegalPageProps = {
   page: LegalPageContent;
@@ -46,13 +47,10 @@ export function LegalPage({
           className="legal-brand"
           onClick={handleNavigate("/landing")}
         >
-          <strong>Scanlark</strong>
-          <span>Alpha trust and product notes</span>
+          <ScanlarkLogo width={172} className="scanlark-logo-on-surface" />
+          <span>Website health checks and managed monitoring</span>
         </a>
         <div className="legal-nav__actions">
-          <a href="/learn" onClick={handleNavigate("/learn")}>
-            Learn
-          </a>
           <a
             href={isAuthenticated ? "/dashboard" : "/login"}
             onClick={handleNavigate(isAuthenticated ? "/dashboard" : "/login")}
@@ -64,7 +62,7 @@ export function LegalPage({
 
       <main className="legal-document">
         <header className="legal-hero">
-          <span>Hosted alpha</span>
+          <span>Legal information</span>
           <h1>{page.title}</h1>
           <p>{page.intro}</p>
           <div>Last updated: {page.lastUpdated}</div>
@@ -84,6 +82,9 @@ export function LegalPage({
                   ))}
                 </ul>
               ) : null}
+              {section.afterParagraphs?.map((paragraph) => (
+                <p key={paragraph}>{renderTextWithEmailLinks(paragraph)}</p>
+              ))}
             </section>
           ))}
         </div>
@@ -91,8 +92,9 @@ export function LegalPage({
 
       <footer className="legal-footer">
         <div>
-          These pages are plain-English alpha trust pages and are not presented
-          as solicitor-reviewed final legal documents.
+          Scanlark is operated by Connor Smith in the United Kingdom. Business
+          services only. Contact:{" "}
+          <a href={`mailto:${SUPPORT_EMAIL}`}>{SUPPORT_EMAIL}</a>
         </div>
         <div className="legal-footer__links">
           {LEGAL_PAGE_LINKS.map((link) => (

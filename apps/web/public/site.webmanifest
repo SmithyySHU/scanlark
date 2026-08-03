@@ -1,7 +1,7 @@
 {
   "name": "Scanlark",
   "short_name": "Scanlark",
-  "description": "Website health monitoring",
+  "description": "Website health checks and managed monitoring",
   "icons": [
     {
       "src": "/brand/icons/android-chrome-192x192.png",
