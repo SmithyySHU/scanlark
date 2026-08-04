@@ -540,7 +540,7 @@ export async function createOperationsCommunicationTemplate(
       JSON.stringify(input.contentVariantsJson ?? []),
       JSON.stringify(input.subjectSuggestionsJson ?? []),
       input.attachmentPolicy ?? "none",
-      input.signatureMode ?? "include_scanlark_signature",
+      input.signatureMode ?? "use_mailbox_signature",
       input.defaultFollowUpBusinessDays ?? null,
       input.isActive !== false,
       actor.id,

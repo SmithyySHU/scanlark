@@ -976,7 +976,7 @@ export function getOperationsDefaultSignatureMode(
 ): OperationsCommunicationSignatureMode {
   return (
     parseEmailSignatureMode(env.OPERATIONS_DEFAULT_SIGNATURE_MODE) ??
-    "include_scanlark_signature"
+    "use_mailbox_signature"
   );
 }
 
@@ -1337,7 +1337,7 @@ function renderSignature(input: {
   markUrl: string;
 }) {
   if (input.mode === "use_mailbox_signature") {
-    return `<p style="color: #6b7280; font-size: 13px;">Signature will be added by the selected IONOS mailbox.</p>`;
+    return "";
   }
   return `
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top: 26px; border-top: 1px solid #dbe4ef; padding-top: 16px; width: 100%;">
@@ -1490,7 +1490,7 @@ export function renderClientCommunicationTemplate(
   const signatureMode =
     options.signatureMode ??
     template.signature_mode ??
-    "include_scanlark_signature";
+    getOperationsDefaultSignatureMode();
   const layoutKey = template.layout_key ?? "personal_letter";
   const attachmentPolicy = template.attachment_policy ?? "none";
   const selected = templateBodyForVariant(template, options.wordingVariantKey);

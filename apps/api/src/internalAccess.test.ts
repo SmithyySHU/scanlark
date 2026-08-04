@@ -15,6 +15,7 @@ import {
   addBusinessDays,
   findUnresolvedClientCommunicationPlaceholders,
   getConfiguredDefaultFollowUpBusinessDays,
+  getOperationsDefaultSignatureMode,
   parseOperationsBusinessInput,
   parseOperationsCommunicationInput,
   parseOperationsCommunicationTemplateInput,
@@ -651,6 +652,43 @@ test("operations html communication renderer keeps plain text compatible", () =>
   assert(rendered.htmlFragment.includes('alt="Scanlark"'));
   assert(rendered.plainText.includes("Plain text only."));
   assert.deepEqual(rendered.attachmentRequirements, []);
+});
+
+test("operations communication rendering defaults to mailbox signature only", () => {
+  assert.equal(getOperationsDefaultSignatureMode({}), "use_mailbox_signature");
+  assert.equal(
+    getOperationsDefaultSignatureMode({
+      OPERATIONS_DEFAULT_SIGNATURE_MODE: "include_scanlark_signature",
+    }),
+    "include_scanlark_signature",
+  );
+
+  const rendered = renderClientCommunicationTemplate(
+    {
+      subject_template: "Hello {{businessName}}",
+      body_template: "Hi {{contactName}},\n\nPlain text only.",
+    },
+    {
+      business: {
+        id: "business_1",
+        name: "Example Co",
+        website_url: "https://example.com",
+        general_email: "hello@example.com",
+      },
+      contact: null,
+      site: null,
+    },
+    {
+      senderName: "Connor Smith",
+      senderEmail: "connor@scanlark.com",
+      publicSiteUrl: "https://scanlark.com",
+      emailAssetBaseUrl: "https://scanlark.com/assets/email",
+    },
+  );
+
+  assert.equal(rendered.signatureMode, "use_mailbox_signature");
+  assert(!rendered.htmlFragment.includes("scanlark-email-mark.png"));
+  assert(!rendered.htmlFragment.includes("Signature will be added"));
 });
 
 test("operations html communication renderer uses edited manual body for html and plain text", () => {

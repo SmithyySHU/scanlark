@@ -1250,7 +1250,12 @@ type CommunicationFormState = {
   attachmentConfirmationNote: string;
   templateSnapshot: Record<string, unknown> | null;
   renderWarnings: string[];
-  previewMode: "desktop" | "narrow" | "images_hidden" | "plain_text";
+  previewMode:
+    | "desktop"
+    | "narrow"
+    | "images_hidden"
+    | "plain_text"
+    | "html_raw";
   copyStatus: string;
   hasUnsavedRenderEdits: boolean;
   renderStatus: "idle" | "rendering" | "current" | "stale" | "failed";
@@ -1659,7 +1664,7 @@ const emptyCommunicationForm: CommunicationFormState = {
   plainTextBody: "",
   layoutKey: "personal_letter",
   wordingVariantKey: "",
-  signatureMode: "include_scanlark_signature",
+  signatureMode: "use_mailbox_signature",
   senderIdentityKey: "",
   senderName: "",
   senderEmail: "",
@@ -1696,7 +1701,7 @@ const emptyTemplateForm: TemplateFormState = {
   contentVariantsJson: [],
   subjectSuggestionsJson: [],
   attachmentPolicy: "none",
-  signatureMode: "include_scanlark_signature",
+  signatureMode: "use_mailbox_signature",
   defaultFollowUpBusinessDays: "",
   isActive: true,
 };
@@ -2170,7 +2175,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     OperationsSenderIdentity[]
   >([]);
   const [defaultSignatureMode, setDefaultSignatureMode] =
-    useState<CommunicationSignatureMode>("include_scanlark_signature");
+    useState<CommunicationSignatureMode>("use_mailbox_signature");
   const [communications, setCommunications] = useState<Communication[]>([]);
   const [communicationsLoading, setCommunicationsLoading] = useState(false);
   const [communicationSearch, setCommunicationSearch] = useState("");
@@ -2473,7 +2478,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       setCommunicationTemplates(data.templates);
       setSenderIdentities(data.senderIdentities ?? []);
       setDefaultSignatureMode(
-        data.defaultSignatureMode ?? "include_scanlark_signature",
+        data.defaultSignatureMode ?? "use_mailbox_signature",
       );
     } catch (err) {
       console.warn("Failed to load communication templates", err);
@@ -3471,9 +3476,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         template?.content_variants_json?.[0]?.key ??
         "",
       signatureMode:
-        overrides.signatureMode ??
-        template?.signature_mode ??
-        defaultSignatureMode,
+        overrides.signatureMode ?? defaultSignatureMode,
       senderIdentityKey: overrides.senderIdentityKey ?? sender.key,
       senderName: overrides.senderName ?? sender.name,
       senderEmail: overrides.senderEmail ?? sender.email,
@@ -4730,10 +4733,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   async function copyCommunication() {
+    const html = communicationForm.htmlFragment;
+    if (!html.trim()) {
+      setCommunicationForm((prev) => ({
+        ...prev,
+        copyStatus: "Generate the email preview before copying formatted email.",
+      }));
+      return;
+    }
+    const result = await copyRichEmailToClipboard({
+      html,
+      plainText: communicationForm.plainTextBody || communicationForm.body,
+      expectedText: communicationForm.body,
+      isStale:
+        communicationForm.hasUnsavedRenderEdits ||
+        communicationForm.renderStatus !== "current",
+      requireLayout: true,
+      requireLogoUrl:
+        communicationForm.signatureMode !== "use_mailbox_signature",
+    });
     setCommunicationForm((prev) => ({
       ...prev,
-      copyStatus:
-        "Save your latest changes before copying formatted email. Copy from the saved communication record.",
+      copyStatus: result.ok
+        ? `${result.message} (${result.mimeTypes.join(", ")})`
+        : result.message,
     }));
   }
 
@@ -4747,14 +4770,41 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     await navigator.clipboard.writeText(value);
   }
 
+  function communicationHtmlSource(input: {
+    subject?: string | null;
+    htmlDocument?: string | null;
+    htmlFragment?: string | null;
+  }) {
+    if (input.htmlDocument?.trim()) return input.htmlDocument;
+    if (!input.htmlFragment?.trim()) return "";
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtmlText(
+      input.subject ?? "Scanlark email",
+    )}</title></head><body>${input.htmlFragment}</body></html>`;
+  }
+
+  async function copyCommunicationRawHtml(
+    input: {
+      subject?: string | null;
+      htmlDocument?: string | null;
+      htmlFragment?: string | null;
+    },
+    setStatus: (status: string) => void,
+  ) {
+    const html = communicationHtmlSource(input);
+    if (!html.trim()) {
+      setStatus("No rendered HTML is available to copy.");
+      return;
+    }
+    await navigator.clipboard.writeText(html);
+    setStatus("Raw HTML copied.");
+  }
+
   function downloadSavedCommunicationHtml(communication: Communication) {
-    const html =
-      communication.html_document ||
-      (communication.html_fragment
-        ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtmlText(
-            communication.subject ?? "Scanlark email",
-          )}</title></head><body>${communication.html_fragment}</body></html>`
-        : "");
+    const html = communicationHtmlSource({
+      subject: communication.subject,
+      htmlDocument: communication.html_document,
+      htmlFragment: communication.html_fragment,
+    });
     if (!html.trim()) {
       setCommunicationCopyStatus("Saved HTML email output is not available.");
       return;
@@ -4835,7 +4885,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           htmlDocument: item.html_document,
           plainTextBody: item.plain_text_body ?? item.body,
           layoutKey: item.layout_key,
-          signatureMode: item.signature_mode ?? "include_scanlark_signature",
+          signatureMode: item.signature_mode ?? defaultSignatureMode,
           senderIdentityKey: item.sender_identity_key ?? sender.key,
           senderName: item.sender_name ?? sender.name,
           senderEmail: item.sender_email ?? sender.email,
@@ -4954,7 +5004,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       contentVariantsJson: template.content_variants_json ?? [],
       subjectSuggestionsJson: template.subject_suggestions_json ?? [],
       attachmentPolicy: template.attachment_policy,
-      signatureMode: template.signature_mode,
+      signatureMode: template.signature_mode ?? defaultSignatureMode,
       defaultFollowUpBusinessDays:
         template.default_follow_up_business_days == null
           ? ""
@@ -5520,8 +5570,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                         layoutKey: template?.layout_key ?? prev.layoutKey,
                         wordingVariantKey:
                           template?.content_variants_json?.[0]?.key ?? "",
-                        signatureMode:
-                          template?.signature_mode ?? prev.signatureMode,
+                        signatureMode: defaultSignatureMode,
                         preheader: template?.preheader_template ?? "",
                         htmlFragment: "",
                         htmlDocument: "",
@@ -5768,9 +5817,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               )}
               {communicationForm.hasUnsavedRenderEdits && (
                 <div className="ops-warning">
-                  Save your latest changes before copying or downloading.
-                  Preview can render unsaved edits, but handoff actions use
-                  saved content.
+                  Render your latest changes before copying formatted email.
+                  The preview can show unsaved edits, but clipboard actions use
+                  the latest rendered HTML.
                 </div>
               )}
               {communicationForm.attachmentRequirements.length > 0 && (
@@ -5849,6 +5898,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   disabled={!communicationForm.body.trim()}
                 >
                   Copy formatted email
+                </button>
+                <button
+                  type="button"
+                  className="ops-button"
+                  onClick={() =>
+                    void copyCommunicationRawHtml(
+                      {
+                        subject: communicationForm.subject,
+                        htmlDocument: communicationForm.htmlDocument,
+                        htmlFragment: communicationForm.htmlFragment,
+                      },
+                      (status) =>
+                        setCommunicationForm((prev) => ({
+                          ...prev,
+                          copyStatus: status,
+                        })),
+                    )
+                  }
+                  disabled={
+                    !communicationForm.htmlDocument &&
+                    !communicationForm.htmlFragment
+                  }
+                >
+                  Copy raw HTML
                 </button>
                 <button
                   type="button"
@@ -5960,6 +6033,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   ["narrow", "Narrow HTML"],
                   ["images_hidden", "Images hidden"],
                   ["plain_text", "Plain text"],
+                  ["html_raw", "HTML source"],
                 ].map(([value, label]) => (
                   <button
                     key={value}
@@ -5984,6 +6058,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                   {communicationForm.plainTextBody ||
                     communicationForm.body ||
                     "Generate or write a draft."}
+                </pre>
+              ) : communicationForm.previewMode === "html_raw" ? (
+                <pre className="ops-raw-html">
+                  {communicationHtmlSource({
+                    subject: communicationForm.subject,
+                    htmlDocument: communicationForm.htmlDocument,
+                    htmlFragment: communicationForm.htmlFragment,
+                  }) || "Generate a draft to view HTML source."}
                 </pre>
               ) : (
                 <iframe
@@ -6345,6 +6427,26 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       disabled={!selectedCommunication.html_fragment}
                     >
                       Copy formatted email
+                    </button>
+                    <button
+                      type="button"
+                      className="ops-button"
+                      onClick={() =>
+                        void copyCommunicationRawHtml(
+                          {
+                            subject: selectedCommunication.subject,
+                            htmlDocument: selectedCommunication.html_document,
+                            htmlFragment: selectedCommunication.html_fragment,
+                          },
+                          setCommunicationCopyStatus,
+                        )
+                      }
+                      disabled={
+                        !selectedCommunication.html_document &&
+                        !selectedCommunication.html_fragment
+                      }
+                    >
+                      Copy raw HTML
                     </button>
                     <button
                       type="button"
@@ -11629,6 +11731,14 @@ const operationsStyles = `
     color: var(--text);
     margin: 0;
     font-family: inherit;
+  }
+  .ops-preview .ops-raw-html {
+    max-height: 520px;
+    overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.5;
   }
   .ops-communication-body {
     min-height: 240px;

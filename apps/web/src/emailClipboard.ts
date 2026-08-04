@@ -44,7 +44,7 @@ export function verifyRichEmailHtmlForClipboard(
       ok: false,
       mode: "rich_unavailable",
       reason: "stale_preview",
-      message: "Preview is stale. Save your latest changes before copying.",
+      message: "Preview is stale. Render your latest changes before copying.",
       mimeTypes: [],
     };
   }
