@@ -713,5 +713,7 @@ export { isOperationsEmailModuleEnabled } from "./operationsEmailConfig";
 export * from "./operationsEmail";
 export * from "./operationsEmailPreparation";
 export * from "./operationsEmailSmtpConfig";
+export * from "./operationsEmailImapConfig";
+export * from "./operationsEmailFinalisation";
 
 export { SCAN_EVENT_CHANNEL } from "./events";

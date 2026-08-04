@@ -6568,7 +6568,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                               );
                             }}
                           >
-                            View sent Communication event
+                            View final Communication
                           </button>
                         )}
                       </div>

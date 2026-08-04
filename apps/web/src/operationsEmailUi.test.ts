@@ -93,6 +93,21 @@ test("standalone CRM linkage is not presented as a delivery requirement", () => 
   );
 });
 
+test("Checkpoint 6 shows independent CRM and IONOS reconciliation actions", () => {
+  for (const text of [
+    "Post-send records",
+    "Link to business/contact",
+    "Frozen recipient",
+    "Confirm mismatch and link",
+    "IONOS Sent copy",
+    "Retry saving to IONOS Sent",
+    "It will not send the email to the recipient again.",
+  ])
+    assert.equal(workspaceSource.includes(text), true, `missing ${text}`);
+  assert.equal(workspaceSource.includes("resolved_sent_mailbox"), false);
+  assert.equal(workspaceSource.includes("raw_mime_bytes"), false);
+});
+
 test("Email UI displays all required save states", () => {
   for (const state of [
     "Saving…",
@@ -183,6 +198,7 @@ test("Communications exposes the approved linked Email actions", () => {
     "Open in Email Editor",
     "Continue in Email Editor",
     "View sent email",
+    "View final Communication",
     "Open failed Email",
   ]) {
     assert.equal(
@@ -216,7 +232,7 @@ test("final Communication link is conditional on its linked ID", () => {
     true,
   );
   assert.equal(
-    communicationsSource.includes("View sent Communication event"),
+    communicationsSource.includes("View final Communication"),
     true,
   );
 });

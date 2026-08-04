@@ -40,6 +40,22 @@ type EmailSummary = {
   last_editor_label: string | null;
   sent_actor_label: string | null;
   safe_display_error: string | null;
+  crm_finalisation_status:
+    | "not_required"
+    | "pending"
+    | "finalising"
+    | "finalised"
+    | "failed"
+    | null;
+  crm_safe_error: string | null;
+  sent_copy_status:
+    | "not_required"
+    | "pending"
+    | "appending"
+    | "appended"
+    | "failed"
+    | null;
+  sent_copy_safe_error: string | null;
 };
 
 type EmailDetail = EmailSummary & {
@@ -56,6 +72,16 @@ type EmailDetail = EmailSummary & {
   contact_email: string | null;
   created_actor_label: string | null;
   created_at: string;
+  crm_finalised_at: string | null;
+  sent_copy_appended_at: string | null;
+};
+
+type ClientLinkOption = {
+  business_id: string;
+  business_name: string;
+  contact_id: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
 };
 
 type EmailAttachment = {
@@ -106,6 +132,12 @@ type EmailRuntimeConfig = {
     mode: "disabled" | "allowlist" | "live";
     generallyAvailable: boolean;
   };
+  sentCopy: {
+    configured: boolean;
+    readiness: "not_checked" | "unavailable" | "configured" | "available";
+    available: boolean;
+    checkedAt: string | null;
+  };
 };
 
 type DeliveryHistory = {
@@ -134,6 +166,17 @@ type DeliveryHistory = {
   created_at: string;
   actor_label: string | null;
   has_frozen_mime: boolean;
+  sent_copy_status:
+    | "not_required"
+    | "pending"
+    | "appending"
+    | "appended"
+    | "failed";
+  sent_copy_appended_at: string | null;
+  sent_copy_last_attempt_at: string | null;
+  sent_copy_safe_error: string | null;
+  sent_copy_next_attempt_at: string | null;
+  sent_copy_attempt_count: number;
 };
 
 type RealSendConfirmation = {
@@ -304,10 +347,35 @@ export function OperationsEmailWorkspace({
   const deliveryInFlight = useRef(false);
   const [realSendConfirmation, setRealSendConfirmation] =
     useState<RealSendConfirmation | null>(null);
+  const [clientLinkOptions, setClientLinkOptions] = useState<
+    ClientLinkOption[]
+  >([]);
+  const [clientLinkOpen, setClientLinkOpen] = useState(false);
+  const [clientLinkBusinessId, setClientLinkBusinessId] = useState("");
+  const [clientLinkContactId, setClientLinkContactId] = useState("");
+  const [clientLinkBusy, setClientLinkBusy] = useState(false);
   const [previewTab, setPreviewTab] = useState<"editor" | "final" | "plain">(
     "editor",
   );
   const editable = detail?.status === "draft" || detail?.status === "ready";
+  const clientLinkBusinesses = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const option of clientLinkOptions)
+      byId.set(option.business_id, option.business_name);
+    return Array.from(byId, ([id, name]) => ({ id, name }));
+  }, [clientLinkOptions]);
+  const selectedClientBusiness = clientLinkBusinesses.find(
+    (business) => business.id === clientLinkBusinessId,
+  );
+  const selectedClientContact = clientLinkOptions.find(
+    (option) => option.contact_id === clientLinkContactId,
+  );
+  const clientRecipientMismatch = Boolean(
+    selectedClientContact?.contact_email &&
+    detail?.recipient_address &&
+    selectedClientContact.contact_email.toLowerCase() !==
+      detail.recipient_address.toLowerCase(),
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -486,10 +554,15 @@ export function OperationsEmailWorkspace({
   useEffect(() => {
     if (
       !detail ||
-      !deliveries.some(
+      (!deliveries.some(
         (delivery) =>
-          delivery.status === "queued" || delivery.status === "sending",
-      )
+          delivery.status === "queued" ||
+          delivery.status === "sending" ||
+          delivery.sent_copy_status === "pending" ||
+          delivery.sent_copy_status === "appending",
+      ) &&
+        detail.crm_finalisation_status !== "pending" &&
+        detail.crm_finalisation_status !== "finalising")
     )
       return;
     const timer = window.setInterval(() => {
@@ -962,6 +1035,106 @@ export function OperationsEmailWorkspace({
     }
   }
 
+  async function retrySentCopy(deliveryId: string) {
+    if (!detail || deliveryBusy || deliveryInFlight.current) return;
+    if (
+      !window.confirm(
+        "This retries saving the existing sent email to the Connor mailbox’s Sent folder. It will not send the email to the recipient again.",
+      )
+    )
+      return;
+    deliveryInFlight.current = true;
+    setDeliveryBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(detail.id)}/deliveries/${encodeURIComponent(deliveryId)}/retry-sent-copy`,
+        { method: "POST" },
+      );
+      if (!response.ok)
+        throw new Error(
+          await responseMessage(
+            response,
+            "Sent-folder retry was not permitted",
+          ),
+        );
+      await Promise.all([
+        loadDeliveryHistory(detail.id),
+        loadDetail(detail.id),
+      ]);
+      await loadList();
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Sent-folder retry failed",
+      );
+    } finally {
+      deliveryInFlight.current = false;
+      setDeliveryBusy(false);
+    }
+  }
+
+  async function openClientLink() {
+    if (!detail) return;
+    setError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/client-link-options`,
+        { cache: "no-store" },
+      );
+      if (!response.ok)
+        throw new Error(
+          await responseMessage(response, "Failed to load client choices"),
+        );
+      const data = (await response.json()) as { options: ClientLinkOption[] };
+      setClientLinkOptions(data.options);
+      setClientLinkBusinessId("");
+      setClientLinkContactId("");
+      setClientLinkOpen(true);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to load client choices",
+      );
+    }
+  }
+
+  async function linkSentEmailToClient() {
+    if (!detail || !clientLinkBusinessId || clientLinkBusy) return;
+    setClientLinkBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(detail.id)}/link-client`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            businessId: clientLinkBusinessId,
+            contactId: clientLinkContactId || null,
+            expectedRevision: detail.revision,
+          }),
+        },
+      );
+      if (!response.ok)
+        throw new Error(
+          await responseMessage(response, "Failed to link sent email"),
+        );
+      setClientLinkOpen(false);
+      await Promise.all([
+        loadDetail(detail.id),
+        loadDeliveryHistory(detail.id),
+      ]);
+      await loadList();
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Failed to link sent email",
+      );
+    } finally {
+      setClientLinkBusy(false);
+    }
+  }
+
   function reloadLatest() {
     if (conflictLatest) {
       setDetail((existing) =>
@@ -1050,6 +1223,14 @@ export function OperationsEmailWorkspace({
             {runtimeConfig.testSend.available ? "available" : "unavailable"}
           </span>
           <span>Real sending {runtimeConfig.realSend.mode}</span>
+          <span>
+            IONOS Sent copy{" "}
+            {runtimeConfig.sentCopy.available
+              ? "available"
+              : runtimeConfig.sentCopy.configured
+                ? "not yet verified"
+                : "not configured"}
+          </span>
           <span>
             Sender: {runtimeConfig.fixedSender.name} &lt;
             {runtimeConfig.fixedSender.address}&gt;
@@ -1161,8 +1342,30 @@ export function OperationsEmailWorkspace({
                   <span
                     className={`ops-email-status ops-email-status--${message.status}`}
                   >
-                    {message.status.split("_").join(" ")}
+                    {message.status === "sent"
+                      ? "Accepted by outgoing server"
+                      : message.status.split("_").join(" ")}
                   </span>
+                  {message.status === "sent" && (
+                    <span className="ops-email-list-reconciliation">
+                      <span>
+                        {message.crm_finalisation_status === "finalised"
+                          ? "CRM history recorded"
+                          : message.crm_finalisation_status === "not_required"
+                            ? "Not linked to a client"
+                            : message.crm_finalisation_status === "failed"
+                              ? "CRM history failed"
+                              : "CRM history pending"}
+                      </span>
+                      <span>
+                        {message.sent_copy_status === "appended"
+                          ? "IONOS Sent copy saved"
+                          : message.sent_copy_status === "failed"
+                            ? "IONOS Sent copy failed"
+                            : "IONOS Sent copy pending"}
+                      </span>
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -1218,6 +1421,56 @@ export function OperationsEmailWorkspace({
               )}
               {detail.safe_display_error && (
                 <div className="ops-warning">{detail.safe_display_error}</div>
+              )}
+              {detail.status === "sent" && (
+                <section
+                  className="ops-email-reconciliation"
+                  aria-label="Post-send records"
+                >
+                  <div>
+                    <strong>CRM record</strong>
+                    <span className="ops-email-status">
+                      {detail.crm_finalisation_status === "finalised"
+                        ? "recorded"
+                        : detail.crm_finalisation_status === "not_required"
+                          ? "not linked"
+                          : (detail.crm_finalisation_status ?? "pending")
+                              .split("_")
+                              .join(" ")}
+                    </span>
+                  </div>
+                  {detail.crm_finalisation_status === "finalised" && (
+                    <small>
+                      Immutable sent Communication recorded
+                      {detail.crm_finalised_at
+                        ? ` ${formatDate(detail.crm_finalised_at)}`
+                        : ""}
+                      .
+                    </small>
+                  )}
+                  {detail.crm_safe_error && (
+                    <div className="ops-email-delivery-error">
+                      {detail.crm_safe_error}
+                    </div>
+                  )}
+                  {!detail.business_id &&
+                    !detail.sent_communication_id &&
+                    detail.crm_finalisation_status === "not_required" && (
+                      <div>
+                        <small>
+                          This sent email is not linked to a client record. It
+                          is retained in Email, and its frozen recipient and
+                          content will not change when linked.
+                        </small>
+                        <button
+                          className="ops-button"
+                          onClick={() => void openClientLink()}
+                        >
+                          Link to business/contact
+                        </button>
+                      </div>
+                    )}
+                </section>
               )}
               <div className="ops-email-fields">
                 <label>
@@ -1619,6 +1872,25 @@ export function OperationsEmailWorkspace({
                             {formatDate(delivery.smtp_accepted_at)}
                           </small>
                         )}
+                        {delivery.delivery_kind === "real" &&
+                          delivery.status === "sent" && (
+                            <small>
+                              IONOS Sent copy:{" "}
+                              {delivery.sent_copy_status === "appended"
+                                ? `saved${delivery.sent_copy_appended_at ? ` ${formatDate(delivery.sent_copy_appended_at)}` : ""}`
+                                : delivery.sent_copy_status
+                                    .split("_")
+                                    .join(" ")}
+                              {delivery.sent_copy_attempt_count
+                                ? ` · attempts ${delivery.sent_copy_attempt_count}`
+                                : ""}
+                            </small>
+                          )}
+                        {delivery.sent_copy_safe_error && (
+                          <div className="ops-email-delivery-error">
+                            {delivery.sent_copy_safe_error}
+                          </div>
+                        )}
                         {delivery.safe_display_error && (
                           <div
                             className={
@@ -1651,6 +1923,21 @@ export function OperationsEmailWorkspace({
                               onClick={() => void retryDelivery(delivery.id)}
                             >
                               Retry same frozen message
+                            </button>
+                          )}
+                        {delivery.delivery_kind === "real" &&
+                          delivery.status === "sent" &&
+                          delivery.sent_copy_status === "failed" &&
+                          delivery.has_frozen_mime && (
+                            <button
+                              className="ops-button"
+                              disabled={
+                                deliveryBusy ||
+                                !runtimeConfig?.sentCopy.configured
+                              }
+                              onClick={() => void retrySentCopy(delivery.id)}
+                            >
+                              Retry saving to IONOS Sent
                             </button>
                           )}
                       </article>
@@ -1871,6 +2158,119 @@ export function OperationsEmailWorkspace({
           </section>
         </div>
       )}
+      {clientLinkOpen && detail && (
+        <div
+          className="ops-email-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !clientLinkBusy)
+              setClientLinkOpen(false);
+          }}
+        >
+          <section
+            className="ops-email-send-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ops-email-link-dialog-title"
+          >
+            <div>
+              <span className="ops-eyebrow">Post-send attribution</span>
+              <h2 id="ops-email-link-dialog-title">
+                Link sent email to a client
+              </h2>
+              <p>
+                This creates or reuses the immutable sent Communication in the
+                selected client timeline. It does not resend or change the
+                email.
+              </p>
+            </div>
+            <label>
+              Business
+              <select
+                value={clientLinkBusinessId}
+                onChange={(event) => {
+                  setClientLinkBusinessId(event.target.value);
+                  setClientLinkContactId("");
+                }}
+              >
+                <option value="">Select a business</option>
+                {clientLinkBusinesses.map((business) => (
+                  <option key={business.id} value={business.id}>
+                    {business.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Contact (optional)
+              <select
+                value={clientLinkContactId}
+                onChange={(event) => setClientLinkContactId(event.target.value)}
+                disabled={!clientLinkBusinessId}
+              >
+                <option value="">No specific contact</option>
+                {clientLinkOptions
+                  .filter(
+                    (option) =>
+                      option.business_id === clientLinkBusinessId &&
+                      option.contact_id,
+                  )
+                  .map((option) => (
+                    <option key={option.contact_id!} value={option.contact_id!}>
+                      {option.contact_name ||
+                        option.contact_email ||
+                        "Unnamed contact"}
+                      {option.contact_email ? ` · ${option.contact_email}` : ""}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <dl>
+              <div>
+                <dt>Frozen recipient</dt>
+                <dd>{detail.recipient_address}</dd>
+              </div>
+              <div>
+                <dt>Selected client</dt>
+                <dd>
+                  {selectedClientBusiness?.name ?? "Not selected"}
+                  {selectedClientContact
+                    ? ` · ${selectedClientContact.contact_name || selectedClientContact.contact_email || "Unnamed contact"}`
+                    : ""}
+                </dd>
+              </div>
+            </dl>
+            {clientRecipientMismatch && (
+              <div className="ops-warning">
+                The selected contact email (
+                {selectedClientContact?.contact_email}) does not match the
+                frozen recipient ({detail.recipient_address}). Confirm only if
+                this attribution is intentional.
+              </div>
+            )}
+            <div className="ops-email-dialog-actions">
+              <button
+                className="ops-button"
+                disabled={clientLinkBusy}
+                onClick={() => setClientLinkOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="ops-button ops-button--primary"
+                disabled={!clientLinkBusinessId || clientLinkBusy}
+                onClick={() => void linkSentEmailToClient()}
+              >
+                {clientLinkBusy
+                  ? "Linking…"
+                  : clientRecipientMismatch
+                    ? "Confirm mismatch and link"
+                    : "Link sent email"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
@@ -1907,6 +2307,7 @@ const emailStyles = `
   .ops-email-list-top { display: flex; justify-content: space-between; gap: 8px; }
   .ops-email-list-top time, .ops-email-list-recipient { color: var(--text-muted); font-size: 11px; }
   .ops-email-list-subject { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
+  .ops-email-list-reconciliation { display: flex; flex-wrap: wrap; gap: 4px 8px; color: var(--text-muted); font-size: 10px; }
   .ops-email-status { display: inline-flex; width: fit-content; border-radius: 999px; padding: 3px 7px; background: var(--bg); color: var(--text-muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
   .ops-email-status--ready { background: #fff1c7; color: #805400; }
   .ops-email-status--queued, .ops-email-status--sending { background: #e2ecff; color: #244c8a; }
@@ -1916,6 +2317,9 @@ const emailStyles = `
   .ops-email-empty-editor { min-height: 500px; display: grid; place-content: center; justify-items: center; color: var(--text-muted); text-align: center; }
   .ops-email-empty-mark { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 18px; background: var(--accent-soft); color: var(--accent); font-size: 26px; }
   .ops-email-editor { display: grid; gap: 16px; }
+  .ops-email-reconciliation { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+  .ops-email-reconciliation > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; }
+  .ops-email-reconciliation small { color: var(--text-muted); }
   .ops-email-editor-title { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
   .ops-email-editor-title span:first-child { color: var(--text-muted); font-size: 12px; }
   .ops-email-editor-title h2 { margin: 3px 0 0; font-size: 22px; }
@@ -1965,6 +2369,8 @@ const emailStyles = `
   .ops-email-send-dialog { width: min(620px, 100%); max-height: calc(100vh - 36px); overflow: auto; display: grid; gap: 16px; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); box-shadow: 0 24px 70px rgb(0 0 0 / .28); }
   .ops-email-send-dialog h2 { margin: 4px 0; }
   .ops-email-send-dialog p { margin: 0; color: var(--text-muted); }
+  .ops-email-send-dialog > label { display: grid; gap: 6px; color: var(--text-muted); font-size: 12px; font-weight: 700; }
+  .ops-email-send-dialog select { width: 100%; box-sizing: border-box; }
   .ops-email-send-dialog dl { display: grid; gap: 0; margin: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .ops-email-send-dialog dl > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--border); }
   .ops-email-send-dialog dl > div:last-child { border-bottom: 0; }

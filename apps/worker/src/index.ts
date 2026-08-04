@@ -14,6 +14,7 @@ import {
   getScanRunById,
   getSiteById,
   getOperationsEmailSmtpConfig,
+  getOperationsEmailImapConfig,
   isOperationsEmailModuleEnabled,
   recoverStaleQueuedScanJobs,
   recordUptimeCheck,
@@ -27,6 +28,8 @@ import { checkUptime } from "../../../packages/crawler/src/checkUptime";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
 import { createOperationsEmailTransport } from "./operationsEmailTransport";
 import { runOperationsEmailSmtpWorker } from "./operationsEmailWorker";
+import { runOperationsEmailCrmFinalisationWorker } from "./operationsEmailFinalisation";
+import { runOperationsEmailSentCopyWorker } from "./operationsEmailSentCopy";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -378,10 +381,27 @@ runUptimeLoop().catch((err) => {
 });
 
 const operationsEmailSmtpConfig = getOperationsEmailSmtpConfig();
-if (
-  isOperationsEmailModuleEnabled(process.env) &&
-  operationsEmailSmtpConfig.configured
-) {
+const operationsEmailImapConfig = getOperationsEmailImapConfig();
+const operationsEmailModuleEnabled = isOperationsEmailModuleEnabled(
+  process.env,
+);
+
+if (operationsEmailModuleEnabled) {
+  runOperationsEmailCrmFinalisationWorker({
+    workerId: `operations-email-crm-${workerId}`,
+    signal: operationsEmailAbortController.signal,
+  }).catch((err) => {
+    console.error(
+      `[operations-email-crm ${workerId}] isolated loop failure`,
+      err instanceof Error ? err.name : "unknown",
+    );
+  });
+  console.log(
+    `[operations-email-crm ${workerId}] CRM finalisation worker started`,
+  );
+}
+
+if (operationsEmailModuleEnabled && operationsEmailSmtpConfig.configured) {
   const transport = createOperationsEmailTransport(operationsEmailSmtpConfig);
   runOperationsEmailSmtpWorker({
     workerId: `operations-email-${workerId}`,
@@ -397,7 +417,27 @@ if (
   console.log(`[operations-email ${workerId}] SMTP queue worker started`);
 } else {
   console.log(
-    `[operations-email ${workerId}] SMTP queue worker inactive reason=${isOperationsEmailModuleEnabled(process.env) ? "smtp_configuration_unavailable" : "module_disabled"}`,
+    `[operations-email ${workerId}] SMTP queue worker inactive reason=${operationsEmailModuleEnabled ? "smtp_configuration_unavailable" : "module_disabled"}`,
+  );
+}
+
+if (operationsEmailModuleEnabled && operationsEmailImapConfig.configured) {
+  runOperationsEmailSentCopyWorker({
+    workerId: `operations-email-imap-${workerId}`,
+    config: operationsEmailImapConfig,
+    signal: operationsEmailAbortController.signal,
+  }).catch((err) => {
+    console.error(
+      `[operations-email-imap ${workerId}] isolated loop failure`,
+      err instanceof Error ? err.name : "unknown",
+    );
+  });
+  console.log(
+    `[operations-email-imap ${workerId}] IONOS Sent-copy worker started`,
+  );
+} else {
+  console.log(
+    `[operations-email-imap ${workerId}] Sent-copy worker inactive reason=${operationsEmailModuleEnabled ? "imap_configuration_unavailable" : "module_disabled"}`,
   );
 }
 
@@ -406,7 +446,13 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     operationsEmailAbortController.abort();
     setTimeout(
       () => process.exit(0),
-      Math.min(60_000, operationsEmailSmtpConfig.socketTimeoutMs + 5_000),
+      Math.min(
+        60_000,
+        Math.max(
+          operationsEmailSmtpConfig.socketTimeoutMs,
+          operationsEmailImapConfig.socketTimeoutMs,
+        ) + 5_000,
+      ),
     ).unref();
   });
 }

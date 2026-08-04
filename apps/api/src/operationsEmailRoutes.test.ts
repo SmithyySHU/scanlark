@@ -24,6 +24,7 @@ test("Operations Email API is mounted behind its isolated guard", () => {
 
 test("Checkpoint 3 exposes transfer, detail, edit and lifecycle routes", () => {
   for (const route of [
+    '"/sent-copy-status"',
     '"/messages/from-communication/:communicationId"',
     '"/messages/:messageId"',
     '"/messages/:messageId/ready"',
@@ -94,6 +95,27 @@ test("Checkpoint 5 exposes guarded test, real-send, history, and retry routes", 
   );
 });
 
+test("Checkpoint 6 exposes only post-acceptance client linking and Sent-copy retry controls", () => {
+  for (const route of [
+    '"/client-link-options"',
+    '"/messages/:messageId/link-client"',
+    '"/messages/:messageId/deliveries/:deliveryId/retry-sent-copy"',
+  ])
+    assert.equal(routeSource.includes(route), true, `missing ${route}`);
+  assert.equal(
+    routeSource.includes("requestOperationsEmailPostSendLink"),
+    true,
+  );
+  assert.equal(
+    routeSource.includes("requestOperationsEmailSentCopyRetry"),
+    true,
+  );
+  assert.equal(routeSource.includes("reusesExactFrozenMime: true"), true);
+  assert.equal(routeSource.includes("imap.password"), false);
+  assert.equal(routeSource.includes("imap.username"), false);
+  assert.equal(routeSource.includes("resolved_sent_mailbox"), false);
+});
+
 test("SMTP API never accepts browser-provided recipients or exposes secrets", () => {
   assert.equal(
     routeSource.includes(
@@ -118,8 +140,16 @@ test("standalone test sends do not require a Communication or business", () => {
 test("standalone real send requires rollout policy but not a CRM link", () => {
   assert.equal(routeSource.includes('"real_send_business_required"'), false);
   assert.equal(routeSource.includes("operationsEmailRealSendPolicy"), true);
+  const realQueueRepository = repositorySource.slice(
+    repositorySource.indexOf(
+      "export async function createOrGetAndQueueOperationsEmailRealDelivery",
+    ),
+    repositorySource.indexOf(
+      "export async function claimDueOperationsEmailSmtpDelivery",
+    ),
+  );
   assert.equal(
-    repositorySource.includes("message.business_id IS NOT NULL"),
+    realQueueRepository.includes("message.business_id IS NOT NULL"),
     false,
   );
 });

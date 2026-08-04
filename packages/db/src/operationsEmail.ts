@@ -257,6 +257,16 @@ export type OperationsEmailMessageSummary = Pick<
   contact_name: string | null;
   last_editor_label: string | null;
   sent_actor_label: string | null;
+  crm_finalisation_status:
+    | "not_required"
+    | "pending"
+    | "finalising"
+    | "finalised"
+    | "failed"
+    | null;
+  crm_safe_error: string | null;
+  sent_copy_status: OperationsEmailSentCopyStatus | null;
+  sent_copy_safe_error: string | null;
 };
 
 export type OperationsEmailMessageDetail = OperationsEmailMessageRow & {
@@ -266,6 +276,18 @@ export type OperationsEmailMessageDetail = OperationsEmailMessageRow & {
   created_actor_label: string | null;
   last_editor_label: string | null;
   sent_actor_label: string | null;
+  crm_finalisation_status:
+    | "not_required"
+    | "pending"
+    | "finalising"
+    | "finalised"
+    | "failed"
+    | null;
+  crm_safe_error: string | null;
+  crm_finalised_at: Date | null;
+  sent_copy_status: OperationsEmailSentCopyStatus | null;
+  sent_copy_safe_error: string | null;
+  sent_copy_appended_at: Date | null;
 };
 
 export type OperationsEmailOptimisticResult =
@@ -687,13 +709,29 @@ export async function getOperationsEmailMessageDetail(
         COALESCE(last_editor.display_name, last_editor.email)
           AS last_editor_label,
         COALESCE(sent_actor.display_name, sent_actor.email)
-          AS sent_actor_label
+          AS sent_actor_label,
+        crm.status AS crm_finalisation_status,
+        crm.safe_error AS crm_safe_error,
+        crm.finalised_at AS crm_finalised_at,
+        real_delivery.sent_copy_status,
+        real_delivery.sent_copy_safe_error,
+        real_delivery.sent_copy_appended_at
       FROM operations_email_messages message
       LEFT JOIN operations_businesses business ON business.id = message.business_id
       LEFT JOIN operations_contacts contact ON contact.id = message.contact_id
       LEFT JOIN users created_actor ON created_actor.id = message.created_by_user_id
       LEFT JOIN users last_editor ON last_editor.id = message.last_edited_by_user_id
       LEFT JOIN users sent_actor ON sent_actor.id = message.send_requested_by_user_id
+      LEFT JOIN operations_email_crm_finalisations crm ON crm.message_id = message.id
+      LEFT JOIN LATERAL (
+        SELECT delivery.sent_copy_status, delivery.sent_copy_safe_error,
+               delivery.sent_copy_appended_at
+        FROM operations_email_deliveries delivery
+        WHERE delivery.message_id = message.id
+          AND delivery.delivery_kind = 'real'
+        ORDER BY delivery.created_at DESC
+        LIMIT 1
+      ) real_delivery ON true
       WHERE message.id = $2
         AND message.workspace_id = $1
     `,
@@ -743,12 +781,25 @@ export async function listOperationsEmailMessageSummaries(input: {
         COALESCE(last_editor.display_name, last_editor.email)
           AS last_editor_label,
         COALESCE(sent_actor.display_name, sent_actor.email)
-          AS sent_actor_label
+          AS sent_actor_label,
+        crm.status AS crm_finalisation_status,
+        crm.safe_error AS crm_safe_error,
+        real_delivery.sent_copy_status,
+        real_delivery.sent_copy_safe_error
       FROM operations_email_messages message
       LEFT JOIN operations_businesses business ON business.id = message.business_id
       LEFT JOIN operations_contacts contact ON contact.id = message.contact_id
       LEFT JOIN users last_editor ON last_editor.id = message.last_edited_by_user_id
       LEFT JOIN users sent_actor ON sent_actor.id = message.send_requested_by_user_id
+      LEFT JOIN operations_email_crm_finalisations crm ON crm.message_id = message.id
+      LEFT JOIN LATERAL (
+        SELECT delivery.sent_copy_status, delivery.sent_copy_safe_error
+        FROM operations_email_deliveries delivery
+        WHERE delivery.message_id = message.id
+          AND delivery.delivery_kind = 'real'
+        ORDER BY delivery.created_at DESC
+        LIMIT 1
+      ) real_delivery ON true
       WHERE message.workspace_id = $1
         AND ($2::text[] IS NULL OR message.status = ANY($2::text[]))
         AND (
@@ -1740,6 +1791,12 @@ export type OperationsEmailDeliveryHistoryItem = Pick<
   | "failed_at"
   | "uncertain_at"
   | "created_at"
+  | "sent_copy_status"
+  | "sent_copy_appended_at"
+  | "sent_copy_last_attempt_at"
+  | "sent_copy_safe_error"
+  | "sent_copy_next_attempt_at"
+  | "sent_copy_attempt_count"
 > & {
   actor_label: string | null;
   intended_recipient: string | null;
@@ -1772,6 +1829,12 @@ export async function listOperationsEmailDeliveryHistorySafe(
         delivery.failed_at,
         delivery.uncertain_at,
         delivery.created_at,
+        delivery.sent_copy_status,
+        delivery.sent_copy_appended_at,
+        delivery.sent_copy_last_attempt_at,
+        delivery.sent_copy_safe_error,
+        delivery.sent_copy_next_attempt_at,
+        delivery.sent_copy_attempt_count,
         COALESCE(actor.display_name, actor.email) AS actor_label,
         CASE
           WHEN delivery.delivery_kind = 'test'
@@ -2440,7 +2503,34 @@ export async function recordOperationsEmailSmtpAcceptance(input: {
           AND message.id = delivery.message_id
           AND message.workspace_id = delivery.workspace_id
           AND message.status IN ('queued', 'sending')
-        RETURNING message.id
+        RETURNING message.*
+      ), inserted_crm_finalisation AS (
+        INSERT INTO operations_email_crm_finalisations (
+          workspace_id, message_id, delivery_id, status, business_id,
+          contact_id, sent_communication_id, next_attempt_at, finalised_at
+        )
+        SELECT
+          delivery.workspace_id,
+          delivery.message_id,
+          delivery.id,
+          CASE
+            WHEN message.sent_communication_id IS NOT NULL THEN 'finalised'
+            WHEN message.business_id IS NULL THEN 'not_required'
+            ELSE 'pending'
+          END,
+          message.business_id,
+          message.contact_id,
+          message.sent_communication_id,
+          CASE
+            WHEN message.sent_communication_id IS NULL AND message.business_id IS NOT NULL
+            THEN now()
+            ELSE NULL
+          END,
+          CASE WHEN message.sent_communication_id IS NOT NULL THEN now() ELSE NULL END
+        FROM updated_delivery delivery
+        JOIN updated_message message ON message.id = delivery.message_id
+        ON CONFLICT (message_id) DO NOTHING
+        RETURNING id
       )
       SELECT * FROM updated_delivery
     `,
@@ -2471,7 +2561,8 @@ export async function claimPendingOperationsEmailSentCopy(input: {
           AND (
             (
               delivery.sent_copy_status IN ('pending', 'failed')
-              AND COALESCE(delivery.sent_copy_next_attempt_at, now()) <= now()
+              AND delivery.sent_copy_next_attempt_at IS NOT NULL
+              AND delivery.sent_copy_next_attempt_at <= now()
             )
             OR (
               delivery.sent_copy_status = 'appending'
@@ -2566,7 +2657,7 @@ export async function markOperationsEmailSentCopyFailed(input: {
   deliveryId: string;
   workerId: string;
   safeDisplayError: string;
-  nextAttemptAt: Date;
+  nextAttemptAt: Date | null;
 }) {
   const client = await ensureConnected();
   const res = await client.query<OperationsEmailDeliveryRow>(
@@ -2619,6 +2710,38 @@ export async function markOperationsEmailSentCopyPending(input: {
       RETURNING *
     `,
     [input.deliveryId, input.workspaceId, input.nextAttemptAt],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function requestOperationsEmailSentCopyRetry(input: {
+  workspaceId: string;
+  deliveryId: string;
+}) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      UPDATE operations_email_deliveries
+      SET sent_copy_status = 'pending',
+          sent_copy_next_attempt_at = now(),
+          sent_copy_safe_error = NULL,
+          sent_copy_lock_owner = NULL,
+          sent_copy_locked_at = NULL,
+          sent_copy_lock_expires_at = NULL,
+          updated_at = now()
+      WHERE id = $1
+        AND workspace_id = $2
+        AND delivery_kind = 'real'
+        AND status = 'sent'
+        AND smtp_accepted_at IS NOT NULL
+        AND fixed_message_id IS NOT NULL
+        AND mime_sha256 IS NOT NULL
+        AND raw_mime_bytes IS NOT NULL
+        AND raw_mime_storage_key IS NULL
+        AND sent_copy_status IN ('pending', 'failed')
+      RETURNING *
+    `,
+    [input.deliveryId, input.workspaceId],
   );
   return res.rows[0] ?? null;
 }

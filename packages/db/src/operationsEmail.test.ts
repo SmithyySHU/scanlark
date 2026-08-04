@@ -42,6 +42,12 @@ import {
 } from "./operationsEmail";
 import { markOperationsCommunicationSent } from "./operationsCommunications";
 import {
+  claimDueOperationsEmailCrmFinalisation,
+  claimOperationsEmailCrmFinalisationForMessage,
+  finaliseClaimedOperationsEmailCrm,
+  requestOperationsEmailPostSendLink,
+} from "./operationsEmailFinalisation";
+import {
   addOperationsEmailGeneratedAttachment,
   addOperationsEmailManualAttachment,
   getOperationsEmailAttachmentDownload,
@@ -113,6 +119,15 @@ before(async () => {
       readFileSync(
         new URL(
           "../migrations/048_operations_email_standalone_drafts.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    await db.query(
+      readFileSync(
+        new URL(
+          "../migrations/049_operations_email_crm_finalisation.sql",
           import.meta.url,
         ),
         "utf8",
@@ -208,6 +223,14 @@ after(async () => {
     );
     await db.query(
       `DELETE FROM operations_email_smtp_readiness WHERE workspace_id = ANY($1::uuid[])`,
+      [workspaceIds],
+    );
+    await db.query(
+      `DELETE FROM operations_email_imap_readiness WHERE workspace_id = ANY($1::uuid[])`,
+      [workspaceIds],
+    );
+    await db.query(
+      `DELETE FROM operations_email_crm_finalisations WHERE workspace_id = ANY($1::uuid[])`,
       [workspaceIds],
     );
     await db.query(
@@ -373,7 +396,15 @@ async function queueReal(
     expectedRevision: message.revision,
     actorUserId,
     idempotencyKey: key,
-    frozenMime: { ...frozenMime, fixedMessageId: `<${key}@scanlark.test>` },
+    frozenMime: {
+      ...frozenMime,
+      fixedMessageId: `<${key}@scanlark.test>`,
+      frozenMetadataJson: {
+        ...frozenMime.frozenMetadataJson,
+        subject: message.subject,
+        attachmentCount: 0,
+      },
+    },
   });
   assert.ok(result.delivery);
   return result;
@@ -387,6 +418,10 @@ async function deferAllClaims() {
           sent_copy_next_attempt_at = now() + interval '1 day'
       WHERE workspace_id = $1
     `,
+    [workspaceId],
+  );
+  await db.query(
+    `UPDATE operations_email_crm_finalisations SET next_attempt_at = now() + interval '1 day' WHERE workspace_id = $1`,
     [workspaceId],
   );
 }
@@ -511,6 +546,11 @@ test("standalone drafts can queue test delivery without a source or business", a
 });
 
 test("standalone emails can queue normal delivery without a source or business", async () => {
+  await deferAllClaims();
+  const communicationsBefore = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM operations_communications WHERE business_id = $1`,
+    [businessId],
+  );
   const draft = await createOperationsEmailStandaloneDraft({
     workspaceId,
     actorUserId,
@@ -526,6 +566,8 @@ test("standalone emails can queue normal delivery without a source or business",
       UPDATE operations_email_messages
       SET editor_body = 'A valid standalone email body.',
           plain_text = 'A valid standalone email body.',
+          final_render_html = '<p>A valid standalone email body.</p>',
+          final_render_plain_text = 'A valid standalone email body.',
           status = 'ready',
           ready_at = now()
       WHERE id = $1 AND workspace_id = $2
@@ -545,12 +587,113 @@ test("standalone emails can queue normal delivery without a source or business",
       ...frozenMime,
       envelopeRecipient: message.recipient_address,
       fixedMessageId: `<standalone-real-${randomUUID()}@scanlark.test>`,
+      frozenMetadataJson: {
+        ...frozenMime.frozenMetadataJson,
+        subject: message.subject,
+        attachmentCount: 0,
+      },
     },
   });
   assert.equal(result.outcome, "created");
   assert.equal(result.delivery?.delivery_kind, "real");
   assert.equal(result.message?.business_id, null);
   assert.equal(result.message?.source_communication_id, null);
+  const smtpClaim = await claimDueOperationsEmailSmtpDelivery({
+    workerId: "standalone-smtp-worker",
+    leaseSeconds: 60,
+  });
+  assert.equal(smtpClaim?.id, result.delivery?.id);
+  await recordOperationsEmailSmtpAcceptance({
+    workspaceId,
+    deliveryId: result.delivery!.id,
+    workerId: "standalone-smtp-worker",
+    acceptedRecipients: [message.recipient_address],
+  });
+  const unlinkedState = await db.query<{ status: string }>(
+    `SELECT status FROM operations_email_crm_finalisations WHERE message_id = $1`,
+    [message.id],
+  );
+  assert.equal(unlinkedState.rows[0].status, "not_required");
+  assert.equal(
+    await claimDueOperationsEmailCrmFinalisation({
+      workerId: "standalone-crm-worker",
+      leaseSeconds: 60,
+    }),
+    null,
+  );
+  const communicationsStillUnchanged = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM operations_communications WHERE business_id = $1`,
+    [businessId],
+  );
+  assert.equal(
+    communicationsStillUnchanged.rows[0].count,
+    communicationsBefore.rows[0].count,
+  );
+
+  const acceptedMessage = await getOperationsEmailMessage(
+    workspaceId,
+    message.id,
+  );
+  assert.equal(
+    await requestOperationsEmailPostSendLink({
+      workspaceId,
+      messageId: message.id,
+      businessId: otherBusinessId,
+      contactId: null,
+      expectedRevision: acceptedMessage!.revision,
+      actorUserId,
+    }),
+    null,
+  );
+  assert.equal(
+    await requestOperationsEmailPostSendLink({
+      workspaceId,
+      messageId: message.id,
+      businessId,
+      contactId: randomUUID(),
+      expectedRevision: acceptedMessage!.revision,
+      actorUserId,
+    }),
+    null,
+  );
+  const linked = await requestOperationsEmailPostSendLink({
+    workspaceId,
+    messageId: message.id,
+    businessId,
+    contactId,
+    expectedRevision: acceptedMessage!.revision,
+    actorUserId,
+  });
+  assert.equal(linked?.recipient_contact_mismatch, true);
+  const postLinkClaim = await claimOperationsEmailCrmFinalisationForMessage({
+    workspaceId,
+    messageId: message.id,
+    workerId: "post-link-crm-worker",
+    leaseSeconds: 60,
+  });
+  assert.ok(postLinkClaim);
+  const finalised = await finaliseClaimedOperationsEmailCrm({
+    workspaceId,
+    finalisationId: postLinkClaim!.id,
+    workerId: "post-link-crm-worker",
+  });
+  assert.ok(finalised?.sent_communication_id);
+  const repeated = await requestOperationsEmailPostSendLink({
+    workspaceId,
+    messageId: message.id,
+    businessId,
+    contactId,
+    expectedRevision: acceptedMessage!.revision,
+    actorUserId,
+  });
+  assert.equal(
+    repeated?.sent_communication_id,
+    finalised?.sent_communication_id,
+  );
+  await db.query(
+    `UPDATE operations_email_deliveries SET sent_copy_next_attempt_at = now() + interval '1 day' WHERE id = $1`,
+    [result.delivery!.id],
+  );
 });
 
 test("optimistic editor updates increment current revisions and reject stale revisions", async () => {
@@ -993,11 +1136,13 @@ test("Sent-copy claims are independent and never requeue SMTP", async () => {
   const beforeSideEffects = await db.query<{
     last_contacted_at: Date | null;
     communication_status: string;
+    communication_body: string;
     follow_up_completed_at: Date | null;
   }>(
     `
       SELECT business.last_contacted_at,
              communication.status AS communication_status,
+             communication.body AS communication_body,
              communication.follow_up_completed_at
       FROM operations_businesses business
       JOIN operations_communications communication ON communication.id = $2
@@ -1029,11 +1174,13 @@ test("Sent-copy claims are independent and never requeue SMTP", async () => {
   const afterSideEffects = await db.query<{
     last_contacted_at: Date | null;
     communication_status: string;
+    communication_body: string;
     follow_up_completed_at: Date | null;
   }>(
     `
       SELECT business.last_contacted_at,
              communication.status AS communication_status,
+             communication.body AS communication_body,
              communication.follow_up_completed_at
       FROM operations_businesses business
       JOIN operations_communications communication ON communication.id = $2
@@ -1069,6 +1216,73 @@ test("Sent-copy claims are independent and never requeue SMTP", async () => {
   });
   assert.equal(pendingAgain?.status, "sent");
   assert.equal(pendingAgain?.sent_copy_status, "pending");
+
+  const crmClaim = await claimDueOperationsEmailCrmFinalisation({
+    workerId: "crm-worker",
+    leaseSeconds: 60,
+  });
+  assert.equal(crmClaim?.message_id, message.id);
+  const finalised = await finaliseClaimedOperationsEmailCrm({
+    workspaceId,
+    finalisationId: crmClaim!.id,
+    workerId: "crm-worker",
+  });
+  assert.equal(finalised?.status, "finalised");
+  assert.equal(finalised?.communication_created, true);
+  const finalMessage = await getOperationsEmailMessage(workspaceId, message.id);
+  assert.equal(
+    finalMessage?.sent_communication_id,
+    finalised?.sent_communication_id,
+  );
+  const sourceAfterFinalisation = await db.query<{
+    status: string;
+    body: string;
+  }>(`SELECT status, body FROM operations_communications WHERE id = $1`, [
+    sourceCommunicationId,
+  ]);
+  assert.equal(
+    sourceAfterFinalisation.rows[0].status,
+    beforeSideEffects.rows[0].communication_status,
+  );
+  assert.equal(
+    sourceAfterFinalisation.rows[0].body,
+    beforeSideEffects.rows[0].communication_body,
+  );
+  const sentCount = await db.query<{
+    count: string;
+    subject: string;
+    body: string;
+    recipient_email: string;
+    sent_at: Date;
+  }>(
+    `SELECT count(*)::text AS count, max(subject) AS subject, max(body) AS body,
+            max(recipient_email) AS recipient_email, max(sent_at) AS sent_at
+     FROM operations_communications WHERE id = $1 AND status = 'sent'`,
+    [finalised?.sent_communication_id],
+  );
+  assert.equal(Number(sentCount.rows[0].count), 1);
+  assert.equal(sentCount.rows[0].subject, message.subject);
+  assert.equal(sentCount.rows[0].body, message.final_render_plain_text);
+  assert.equal(sentCount.rows[0].recipient_email, accepted?.envelope_recipient);
+  assert.equal(
+    sentCount.rows[0].sent_at.getTime(),
+    accepted?.smtp_accepted_at?.getTime(),
+  );
+  const reconciledBusiness = await db.query<{ last_contacted_at: Date }>(
+    `SELECT last_contacted_at FROM operations_businesses WHERE id = $1`,
+    [businessId],
+  );
+  assert.equal(
+    reconciledBusiness.rows[0].last_contacted_at.getTime(),
+    accepted?.smtp_accepted_at?.getTime(),
+  );
+  assert.equal(
+    await claimDueOperationsEmailCrmFinalisation({
+      workerId: "crm-worker-2",
+      leaseSeconds: 60,
+    }),
+    null,
+  );
 });
 
 test("batch source-link lookup returns multiple Communications in one result", async () => {

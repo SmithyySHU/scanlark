@@ -20,6 +20,8 @@ import {
   getOperationsEmailSourceLinks,
   getOperationsEmailSmtpConfig,
   getOperationsEmailSmtpReadiness,
+  getOperationsEmailImapConfig,
+  getOperationsEmailImapReadiness,
   getOperationsEmailTransferSource,
   getOperationsQuotePreview,
   isValidEmailAddress,
@@ -27,9 +29,16 @@ import {
   listOperationsEmailAttachmentsSafe,
   listOperationsEmailMessageSummaries,
   listOperationsEmailDeliveryHistorySafe,
+  listOperationsEmailClientLinkOptions,
   markOperationsEmailMessageReady,
   recordAdminAuditLog,
+  recordOperationsEmailSystemAudit,
   requeueOperationsEmailDeliveryWithFrozenMime,
+  requestOperationsEmailPostSendLink,
+  claimOperationsEmailCrmFinalisationForMessage,
+  finaliseClaimedOperationsEmailCrm,
+  markOperationsEmailCrmFinalisationFailed,
+  requestOperationsEmailSentCopyRetry,
   removeOperationsEmailAttachment,
   returnOperationsEmailMessageToDraft,
   saveOperationsQuotePdfRenderAtNextRevision,
@@ -303,7 +312,9 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const workspace = await emailWorkspace(res);
       if (!workspace) return;
       const smtp = getOperationsEmailSmtpConfig();
+      const imap = getOperationsEmailImapConfig();
       const readiness = await getOperationsEmailSmtpReadiness(workspace.id);
+      const imapReadiness = await getOperationsEmailImapReadiness(workspace.id);
       const usable =
         smtp.configured &&
         smtpReadinessUsable(readiness, smtp.readinessIntervalMs);
@@ -314,7 +325,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       return res.json({
         enabled: req.operationsCapabilities?.operationsEmailEnabled === true,
         canUseEmail: req.operationsCapabilities?.canUseOperationsEmail === true,
-        implementationStage: "checkpoint-5-smtp-queue",
+        implementationStage: "checkpoint-6-crm-sent-copy",
         smtp: {
           configured: smtp.configured,
           readiness: readiness?.status ?? "not_checked",
@@ -334,6 +345,12 @@ export function mountOperationsEmailRoutes(app: express.Application) {
           mode: smtp.realSendMode,
           generallyAvailable: usable && smtp.realSendMode !== "disabled",
         },
+        sentCopy: {
+          configured: imap.configured,
+          readiness: imapReadiness?.status ?? "not_checked",
+          available: imap.configured && imapReadiness?.status === "available",
+          checkedAt: imapReadiness?.checked_at ?? null,
+        },
       });
     } catch (error) {
       console.error("Operations Email config failed", error);
@@ -342,6 +359,31 @@ export function mountOperationsEmailRoutes(app: express.Application) {
         500,
         "operations_email_config_failed",
         "Failed to load safe Email configuration status",
+      );
+    }
+  });
+
+  router.get("/sent-copy-status", async (_req, res) => {
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const config = getOperationsEmailImapConfig();
+      const readiness = await getOperationsEmailImapReadiness(workspace.id);
+      return res.json({
+        configured: config.configured,
+        available: config.configured && readiness?.status === "available",
+        lastChecked: readiness?.checked_at ?? null,
+        state:
+          readiness?.status ??
+          (config.configured ? "configured" : "unavailable"),
+      });
+    } catch (error) {
+      console.error("Operations Email Sent-copy status failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_sent_copy_status_failed",
+        "Failed to load safe IONOS Sent-copy status",
       );
     }
   });
@@ -1120,6 +1162,227 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/client-link-options", async (_req, res) => {
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const options = await listOperationsEmailClientLinkOptions(workspace.id);
+      return res.json({ options });
+    } catch (error) {
+      console.error("Operations Email client link options failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_client_options_failed",
+        "Failed to load business and contact choices",
+      );
+    }
+  });
+
+  router.post("/messages/:messageId/link-client", async (req, res) => {
+    const messageId = uuidParam(req, res, "messageId");
+    if (!messageId) return;
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const body =
+        req.body && typeof req.body === "object"
+          ? (req.body as Record<string, unknown>)
+          : {};
+      if (typeof body.businessId !== "string" || !UUID_RE.test(body.businessId))
+        return sendApiError(
+          res,
+          400,
+          "invalid_business_id",
+          "Select a valid business",
+        );
+      if (
+        body.contactId != null &&
+        (typeof body.contactId !== "string" || !UUID_RE.test(body.contactId))
+      )
+        return sendApiError(
+          res,
+          400,
+          "invalid_contact_id",
+          "Select a valid contact",
+        );
+      const expectedRevision = parseExpectedRevision(body.expectedRevision);
+      const linked = await requestOperationsEmailPostSendLink({
+        workspaceId: workspace.id,
+        messageId,
+        businessId: body.businessId,
+        contactId: typeof body.contactId === "string" ? body.contactId : null,
+        expectedRevision,
+        actorUserId: actor(req).id,
+      });
+      if (!linked) {
+        const current = await getOperationsEmailMessageDetail(
+          workspace.id,
+          messageId,
+        );
+        if (current?.sent_communication_id)
+          return res.json({ message: current, alreadyFinalised: true });
+        return sendApiError(
+          res,
+          409,
+          "operations_email_link_conflict",
+          "This sent email changed or is no longer eligible for client linking",
+          { latest: current },
+        );
+      }
+      await auditEmail(
+        req,
+        workspace.id,
+        "operations.email.post_send_client_linked",
+        messageId,
+        {
+          businessId: linked.business_id,
+          contactId: linked.contact_id,
+          frozenRecipientMismatch: linked.recipient_contact_mismatch,
+        },
+      );
+      const finalisationWorkerId = `operations-email-api-${randomUUID()}`;
+      const claim = await claimOperationsEmailCrmFinalisationForMessage({
+        workspaceId: workspace.id,
+        messageId,
+        workerId: finalisationWorkerId,
+        leaseSeconds: 60,
+      });
+      if (!claim)
+        return res
+          .status(202)
+          .json({ message: linked, crmFinalisation: "pending" });
+      try {
+        const finalised = await finaliseClaimedOperationsEmailCrm({
+          workspaceId: workspace.id,
+          finalisationId: claim.id,
+          workerId: finalisationWorkerId,
+        });
+        if (finalised) {
+          await recordOperationsEmailSystemAudit({
+            workspaceId: workspace.id,
+            deliveryId: claim.delivery_id,
+            messageId,
+            action: finalised.communication_created
+              ? "operations.email.final_communication_created"
+              : "operations.email.final_communication_reused",
+            metadata: {
+              sentCommunicationId: finalised.sent_communication_id,
+              postSendLink: true,
+            },
+          });
+          await recordOperationsEmailSystemAudit({
+            workspaceId: workspace.id,
+            deliveryId: claim.delivery_id,
+            messageId,
+            action: "operations.email.business_last_contacted_reconciled",
+            metadata: { smtpAcceptanceTimestampUsed: true, postSendLink: true },
+          });
+        }
+        const message = await getOperationsEmailMessageDetail(
+          workspace.id,
+          messageId,
+        );
+        return res.json({
+          message,
+          sentCommunicationId: finalised?.sent_communication_id ?? null,
+          crmFinalisation: finalised ? "finalised" : "pending",
+        });
+      } catch (error) {
+        await markOperationsEmailCrmFinalisationFailed({
+          workspaceId: workspace.id,
+          finalisationId: claim.id,
+          workerId: finalisationWorkerId,
+          safeError:
+            "The client link was saved, but CRM recording is delayed and will be retried.",
+          nextAttemptAt: new Date(),
+        });
+        return res
+          .status(202)
+          .json({ message: linked, crmFinalisation: "pending" });
+      }
+    } catch (error) {
+      if (validationError(res, error)) return;
+      console.error("Operations Email post-send client link failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_client_link_failed",
+        "Failed to link the sent email to the selected client",
+      );
+    }
+  });
+
+  router.post(
+    "/messages/:messageId/deliveries/:deliveryId/retry-sent-copy",
+    async (req, res) => {
+      const messageId = uuidParam(req, res, "messageId");
+      const deliveryId = uuidParam(req, res, "deliveryId");
+      if (!messageId || !deliveryId) return;
+      try {
+        const workspace = await emailWorkspace(res);
+        if (!workspace) return;
+        if (!getOperationsEmailImapConfig().configured)
+          return sendApiError(
+            res,
+            409,
+            "imap_unavailable",
+            "IONOS Sent-copy access is not configured",
+          );
+        const delivery = await getOperationsEmailMessageDelivery(
+          workspace.id,
+          messageId,
+          deliveryId,
+        );
+        if (!delivery)
+          return sendApiError(res, 404, "not_found", "Delivery not found");
+        if (
+          !delivery.raw_mime_bytes ||
+          !delivery.mime_sha256 ||
+          createHash("sha256").update(delivery.raw_mime_bytes).digest("hex") !==
+            delivery.mime_sha256
+        )
+          return sendApiError(
+            res,
+            409,
+            "frozen_mime_integrity_failed",
+            "The exact sent MIME is unavailable and cannot be appended safely",
+          );
+        const retried = await requestOperationsEmailSentCopyRetry({
+          workspaceId: workspace.id,
+          deliveryId,
+        });
+        if (!retried)
+          return sendApiError(
+            res,
+            409,
+            "sent_copy_retry_not_allowed",
+            "This delivery is not eligible for a Sent-folder retry",
+          );
+        await auditEmail(
+          req,
+          workspace.id,
+          "operations.email.sent_copy_manual_retry",
+          messageId,
+          {
+            deliveryId,
+            doesNotResendRecipientEmail: true,
+            reusesExactFrozenMime: true,
+          },
+        );
+        return res.status(202).json({ delivery: safeDelivery(retried) });
+      } catch (error) {
+        console.error("Operations Email Sent-copy retry failed", error);
+        return sendApiError(
+          res,
+          500,
+          "operations_email_sent_copy_retry_failed",
+          "Failed to queue the IONOS Sent-folder retry",
+        );
+      }
+    },
+  );
 
   router.post("/messages/:messageId/test-send", async (req, res) => {
     const messageId = uuidParam(req, res, "messageId");

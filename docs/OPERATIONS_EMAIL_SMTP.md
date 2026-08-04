@@ -1,8 +1,9 @@
-# Operations Email SMTP boundary (Checkpoint 5)
+# Operations Email delivery and finalisation boundaries (Checkpoints 5–6)
 
 Checkpoint 5 queues and submits frozen MIME to the configured outgoing SMTP
-server. It does not append to the IONOS Sent folder or finalize CRM state; those
-remain Checkpoint 6 work.
+server. Checkpoint 6 independently reconciles accepted real deliveries into CRM
+and appends their exact frozen MIME to the IONOS Sent folder. Neither
+post-acceptance process can send recipient email.
 
 ## Local enablement and test workflow
 
@@ -10,7 +11,7 @@ The module flag is read by the API and worker from the repository-root `.env`
 file. For local development:
 
 1. Apply all migrations in sorted order, including
-   `048_operations_email_standalone_drafts.sql`.
+   `049_operations_email_crm_finalisation.sql`.
 2. In the root `.env`, set `OPERATIONS_EMAIL_MODULE_ENABLED=true`. Keep
    `OPERATIONS_EMAIL_REAL_SEND_MODE=disabled` for local Checkpoint 5 testing.
 3. Restart `npm run dev:api` so the server reloads the flag. Restart
@@ -65,7 +66,7 @@ For Checkpoint 6 CRM finalization:
   create the immutable sent Communication event in that client's timeline;
 - a successfully delivered unlinked standalone message will remain recorded in
   Email without creating a placeholder business or Communication;
-- the sent Email UI will later expose **Link to business/contact** so an operator
+- the sent Email UI exposes **Link to business/contact** so an operator
   can attribute an unlinked record explicitly and auditably;
 - messages transferred from Communications retain their existing source
   business/contact linkage automatically.
@@ -136,3 +137,43 @@ module. `OPERATIONS_EMAIL_REAL_SEND_MODE` independently defaults to `disabled`:
 The worker verifies SMTP with Nodemailer's `verify()` without sending a message.
 Queue actions require a recent safe readiness record. Credentials and raw MIME
 are never returned by readiness, history, or configuration endpoints.
+
+## CRM finalisation after acceptance
+
+SMTP acceptance creates one reconciliation row in the same database statement.
+Linked messages are claimed with a lease and finalised atomically: exactly one
+immutable sent Communication is created or reused, the Email is linked to it,
+and the business `last_contacted_at` is advanced to the SMTP acceptance time.
+The source Communication draft is never edited. Existing source-link queries
+therefore derive its “Sent through Email” annotation and both links from the
+reverse Email relationship.
+
+Unlinked standalone sends are `not_required` and create no placeholder CRM
+records. A later actor-selected business/contact link changes only attribution;
+the frozen recipient and content remain unchanged. Contact-recipient mismatches
+must be shown for explicit confirmation and are retained in the audit trail.
+
+No additional follow-up or pipeline automation is introduced here. The current
+manual mark-sent workflow remains available and retains its existing side
+effects; direct-send finalisation does not complete unrelated follow-ups.
+
+## IONOS Sent-folder append boundary
+
+The IMAP worker only claims real deliveries already marked SMTP `sent`; test
+deliveries are never eligible. On every attempt it verifies the SHA-256 of the
+stored raw MIME, validates the fixed Message-ID, connects to IMAP, and resolves
+the destination using either the configured exact mailbox path or exactly one
+mailbox advertised with `\\Sent`. It never creates, renames, moves, or deletes a
+mailbox.
+
+After opening the destination, the worker searches for the fixed Message-ID.
+An existing match is recorded as success without appending. Otherwise it appends
+the exact stored bytes with `\\Seen`, then records the returned UID (or confirms
+the UID with another Message-ID search). Transient IMAP failures receive bounded
+retry; credential, mailbox-discovery, Message-ID, and MIME-integrity failures
+stop for correction and explicit manual retry. The manual action is a Sent-copy
+retry only and cannot requeue SMTP.
+
+The browser receives only configured/available state and safe errors. Host,
+username, password, resolved mailbox hierarchy, raw MIME, and provider error
+text remain server/worker-only.

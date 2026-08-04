@@ -12,9 +12,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@scanlark/db": "*",
     "@scanlark/crawler": "*",
+    "@scanlark/db": "*",
     "dotenv": "^16.4.5",
+    "imapflow": "^1.6.5",
     "nodemailer": "^9.0.3"
   },
   "devDependencies": {
