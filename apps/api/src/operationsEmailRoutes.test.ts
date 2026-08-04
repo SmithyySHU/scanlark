@@ -43,20 +43,45 @@ test("Checkpoint 4 exposes only isolated attachment and render preparation route
     '"/messages/:messageId/attachments/:attachmentId/download"',
     '"/messages/:messageId/quote-renders/:quoteId"',
     '"/messages/:messageId/final-preview"',
-  ]) assert.equal(routeSource.includes(route), true, `missing ${route}`);
+  ])
+    assert.equal(routeSource.includes(route), true, `missing ${route}`);
   assert.equal(routeSource.includes("multer.memoryStorage()"), true);
   assert.equal(routeSource.includes("prepareOperationsEmailFinal"), true);
 });
 
-test("Checkpoint 3 router contains no queue, send or retry endpoint", () => {
-  for (const forbidden of [
-    'router.post("/send',
-    'router.post("/test',
-    'router.post("/retry',
-    'router.post("/queue',
-  ]) {
-    assert.equal(routeSource.includes(forbidden), false);
-  }
+test("Checkpoint 5 exposes guarded test, real-send, history, and retry routes", () => {
+  for (const route of [
+    '"/messages/:messageId/deliveries"',
+    '"/messages/:messageId/test-send"',
+    '"/messages/:messageId/send"',
+    '"/messages/:messageId/deliveries/:deliveryId/retry"',
+  ])
+    assert.equal(routeSource.includes(route), true, `missing ${route}`);
+  assert.equal(
+    routeSource.includes("deriveOperationsEmailTestRecipient"),
+    true,
+  );
+  assert.equal(routeSource.includes("operationsEmailRealSendPolicy"), true);
+  assert.equal(
+    routeSource.includes("getOperationsEmailRealDeliveryForMessage"),
+    true,
+  );
+  assert.equal(
+    routeSource.includes("getOperationsEmailTestDeliveryByIdempotencyKey"),
+    true,
+  );
+});
+
+test("SMTP API never accepts browser-provided recipients or exposes secrets", () => {
+  assert.equal(
+    routeSource.includes(
+      "The test recipient is derived from the authenticated actor",
+    ),
+    true,
+  );
+  assert.equal(routeSource.includes("smtp.password"), false);
+  assert.equal(routeSource.includes("smtp.username"), false);
+  assert.equal(routeSource.includes("raw_mime_bytes:"), false);
 });
 
 test("transfer loads source content server-side", () => {

@@ -13,6 +13,8 @@ import {
   getJobForScanRun,
   getScanRunById,
   getSiteById,
+  getOperationsEmailSmtpConfig,
+  isOperationsEmailModuleEnabled,
   recoverStaleQueuedScanJobs,
   recordUptimeCheck,
   requeueExpiredScanJobs,
@@ -23,6 +25,8 @@ import {
 } from "@scanlark/db";
 import { checkUptime } from "../../../packages/crawler/src/checkUptime";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
+import { createOperationsEmailTransport } from "./operationsEmailTransport";
+import { runOperationsEmailSmtpWorker } from "./operationsEmailWorker";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -37,6 +41,7 @@ const UPTIME_TICK_MS = parsePositiveIntEnv("UPTIME_TICK_MS", 60000);
 const UPTIME_BATCH_SIZE = parsePositiveIntEnv("UPTIME_BATCH_SIZE", 25);
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
+const operationsEmailAbortController = new AbortController();
 
 function parsePositiveIntEnv(name: string, fallback: number) {
   const raw = process.env[name];
@@ -371,3 +376,37 @@ runSchedulerLoop().catch((err) => {
 runUptimeLoop().catch((err) => {
   console.error(`[uptime ${workerId}] fatal`, err);
 });
+
+const operationsEmailSmtpConfig = getOperationsEmailSmtpConfig();
+if (
+  isOperationsEmailModuleEnabled(process.env) &&
+  operationsEmailSmtpConfig.configured
+) {
+  const transport = createOperationsEmailTransport(operationsEmailSmtpConfig);
+  runOperationsEmailSmtpWorker({
+    workerId: `operations-email-${workerId}`,
+    config: operationsEmailSmtpConfig,
+    transport,
+    signal: operationsEmailAbortController.signal,
+  }).catch((err) => {
+    console.error(
+      `[operations-email ${workerId}] worker unavailable error=isolated_loop_failure`,
+      err instanceof Error ? err.name : "unknown",
+    );
+  });
+  console.log(`[operations-email ${workerId}] SMTP queue worker started`);
+} else {
+  console.log(
+    `[operations-email ${workerId}] SMTP queue worker inactive reason=${isOperationsEmailModuleEnabled(process.env) ? "smtp_configuration_unavailable" : "module_disabled"}`,
+  );
+}
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => {
+    operationsEmailAbortController.abort();
+    setTimeout(
+      () => process.exit(0),
+      Math.min(60_000, operationsEmailSmtpConfig.socketTimeoutMs + 5_000),
+    ).unref();
+  });
+}

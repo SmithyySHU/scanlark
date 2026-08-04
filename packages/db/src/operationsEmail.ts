@@ -693,7 +693,9 @@ export async function listOperationsEmailMessageSummaries(input: {
           WHERE ($2::text[] IS NULL OR message.status = ANY($2::text[]))
         )::text AS total,
         count(*) FILTER (WHERE message.status = 'draft')::text AS draft_count,
-        count(*) FILTER (WHERE message.status = 'ready')::text AS ready_count,
+        count(*) FILTER (
+          WHERE message.status IN ('ready', 'queued', 'sending')
+        )::text AS ready_count,
         count(*) FILTER (WHERE message.status = 'sent')::text AS sent_count,
         count(*) FILTER (
           WHERE message.status IN ('failed', 'delivery_uncertain', 'cancelled')
@@ -1582,6 +1584,46 @@ export async function getOperationsEmailDelivery(
   return res.rows[0] ?? null;
 }
 
+export async function getOperationsEmailRealDeliveryForMessage(
+  workspaceId: string,
+  messageId: string,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      SELECT *
+      FROM operations_email_deliveries
+      WHERE workspace_id = $1
+        AND message_id = $2
+        AND delivery_kind = 'real'
+      LIMIT 1
+    `,
+    [workspaceId, messageId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function getOperationsEmailTestDeliveryByIdempotencyKey(
+  workspaceId: string,
+  messageId: string,
+  idempotencyKey: string,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      SELECT *
+      FROM operations_email_deliveries
+      WHERE workspace_id = $1
+        AND message_id = $2
+        AND delivery_kind = 'test'
+        AND idempotency_key = $3
+      LIMIT 1
+    `,
+    [workspaceId, messageId, idempotencyKey],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function listOperationsEmailDeliveryHistory(
   workspaceId: string,
   messageId: string,
@@ -1596,6 +1638,193 @@ export async function listOperationsEmailDeliveryHistory(
     [workspaceId, messageId],
   );
   return res.rows;
+}
+
+export type OperationsEmailDeliveryHistoryItem = Pick<
+  OperationsEmailDeliveryRow,
+  | "id"
+  | "delivery_kind"
+  | "status"
+  | "envelope_recipient"
+  | "smtp_phase"
+  | "failure_class"
+  | "retry_policy"
+  | "automatic_attempt_count"
+  | "manual_retry_count"
+  | "safe_display_error"
+  | "response_code"
+  | "next_attempt_at"
+  | "queued_at"
+  | "sending_at"
+  | "smtp_accepted_at"
+  | "failed_at"
+  | "uncertain_at"
+  | "created_at"
+> & {
+  actor_label: string | null;
+  intended_recipient: string | null;
+  has_frozen_mime: boolean;
+};
+
+export async function listOperationsEmailDeliveryHistorySafe(
+  workspaceId: string,
+  messageId: string,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryHistoryItem>(
+    `
+      SELECT
+        delivery.id,
+        delivery.delivery_kind,
+        delivery.status,
+        delivery.envelope_recipient,
+        delivery.smtp_phase,
+        delivery.failure_class,
+        delivery.retry_policy,
+        delivery.automatic_attempt_count,
+        delivery.manual_retry_count,
+        delivery.safe_display_error,
+        delivery.response_code,
+        delivery.next_attempt_at,
+        delivery.queued_at,
+        delivery.sending_at,
+        delivery.smtp_accepted_at,
+        delivery.failed_at,
+        delivery.uncertain_at,
+        delivery.created_at,
+        COALESCE(actor.display_name, actor.email) AS actor_label,
+        CASE
+          WHEN delivery.delivery_kind = 'test'
+          THEN delivery.frozen_metadata_json->>'intendedRecipient'
+          ELSE delivery.envelope_recipient
+        END AS intended_recipient,
+        (
+          delivery.mime_sha256 IS NOT NULL
+          AND delivery.fixed_message_id IS NOT NULL
+          AND delivery.raw_mime_bytes IS NOT NULL
+          AND delivery.raw_mime_storage_key IS NULL
+        ) AS has_frozen_mime
+      FROM operations_email_deliveries delivery
+      LEFT JOIN users actor ON actor.id = delivery.initiated_by_user_id
+      WHERE delivery.workspace_id = $1
+        AND delivery.message_id = $2
+      ORDER BY delivery.created_at DESC, delivery.id DESC
+    `,
+    [workspaceId, messageId],
+  );
+  return res.rows;
+}
+
+export async function getOperationsEmailMessageDelivery(
+  workspaceId: string,
+  messageId: string,
+  deliveryId: string,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      SELECT *
+      FROM operations_email_deliveries
+      WHERE id = $1 AND message_id = $2 AND workspace_id = $3
+    `,
+    [deliveryId, messageId, workspaceId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export type OperationsEmailSmtpReadinessRow = {
+  workspace_id: string;
+  status: "unavailable" | "configured" | "verified";
+  checked_at: Date;
+  verified_at: Date | null;
+  safe_error_code: string | null;
+  worker_id: string | null;
+  updated_at: Date;
+};
+
+export async function getOperationsEmailSmtpReadiness(workspaceId: string) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailSmtpReadinessRow>(
+    `SELECT * FROM operations_email_smtp_readiness WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function setOperationsEmailSmtpReadiness(input: {
+  workspaceId: string;
+  status: OperationsEmailSmtpReadinessRow["status"];
+  workerId: string;
+  safeErrorCode?: string | null;
+}) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailSmtpReadinessRow>(
+    `
+      INSERT INTO operations_email_smtp_readiness (
+        workspace_id, status, checked_at, verified_at, safe_error_code, worker_id
+      )
+      VALUES ($1, $2, now(), CASE WHEN $2 = 'verified' THEN now() ELSE NULL END, $3, $4)
+      ON CONFLICT (workspace_id) DO UPDATE
+      SET status = EXCLUDED.status,
+          checked_at = now(),
+          verified_at = CASE
+            WHEN EXCLUDED.status = 'verified' THEN now()
+            ELSE operations_email_smtp_readiness.verified_at
+          END,
+          safe_error_code = EXCLUDED.safe_error_code,
+          worker_id = EXCLUDED.worker_id,
+          updated_at = now()
+      RETURNING *
+    `,
+    [
+      input.workspaceId,
+      input.status,
+      boundedText(input.safeErrorCode, 100),
+      requiredText(input.workerId, "worker_id").slice(0, 300),
+    ],
+  );
+  return res.rows[0];
+}
+
+export async function recordOperationsEmailSystemAudit(input: {
+  workspaceId: string;
+  deliveryId?: string | null;
+  messageId?: string | null;
+  action: string;
+  metadata?: Record<string, unknown>;
+}) {
+  const client = await ensureConnected();
+  const targetId = input.deliveryId ?? input.messageId ?? input.workspaceId;
+  const res = await client.query(
+    `
+      INSERT INTO admin_audit_log (
+        admin_user_id, admin_email, action, target_type, target_id, metadata_json
+      )
+      SELECT
+        actor.id,
+        COALESCE(actor.email, 'operations-email-worker@scanlark.internal'),
+        $3,
+        CASE WHEN $2::uuid IS NULL THEN 'operations_email_smtp' ELSE 'operations_email_delivery' END,
+        $4,
+        $5::jsonb
+      FROM (SELECT 1) seed
+      LEFT JOIN operations_email_deliveries delivery ON delivery.id = $2 AND delivery.workspace_id = $1
+      LEFT JOIN users actor ON actor.id = delivery.initiated_by_user_id
+    `,
+    [
+      input.workspaceId,
+      input.deliveryId ?? null,
+      input.action,
+      targetId,
+      JSON.stringify({
+        workspaceId: input.workspaceId,
+        messageId: input.messageId ?? null,
+        deliveryId: input.deliveryId ?? null,
+        ...(input.metadata ?? {}),
+      }),
+    ],
+  );
+  return res.rowCount === 1;
 }
 
 export async function claimDueOperationsEmailSmtpDelivery(input: {
@@ -1731,6 +1960,82 @@ export async function markOperationsEmailTransmissionBegun(input: {
   return res.rows[0] ?? null;
 }
 
+export async function restoreOperationsEmailProvenPreTransmissionBoundary(input: {
+  workspaceId: string;
+  deliveryId: string;
+  workerId: string;
+  smtpPhase: "not_started" | "connect" | "envelope";
+}) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      UPDATE operations_email_deliveries
+      SET smtp_phase = $4,
+          transmission_may_have_begun = false,
+          updated_at = now()
+      WHERE id = $1
+        AND workspace_id = $2
+        AND smtp_lock_owner = $3
+        AND status = 'sending'
+      RETURNING *
+    `,
+    [input.deliveryId, input.workspaceId, input.workerId, input.smtpPhase],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function markExpiredOperationsEmailRiskLeasesUncertain(input: {
+  safeDisplayError: string;
+}) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailDeliveryRow>(
+    `
+      WITH uncertain AS (
+        UPDATE operations_email_deliveries delivery
+        SET status = 'delivery_uncertain',
+            smtp_phase = CASE
+              WHEN delivery.smtp_phase IN ('data', 'post_data') THEN delivery.smtp_phase
+              ELSE 'unknown'
+            END,
+            failure_class = 'uncertain',
+            retry_policy = 'never',
+            transmission_may_have_begun = true,
+            safe_display_error = $1,
+            redacted_internal_error = 'smtp_worker_lease_expired_after_transmission_risk',
+            uncertain_at = now(),
+            smtp_lock_owner = NULL,
+            smtp_locked_at = NULL,
+            smtp_lock_expires_at = NULL,
+            updated_at = now()
+        WHERE delivery.status = 'sending'
+          AND delivery.smtp_lock_expires_at < now()
+          AND (
+            delivery.transmission_may_have_begun = true
+            OR delivery.smtp_phase IS NULL
+            OR delivery.smtp_phase IN ('data', 'post_data', 'unknown')
+          )
+        RETURNING delivery.*
+      ), updated_message AS (
+        UPDATE operations_email_messages message
+        SET status = 'delivery_uncertain',
+            uncertain_at = now(),
+            safe_display_error = $1,
+            revision = revision + 1,
+            updated_at = now()
+        FROM uncertain delivery
+        WHERE delivery.delivery_kind = 'real'
+          AND message.id = delivery.message_id
+          AND message.workspace_id = delivery.workspace_id
+          AND message.status IN ('queued', 'sending')
+        RETURNING message.id
+      )
+      SELECT * FROM uncertain
+    `,
+    [boundedText(input.safeDisplayError, 1000)],
+  );
+  return res.rows;
+}
+
 export async function releaseOperationsEmailSmtpLeaseSafely(input: {
   workspaceId: string;
   deliveryId: string;
@@ -1760,13 +2065,11 @@ export async function releaseOperationsEmailSmtpLeaseSafely(input: {
   return res.rows[0] ?? null;
 }
 
-export async function requeueFailedOperationsEmailDeliveryManually(input: {
+export async function requeueOperationsEmailDeliveryWithFrozenMime(input: {
   workspaceId: string;
   deliveryId: string;
   actorUserId: string;
-  frozenMime: OperationsEmailFrozenMimeInput;
 }) {
-  const frozen = validateFrozenMime(input.frozenMime);
   const client = await ensureConnected();
   const res = await client.query<OperationsEmailDeliveryRow>(
     `
@@ -1774,14 +2077,6 @@ export async function requeueFailedOperationsEmailDeliveryManually(input: {
         UPDATE operations_email_deliveries delivery
         SET status = 'queued',
             initiated_by_user_id = $3,
-            fixed_message_id = $4,
-            date_header = $5,
-            envelope_sender = $6,
-            envelope_recipient = $7,
-            raw_mime_bytes = $8,
-            raw_mime_storage_key = $9,
-            mime_sha256 = $10,
-            frozen_metadata_json = $11::jsonb,
             smtp_phase = 'not_started',
             failure_class = NULL,
             retry_policy = 'automatic',
@@ -1805,12 +2100,17 @@ export async function requeueFailedOperationsEmailDeliveryManually(input: {
         WHERE delivery.id = $1
           AND delivery.workspace_id = $2
           AND delivery.status = 'failed'
+          AND delivery.retry_policy = 'manual'
           AND delivery.transmission_may_have_begun = false
-          AND delivery.failure_class <> 'uncertain'
+          AND delivery.raw_mime_bytes IS NOT NULL
+          AND delivery.raw_mime_storage_key IS NULL
+          AND delivery.mime_sha256 IS NOT NULL
           AND message.id = delivery.message_id
           AND message.workspace_id = delivery.workspace_id
           AND (
-            delivery.delivery_kind = 'test'
+            (delivery.delivery_kind = 'test' AND message.status NOT IN (
+              'sent', 'delivery_uncertain', 'cancelled'
+            ))
             OR (
               message.status = 'failed'
               AND (
@@ -1842,19 +2142,7 @@ export async function requeueFailedOperationsEmailDeliveryManually(input: {
       )
       SELECT * FROM requeued
     `,
-    [
-      input.deliveryId,
-      input.workspaceId,
-      input.actorUserId,
-      frozen.fixedMessageId,
-      frozen.dateHeader,
-      frozen.envelopeSender,
-      frozen.envelopeRecipient,
-      frozen.rawMimeBytes,
-      frozen.rawMimeStorageKey,
-      frozen.mimeSha256,
-      JSON.stringify(frozen.frozenMetadataJson),
-    ],
+    [input.deliveryId, input.workspaceId, input.actorUserId],
   );
   return res.rows[0] ?? null;
 }

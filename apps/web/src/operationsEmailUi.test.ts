@@ -21,10 +21,21 @@ test("Email UI renders only the approved outgoing folders", () => {
   assert.equal(workspaceSource.includes('label: "Inbox"'), false);
 });
 
-test("Email UI does not expose send, test-send, or SMTP retry controls", () => {
-  for (const forbidden of [">Send Email<", ">Send Test<", ">Retry SMTP<"]) {
-    assert.equal(workspaceSource.includes(forbidden), false);
-  }
+test("Checkpoint 5 UI distinguishes test and real-send controls", () => {
+  for (const required of [
+    "Send test",
+    "Send email…",
+    "Final real-send confirmation",
+    "Confirm and queue real email",
+    "Retry same frozen message",
+  ])
+    assert.equal(
+      workspaceSource.includes(required),
+      true,
+      `missing ${required}`,
+    );
+  assert.equal(workspaceSource.includes("ops-email-test-send"), true);
+  assert.equal(workspaceSource.includes('realSend.mode === "disabled"'), true);
 });
 
 test("Email UI displays all required save states", () => {
@@ -53,6 +64,7 @@ test("narrow screens switch from list to a full editor with Back", () => {
     workspaceSource.includes(".ops-email-shell.has-selection"),
     true,
   );
+  assert.equal(workspaceSource.includes("Retry the same frozen email?"), true);
   assert.equal(workspaceSource.includes("Back to messages"), true);
   assert.equal(workspaceSource.includes("@media (max-width: 760px)"), true);
 });
@@ -68,7 +80,7 @@ test("editor and final server previews are distinct and sandboxed", () => {
   assert.equal(workspaceSource.includes("Plain text"), true);
 });
 
-test("Checkpoint 4 attachment controls are present without delivery actions", () => {
+test("Checkpoint 4 attachment controls remain present", () => {
   for (const label of [
     "Attachments",
     "Generate persisted quote PDF",
@@ -78,8 +90,18 @@ test("Checkpoint 4 attachment controls are present without delivery actions", ()
     assert.equal(workspaceSource.includes(label), true, `missing ${label}`);
   }
   assert.match(workspaceSource, /10 MiB per file;\s+20 MiB total/);
-  assert.equal(workspaceSource.includes(">Send Email<"), false);
-  assert.equal(workspaceSource.includes(">Send Test<"), false);
+});
+
+test("delivery language does not overclaim SMTP acceptance", () => {
+  assert.equal(
+    workspaceSource.includes("Accepted by outgoing mail server"),
+    true,
+  );
+  assert.match(
+    workspaceSource,
+    /recipient delivery or reading\s+is not claimed/,
+  );
+  assert.match(workspaceSource, /will never be\s+resent automatically/);
 });
 
 test("From and Reply-To fields are read-only", () => {
@@ -120,6 +142,8 @@ test("Communications exposes the approved linked status language", () => {
   for (const label of [
     "Editing in Email",
     "Ready in Email",
+    "Queued for Email delivery",
+    "Sending through Email",
     "Sent through Email",
     "Delivery outcome uncertain",
   ]) {

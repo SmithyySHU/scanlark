@@ -17,6 +17,7 @@ import {
   createOrGetOperationsEmailTestDelivery,
   getOperationsEmailMessage,
   getOperationsEmailMessageDetail,
+  getOperationsEmailSmtpReadiness,
   getOperationsEmailSourceLinks,
   getOperationsEmailTransferSource,
   getOperationsQuotePdfRender,
@@ -29,10 +30,11 @@ import {
   recordOperationsEmailDeliveryUncertain,
   recordOperationsEmailSafePreSendFailure,
   recordOperationsEmailSmtpAcceptance,
-  requeueFailedOperationsEmailDeliveryManually,
+  requeueOperationsEmailDeliveryWithFrozenMime,
   returnOperationsEmailMessageToDraft,
   saveOperationsQuotePdfRender,
   saveOperationsQuotePdfRenderAtNextRevision,
+  setOperationsEmailSmtpReadiness,
   softRemoveOperationsEmailAttachment,
   updateOperationsEmailMessageEditor,
   type OperationsEmailMessageRow,
@@ -92,6 +94,15 @@ before(async () => {
       readFileSync(
         new URL(
           "../migrations/046_operations_email_content_preparation.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    await db.query(
+      readFileSync(
+        new URL(
+          "../migrations/047_operations_email_smtp_queue.sql",
           import.meta.url,
         ),
         "utf8",
@@ -183,6 +194,10 @@ after(async () => {
     const workspaceIds = [workspaceId, otherWorkspaceId];
     await db.query(
       `DELETE FROM operations_email_delivery_attempts WHERE workspace_id = ANY($1::uuid[])`,
+      [workspaceIds],
+    );
+    await db.query(
+      `DELETE FROM operations_email_smtp_readiness WHERE workspace_id = ANY($1::uuid[])`,
       [workspaceIds],
     );
     await db.query(
@@ -822,22 +837,65 @@ test("only transient pre-acceptance failures auto-retry and permanent failures n
     },
   });
   assert.equal(failed?.status, "failed");
-  const manuallyRetried = await requeueFailedOperationsEmailDeliveryManually({
+  const manuallyRetried = await requeueOperationsEmailDeliveryWithFrozenMime({
     workspaceId,
     deliveryId: permanentDelivery.delivery.id,
     actorUserId,
-    frozenMime: {
-      ...frozenMime,
-      fixedMessageId: `<manual-${randomUUID()}@scanlark.test>`,
-    },
   });
   assert.equal(manuallyRetried?.status, "queued");
   assert.equal(manuallyRetried?.manual_retry_count, 1);
+  assert.equal(
+    manuallyRetried?.fixed_message_id,
+    permanentDelivery.delivery.fixed_message_id,
+  );
+  assert.equal(
+    manuallyRetried?.mime_sha256,
+    permanentDelivery.delivery.mime_sha256,
+  );
+  assert.deepEqual(
+    manuallyRetried?.raw_mime_bytes,
+    permanentDelivery.delivery.raw_mime_bytes,
+  );
+});
+
+test("SMTP readiness stores only safe workspace status", async () => {
+  const verified = await setOperationsEmailSmtpReadiness({
+    workspaceId,
+    status: "verified",
+    workerId: "checkpoint-5-test-worker",
+  });
+  assert.equal(verified.status, "verified");
+  assert.ok(verified.verified_at);
+  const unavailable = await setOperationsEmailSmtpReadiness({
+    workspaceId,
+    status: "unavailable",
+    workerId: "checkpoint-5-test-worker",
+    safeErrorCode: "smtp_verification_failed",
+  });
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.safe_error_code, "smtp_verification_failed");
+  const loaded = await getOperationsEmailSmtpReadiness(workspaceId);
+  assert.equal(loaded?.status, "unavailable");
 });
 
 test("Sent-copy claims are independent and never requeue SMTP", async () => {
   await deferAllClaims();
-  const { message } = await createReadyMessage();
+  const { message, sourceCommunicationId } = await createReadyMessage();
+  const beforeSideEffects = await db.query<{
+    last_contacted_at: Date | null;
+    communication_status: string;
+    follow_up_completed_at: Date | null;
+  }>(
+    `
+      SELECT business.last_contacted_at,
+             communication.status AS communication_status,
+             communication.follow_up_completed_at
+      FROM operations_businesses business
+      JOIN operations_communications communication ON communication.id = $2
+      WHERE business.id = $1
+    `,
+    [businessId, sourceCommunicationId],
+  );
   const queued = await queueReal(message);
   assert.ok(queued.delivery);
   const smtpClaim = await claimDueOperationsEmailSmtpDelivery({
@@ -853,6 +911,28 @@ test("Sent-copy claims are independent and never requeue SMTP", async () => {
   });
   assert.equal(accepted?.status, "sent");
   assert.equal(accepted?.sent_copy_status, "pending");
+  const acceptedMessage = await getOperationsEmailMessage(
+    workspaceId,
+    message.id,
+  );
+  assert.equal(acceptedMessage?.status, "sent");
+  assert.equal(acceptedMessage?.sent_communication_id, null);
+  const afterSideEffects = await db.query<{
+    last_contacted_at: Date | null;
+    communication_status: string;
+    follow_up_completed_at: Date | null;
+  }>(
+    `
+      SELECT business.last_contacted_at,
+             communication.status AS communication_status,
+             communication.follow_up_completed_at
+      FROM operations_businesses business
+      JOIN operations_communications communication ON communication.id = $2
+      WHERE business.id = $1
+    `,
+    [businessId, sourceCommunicationId],
+  );
+  assert.deepEqual(afterSideEffects.rows[0], beforeSideEffects.rows[0]);
 
   const noSmtpRetry = await claimDueOperationsEmailSmtpDelivery({
     workerId: "smtp-worker-2",

@@ -5039,6 +5039,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       return "Investigate Email delivery";
     if (link.messageStatus === "failed") return "Open failed Email";
     if (link.messageStatus === "cancelled") return "View cancelled Email";
+    if (link.messageStatus === "queued") return "View queued Email";
+    if (link.messageStatus === "sending") return "View sending Email";
     return "Continue in Email Editor";
   }
 
@@ -5054,6 +5056,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       return "Linked Email workflow cancelled";
     if (link.messageStatus === "draft") return "Editing in Email";
     if (link.messageStatus === "ready") return "Ready in Email";
+    if (link.messageStatus === "queued") return "Queued for Email delivery";
+    if (link.messageStatus === "sending") return "Sending through Email";
     return `Email delivery ${link.messageStatus}`;
   }
 
@@ -5061,7 +5065,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     const folder =
       link.messageStatus === "sent"
         ? "sent"
-        : link.messageStatus === "ready"
+        : ["ready", "queued", "sending"].includes(link.messageStatus)
           ? "ready"
           : link.messageStatus === "draft"
             ? "drafts"

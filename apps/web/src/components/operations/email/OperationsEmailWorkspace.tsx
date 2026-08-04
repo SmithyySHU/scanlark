@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type ApiFetch = (
   input: RequestInfo | URL,
@@ -85,6 +91,55 @@ type FinalPreview = {
   requiredAttachmentTypes: Array<"report_pdf" | "quote_pdf">;
 };
 
+type EmailRuntimeConfig = {
+  smtp: {
+    configured: boolean;
+    readiness: "not_checked" | "unavailable" | "configured" | "verified";
+    usable: boolean;
+    checkedAt: string | null;
+  };
+  fixedSender: { name: string; address: string; replyTo: string };
+  testSend: { available: boolean; recipient: string | null };
+  realSend: {
+    mode: "disabled" | "allowlist" | "live";
+    generallyAvailable: boolean;
+  };
+};
+
+type DeliveryHistory = {
+  id: string;
+  delivery_kind: "test" | "real";
+  status:
+    | "queued"
+    | "sending"
+    | "sent"
+    | "failed"
+    | "delivery_uncertain"
+    | "cancelled";
+  envelope_recipient: string | null;
+  intended_recipient: string | null;
+  smtp_phase: string | null;
+  failure_class: string | null;
+  retry_policy: "automatic" | "manual" | "never" | null;
+  automatic_attempt_count: number;
+  manual_retry_count: number;
+  safe_display_error: string | null;
+  next_attempt_at: string;
+  queued_at: string;
+  smtp_accepted_at: string | null;
+  failed_at: string | null;
+  uncertain_at: string | null;
+  created_at: string;
+  actor_label: string | null;
+  has_frozen_mime: boolean;
+};
+
+type RealSendConfirmation = {
+  idempotencyKey: string;
+  revision: number;
+  preview: FinalPreview;
+};
+
 type EditorForm = {
   recipientName: string;
   recipientAddress: string;
@@ -125,6 +180,15 @@ function formatBytes(value: number | string) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function deliveryStatusLabel(delivery: DeliveryHistory) {
+  if (delivery.status === "sent") return "Accepted by outgoing mail server";
+  if (delivery.status === "delivery_uncertain") return "Delivery uncertain";
+  if (delivery.status === "sending") return "Sending";
+  if (delivery.status === "queued") return "Queued";
+  if (delivery.status === "failed") return "Not sent — action required";
+  return "Cancelled";
 }
 
 function requiredAttachmentTypes(message: EmailDetail) {
@@ -202,6 +266,9 @@ export function OperationsEmailWorkspace({
   const [accessState, setAccessState] = useState<
     "checking" | "available" | "unavailable" | "forbidden" | "error"
   >("checking");
+  const [runtimeConfig, setRuntimeConfig] = useState<EmailRuntimeConfig | null>(
+    null,
+  );
   const [messages, setMessages] = useState<EmailSummary[]>([]);
   const [counts, setCounts] = useState<Record<Folder, number>>({
     drafts: 0,
@@ -229,6 +296,11 @@ export function OperationsEmailWorkspace({
   >([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [finalPreview, setFinalPreview] = useState<FinalPreview | null>(null);
+  const [deliveries, setDeliveries] = useState<DeliveryHistory[]>([]);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const deliveryInFlight = useRef(false);
+  const [realSendConfirmation, setRealSendConfirmation] =
+    useState<RealSendConfirmation | null>(null);
   const [previewTab, setPreviewTab] = useState<"editor" | "final" | "plain">(
     "editor",
   );
@@ -240,15 +312,20 @@ export function OperationsEmailWorkspace({
       cache: "no-store",
       signal: controller.signal,
     })
-      .then((response) => {
-        if (response.ok) setAccessState("available");
-        else if (response.status === 404) setAccessState("unavailable");
+      .then(async (response) => {
+        if (response.ok) {
+          setRuntimeConfig((await response.json()) as EmailRuntimeConfig);
+          setAccessState("available");
+        } else if (response.status === 404) setAccessState("unavailable");
         else if (response.status === 401 || response.status === 403) {
           setAccessState("forbidden");
         } else setAccessState("error");
       })
       .catch(() => {
-        if (!controller.signal.aborted) setAccessState("error");
+        if (!controller.signal.aborted) {
+          setRuntimeConfig(null);
+          setAccessState("error");
+        }
       });
     return () => controller.abort();
   }, [apiBase, apiFetch]);
@@ -296,6 +373,25 @@ export function OperationsEmailWorkspace({
     return () => window.clearTimeout(timer);
   }, [loadList]);
 
+  const loadDeliveryHistory = useCallback(
+    async (messageId: string) => {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(messageId)}/deliveries`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) {
+        throw new Error(
+          await responseMessage(response, "Failed to load delivery history"),
+        );
+      }
+      const data = (await response.json()) as {
+        deliveries: DeliveryHistory[];
+      };
+      setDeliveries(data.deliveries);
+    },
+    [apiBase, apiFetch],
+  );
+
   const loadDetail = useCallback(
     async (id: string) => {
       setLoadingDetail(true);
@@ -315,6 +411,7 @@ export function OperationsEmailWorkspace({
         };
         setDetail(data.message);
         setAttachments(data.attachments ?? []);
+        setDeliveries([]);
         setAttachmentOptions([]);
         setFinalPreview(null);
         setPreviewTab("editor");
@@ -371,6 +468,44 @@ export function OperationsEmailWorkspace({
       ),
     );
   }, [detail?.id, loadAttachmentOptions]);
+
+  useEffect(() => {
+    if (!detail) return;
+    void loadDeliveryHistory(detail.id).catch((caught) =>
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to load delivery history",
+      ),
+    );
+  }, [detail?.id, loadDeliveryHistory]);
+
+  useEffect(() => {
+    if (
+      !detail ||
+      !deliveries.some(
+        (delivery) =>
+          delivery.status === "queued" || delivery.status === "sending",
+      )
+    )
+      return;
+    const timer = window.setInterval(() => {
+      void Promise.all([
+        loadDeliveryHistory(detail.id),
+        apiFetch(
+          `${apiBase}/operations/email/messages/${encodeURIComponent(detail.id)}`,
+          { cache: "no-store" },
+        ).then(async (response) => {
+          if (!response.ok) return;
+          const data = (await response.json()) as { message: EmailDetail };
+          setDetail((current) =>
+            current ? { ...current, ...data.message } : data.message,
+          );
+        }),
+      ]).then(() => void loadList());
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [apiBase, apiFetch, deliveries, detail, loadDeliveryHistory, loadList]);
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -437,6 +572,7 @@ export function OperationsEmailWorkspace({
     value: EditorForm[K],
   ) {
     setForm((current) => (current ? { ...current, [key]: value } : current));
+    setFinalPreview(null);
     setSaveState("dirty");
     setError(null);
   }
@@ -615,9 +751,9 @@ export function OperationsEmailWorkspace({
 
   async function renderFinalPreview() {
     let current = detail;
-    if (!current) return;
+    if (!current) return null;
     if (saveState !== "saved") current = await save();
-    if (!current) return;
+    if (!current) return null;
     setError(null);
     const response = await apiFetch(
       `${apiBase}/operations/email/messages/${encodeURIComponent(current.id)}/final-preview`,
@@ -628,19 +764,159 @@ export function OperationsEmailWorkspace({
       },
     );
     const data = (await response.json().catch(() => null)) as
-      | (FinalPreview & { message?: string; errors?: string[] })
+      | (FinalPreview & { message: EmailDetail; errors?: string[] })
+      | { message?: string; errors?: string[] }
       | null;
-    if (!response.ok || !data?.html) {
+    if (!response.ok || !data || !("html" in data) || !data.html) {
       setFinalPreview(null);
       setError(
         data?.errors?.join(" ") ??
-          data?.message ??
+          (typeof data?.message === "string" ? data.message : null) ??
           "Final preview validation failed",
       );
-      return;
+      return null;
     }
     setFinalPreview(data);
+    setDetail((existing) =>
+      existing ? { ...existing, ...data.message } : data.message,
+    );
     setPreviewTab("final");
+    void loadList();
+    return { preview: data, revision: data.message.revision };
+  }
+
+  async function queueTestSend() {
+    let current = detail;
+    if (
+      !current ||
+      !runtimeConfig?.testSend.available ||
+      deliveryBusy ||
+      deliveryInFlight.current
+    )
+      return;
+    deliveryInFlight.current = true;
+    setDeliveryBusy(true);
+    setError(null);
+    try {
+      if (saveState !== "saved") current = await save();
+      if (!current) return;
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(current.id)}/test-send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedRevision: current.revision,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          await responseMessage(response, "Failed to queue test Email"),
+        );
+      }
+      await loadDeliveryHistory(current.id);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Failed to queue test Email",
+      );
+    } finally {
+      deliveryInFlight.current = false;
+      setDeliveryBusy(false);
+    }
+  }
+
+  async function openRealSendConfirmation() {
+    if (!detail || detail.status !== "ready" || deliveryBusy) return;
+    const prepared = finalPreview
+      ? { preview: finalPreview, revision: detail.revision }
+      : await renderFinalPreview();
+    if (!prepared) return;
+    setRealSendConfirmation({
+      idempotencyKey: crypto.randomUUID(),
+      revision: prepared.revision,
+      preview: prepared.preview,
+    });
+  }
+
+  async function queueRealSend() {
+    if (
+      !detail ||
+      !realSendConfirmation ||
+      deliveryBusy ||
+      deliveryInFlight.current
+    )
+      return;
+    deliveryInFlight.current = true;
+    setDeliveryBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(detail.id)}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedRevision: realSendConfirmation.revision,
+            idempotencyKey: realSendConfirmation.idempotencyKey,
+          }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(
+          await responseMessage(response, "Failed to queue Email"),
+        );
+      }
+      const data = (await response.json()) as { message: EmailDetail };
+      setDetail((current) =>
+        current ? { ...current, ...data.message } : data.message,
+      );
+      setRealSendConfirmation(null);
+      await loadDeliveryHistory(detail.id);
+      await loadList();
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Failed to queue Email",
+      );
+    } finally {
+      deliveryInFlight.current = false;
+      setDeliveryBusy(false);
+    }
+  }
+
+  async function retryDelivery(deliveryId: string) {
+    if (!detail || deliveryBusy || deliveryInFlight.current) return;
+    if (
+      !window.confirm(
+        "Retry the same frozen email? The original recipient, Date, Message-ID, content and attachments will be reused exactly. Use this only after correcting the external failure.",
+      )
+    )
+      return;
+    deliveryInFlight.current = true;
+    setDeliveryBusy(true);
+    setError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/${encodeURIComponent(detail.id)}/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        throw new Error(
+          await responseMessage(response, "Retry was not permitted"),
+        );
+      }
+      await Promise.all([
+        loadDeliveryHistory(detail.id),
+        loadDetail(detail.id),
+      ]);
+      await loadList();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Retry failed");
+    } finally {
+      deliveryInFlight.current = false;
+      setDeliveryBusy(false);
+    }
   }
 
   function reloadLatest() {
@@ -935,6 +1211,32 @@ export function OperationsEmailWorkspace({
                     Return to draft
                   </button>
                 )}
+                {(detail.status === "draft" || detail.status === "ready") && (
+                  <button
+                    className="ops-button ops-email-test-send"
+                    onClick={() => void queueTestSend()}
+                    disabled={
+                      deliveryBusy ||
+                      saveState === "saving" ||
+                      !runtimeConfig?.testSend.available
+                    }
+                  >
+                    {deliveryBusy ? "Queueing…" : "Send test"}
+                  </button>
+                )}
+                {detail.status === "ready" && (
+                  <button
+                    className="ops-button ops-button--primary"
+                    onClick={() => void openRealSendConfirmation()}
+                    disabled={
+                      deliveryBusy ||
+                      saveState === "saving" ||
+                      !runtimeConfig?.realSend.generallyAvailable
+                    }
+                  >
+                    Send email…
+                  </button>
+                )}
                 {detail.source_communication_id && (
                   <button
                     className="ops-button"
@@ -960,6 +1262,27 @@ export function OperationsEmailWorkspace({
                   </button>
                 )}
               </div>
+              {(detail.status === "draft" || detail.status === "ready") && (
+                <div className="ops-email-send-policy">
+                  <strong>Direct SMTP sending</strong>
+                  <span>
+                    {runtimeConfig?.smtp.usable
+                      ? `Outgoing SMTP verified${runtimeConfig.smtp.checkedAt ? ` ${formatDate(runtimeConfig.smtp.checkedAt)}` : ""}.`
+                      : "Outgoing SMTP is not verified; queue actions are unavailable."}
+                  </span>
+                  <span>
+                    {runtimeConfig?.testSend.recipient
+                      ? `Tests go only to your approved Operations address: ${runtimeConfig.testSend.recipient}. The subject and message are marked [TEST].`
+                      : "Your authenticated Operations address is not on the test-recipient allowlist."}
+                  </span>
+                  {runtimeConfig?.realSend.mode === "disabled" && (
+                    <span>
+                      Real sending is disabled for this rollout. Preparing and
+                      reviewing Email remains available.
+                    </span>
+                  )}
+                </div>
+              )}
               <section
                 className="ops-email-attachments"
                 aria-label="Attachments"
@@ -1111,6 +1434,113 @@ export function OperationsEmailWorkspace({
                   20 MiB total.
                 </small>
               </section>
+              <section
+                className="ops-email-deliveries"
+                aria-label="Delivery history"
+              >
+                <div className="ops-email-panel-heading">
+                  <div>
+                    <strong>Delivery history</strong>
+                    <small>
+                      SMTP acceptance is recorded; recipient delivery or reading
+                      is not claimed.
+                    </small>
+                  </div>
+                </div>
+                {deliveries.length === 0 ? (
+                  <small>No SMTP delivery attempts have been queued.</small>
+                ) : (
+                  <div className="ops-email-delivery-list">
+                    {deliveries.map((delivery) => (
+                      <article key={delivery.id}>
+                        <div>
+                          <strong>
+                            {delivery.delivery_kind === "test"
+                              ? "[TEST] Test send"
+                              : "Real send"}
+                          </strong>
+                          <span
+                            className={`ops-email-status ops-email-status--${delivery.status}`}
+                          >
+                            {deliveryStatusLabel(delivery)}
+                          </span>
+                        </div>
+                        <small>
+                          To {delivery.envelope_recipient ?? "unknown"} · queued{" "}
+                          {formatDate(delivery.queued_at)}
+                          {delivery.actor_label
+                            ? ` by ${delivery.actor_label}`
+                            : ""}
+                        </small>
+                        <small>
+                          SMTP attempts {delivery.automatic_attempt_count}
+                          {delivery.manual_retry_count
+                            ? ` · manual retries ${delivery.manual_retry_count}`
+                            : ""}
+                          {delivery.failure_class
+                            ? ` · failure class ${delivery.failure_class.split("_").join(" ")}`
+                            : ""}
+                        </small>
+                        {delivery.status === "queued" &&
+                          delivery.retry_policy === "automatic" &&
+                          delivery.automatic_attempt_count > 0 && (
+                            <small>
+                              Next bounded attempt{" "}
+                              {formatDate(delivery.next_attempt_at)}
+                            </small>
+                          )}
+                        {delivery.delivery_kind === "test" &&
+                          delivery.intended_recipient && (
+                            <small>
+                              Intended client recipient in the frozen test
+                              marker: {delivery.intended_recipient}
+                            </small>
+                          )}
+                        {delivery.smtp_accepted_at && (
+                          <small>
+                            Provider acceptance confirmed{" "}
+                            {formatDate(delivery.smtp_accepted_at)}
+                          </small>
+                        )}
+                        {delivery.safe_display_error && (
+                          <div
+                            className={
+                              delivery.status === "delivery_uncertain"
+                                ? "ops-warning"
+                                : "ops-email-delivery-error"
+                            }
+                          >
+                            {delivery.safe_display_error}
+                          </div>
+                        )}
+                        {delivery.status === "delivery_uncertain" && (
+                          <div className="ops-warning">
+                            This message may already have been accepted and
+                            requires manual investigation. It will never be
+                            resent automatically.
+                          </div>
+                        )}
+                        {delivery.status === "failed" &&
+                          delivery.retry_policy === "manual" &&
+                          delivery.has_frozen_mime &&
+                          (delivery.delivery_kind === "real"
+                            ? runtimeConfig?.realSend.generallyAvailable
+                            : runtimeConfig?.testSend.available &&
+                              runtimeConfig.testSend.recipient ===
+                                delivery.envelope_recipient) && (
+                            <button
+                              className="ops-button"
+                              disabled={deliveryBusy}
+                              onClick={() => void retryDelivery(delivery.id)}
+                            >
+                              Retry same frozen message
+                            </button>
+                          )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
               <div
                 className="ops-email-preview-tabs"
                 role="tablist"
@@ -1217,6 +1647,113 @@ export function OperationsEmailWorkspace({
           )}
         </section>
       </div>
+      {realSendConfirmation && detail && runtimeConfig && (
+        <div
+          className="ops-email-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deliveryBusy) {
+              setRealSendConfirmation(null);
+            }
+          }}
+        >
+          <section
+            className="ops-email-send-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ops-email-send-dialog-title"
+          >
+            <div>
+              <span className="ops-eyebrow">Final real-send confirmation</span>
+              <h2 id="ops-email-send-dialog-title">Queue this real email?</h2>
+              <p>
+                This queues one real SMTP message. It is not a delivery or read
+                receipt.
+              </p>
+            </div>
+            <dl>
+              <div>
+                <dt>From</dt>
+                <dd>
+                  {runtimeConfig.fixedSender.name} &lt;
+                  {runtimeConfig.fixedSender.address}&gt;
+                </dd>
+              </div>
+              <div>
+                <dt>Reply-To</dt>
+                <dd>{runtimeConfig.fixedSender.replyTo}</dd>
+              </div>
+              <div>
+                <dt>Recipient</dt>
+                <dd>
+                  {detail.recipient_name
+                    ? `${detail.recipient_name} <${detail.recipient_address}>`
+                    : detail.recipient_address}
+                </dd>
+              </div>
+              <div>
+                <dt>Business / contact</dt>
+                <dd>
+                  {detail.business_name}
+                  {detail.contact_name ? ` · ${detail.contact_name}` : ""}
+                </dd>
+              </div>
+              <div>
+                <dt>Subject</dt>
+                <dd>{detail.subject}</dd>
+              </div>
+              <div>
+                <dt>Attachments</dt>
+                <dd>
+                  {attachments.length
+                    ? attachments
+                        .map(
+                          (attachment) =>
+                            `${attachment.display_filename} (${formatBytes(attachment.size_bytes)})`,
+                        )
+                        .join(", ")
+                    : "None"}
+                </dd>
+              </div>
+              <div>
+                <dt>Estimated encoded size</dt>
+                <dd>
+                  {formatBytes(realSendConfirmation.preview.estimatedMimeBytes)}
+                </dd>
+              </div>
+              <div>
+                <dt>Frozen revision</dt>
+                <dd>{realSendConfirmation.revision}</dd>
+              </div>
+              <div>
+                <dt>Real-send policy</dt>
+                <dd>{runtimeConfig.realSend.mode}</dd>
+              </div>
+            </dl>
+            <div className="ops-warning">
+              If SMTP transmission begins but acceptance cannot be confirmed,
+              this message will be marked delivery uncertain and will not be
+              resent automatically.
+            </div>
+            <div className="ops-email-dialog-actions">
+              <button
+                className="ops-button"
+                disabled={deliveryBusy}
+                onClick={() => setRealSendConfirmation(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="ops-button ops-button--primary"
+                disabled={deliveryBusy}
+                onClick={() => void queueRealSend()}
+              >
+                {deliveryBusy ? "Queueing…" : "Confirm and queue real email"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
@@ -1247,6 +1784,7 @@ const emailStyles = `
   .ops-email-list-subject { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
   .ops-email-status { display: inline-flex; width: fit-content; border-radius: 999px; padding: 3px 7px; background: var(--bg); color: var(--text-muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
   .ops-email-status--ready { background: #fff1c7; color: #805400; }
+  .ops-email-status--queued, .ops-email-status--sending { background: #e2ecff; color: #244c8a; }
   .ops-email-status--sent { background: #dff5e7; color: #21663c; }
   .ops-email-status--failed, .ops-email-status--delivery_uncertain { background: #fde5e1; color: #962f22; }
   .ops-email-editor-pane { min-width: 0; padding: 18px; overflow: auto; }
@@ -1262,6 +1800,9 @@ const emailStyles = `
   .ops-email-fields input, .ops-email-fields textarea { width: 100%; box-sizing: border-box; color: var(--text); }
   .ops-email-fields input[readonly], .ops-email-fields input:disabled, .ops-email-fields textarea:disabled { opacity: .72; background: var(--bg); }
   .ops-email-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ops-email-test-send { border-color: #b45309; color: #92400e; background: #fff7ed; }
+  .ops-email-send-policy { display: grid; gap: 4px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); font-size: 12px; }
+  .ops-email-send-policy span { color: var(--text-muted); }
   .ops-email-attachments { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--panel) 94%, var(--bg)); }
   .ops-email-panel-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
   .ops-email-panel-heading > div { display: grid; gap: 2px; }
@@ -1277,6 +1818,13 @@ const emailStyles = `
   .ops-email-attachment-list small { color: var(--text-muted); }
   .ops-email-upload { position: relative; overflow: hidden; cursor: pointer; }
   .ops-email-upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .ops-email-deliveries { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: color-mix(in srgb, var(--panel) 94%, var(--bg)); }
+  .ops-email-deliveries > small { color: var(--text-muted); }
+  .ops-email-delivery-list { display: grid; gap: 9px; }
+  .ops-email-delivery-list article { display: grid; gap: 6px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
+  .ops-email-delivery-list article > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .ops-email-delivery-list small { color: var(--text-muted); overflow-wrap: anywhere; }
+  .ops-email-delivery-error { color: #962f22; font-size: 12px; }
   .ops-email-preview-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
   .ops-email-preview-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 9px 11px; background: transparent; color: var(--text-muted); cursor: pointer; }
   .ops-email-preview-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 700; }
@@ -1288,6 +1836,16 @@ const emailStyles = `
   .ops-email-previews pre { padding: 18px; overflow: auto; white-space: pre-wrap; font: 13px/1.55 ui-monospace, monospace; }
   .ops-email-meta { color: var(--text-muted); font-size: 11px; }
   .ops-email-mobile-back { display: none; margin-bottom: 10px; }
+  .ops-email-modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 18px; background: rgb(10 18 28 / .62); }
+  .ops-email-send-dialog { width: min(620px, 100%); max-height: calc(100vh - 36px); overflow: auto; display: grid; gap: 16px; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); box-shadow: 0 24px 70px rgb(0 0 0 / .28); }
+  .ops-email-send-dialog h2 { margin: 4px 0; }
+  .ops-email-send-dialog p { margin: 0; color: var(--text-muted); }
+  .ops-email-send-dialog dl { display: grid; gap: 0; margin: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .ops-email-send-dialog dl > div { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--border); }
+  .ops-email-send-dialog dl > div:last-child { border-bottom: 0; }
+  .ops-email-send-dialog dt { color: var(--text-muted); font-size: 12px; font-weight: 700; }
+  .ops-email-send-dialog dd { margin: 0; overflow-wrap: anywhere; }
+  .ops-email-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
   @media (max-width: 980px) {
     .ops-email-shell { grid-template-columns: 110px minmax(230px, .75fr) 1.4fr; }
     .ops-email-folders button { grid-template-columns: 24px 1fr; }
@@ -1308,5 +1866,6 @@ const emailStyles = `
     .ops-email-attachment-list > div { grid-template-columns: 1fr auto; }
     .ops-email-attachment-list > div > div { grid-column: 1 / -1; }
     .ops-email-preview-tabs { overflow-x: auto; }
+    .ops-email-send-dialog dl > div { grid-template-columns: 1fr; gap: 3px; }
   }
 `;

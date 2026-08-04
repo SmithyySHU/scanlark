@@ -6,7 +6,7 @@ import {
 
 export const OPERATIONS_EMAIL_FOLDER_STATUSES = {
   drafts: ["draft"],
-  ready: ["ready"],
+  ready: ["ready", "queued", "sending"],
   sent: ["sent"],
   failed: ["failed", "delivery_uncertain", "cancelled"],
 } as const;

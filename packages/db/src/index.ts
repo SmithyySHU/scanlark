@@ -712,5 +712,6 @@ export type {
 export { isOperationsEmailModuleEnabled } from "./operationsEmailConfig";
 export * from "./operationsEmail";
 export * from "./operationsEmailPreparation";
+export * from "./operationsEmailSmtpConfig";
 
 export { SCAN_EVENT_CHANNEL } from "./events";

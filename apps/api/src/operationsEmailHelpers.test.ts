@@ -26,6 +26,14 @@ test("failed folder includes uncertain and cancelled records", () => {
   ]);
 });
 
+test("ready folder keeps queued and sending messages visible", () => {
+  assert.deepEqual(OPERATIONS_EMAIL_FOLDER_STATUSES.ready, [
+    "ready",
+    "queued",
+    "sending",
+  ]);
+});
+
 test("missing folder selects drafts", () => {
   assert.equal(parseEmailFolder(undefined), "drafts");
 });

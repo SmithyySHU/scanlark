@@ -4,6 +4,7 @@ import {
   loadOperationsEmailAttachmentBytes,
   saveOperationsEmailFinalRender,
   type OperationsEmailAttachmentSafeRow,
+  type OperationsEmailSmtpConfig,
 } from "@scanlark/db";
 import {
   estimateOperationsEmailMimeBytes,
@@ -241,4 +242,121 @@ export async function buildPreparedOperationsEmailMime(input: {
     })),
     maxBytes: limits.maxEstimatedMimeBytes,
   });
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export function buildOperationsEmailTestVariant(input: {
+  subject: string;
+  html: string;
+  plainText: string;
+  intendedRecipient: string;
+}) {
+  return {
+    subject: `[TEST] ${input.subject}`,
+    html: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;border:2px solid #b45309;background:#fff7ed"><tr><td style="padding:12px;color:#7c2d12;font-family:Arial,sans-serif;font-weight:bold">TEST MESSAGE — intended client recipient: ${escapeHtml(input.intendedRecipient)}</td></tr></table>${input.html}`,
+    plainText: `[TEST MESSAGE — intended client recipient: ${input.intendedRecipient}]\n\n${input.plainText}`,
+  };
+}
+
+export async function freezeOperationsEmailDeliveryMime(input: {
+  workspaceId: string;
+  messageId: string;
+  expectedRevision: number;
+  actorUserId: string;
+  deliveryKind: "test" | "real";
+  actualRecipient: string;
+  date: Date;
+  messageIdHeader: string;
+  smtpConfig: Pick<
+    OperationsEmailSmtpConfig,
+    "fromName" | "fromAddress" | "replyToAddress"
+  >;
+}) {
+  const prepared = await prepareOperationsEmailFinal({
+    workspaceId: input.workspaceId,
+    messageId: input.messageId,
+    expectedRevision: input.expectedRevision,
+    actorUserId: input.actorUserId,
+  });
+  if (prepared.outcome !== "prepared") return prepared;
+  const message = prepared.message;
+  const attachments = await loadOperationsEmailAttachmentBytes(
+    input.workspaceId,
+    input.messageId,
+  );
+  const isTest = input.deliveryKind === "test";
+  const content = isTest
+    ? buildOperationsEmailTestVariant({
+        subject: message.subject,
+        html: prepared.html,
+        plainText: prepared.plainText,
+        intendedRecipient: message.recipient_address,
+      })
+    : {
+        subject: message.subject,
+        html: prepared.html,
+        plainText: prepared.plainText,
+      };
+  const mime = await buildOperationsEmailMime({
+    from: {
+      name: input.smtpConfig.fromName,
+      address: input.smtpConfig.fromAddress,
+    },
+    replyTo: input.smtpConfig.replyToAddress,
+    to: {
+      name: isTest ? "Scanlark test recipient" : message.recipient_name,
+      address: input.actualRecipient,
+    },
+    subject: content.subject,
+    date: input.date,
+    messageId: input.messageIdHeader,
+    html: content.html,
+    plainText: content.plainText,
+    attachments: attachments.map((attachment) => ({
+      filename: attachment.display_filename,
+      contentType:
+        attachment.verified_mime_type ?? attachment.declared_mime_type,
+      bytes: attachment.bytes ?? Buffer.alloc(0),
+      sha256: attachment.sha256 ?? "",
+    })),
+    maxBytes: getOperationsEmailAttachmentLimits().maxEstimatedMimeBytes,
+  });
+  return {
+    ...prepared,
+    outcome: "frozen" as const,
+    mime,
+    subject: content.subject,
+    actualRecipient: input.actualRecipient,
+    frozenMime: {
+      fixedMessageId: input.messageIdHeader,
+      dateHeader: input.date,
+      envelopeSender: input.smtpConfig.fromAddress,
+      envelopeRecipient: input.actualRecipient,
+      rawMimeBytes: mime.raw,
+      mimeSha256: mime.sha256,
+      frozenMetadataJson: {
+        deliveryKind: input.deliveryKind,
+        messageRevision: message.revision,
+        intendedRecipient: message.recipient_address,
+        actualRecipient: input.actualRecipient,
+        subject: content.subject,
+        attachmentSetSha256: prepared.attachmentSetSha256,
+        htmlSha256: prepared.htmlSha256,
+        plainTextSha256: prepared.plainTextSha256,
+        attachmentCount: attachments.length,
+        attachmentIds: attachments.map((attachment) => attachment.id),
+        attachmentNames: attachments.map(
+          (attachment) => attachment.display_filename,
+        ),
+        rawMimeByteSize: mime.byteSize,
+      },
+    },
+  };
 }

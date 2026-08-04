@@ -1,25 +1,34 @@
 import express from "express";
 import type { Request, Response } from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import multer from "multer";
 import {
   addOperationsEmailGeneratedAttachment,
   addOperationsEmailManualAttachment,
+  createOrGetAndQueueOperationsEmailRealDelivery,
+  createOrGetOperationsEmailTestDelivery,
   createOrGetOperationsEmailMessageFromCommunication,
   getOperationsEmailAttachmentDownload,
   getInternalWorkspaceByCode,
   getOperationsEmailMessageDetail,
+  getOperationsEmailMessageDelivery,
+  getOperationsEmailRealDeliveryForMessage,
+  getOperationsEmailTestDeliveryByIdempotencyKey,
   getOperationsEmailQuotePdfRender,
   getOperationsEmailScopedQuoteForRender,
   getOperationsEmailSourceLinks,
+  getOperationsEmailSmtpConfig,
+  getOperationsEmailSmtpReadiness,
   getOperationsEmailTransferSource,
   getOperationsQuotePreview,
   isValidEmailAddress,
   listOperationsEmailAttachmentOptions,
   listOperationsEmailAttachmentsSafe,
   listOperationsEmailMessageSummaries,
+  listOperationsEmailDeliveryHistorySafe,
   markOperationsEmailMessageReady,
   recordAdminAuditLog,
+  requeueOperationsEmailDeliveryWithFrozenMime,
   removeOperationsEmailAttachment,
   returnOperationsEmailMessageToDraft,
   saveOperationsQuotePdfRenderAtNextRevision,
@@ -27,6 +36,8 @@ import {
   updateOperationsEmailMessageEditor,
   type OperationsEmailMessageStatus,
   type OperationsEmailOptimisticResult,
+  deriveOperationsEmailTestRecipient,
+  operationsEmailRealSendPolicy,
 } from "@scanlark/db";
 import { requireOperationsEmailAccess } from "../operationsAccess";
 import {
@@ -45,7 +56,10 @@ import {
   getOperationsEmailAttachmentLimits,
   validateOperationsEmailUpload,
 } from "../operationsEmailAttachments";
-import { prepareOperationsEmailFinal } from "../operationsEmailPreparation";
+import {
+  freezeOperationsEmailDeliveryMime,
+  prepareOperationsEmailFinal,
+} from "../operationsEmailPreparation";
 import {
   operationsQuotePdfFilename,
   renderOperationsQuotePdf,
@@ -188,6 +202,73 @@ function attachmentMutationError(res: Response, outcome: string) {
   return sendApiError(res, status, error, message);
 }
 
+function parseIdempotencyKey(value: unknown) {
+  const record =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  if (
+    typeof record.idempotencyKey !== "string" ||
+    record.idempotencyKey.length < 16 ||
+    record.idempotencyKey.length > 200 ||
+    !/^[A-Za-z0-9._:-]+$/.test(record.idempotencyKey)
+  ) {
+    throw new Error("invalid_idempotency_key");
+  }
+  return record.idempotencyKey;
+}
+
+function smtpReadinessUsable(
+  readiness: Awaited<ReturnType<typeof getOperationsEmailSmtpReadiness>>,
+  readinessIntervalMs: number,
+) {
+  return (
+    readiness?.status === "verified" &&
+    Date.now() - readiness.checked_at.getTime() <= readinessIntervalMs * 2
+  );
+}
+
+function safeDelivery(delivery: {
+  id: string;
+  delivery_kind: string;
+  status: string;
+  automatic_attempt_count: number;
+  manual_retry_count: number;
+  smtp_phase: string | null;
+  failure_class: string | null;
+  retry_policy: string | null;
+  safe_display_error: string | null;
+  next_attempt_at: Date;
+  queued_at: Date;
+  sending_at: Date | null;
+  smtp_accepted_at: Date | null;
+  failed_at: Date | null;
+  uncertain_at: Date | null;
+  envelope_recipient: string | null;
+  mime_sha256: string | null;
+  fixed_message_id: string | null;
+}) {
+  return {
+    id: delivery.id,
+    deliveryKind: delivery.delivery_kind,
+    status: delivery.status,
+    actualRecipient: delivery.envelope_recipient,
+    automaticAttemptCount: delivery.automatic_attempt_count,
+    manualRetryCount: delivery.manual_retry_count,
+    smtpPhase: delivery.smtp_phase,
+    failureClass: delivery.failure_class,
+    retryPolicy: delivery.retry_policy,
+    safeDisplayError: delivery.safe_display_error,
+    nextAttemptAt: delivery.next_attempt_at,
+    queuedAt: delivery.queued_at,
+    sendingAt: delivery.sending_at,
+    smtpAcceptedAt: delivery.smtp_accepted_at,
+    failedAt: delivery.failed_at,
+    uncertainAt: delivery.uncertain_at,
+    hasFrozenMime: Boolean(delivery.mime_sha256 && delivery.fixed_message_id),
+  };
+}
+
 async function auditEmail(
   req: Request,
   workspaceId: string,
@@ -212,12 +293,52 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     limits: { fileSize: attachmentLimits.maxFileBytes, files: 1, fields: 2 },
   });
 
-  router.get("/config", (req, res) => {
-    return res.json({
-      enabled: req.operationsCapabilities?.operationsEmailEnabled === true,
-      canUseEmail: req.operationsCapabilities?.canUseOperationsEmail === true,
-      implementationStage: "checkpoint-4-content-preparation",
-    });
+  router.get("/config", async (req, res) => {
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const smtp = getOperationsEmailSmtpConfig();
+      const readiness = await getOperationsEmailSmtpReadiness(workspace.id);
+      const usable =
+        smtp.configured &&
+        smtpReadinessUsable(readiness, smtp.readinessIntervalMs);
+      const testRecipient = deriveOperationsEmailTestRecipient(
+        actor(req).email,
+        smtp,
+      );
+      return res.json({
+        enabled: req.operationsCapabilities?.operationsEmailEnabled === true,
+        canUseEmail: req.operationsCapabilities?.canUseOperationsEmail === true,
+        implementationStage: "checkpoint-5-smtp-queue",
+        smtp: {
+          configured: smtp.configured,
+          readiness: readiness?.status ?? "not_checked",
+          usable,
+          checkedAt: readiness?.checked_at ?? null,
+        },
+        fixedSender: {
+          name: smtp.fromName,
+          address: smtp.fromAddress,
+          replyTo: smtp.replyToAddress,
+        },
+        testSend: {
+          available: usable && Boolean(testRecipient),
+          recipient: testRecipient,
+        },
+        realSend: {
+          mode: smtp.realSendMode,
+          generallyAvailable: usable && smtp.realSendMode !== "disabled",
+        },
+      });
+    } catch (error) {
+      console.error("Operations Email config failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_config_failed",
+        "Failed to load safe Email configuration status",
+      );
+    }
   });
 
   router.get("/messages", async (req, res) => {
@@ -911,6 +1032,519 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       );
     }
   });
+
+  router.get("/messages/:messageId/deliveries", async (req, res) => {
+    const messageId = uuidParam(req, res, "messageId");
+    if (!messageId) return;
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const message = await getOperationsEmailMessageDetail(
+        workspace.id,
+        messageId,
+      );
+      if (!message)
+        return sendApiError(res, 404, "not_found", "Email message not found");
+      const deliveries = await listOperationsEmailDeliveryHistorySafe(
+        workspace.id,
+        messageId,
+      );
+      return res.json({ deliveries });
+    } catch (error) {
+      console.error("Operations Email delivery history failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_delivery_history_failed",
+        "Failed to load Email delivery history",
+      );
+    }
+  });
+
+  router.post("/messages/:messageId/test-send", async (req, res) => {
+    const messageId = uuidParam(req, res, "messageId");
+    if (!messageId) return;
+    try {
+      const body =
+        req.body && typeof req.body === "object"
+          ? (req.body as Record<string, unknown>)
+          : {};
+      if (
+        Object.keys(body).some(
+          (key) => !["expectedRevision", "idempotencyKey"].includes(key),
+        )
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "unsupported_test_send_field",
+          "The test recipient is derived from the authenticated actor",
+        );
+      }
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const expectedRevision = parseExpectedRevision(body);
+      const idempotencyKey = parseIdempotencyKey(body);
+      const existing = await getOperationsEmailTestDeliveryByIdempotencyKey(
+        workspace.id,
+        messageId,
+        idempotencyKey,
+      );
+      if (existing) {
+        if (
+          existing.envelope_recipient?.toLowerCase() !==
+          actor(req).email.trim().toLowerCase()
+        ) {
+          return sendApiError(
+            res,
+            403,
+            "test_delivery_actor_mismatch",
+            "This test delivery belongs to a different Operations actor",
+          );
+        }
+        const message = await getOperationsEmailMessageDetail(
+          workspace.id,
+          messageId,
+        );
+        if (!message)
+          return sendApiError(res, 404, "not_found", "Email message not found");
+        await auditEmail(
+          req,
+          workspace.id,
+          "operations.email.test_send_idempotent_replay",
+          messageId,
+          { deliveryId: existing.id, deliveryKind: "test" },
+        );
+        return res.json({
+          outcome: "existing",
+          delivery: safeDelivery(existing),
+          message,
+        });
+      }
+      const smtp = getOperationsEmailSmtpConfig();
+      if (!smtp.configured) {
+        return sendApiError(
+          res,
+          409,
+          "smtp_unavailable",
+          "Operations Email SMTP is not configured",
+        );
+      }
+      const readiness = await getOperationsEmailSmtpReadiness(workspace.id);
+      if (!smtpReadinessUsable(readiness, smtp.readinessIntervalMs)) {
+        return sendApiError(
+          res,
+          409,
+          "smtp_not_verified",
+          "Operations Email SMTP has not been verified recently",
+        );
+      }
+      const testRecipient = deriveOperationsEmailTestRecipient(
+        actor(req).email,
+        smtp,
+      );
+      if (!testRecipient) {
+        return sendApiError(
+          res,
+          403,
+          "test_recipient_not_allowed",
+          "No approved test recipient is configured for this Operations actor",
+        );
+      }
+      await auditEmail(
+        req,
+        workspace.id,
+        "operations.email.test_send_requested",
+        messageId,
+        { deliveryKind: "test", revision: expectedRevision },
+      );
+      const date = new Date();
+      const messageIdHeader = `<operations-email-test-${randomUUID()}@scanlark.com>`;
+      const frozen = await freezeOperationsEmailDeliveryMime({
+        workspaceId: workspace.id,
+        messageId,
+        expectedRevision,
+        actorUserId: actor(req).id,
+        deliveryKind: "test",
+        actualRecipient: testRecipient,
+        date,
+        messageIdHeader,
+        smtpConfig: smtp,
+      });
+      if (frozen.outcome !== "frozen") {
+        if (frozen.outcome === "not_found")
+          return sendApiError(res, 404, "not_found", "Email message not found");
+        if (frozen.outcome === "stale_revision")
+          return sendApiError(
+            res,
+            409,
+            "operations_email_revision_conflict",
+            "This Email changed before the test was frozen",
+            { latest: frozen.message },
+          );
+        if (frozen.outcome === "validation_failed")
+          return res.status(422).json({
+            error: "operations_email_test_validation_failed",
+            message: "Resolve the final-render requirements before testing",
+            details: frozen.errors,
+          });
+        return sendApiError(
+          res,
+          409,
+          "operations_email_state_conflict",
+          "This Email cannot be tested in its current lifecycle",
+        );
+      }
+      const result = await createOrGetOperationsEmailTestDelivery({
+        workspaceId: workspace.id,
+        messageId,
+        expectedRevision,
+        actorUserId: actor(req).id,
+        idempotencyKey,
+        frozenMime: frozen.frozenMime,
+      });
+      if (!result.delivery) {
+        return sendApiError(
+          res,
+          result.outcome === "stale_revision" ? 409 : 422,
+          "operations_email_test_queue_failed",
+          "The test Email could not be queued",
+        );
+      }
+      await auditEmail(
+        req,
+        workspace.id,
+        result.outcome === "created"
+          ? "operations.email.test_send_queued"
+          : "operations.email.test_send_idempotent_replay",
+        messageId,
+        {
+          deliveryId: result.delivery.id,
+          deliveryKind: "test",
+          revision: expectedRevision,
+          rawMimeByteSize: frozen.mime.byteSize,
+          mimeSha256: frozen.mime.sha256,
+        },
+      );
+      return res.status(result.outcome === "created" ? 202 : 200).json({
+        outcome: result.outcome,
+        delivery: safeDelivery(result.delivery),
+        message: result.message,
+      });
+    } catch (error) {
+      if (validationError(res, error)) return;
+      if (error instanceof Error && error.message.startsWith("mime_")) {
+        return sendApiError(
+          res,
+          422,
+          "operations_email_mime_validation_failed",
+          "The final Email could not be safely frozen",
+        );
+      }
+      console.error("Operations Email test queue failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_test_queue_failed",
+        "Failed to queue the test Email",
+      );
+    }
+  });
+
+  router.post("/messages/:messageId/send", async (req, res) => {
+    const messageId = uuidParam(req, res, "messageId");
+    if (!messageId) return;
+    try {
+      const body =
+        req.body && typeof req.body === "object"
+          ? (req.body as Record<string, unknown>)
+          : {};
+      if (
+        Object.keys(body).some(
+          (key) => !["expectedRevision", "idempotencyKey"].includes(key),
+        )
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "unsupported_real_send_field",
+          "Recipient and confirmation details are loaded server-side",
+        );
+      }
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const expectedRevision = parseExpectedRevision(body);
+      const idempotencyKey = parseIdempotencyKey(body);
+      const current = await getOperationsEmailMessageDetail(
+        workspace.id,
+        messageId,
+      );
+      if (!current)
+        return sendApiError(res, 404, "not_found", "Email message not found");
+      const existing = await getOperationsEmailRealDeliveryForMessage(
+        workspace.id,
+        messageId,
+      );
+      if (existing) {
+        await auditEmail(
+          req,
+          workspace.id,
+          "operations.email.real_send_idempotent_replay",
+          messageId,
+          { deliveryId: existing.id, deliveryKind: "real" },
+        );
+        return res.json({
+          outcome: "existing",
+          delivery: safeDelivery(existing),
+          message: current,
+        });
+      }
+      const smtp = getOperationsEmailSmtpConfig();
+      if (!smtp.configured)
+        return sendApiError(
+          res,
+          409,
+          "smtp_unavailable",
+          "Operations Email SMTP is not configured",
+        );
+      const policy = operationsEmailRealSendPolicy(
+        current.recipient_address,
+        smtp,
+      );
+      if (!policy.allowed) {
+        return sendApiError(
+          res,
+          403,
+          policy.reason,
+          policy.reason === "real_send_disabled"
+            ? "Real sending remains disabled until the controlled rollout is approved"
+            : "This recipient is not included in the controlled real-send allowlist",
+        );
+      }
+      if (current.status !== "ready") {
+        return sendApiError(
+          res,
+          409,
+          "operations_email_state_conflict",
+          "Only a current Ready Email can be sent",
+        );
+      }
+      const readiness = await getOperationsEmailSmtpReadiness(workspace.id);
+      if (!smtpReadinessUsable(readiness, smtp.readinessIntervalMs))
+        return sendApiError(
+          res,
+          409,
+          "smtp_not_verified",
+          "Operations Email SMTP has not been verified recently",
+        );
+      await auditEmail(
+        req,
+        workspace.id,
+        "operations.email.real_send_requested",
+        messageId,
+        {
+          deliveryKind: "real",
+          revision: expectedRevision,
+          realSendMode: smtp.realSendMode,
+        },
+      );
+      const date = new Date();
+      const messageIdHeader = `<operations-email-${randomUUID()}@scanlark.com>`;
+      const frozen = await freezeOperationsEmailDeliveryMime({
+        workspaceId: workspace.id,
+        messageId,
+        expectedRevision,
+        actorUserId: actor(req).id,
+        deliveryKind: "real",
+        actualRecipient: current.recipient_address,
+        date,
+        messageIdHeader,
+        smtpConfig: smtp,
+      });
+      if (frozen.outcome !== "frozen") {
+        if (frozen.outcome === "stale_revision")
+          return sendApiError(
+            res,
+            409,
+            "operations_email_revision_conflict",
+            "The send confirmation is stale because this Email changed",
+            { latest: frozen.message },
+          );
+        if (frozen.outcome === "validation_failed")
+          return res.status(422).json({
+            error: "operations_email_send_validation_failed",
+            message: "Resolve the final-render requirements before sending",
+            details: frozen.errors,
+          });
+        return sendApiError(
+          res,
+          frozen.outcome === "not_found" ? 404 : 409,
+          "operations_email_state_conflict",
+          "Only a current Ready Email can be sent",
+        );
+      }
+      const result = await createOrGetAndQueueOperationsEmailRealDelivery({
+        workspaceId: workspace.id,
+        messageId,
+        expectedRevision,
+        actorUserId: actor(req).id,
+        idempotencyKey,
+        frozenMime: frozen.frozenMime,
+      });
+      if (!result.delivery) {
+        return sendApiError(
+          res,
+          result.outcome === "stale_revision" ? 409 : 422,
+          `operations_email_${result.outcome}`,
+          result.outcome === "source_not_ready"
+            ? "The source Communication is no longer Ready"
+            : "The real Email could not be queued",
+        );
+      }
+      await auditEmail(
+        req,
+        workspace.id,
+        result.outcome === "created"
+          ? "operations.email.real_send_queued"
+          : "operations.email.real_send_idempotent_replay",
+        messageId,
+        {
+          deliveryId: result.delivery.id,
+          deliveryKind: "real",
+          revision: expectedRevision,
+          realSendMode: smtp.realSendMode,
+          rawMimeByteSize: frozen.mime.byteSize,
+          mimeSha256: frozen.mime.sha256,
+        },
+      );
+      return res.status(result.outcome === "created" ? 202 : 200).json({
+        outcome: result.outcome,
+        delivery: safeDelivery(result.delivery),
+        message: result.message,
+      });
+    } catch (error) {
+      if (validationError(res, error)) return;
+      if (error instanceof Error && error.message.startsWith("mime_"))
+        return sendApiError(
+          res,
+          422,
+          "operations_email_mime_validation_failed",
+          "The final Email could not be safely frozen",
+        );
+      console.error("Operations Email real queue failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_real_queue_failed",
+        "Failed to queue the real Email",
+      );
+    }
+  });
+
+  router.post(
+    "/messages/:messageId/deliveries/:deliveryId/retry",
+    async (req, res) => {
+      const messageId = uuidParam(req, res, "messageId");
+      const deliveryId = uuidParam(req, res, "deliveryId");
+      if (!messageId || !deliveryId) return;
+      try {
+        const workspace = await emailWorkspace(res);
+        if (!workspace) return;
+        const smtp = getOperationsEmailSmtpConfig();
+        if (!smtp.configured)
+          return sendApiError(
+            res,
+            409,
+            "smtp_unavailable",
+            "Operations Email SMTP is not configured",
+          );
+        const delivery = await getOperationsEmailMessageDelivery(
+          workspace.id,
+          messageId,
+          deliveryId,
+        );
+        if (!delivery)
+          return sendApiError(res, 404, "not_found", "Delivery not found");
+        if (delivery.delivery_kind === "test") {
+          const actorTestRecipient = deriveOperationsEmailTestRecipient(
+            actor(req).email,
+            smtp,
+          );
+          if (
+            !actorTestRecipient ||
+            actorTestRecipient !== delivery.envelope_recipient?.toLowerCase()
+          ) {
+            return sendApiError(
+              res,
+              403,
+              "test_retry_recipient_not_allowed",
+              "This frozen test delivery is not addressed to the authenticated Operations actor",
+            );
+          }
+        }
+        if (
+          delivery.delivery_kind === "real" &&
+          !operationsEmailRealSendPolicy(
+            delivery.envelope_recipient ?? "",
+            smtp,
+          ).allowed
+        ) {
+          return sendApiError(
+            res,
+            403,
+            "real_send_policy_blocked",
+            "The controlled real-send policy no longer permits this recipient",
+          );
+        }
+        if (
+          !delivery.raw_mime_bytes ||
+          !delivery.mime_sha256 ||
+          createHash("sha256").update(delivery.raw_mime_bytes).digest("hex") !==
+            delivery.mime_sha256
+        ) {
+          return sendApiError(
+            res,
+            409,
+            "frozen_mime_integrity_failed",
+            "The frozen Email cannot be retried safely",
+          );
+        }
+        const retried = await requeueOperationsEmailDeliveryWithFrozenMime({
+          workspaceId: workspace.id,
+          deliveryId,
+          actorUserId: actor(req).id,
+        });
+        if (!retried)
+          return sendApiError(
+            res,
+            409,
+            "delivery_retry_not_allowed",
+            "Only a definitely-not-sent delivery marked for manual retry can be retried",
+          );
+        await auditEmail(
+          req,
+          workspace.id,
+          "operations.email.manual_retry_queued",
+          messageId,
+          {
+            deliveryId,
+            deliveryKind: retried.delivery_kind,
+            reusesFrozenMime: true,
+            mimeSha256: retried.mime_sha256,
+          },
+        );
+        return res.status(202).json({ delivery: safeDelivery(retried) });
+      } catch (error) {
+        console.error("Operations Email retry failed", error);
+        return sendApiError(
+          res,
+          500,
+          "operations_email_retry_failed",
+          "Failed to queue the frozen Email retry",
+        );
+      }
+    },
+  );
 
   router.patch("/messages/:messageId", async (req, res) => {
     const messageId = uuidParam(req, res, "messageId");
