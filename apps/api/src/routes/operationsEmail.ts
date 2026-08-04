@@ -6,6 +6,7 @@ import {
   addOperationsEmailGeneratedAttachment,
   addOperationsEmailManualAttachment,
   createOrGetAndQueueOperationsEmailRealDelivery,
+  createOperationsEmailStandaloneDraft,
   createOrGetOperationsEmailTestDelivery,
   createOrGetOperationsEmailMessageFromCommunication,
   getOperationsEmailAttachmentDownload,
@@ -49,6 +50,7 @@ import {
   parseEmailFolder,
   parseExpectedRevision,
   parseOperationsEmailEditorPatch,
+  parseOperationsEmailStandaloneDraft,
   renderOperationsEmailEditorPreview,
   validateOperationsEmailReady,
 } from "../operationsEmailHelpers";
@@ -125,7 +127,10 @@ function validationError(res: Response, error: unknown) {
     "subject_too_long",
     "preheader_too_long",
   ];
-  if (!knownPrefixes.some((prefix) => error.message.startsWith(prefix))) {
+  if (
+    !knownPrefixes.some((prefix) => error.message.startsWith(prefix)) &&
+    !error.message.endsWith("_too_long")
+  ) {
     return false;
   }
   sendApiError(
@@ -337,6 +342,61 @@ export function mountOperationsEmailRoutes(app: express.Application) {
         500,
         "operations_email_config_failed",
         "Failed to load safe Email configuration status",
+      );
+    }
+  });
+
+  router.post("/messages", async (req, res) => {
+    try {
+      const workspace = await emailWorkspace(res);
+      if (!workspace) return;
+      const initial = parseOperationsEmailStandaloneDraft(req.body);
+      const smtp = getOperationsEmailSmtpConfig();
+      const message = await createOperationsEmailStandaloneDraft({
+        workspaceId: workspace.id,
+        actorUserId: actor(req).id,
+        fromName: smtp.fromName,
+        fromAddress: smtp.fromAddress,
+        replyToAddress: isValidEmailAddress(smtp.replyToAddress)
+          ? smtp.replyToAddress
+          : "contact@scanlark.com",
+        ...initial,
+      });
+      if (!message) {
+        return sendApiError(
+          res,
+          400,
+          "operations_email_crm_relationship_invalid",
+          "The selected business, contact, report, or quote is not available in this workspace",
+        );
+      }
+      await auditEmail(
+        req,
+        workspace.id,
+        "operations.email.standalone_draft_created",
+        message.id,
+        {
+          sourceCommunicationId: null,
+          businessId: message.business_id,
+          contactId: message.contact_id,
+          reportId: message.report_id,
+          quoteId: message.quote_id,
+        },
+      );
+      return res.status(201).json({
+        message: await getOperationsEmailMessageDetail(
+          workspace.id,
+          message.id,
+        ),
+      });
+    } catch (error) {
+      if (validationError(res, error)) return;
+      console.error("Operations Email standalone draft creation failed", error);
+      return sendApiError(
+        res,
+        500,
+        "operations_email_create_failed",
+        "Failed to create Email draft",
       );
     }
   });

@@ -27,7 +27,7 @@ type EmailSummary = {
   id: string;
   source_communication_id: string | null;
   sent_communication_id: string | null;
-  business_id: string;
+  business_id: string | null;
   recipient_name: string | null;
   recipient_address: string;
   subject: string;
@@ -92,6 +92,8 @@ type FinalPreview = {
 };
 
 type EmailRuntimeConfig = {
+  enabled: boolean;
+  canUseEmail: boolean;
   smtp: {
     configured: boolean;
     readiness: "not_checked" | "unavailable" | "configured" | "verified";
@@ -298,6 +300,7 @@ export function OperationsEmailWorkspace({
   const [finalPreview, setFinalPreview] = useState<FinalPreview | null>(null);
   const [deliveries, setDeliveries] = useState<DeliveryHistory[]>([]);
   const [deliveryBusy, setDeliveryBusy] = useState(false);
+  const [creatingDraft, setCreatingDraft] = useState(false);
   const deliveryInFlight = useRef(false);
   const [realSendConfirmation, setRealSendConfirmation] =
     useState<RealSendConfirmation | null>(null);
@@ -599,6 +602,46 @@ export function OperationsEmailWorkspace({
     setSelectedId(null);
     setDetail(null);
     onNavigate(`/operations/email?folder=${next}`);
+  }
+
+  async function createStandaloneDraft() {
+    if (creatingDraft || !confirmDiscard()) return;
+    setCreatingDraft(true);
+    setError(null);
+    try {
+      const response = await apiFetch(`${apiBase}/operations/email/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok)
+        throw new Error(
+          await responseMessage(response, "Failed to create Email draft"),
+        );
+      const data = (await response.json()) as { message: EmailDetail };
+      setFolder("drafts");
+      setSelectedId(data.message.id);
+      setDetail(data.message);
+      setForm(detailToForm(data.message));
+      setAttachments([]);
+      setAttachmentOptions([]);
+      setDeliveries([]);
+      setFinalPreview(null);
+      setPreviewTab("editor");
+      setSaveState("saved");
+      onNavigate(
+        `/operations/email?folder=drafts&message=${encodeURIComponent(data.message.id)}`,
+      );
+      void loadList();
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to create Email draft",
+      );
+    } finally {
+      setCreatingDraft(false);
+    }
   }
 
   async function transition(target: "ready" | "draft") {
@@ -967,21 +1010,62 @@ export function OperationsEmailWorkspace({
           <h1>Operations Email</h1>
           <p>Prepare and review outgoing messages in an isolated workspace.</p>
         </div>
-        <div
-          className={`ops-email-save-state ops-email-save-state--${saveState}`}
-          aria-live="polite"
-        >
-          {saveState === "saving"
-            ? "Saving…"
-            : saveState === "dirty"
-              ? "Unsaved changes"
-              : saveState === "conflict"
-                ? "Save conflict"
-                : saveState === "error"
-                  ? "Save failed"
-                  : "Saved"}
+        <div className="ops-email-header-actions">
+          <button
+            className="ops-button ops-button--primary ops-email-new"
+            onClick={() => void createStandaloneDraft()}
+            disabled={creatingDraft}
+          >
+            {creatingDraft ? "Creating…" : "+ New email"}
+          </button>
+          <div
+            className={`ops-email-save-state ops-email-save-state--${saveState}`}
+            aria-live="polite"
+          >
+            {saveState === "saving"
+              ? "Saving…"
+              : saveState === "dirty"
+                ? "Unsaved changes"
+                : saveState === "conflict"
+                  ? "Save conflict"
+                  : saveState === "error"
+                    ? "Save failed"
+                    : "Saved"}
+          </div>
         </div>
       </header>
+      {runtimeConfig && (
+        <aside className="ops-email-config-status" aria-label="Email status">
+          <strong>Email module enabled</strong>
+          <span>
+            SMTP{" "}
+            {runtimeConfig.smtp.configured ? "configured" : "not configured"}
+          </span>
+          <span>
+            SMTP readiness{" "}
+            {runtimeConfig.smtp.usable ? "available" : "unavailable"}
+          </span>
+          <span>
+            Test sending{" "}
+            {runtimeConfig.testSend.available ? "available" : "unavailable"}
+          </span>
+          <span>Real sending {runtimeConfig.realSend.mode}</span>
+          <span>
+            Sender: {runtimeConfig.fixedSender.name} &lt;
+            {runtimeConfig.fixedSender.address}&gt;
+          </span>
+          <span>
+            Test recipient:{" "}
+            {runtimeConfig.testSend.recipient ?? "not available for this actor"}
+          </span>
+          {!runtimeConfig.smtp.configured && (
+            <p>
+              Email drafting is available, but SMTP must be configured before
+              test messages can be sent.
+            </p>
+          )}
+        </aside>
+      )}
       {error && (
         <div className="ops-error ops-email-error" role="alert">
           <span>{error}</span>
@@ -1025,7 +1109,28 @@ export function OperationsEmailWorkspace({
           {loadingList ? (
             <div className="ops-empty-card">Loading messages…</div>
           ) : messages.length === 0 ? (
-            <div className="ops-empty-card">No messages in {folder}.</div>
+            <div className="ops-empty-card ops-email-folder-empty">
+              <strong>No email drafts yet</strong>
+              <p>
+                Create an email here, or prepare an approved draft from
+                Communications.
+              </p>
+              <div>
+                <button
+                  className="ops-button ops-button--primary"
+                  onClick={() => void createStandaloneDraft()}
+                  disabled={creatingDraft}
+                >
+                  New email
+                </button>
+                <button
+                  className="ops-button"
+                  onClick={() => onNavigate("/operations/communications")}
+                >
+                  Go to Communications
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="ops-email-message-list">
               {messages.map((message) => (
@@ -1039,7 +1144,7 @@ export function OperationsEmailWorkspace({
                     <time>{formatDate(message.updated_at)}</time>
                   </span>
                   <span className="ops-email-list-subject">
-                    {message.subject}
+                    {message.subject || "No subject"}
                   </span>
                   <span className="ops-email-list-recipient">
                     {message.recipient_name || message.recipient_address}
@@ -1220,6 +1325,13 @@ export function OperationsEmailWorkspace({
                       saveState === "saving" ||
                       !runtimeConfig?.testSend.available
                     }
+                    title={
+                      runtimeConfig?.testSend.available
+                        ? `Send a test to ${runtimeConfig.testSend.recipient}`
+                        : runtimeConfig?.smtp.configured
+                          ? "Test sending is unavailable until SMTP readiness and the actor allowlist are confirmed"
+                          : "SMTP must be configured before test messages can be sent"
+                    }
                   >
                     {deliveryBusy ? "Queueing…" : "Send test"}
                   </button>
@@ -1274,6 +1386,11 @@ export function OperationsEmailWorkspace({
                     {runtimeConfig?.testSend.recipient
                       ? `Tests go only to your approved Operations address: ${runtimeConfig.testSend.recipient}. The subject and message are marked [TEST].`
                       : "Your authenticated Operations address is not on the test-recipient allowlist."}
+                  </span>
+                  <span>
+                    A business or contact link is optional for standalone Email.
+                    Development recipient restrictions are enforced separately
+                    by the server-side send policy.
                   </span>
                   {runtimeConfig?.realSend.mode === "disabled" && (
                     <span>
@@ -1763,6 +1880,11 @@ const emailStyles = `
   .ops-email-header { display: flex; align-items: end; justify-content: space-between; gap: 24px; }
   .ops-email-header h1 { margin: 3px 0; }
   .ops-email-header p { margin: 0; color: var(--text-muted); }
+  .ops-email-header-actions { display: flex; align-items: center; gap: 10px; }
+  .ops-email-new { white-space: nowrap; }
+  .ops-email-config-status { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); font-size: 11px; }
+  .ops-email-config-status span { color: var(--text-muted); }
+  .ops-email-config-status p { flex-basis: 100%; margin: 2px 0 0; color: #805400; }
   .ops-email-save-state { border: 1px solid var(--border); border-radius: 999px; padding: 7px 11px; font-size: 12px; color: var(--text-muted); background: var(--panel); }
   .ops-email-save-state--dirty, .ops-email-save-state--error, .ops-email-save-state--conflict { color: #9a5a08; border-color: #d8a34a; }
   .ops-email-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -1776,6 +1898,9 @@ const emailStyles = `
   .ops-email-list-toolbar { padding: 14px; border-bottom: 1px solid var(--border); }
   .ops-email-list-toolbar label { display: block; margin-bottom: 6px; color: var(--text-muted); font-size: 12px; font-weight: 700; }
   .ops-email-list-toolbar input { width: 100%; box-sizing: border-box; }
+  .ops-email-folder-empty { display: grid; gap: 9px; margin: 14px; text-align: left; }
+  .ops-email-folder-empty p { margin: 0; color: var(--text-muted); }
+  .ops-email-folder-empty > div { display: flex; flex-wrap: wrap; gap: 7px; }
   .ops-email-message-list { display: grid; max-height: 630px; overflow: auto; }
   .ops-email-message-list > button { display: grid; gap: 5px; padding: 14px; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
   .ops-email-message-list > button:hover, .ops-email-message-list > button.active { background: var(--accent-soft); }
@@ -1854,6 +1979,7 @@ const emailStyles = `
   }
   @media (max-width: 760px) {
     .ops-email-header { align-items: start; flex-direction: column; gap: 8px; }
+    .ops-email-header-actions { width: 100%; justify-content: space-between; }
     .ops-email-shell { display: grid; grid-template-columns: 82px 1fr; min-height: 600px; }
     .ops-email-folders button { display: flex; flex-direction: column; font-size: 10px; }
     .ops-email-editor-pane { display: none; }

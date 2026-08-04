@@ -62,7 +62,7 @@ export type OperationsEmailMessageRow = {
   source_communication_id: string | null;
   sent_communication_id: string | null;
   duplicated_from_message_id: string | null;
-  business_id: string;
+  business_id: string | null;
   contact_id: string | null;
   report_id: string | null;
   quote_id: string | null;
@@ -529,6 +529,90 @@ export async function createOperationsEmailMessageWithoutSource(
   return res.rows[0] ?? null;
 }
 
+export async function createOperationsEmailStandaloneDraft(input: {
+  workspaceId: string;
+  actorUserId: string;
+  fromName: string;
+  fromAddress: string;
+  replyToAddress?: string | null;
+  businessId?: string | null;
+  contactId?: string | null;
+  reportId?: string | null;
+  quoteId?: string | null;
+  recipientName?: string | null;
+  recipientAddress?: string;
+  subject?: string;
+}) {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsEmailMessageRow>(
+    `
+      INSERT INTO operations_email_messages (
+        workspace_id,
+        business_id,
+        contact_id,
+        report_id,
+        quote_id,
+        from_name,
+        from_address,
+        reply_to_address,
+        recipient_name,
+        recipient_address,
+        subject,
+        editor_body,
+        rendered_html,
+        plain_text,
+        source_snapshot_json,
+        render_metadata_json,
+        status,
+        created_by_user_id,
+        last_edited_by_user_id
+      )
+      SELECT
+        $1, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, '', NULL, '',
+        '{}'::jsonb,
+        '{"previewKind":"editor_preview","finalMimeFrozen":false}'::jsonb,
+        'draft', $2, $2
+      WHERE ($3::uuid IS NULL OR EXISTS (
+        SELECT 1
+        FROM operations_businesses business
+        WHERE business.id = $3
+          AND business.internal_workspace_id = $1
+      ))
+        AND ($4::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM operations_contacts contact
+          WHERE contact.id = $4 AND contact.business_id = $3
+        ))
+        AND ($5::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM operations_reports report
+          WHERE report.id = $5 AND report.business_id = $3
+        ))
+        AND ($6::uuid IS NULL OR EXISTS (
+          SELECT 1
+          FROM operations_quotes quote
+          WHERE quote.id = $6 AND quote.business_id = $3
+        ))
+      RETURNING *
+    `,
+    [
+      input.workspaceId,
+      input.actorUserId,
+      input.businessId ?? null,
+      input.contactId ?? null,
+      input.reportId ?? null,
+      input.quoteId ?? null,
+      requiredText(input.fromName, "from_name"),
+      requiredText(input.fromAddress, "from_address"),
+      optionalText(input.replyToAddress),
+      optionalText(input.recipientName),
+      input.recipientAddress?.trim() ?? "",
+      input.subject?.trim() ?? "",
+    ],
+  );
+  return res.rows[0] ?? null;
+}
+
 export async function getOperationsEmailMessage(
   workspaceId: string,
   messageId: string,
@@ -594,7 +678,7 @@ export async function getOperationsEmailMessageDetail(
     `
       SELECT
         message.*,
-        business.name AS business_name,
+        COALESCE(business.name, 'Standalone email') AS business_name,
         NULLIF(trim(concat_ws(' ', contact.first_name, contact.last_name)), '')
           AS contact_name,
         contact.email AS contact_email,
@@ -605,7 +689,7 @@ export async function getOperationsEmailMessageDetail(
         COALESCE(sent_actor.display_name, sent_actor.email)
           AS sent_actor_label
       FROM operations_email_messages message
-      JOIN operations_businesses business ON business.id = message.business_id
+      LEFT JOIN operations_businesses business ON business.id = message.business_id
       LEFT JOIN operations_contacts contact ON contact.id = message.contact_id
       LEFT JOIN users created_actor ON created_actor.id = message.created_by_user_id
       LEFT JOIN users last_editor ON last_editor.id = message.last_edited_by_user_id
@@ -653,7 +737,7 @@ export async function listOperationsEmailMessageSummaries(input: {
         message.failed_at,
         message.uncertain_at,
         message.safe_display_error,
-        business.name AS business_name,
+        COALESCE(business.name, 'Standalone email') AS business_name,
         NULLIF(trim(concat_ws(' ', contact.first_name, contact.last_name)), '')
           AS contact_name,
         COALESCE(last_editor.display_name, last_editor.email)
@@ -661,7 +745,7 @@ export async function listOperationsEmailMessageSummaries(input: {
         COALESCE(sent_actor.display_name, sent_actor.email)
           AS sent_actor_label
       FROM operations_email_messages message
-      JOIN operations_businesses business ON business.id = message.business_id
+      LEFT JOIN operations_businesses business ON business.id = message.business_id
       LEFT JOIN operations_contacts contact ON contact.id = message.contact_id
       LEFT JOIN users last_editor ON last_editor.id = message.last_edited_by_user_id
       LEFT JOIN users sent_actor ON sent_actor.id = message.send_requested_by_user_id
@@ -671,7 +755,7 @@ export async function listOperationsEmailMessageSummaries(input: {
           $3::text IS NULL
           OR message.subject ILIKE '%' || $3 || '%'
           OR message.recipient_address ILIKE '%' || $3 || '%'
-          OR business.name ILIKE '%' || $3 || '%'
+          OR COALESCE(business.name, '') ILIKE '%' || $3 || '%'
           OR concat_ws(' ', contact.first_name, contact.last_name)
             ILIKE '%' || $3 || '%'
         )
@@ -701,14 +785,14 @@ export async function listOperationsEmailMessageSummaries(input: {
           WHERE message.status IN ('failed', 'delivery_uncertain', 'cancelled')
         )::text AS failed_count
       FROM operations_email_messages message
-      JOIN operations_businesses business ON business.id = message.business_id
+      LEFT JOIN operations_businesses business ON business.id = message.business_id
       LEFT JOIN operations_contacts contact ON contact.id = message.contact_id
       WHERE message.workspace_id = $1
         AND (
           $3::text IS NULL
           OR message.subject ILIKE '%' || $3 || '%'
           OR message.recipient_address ILIKE '%' || $3 || '%'
-          OR business.name ILIKE '%' || $3 || '%'
+          OR COALESCE(business.name, '') ILIKE '%' || $3 || '%'
           OR concat_ws(' ', contact.first_name, contact.last_name)
             ILIKE '%' || $3 || '%'
         )
@@ -800,16 +884,12 @@ export async function updateOperationsEmailMessageEditor(input: {
   if (patch.recipientName !== undefined)
     add("recipient_name", optionalText(patch.recipientName));
   if (patch.recipientAddress !== undefined)
-    add(
-      "recipient_address",
-      requiredText(patch.recipientAddress, "recipient_address"),
-    );
-  if (patch.subject !== undefined)
-    add("subject", requiredText(patch.subject, "subject"));
+    add("recipient_address", patch.recipientAddress.trim());
+  if (patch.subject !== undefined) add("subject", patch.subject.trim());
   if (patch.preheader !== undefined)
     add("preheader", optionalText(patch.preheader));
   if (patch.editorBody !== undefined)
-    add("editor_body", requiredText(patch.editorBody, "editor_body"));
+    add("editor_body", patch.editorBody.trim());
   if (patch.renderedHtml !== undefined)
     add("rendered_html", optionalText(patch.renderedHtml));
   if (patch.plainText !== undefined)

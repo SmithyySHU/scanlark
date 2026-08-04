@@ -34,6 +34,28 @@ test("Checkpoint 3 exposes transfer, detail, edit and lifecycle routes", () => {
   }
 });
 
+test("authorised actors can create isolated standalone drafts", () => {
+  assert.equal(routeSource.includes('router.post("/messages"'), true);
+  assert.equal(
+    routeSource.includes("createOperationsEmailStandaloneDraft"),
+    true,
+  );
+  assert.equal(
+    routeSource.includes("parseOperationsEmailStandaloneDraft"),
+    true,
+  );
+  assert.equal(
+    routeSource.includes('"operations.email.standalone_draft_created"'),
+    true,
+  );
+  assert.equal(
+    repositorySource.includes(
+      "export async function createOperationsEmailStandaloneDraft",
+    ),
+    true,
+  );
+});
+
 test("Checkpoint 4 exposes only isolated attachment and render preparation routes", () => {
   for (const route of [
     '"/messages/:messageId/attachment-options"',
@@ -82,6 +104,24 @@ test("SMTP API never accepts browser-provided recipients or exposes secrets", ()
   assert.equal(routeSource.includes("smtp.password"), false);
   assert.equal(routeSource.includes("smtp.username"), false);
   assert.equal(routeSource.includes("raw_mime_bytes:"), false);
+});
+
+test("standalone test sends do not require a Communication or business", () => {
+  const testSendBody = routeSource.slice(
+    routeSource.indexOf('router.post("/messages/:messageId/test-send"'),
+    routeSource.indexOf('router.post("/messages/:messageId/send"'),
+  );
+  assert.equal(testSendBody.includes("source_communication_id"), false);
+  assert.equal(testSendBody.includes("business_id"), false);
+});
+
+test("standalone real send requires rollout policy but not a CRM link", () => {
+  assert.equal(routeSource.includes('"real_send_business_required"'), false);
+  assert.equal(routeSource.includes("operationsEmailRealSendPolicy"), true);
+  assert.equal(
+    repositorySource.includes("message.business_id IS NOT NULL"),
+    false,
+  );
 });
 
 test("transfer loads source content server-side", () => {

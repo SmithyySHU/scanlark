@@ -12,6 +12,7 @@ import {
   claimPendingOperationsEmailSentCopy,
   createOperationsEmailDeliveryAttempt,
   createOperationsEmailMessageWithoutSource,
+  createOperationsEmailStandaloneDraft,
   createOrGetAndQueueOperationsEmailRealDelivery,
   createOrGetOperationsEmailMessageFromCommunication,
   createOrGetOperationsEmailTestDelivery,
@@ -103,6 +104,15 @@ before(async () => {
       readFileSync(
         new URL(
           "../migrations/047_operations_email_smtp_queue.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    await db.query(
+      readFileSync(
+        new URL(
+          "../migrations/048_operations_email_standalone_drafts.sql",
           import.meta.url,
         ),
         "utf8",
@@ -442,6 +452,105 @@ test("source-less future messages are not blocked by source uniqueness", async (
   assert.ok(first);
   assert.ok(second);
   assert.notEqual(first.id, second.id);
+});
+
+test("standalone drafts need no Communication or CRM business and appear in Drafts", async () => {
+  const created = await createOperationsEmailStandaloneDraft({
+    workspaceId,
+    actorUserId,
+    fromName: "Connor Smith",
+    fromAddress: "connor@scanlark.com",
+    replyToAddress: "contact@scanlark.com",
+  });
+  assert.ok(created);
+  assert.equal(created.source_communication_id, null);
+  assert.equal(created.business_id, null);
+  assert.equal(created.contact_id, null);
+  assert.equal(created.recipient_address, "");
+  assert.equal(created.subject, "");
+  assert.equal(created.editor_body, "");
+  assert.equal(created.status, "draft");
+  assert.equal(created.created_by_user_id, actorUserId);
+  assert.equal(created.revision, 1);
+
+  const listed = await listOperationsEmailMessageSummaries({
+    workspaceId,
+    statuses: ["draft"],
+    limit: 200,
+    offset: 0,
+  });
+  const summary = listed.messages.find((item) => item.id === created.id);
+  assert.equal(summary?.business_name, "Standalone email");
+});
+
+test("standalone drafts can queue test delivery without a source or business", async () => {
+  const message = await createOperationsEmailStandaloneDraft({
+    workspaceId,
+    actorUserId,
+    fromName: "Connor Smith",
+    fromAddress: "connor@scanlark.com",
+    replyToAddress: "contact@scanlark.com",
+    recipientAddress: "test@example.com",
+    subject: "Standalone test",
+  });
+  assert.ok(message);
+  const result = await createOrGetOperationsEmailTestDelivery({
+    workspaceId,
+    messageId: message.id,
+    expectedRevision: message.revision,
+    actorUserId,
+    idempotencyKey: randomUUID(),
+    frozenMime: {
+      ...frozenMime,
+      envelopeRecipient: "checkpoint-operator@scanlark.test",
+      fixedMessageId: `<standalone-${randomUUID()}@scanlark.test>`,
+    },
+  });
+  assert.equal(result.outcome, "created");
+  assert.equal(result.delivery?.delivery_kind, "test");
+});
+
+test("standalone emails can queue normal delivery without a source or business", async () => {
+  const draft = await createOperationsEmailStandaloneDraft({
+    workspaceId,
+    actorUserId,
+    fromName: "Connor Smith",
+    fromAddress: "connor@scanlark.com",
+    replyToAddress: "contact@scanlark.com",
+    recipientAddress: "valid-unlinked-recipient@example.net",
+    subject: "Standalone normal delivery",
+  });
+  assert.ok(draft);
+  const ready = await db.query<OperationsEmailMessageRow>(
+    `
+      UPDATE operations_email_messages
+      SET editor_body = 'A valid standalone email body.',
+          plain_text = 'A valid standalone email body.',
+          status = 'ready',
+          ready_at = now()
+      WHERE id = $1 AND workspace_id = $2
+      RETURNING *
+    `,
+    [draft.id, workspaceId],
+  );
+  const message = ready.rows[0];
+  assert.ok(message);
+  const result = await createOrGetAndQueueOperationsEmailRealDelivery({
+    workspaceId,
+    messageId: message.id,
+    expectedRevision: message.revision,
+    actorUserId,
+    idempotencyKey: randomUUID(),
+    frozenMime: {
+      ...frozenMime,
+      envelopeRecipient: message.recipient_address,
+      fixedMessageId: `<standalone-real-${randomUUID()}@scanlark.test>`,
+    },
+  });
+  assert.equal(result.outcome, "created");
+  assert.equal(result.delivery?.delivery_kind, "real");
+  assert.equal(result.message?.business_id, null);
+  assert.equal(result.message?.source_communication_id, null);
 });
 
 test("optimistic editor updates increment current revisions and reject stale revisions", async () => {

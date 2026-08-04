@@ -4,6 +4,72 @@ Checkpoint 5 queues and submits frozen MIME to the configured outgoing SMTP
 server. It does not append to the IONOS Sent folder or finalize CRM state; those
 remain Checkpoint 6 work.
 
+## Local enablement and test workflow
+
+The module flag is read by the API and worker from the repository-root `.env`
+file. For local development:
+
+1. Apply all migrations in sorted order, including
+   `048_operations_email_standalone_drafts.sql`.
+2. In the root `.env`, set `OPERATIONS_EMAIL_MODULE_ENABLED=true`. Keep
+   `OPERATIONS_EMAIL_REAL_SEND_MODE=disabled` for local Checkpoint 5 testing.
+3. Restart `npm run dev:api` so the server reloads the flag. Restart
+   `npm run dev:worker` after adding or changing SMTP configuration. The Vite
+   `npm run dev:web` process does not consume this server flag, so a browser
+   reload is sufficient; restarting it is harmless if the complete local stack
+   is being restarted.
+4. No web rebuild is required while using the Vite development server. A
+   production/static web deployment still requires its normal build after code
+   changes, but changing this server flag alone does not require a web rebuild.
+5. Confirm that the signed-in user has an active membership in the
+   `scanlark-operations` internal workspace with role `owner`,
+   `operations_admin`, or `operations_member`. `viewer`, inactive, and missing
+   memberships do not receive the Email capability. This can be checked without
+   exposing credentials:
+
+   ```sql
+   SELECT u.email, membership.role, membership.is_active
+   FROM internal_workspace_memberships membership
+   JOIN internal_workspaces workspace ON workspace.id = membership.workspace_id
+   JOIN users u ON u.id = membership.user_id
+   WHERE workspace.code = 'scanlark-operations'
+     AND lower(u.email) = lower('<signed-in-email>');
+   ```
+
+6. Reload the authenticated app and open `/operations/email` directly. The
+   Email navigation item and the safe module/SMTP status area should be visible.
+
+Drafting, editor previews, attachment preparation, and standalone draft
+creation continue to work when SMTP is not configured. Send Test and Send Email
+remain unavailable until SMTP is configured and recently verified. To exercise
+the controlled test path, create a standalone draft with **New email**, complete
+and save it, open **Final email preview**, then use **Send test**. Test sending
+derives the recipient from the signed-in actor and does not require a business
+or source Communication.
+
+## Standalone recipients and optional CRM linkage
+
+The To field accepts any syntactically valid email address. Draft creation,
+saving, previewing, manual attachments, test sending, and normal standalone
+delivery do not require a business, contact, or source Communication.
+
+SMTP rollout policy remains independent of CRM linkage. During development,
+test delivery is still restricted to the authenticated actor's derived
+allowlisted address, and normal delivery is still governed by
+`OPERATIONS_EMAIL_REAL_SEND_MODE` and its recipient allowlist. These checks are
+server-side delivery safeguards; they do not require or infer a client record.
+
+For Checkpoint 6 CRM finalization:
+
+- a successfully delivered message that is linked to a business/contact will
+  create the immutable sent Communication event in that client's timeline;
+- a successfully delivered unlinked standalone message will remain recorded in
+  Email without creating a placeholder business or Communication;
+- the sent Email UI will later expose **Link to business/contact** so an operator
+  can attribute an unlinked record explicitly and auditably;
+- messages transferred from Communications retain their existing source
+  business/contact linkage automatically.
+
 ## Nodemailer boundary
 
 The worker calls `transport.sendMail({ envelope, raw })` with the exact frozen

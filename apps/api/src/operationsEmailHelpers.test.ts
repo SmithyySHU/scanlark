@@ -5,6 +5,7 @@ import {
   parseEmailFolder,
   parseExpectedRevision,
   parseOperationsEmailEditorPatch,
+  parseOperationsEmailStandaloneDraft,
   renderOperationsEmailEditorPreview,
   validateOperationsEmailReady,
 } from "./operationsEmailHelpers";
@@ -94,6 +95,57 @@ test("editor patch trims and accepts supported editable fields", () => {
   );
 });
 
+test("standalone draft accepts an empty safe initial editor state", () => {
+  assert.deepEqual(parseOperationsEmailStandaloneDraft({}), {});
+  assert.deepEqual(
+    parseOperationsEmailStandaloneDraft({
+      recipientName: "  Test Operator  ",
+      recipientAddress: "",
+      subject: "",
+    }),
+    {
+      recipientName: "Test Operator",
+      recipientAddress: "",
+      subject: "",
+    },
+  );
+});
+
+test("standalone draft rejects browser-owned workspace and actor identity", () => {
+  assert.throws(
+    () => parseOperationsEmailStandaloneDraft({ workspaceId: "attacker" }),
+    /unsupported_email_draft_field:workspaceId/,
+  );
+  assert.throws(
+    () => parseOperationsEmailStandaloneDraft({ actorUserId: "attacker" }),
+    /unsupported_email_draft_field:actorUserId/,
+  );
+});
+
+test("draft fields may be cleared but Ready validation still requires content", () => {
+  assert.deepEqual(
+    parseOperationsEmailEditorPatch({
+      expectedRevision: 1,
+      recipientAddress: "",
+      subject: "",
+      editorBody: "",
+    }),
+    {
+      expectedRevision: 1,
+      patch: { recipientAddress: "", subject: "", editorBody: "" },
+    },
+  );
+  assert.throws(
+    () =>
+      validateOperationsEmailReady({
+        recipientAddress: "",
+        subject: "",
+        editorBody: "",
+      }),
+    /invalid_recipient_address/,
+  );
+});
+
 test("invalid recipient is rejected on edit", () => {
   assert.throws(
     () =>
@@ -103,6 +155,23 @@ test("invalid recipient is rejected on edit", () => {
       }),
     /invalid_recipient_address/,
   );
+});
+
+test("any syntactically valid recipient may be saved without a client link", () => {
+  const addresses = [
+    "person@example.net",
+    "operator+checkpoint@scanlark.com",
+    "accounts@unlinked-business.org",
+  ];
+  for (const recipientAddress of addresses) {
+    assert.equal(
+      parseOperationsEmailEditorPatch({
+        expectedRevision: 1,
+        recipientAddress,
+      }).patch.recipientAddress,
+      recipientAddress,
+    );
+  }
 });
 
 test("ready validation accepts resolved content", () => {

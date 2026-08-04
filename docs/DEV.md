@@ -17,6 +17,9 @@ notifications, share links, and known limitations, see
 For local auth, either set `DEV_BYPASS_AUTH=true` and `DEMO_USER_EMAIL`, or set
 a 32+ character `SESSION_SECRET` and use the normal auth flow.
 
+For the feature-flagged Operations Email workspace and its role requirements,
+see [OPERATIONS_EMAIL_SMTP.md](OPERATIONS_EMAIL_SMTP.md#local-enablement-and-test-workflow).
+
 ## Install
 
 ```bash

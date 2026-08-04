@@ -38,6 +38,61 @@ test("Checkpoint 5 UI distinguishes test and real-send controls", () => {
   assert.equal(workspaceSource.includes('realSend.mode === "disabled"'), true);
 });
 
+test("Email workspace exposes standalone creation and opens the new editor", () => {
+  assert.equal(workspaceSource.includes("+ New email"), true);
+  assert.equal(
+    workspaceSource.includes("apiFetch(`${apiBase}/operations/email/messages`"),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes("setSelectedId(data.message.id)"),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes(
+      "folder=drafts&message=${encodeURIComponent(data.message.id)}",
+    ),
+    true,
+  );
+});
+
+test("empty folders explain both standalone and Communications workflows", () => {
+  for (const text of [
+    "No email drafts yet",
+    "Create an email here, or prepare an approved draft from",
+    "New email",
+    "Go to Communications",
+  ])
+    assert.equal(workspaceSource.includes(text), true, `missing ${text}`);
+});
+
+test("safe configuration status keeps drafting available without SMTP", () => {
+  for (const text of [
+    "Email module enabled",
+    "SMTP readiness",
+    "Test sending",
+    "Real sending",
+    "Sender:",
+    "Test recipient:",
+    "Email drafting is available, but SMTP must be configured before",
+  ])
+    assert.equal(workspaceSource.includes(text), true, `missing ${text}`);
+  assert.equal(workspaceSource.includes("runtimeConfig.smtp.host"), false);
+  assert.equal(workspaceSource.includes("runtimeConfig.smtp.password"), false);
+  assert.equal(workspaceSource.includes("runtimeConfig.smtp.username"), false);
+});
+
+test("standalone CRM linkage is not presented as a delivery requirement", () => {
+  assert.match(
+    workspaceSource,
+    /A business or contact link is optional for standalone[\s\S]*Email/,
+  );
+  assert.match(
+    workspaceSource,
+    /recipient restrictions are enforced[\s\S]*server-side send policy/,
+  );
+});
+
 test("Email UI displays all required save states", () => {
   for (const state of [
     "Saving…",
