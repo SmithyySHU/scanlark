@@ -43,6 +43,7 @@ import {
   buildAppUrl as buildCanonicalAppUrl,
   getAppHostnameRedirectUrl,
 } from "./appLinks";
+import type { OperationsCapabilities } from "./operationsCapabilities";
 
 type ScanStatus =
   | "queued"
@@ -190,9 +191,10 @@ interface AuthUser {
   name?: string;
   isAdmin?: boolean;
   isInternalAdmin?: boolean;
+  capabilities?: OperationsCapabilities;
 }
 
-function hasInternalOperationsAccess(
+function hasSystemAdminAccessForUser(
   user: AuthUser | null,
   internalOnlyMode: boolean,
 ): boolean {
@@ -3905,16 +3907,18 @@ const App: React.FC = () => {
   const hasSites = sites.length > 0;
   const internalOnlyMode = publicConfig.internalOnlyMode;
   const registrationAvailable = publicConfig.registrationAvailable;
-  const hasOperationsWorkspaceAccess = hasInternalOperationsAccess(
+  const hasSystemAdminAccess = hasSystemAdminAccessForUser(
     authUser,
     internalOnlyMode,
   );
+  const hasOperationsWorkspaceAccess =
+    authUser?.capabilities?.canAccessOperations === true;
   const hasMonitoringWorkspaceAccess =
-    !!authUser && (!internalOnlyMode || hasOperationsWorkspaceAccess);
+    !!authUser && (!internalOnlyMode || hasSystemAdminAccess);
   const hasInternalAppAccess =
     hasMonitoringWorkspaceAccess && !publicConfigLoading;
   const isBlockedInternalUser =
-    internalOnlyMode && !!authUser && !hasOperationsWorkspaceAccess;
+    internalOnlyMode && !!authUser && !hasSystemAdminAccess;
   const sitesLoadError = sitesLoadState === "error";
   const isSiteStatePending = ["idle", "loading"].includes(sitesLoadState);
   const hasSiteSelectionResolved = Boolean(
@@ -6627,7 +6631,7 @@ const App: React.FC = () => {
           label: "System Admin",
           active: isAdminRoute,
           onClick: () => navigateTo("/admin"),
-          hidden: !hasOperationsWorkspaceAccess,
+          hidden: !hasSystemAdminAccess,
         },
       ]
         .filter((item) => !item.hidden)
@@ -9930,7 +9934,12 @@ const App: React.FC = () => {
         });
         throw new Error(getAuthFailureMessage(endpoint, res.status, text));
       }
-      const data = (await res.json()) as AuthUser;
+      await res.json();
+      const meRes = await apiFetch(`${API_BASE}/me`, { cache: "no-store" });
+      if (!meRes.ok) {
+        throw new Error(`Failed to load signed-in account: ${meRes.status}`);
+      }
+      const data = (await meRes.json()) as AuthUser;
       setAuthUser(data);
       setAuthPassword("");
       setAuthError(null);
@@ -10008,7 +10017,7 @@ const App: React.FC = () => {
   }
 
   function getDefaultAuthenticatedPath(user: AuthUser | null) {
-    return hasInternalOperationsAccess(user, internalOnlyMode)
+    return user?.capabilities?.canAccessOperations === true
       ? "/operations"
       : "/dashboard";
   }
@@ -13762,7 +13771,7 @@ const App: React.FC = () => {
         >
           Account settings
         </button>
-        {hasOperationsWorkspaceAccess && (
+        {hasSystemAdminAccess && (
           <button
             onClick={() => {
               navigateTo("/admin");
@@ -20417,6 +20426,7 @@ const App: React.FC = () => {
                   currentPath={locationPathname}
                   currentSearch={locationSearch}
                   authEmail={authUser?.email ?? ""}
+                  capabilities={authUser.capabilities}
                   onNavigate={navigateToHref}
                   onLogout={() => {
                     void handleLogout();
@@ -20492,7 +20502,7 @@ const App: React.FC = () => {
             </div>
           )
         ) : isAdminRoute ? (
-          authUser && hasOperationsWorkspaceAccess ? (
+          authUser && hasSystemAdminAccess ? (
             <>
               {renderAppTopNav({
                 showSiteSwitcher: false,

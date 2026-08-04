@@ -6,14 +6,15 @@ import {
   parseEmailAllowlist,
 } from "./internalAccess";
 
-export function isAdminEmail(email: string | null | undefined): boolean {
+export function isAdminEmail(
+  email: string | null | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
   if (!email) return false;
-  if (
-    parseEmailAllowlist(process.env.ADMIN_EMAILS).has(normalizeEmail(email))
-  ) {
+  if (parseEmailAllowlist(env.ADMIN_EMAILS).has(normalizeEmail(email))) {
     return true;
   }
-  return isInternalOnlyMode() && isInternalAdminEmail(email);
+  return isInternalOnlyMode(env) && isInternalAdminEmail(email, env);
 }
 
 export function adminGuard(req: Request, res: Response, next: NextFunction) {

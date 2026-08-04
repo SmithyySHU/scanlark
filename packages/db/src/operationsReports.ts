@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { recordAdminAuditLog, type AdminActor } from "./admin";
 import { ensureConnected } from "./client";
+import { createHash } from "node:crypto";
 import { formatIssuePresentation } from "./issuePresentation";
 import type { ScanIssue, ScanIssueSeverity } from "./scanIssues";
 
@@ -240,10 +240,18 @@ export type OperationsReportActivityRow = {
 };
 
 export type OperationsReportPdfRenderRow = {
+  id: string;
   operations_report_id: string;
   filename: string;
   pdf_bytes: Buffer;
+  content_type: "application/pdf";
+  size_bytes: string;
+  sha256: string;
+  source_version: string;
+  source_snapshot_sha256: string;
   generated_at: Date;
+  generated_by_user_id: string | null;
+  generation_source: "system" | "actor";
 };
 
 export type OperationsReportDetail = {
@@ -3114,25 +3122,60 @@ export async function saveOperationsReportPdfRender(
   reportId: string,
   filename: string,
   pdfBytes: Buffer,
+  metadata: {
+    sourceVersion?: string;
+    sourceSnapshotSha256?: string;
+    generatedByUserId?: string | null;
+    generationSource?: "system" | "actor";
+  } = {},
 ) {
+  const pdfSha256 = createHash("sha256").update(pdfBytes).digest("hex");
+  const sourceSnapshotSha256 =
+    metadata.sourceSnapshotSha256?.trim().toLowerCase() ?? pdfSha256;
+  if (!/^[0-9a-f]{64}$/.test(sourceSnapshotSha256)) {
+    throw new Error("report_pdf_source_hash_invalid");
+  }
   const client = await ensureConnected();
   const res = await client.query<OperationsReportPdfRenderRow>(
     `
-      INSERT INTO operations_report_pdf_renders (
-        operations_report_id,
-        filename,
-        pdf_bytes,
-        generated_at
+      WITH inserted AS (
+        INSERT INTO operations_report_pdf_renders (
+          operations_report_id,
+          filename,
+          pdf_bytes,
+          content_type,
+          size_bytes,
+          sha256,
+          source_version,
+          source_snapshot_sha256,
+          generated_by_user_id,
+          generation_source,
+          generated_at
+        )
+        VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7, $8, $9, now())
+        ON CONFLICT (operations_report_id, source_snapshot_sha256) DO NOTHING
+        RETURNING *
       )
-      VALUES ($1, $2, $3, now())
-      ON CONFLICT (operations_report_id)
-      DO UPDATE SET
-        filename = EXCLUDED.filename,
-        pdf_bytes = EXCLUDED.pdf_bytes,
-        generated_at = now()
-      RETURNING *
+      SELECT * FROM inserted
+      UNION ALL
+      SELECT existing.*
+      FROM operations_report_pdf_renders existing
+      WHERE existing.operations_report_id = $1
+        AND existing.source_snapshot_sha256 = $7
+        AND NOT EXISTS (SELECT 1 FROM inserted)
+      LIMIT 1
     `,
-    [reportId, requiredText(filename, "pdf_filename"), pdfBytes],
+    [
+      reportId,
+      requiredText(filename, "pdf_filename"),
+      pdfBytes,
+      pdfBytes.length,
+      pdfSha256,
+      metadata.sourceVersion?.trim() || `report-pdf-${pdfSha256.slice(0, 12)}`,
+      sourceSnapshotSha256,
+      metadata.generatedByUserId ?? null,
+      metadata.generationSource ?? "actor",
+    ],
   );
   return res.rows[0];
 }
@@ -3141,9 +3184,11 @@ export async function getOperationsReportPdfRender(reportId: string) {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportPdfRenderRow>(
     `
-      SELECT operations_report_id, filename, pdf_bytes, generated_at
+      SELECT *
       FROM operations_report_pdf_renders
       WHERE operations_report_id = $1
+      ORDER BY generated_at DESC, id DESC
+      LIMIT 1
     `,
     [reportId],
   );

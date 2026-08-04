@@ -1,5 +1,6 @@
 import express from "express";
 import type { Request, Response } from "express";
+import { createHash } from "node:crypto";
 import {
   addOperationsBusinessNote,
   addOperationsContact,
@@ -147,6 +148,7 @@ import {
   type InternalWorkspaceRole,
 } from "@scanlark/db";
 import { isAdminEmail } from "../adminAccess";
+import { requireOperationsWorkspaceMember } from "../operationsAccess";
 import {
   operationsReportPdfFilename,
   renderOperationsReportPdf,
@@ -258,43 +260,6 @@ function sendApiError(
 function getActor(req: Request): AdminActor {
   if (!req.user) throw new Error("admin_actor_missing");
   return { id: req.user.id, email: req.user.email };
-}
-
-async function operationsWorkspaceGuard(
-  req: Request,
-  res: Response,
-  next: express.NextFunction,
-) {
-  if (!req.user) {
-    return sendApiError(res, 401, "unauthorized", "Unauthorized");
-  }
-  try {
-    const memberships = await getUserInternalWorkspaceMemberships(req.user.id);
-    if (
-      memberships.some(
-        (row) =>
-          row.is_active &&
-          row.workspace_code === SCANLARK_OPERATIONS_WORKSPACE_CODE,
-      )
-    ) {
-      return next();
-    }
-    if (isAdminEmail(req.user.email)) return next();
-    return sendApiError(
-      res,
-      403,
-      "operations_workspace_required",
-      "Operations workspace access required",
-    );
-  } catch (err) {
-    console.error("Operations workspace access check failed", err);
-    return sendApiError(
-      res,
-      500,
-      "operations_workspace_access_failed",
-      "Failed to verify Operations workspace access",
-    );
-  }
 }
 
 async function requireOperationsMembershipAdmin(req: Request, res: Response) {
@@ -834,7 +799,7 @@ function handleValidationError(res: Response, err: unknown) {
 
 export function mountOperationsRoutes(app: express.Application) {
   const router = express.Router();
-  router.use(operationsWorkspaceGuard);
+  router.use(requireOperationsWorkspaceMember);
 
   router.get("/staff/workspace", async (req, res) => {
     try {
@@ -3722,7 +3687,14 @@ export function mountOperationsRoutes(app: express.Application) {
         "operations_report_pdf_generated",
         preview.payload,
       );
-      await saveOperationsReportPdfRender(reportId, filename, pdf);
+      await saveOperationsReportPdfRender(reportId, filename, pdf, {
+        sourceVersion: `report-v${preview.payload.report.versionNumber}`,
+        sourceSnapshotSha256: createHash("sha256")
+          .update(JSON.stringify(preview.payload))
+          .digest("hex"),
+        generatedByUserId: getActor(req).id,
+        generationSource: "actor",
+      });
       res.setHeader("content-type", "application/pdf");
       res.setHeader(
         "content-disposition",
@@ -4321,6 +4293,18 @@ export function mountOperationsRoutes(app: express.Application) {
             taskNotes: input.taskNotes,
           },
         );
+        if (
+          communication &&
+          "outcome" in communication &&
+          communication.outcome === "email_protected_state"
+        ) {
+          return sendApiError(
+            res,
+            409,
+            "operations_email_delivery_conflict",
+            `Manual completion is blocked while the linked Email message is ${communication.status}. Investigate the Email message before continuing.`,
+          );
+        }
         if (!communication) {
           return sendApiError(res, 404, "not_found", "Communication not found");
         }
@@ -5000,6 +4984,18 @@ export function mountOperationsRoutes(app: express.Application) {
             taskNotes: input.taskNotes,
           },
         );
+        if (
+          communication &&
+          "outcome" in communication &&
+          communication.outcome === "email_protected_state"
+        ) {
+          return sendApiError(
+            res,
+            409,
+            "operations_email_delivery_conflict",
+            `Manual completion is blocked while the linked Email message is ${communication.status}. Investigate the Email message before continuing.`,
+          );
+        }
         if (!communication) {
           return sendApiError(res, 404, "not_found", "Communication not found");
         }

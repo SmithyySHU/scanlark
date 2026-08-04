@@ -709,4 +709,8 @@ export type {
   InternalWorkspaceRow,
 } from "./internalWorkspaces";
 
+export { isOperationsEmailModuleEnabled } from "./operationsEmailConfig";
+export * from "./operationsEmail";
+export * from "./operationsEmailPreparation";
+
 export { SCAN_EVENT_CHANNEL } from "./events";

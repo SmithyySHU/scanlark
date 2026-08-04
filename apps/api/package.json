@@ -11,11 +11,14 @@
   "dependencies": {
     "@scanlark/crawler": "*",
     "@scanlark/db": "*",
+    "@types/multer": "^2.2.0",
     "cheerio": "^1.1.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.0",
+    "file-type": "^22.0.1",
     "iron-session": "^8.0.2",
+    "multer": "^2.2.0",
     "nodemailer": "^9.0.3",
     "playwright": "^1.55.1"
   },

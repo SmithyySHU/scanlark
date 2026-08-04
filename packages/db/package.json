@@ -19,6 +19,7 @@
     "demo:latest-scan": "node --import tsx src/printLatestScan.ts",
     "demo:site-history": "node --import tsx src/printSiteHistory.ts",
     "demo:schedule": "node --import tsx src/scheduleDemo.ts",
+    "test": "node ../../scripts/run-node-tests.mjs src",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

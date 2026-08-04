@@ -6,7 +6,12 @@ import React, {
   useState,
 } from "react";
 import { copyRichEmailToClipboard } from "../emailClipboard";
+import {
+  canShowOperationsEmailNavigation,
+  type OperationsCapabilities,
+} from "../operationsCapabilities";
 import { OperationsReportWorkspace } from "./operations/reports/OperationsReportWorkspace";
+import { OperationsEmailWorkspace } from "./operations/email/OperationsEmailWorkspace";
 import type {
   OperationsReportReadinessIssue,
   OperationsReportRegroupPreview,
@@ -18,6 +23,7 @@ type OperationsRouteKey =
   | "pipeline"
   | "tasks"
   | "communications"
+  | "email"
   | "reports"
   | "quotes"
   | "work"
@@ -486,6 +492,24 @@ type Communication = {
   contact_last_name?: string | null;
   contact_email?: string | null;
   template_name?: string | null;
+};
+
+type CommunicationEmailLink = {
+  sourceCommunicationId: string;
+  messageId: string;
+  messageStatus:
+    | "draft"
+    | "ready"
+    | "queued"
+    | "sending"
+    | "sent"
+    | "failed"
+    | "delivery_uncertain"
+    | "cancelled";
+  sentAt: string | null;
+  sendRequestedByUserId: string | null;
+  sentActorLabel: string | null;
+  sentCommunicationId: string | null;
 };
 
 type OperationsTask = {
@@ -1300,6 +1324,7 @@ type OperationsPageProps = {
   currentPath: string;
   currentSearch: string;
   authEmail: string;
+  capabilities?: OperationsCapabilities;
   onNavigate: (href: string) => void;
   onLogout: () => void;
   embedded?: boolean;
@@ -1527,6 +1552,7 @@ const routeItems: Array<{
     label: "Communications",
     href: "/operations/communications",
   },
+  { key: "email", label: "Email", href: "/operations/email" },
   { key: "reports", label: "Reports", href: "/operations/reports" },
   { key: "quotes", label: "Quotes", href: "/operations/quotes" },
   { key: "work", label: "Work", href: "/operations/work" },
@@ -1544,6 +1570,7 @@ const placeholderContent: Record<
     | "home"
     | "businesses"
     | "pipeline"
+    | "email"
     | "reports"
     | "quotes"
     | "work"
@@ -2137,11 +2164,21 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   currentPath,
   currentSearch,
   authEmail,
+  capabilities,
   onNavigate,
   onLogout,
   embedded = false,
 }) => {
   const activeRoute = getRouteKey(currentPath);
+  const visibleRouteItems = useMemo(
+    () =>
+      routeItems.filter(
+        (item) =>
+          item.key !== "email" ||
+          canShowOperationsEmailNavigation(capabilities),
+      ),
+    [capabilities],
+  );
   const businessId = getBusinessIdFromPath(currentPath);
   const operationsReportId = getOperationsReportIdFromPath(currentPath);
   const operationsQuoteId = getOperationsQuoteIdFromPath(currentPath);
@@ -2177,6 +2214,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [defaultSignatureMode, setDefaultSignatureMode] =
     useState<CommunicationSignatureMode>("use_mailbox_signature");
   const [communications, setCommunications] = useState<Communication[]>([]);
+  const [communicationEmailLinks, setCommunicationEmailLinks] = useState<
+    Record<string, CommunicationEmailLink>
+  >({});
   const [communicationsLoading, setCommunicationsLoading] = useState(false);
   const [communicationSearch, setCommunicationSearch] = useState("");
   const [communicationStatusFilter, setCommunicationStatusFilter] =
@@ -3022,6 +3062,51 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }, [activeRoute, loadCommunicationTemplates, loadCommunications]);
 
   useEffect(() => {
+    if (
+      activeRoute !== "communications" ||
+      !canShowOperationsEmailNavigation(capabilities) ||
+      communications.length === 0
+    ) {
+      setCommunicationEmailLinks({});
+      return;
+    }
+    const controller = new AbortController();
+    void apiFetch(`${apiBase}/operations/email/source-links`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        communicationIds: communications.map((item) => item.id),
+      }),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+        const data = (await response.json()) as {
+          links: Record<string, CommunicationEmailLink>;
+        };
+        setCommunicationEmailLinks(data.links);
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.warn("Failed to load linked Email status", error);
+          setCommunicationEmailLinks({});
+        }
+      });
+    return () => controller.abort();
+  }, [activeRoute, apiBase, apiFetch, capabilities, communications]);
+
+  useEffect(() => {
+    if (activeRoute !== "communications") return;
+    const requestedCommunication = searchParams.get("communication");
+    if (
+      requestedCommunication &&
+      communications.some((item) => item.id === requestedCommunication)
+    ) {
+      setSelectedCommunicationId(requestedCommunication);
+    }
+  }, [activeRoute, communications, searchParams]);
+
+  useEffect(() => {
     if (activeRoute === "tasks") void loadTasks();
   }, [activeRoute, loadTasks]);
 
@@ -3475,8 +3560,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         overrides.wordingVariantKey ??
         template?.content_variants_json?.[0]?.key ??
         "",
-      signatureMode:
-        overrides.signatureMode ?? defaultSignatureMode,
+      signatureMode: overrides.signatureMode ?? defaultSignatureMode,
       senderIdentityKey: overrides.senderIdentityKey ?? sender.key,
       senderName: overrides.senderName ?? sender.name,
       senderEmail: overrides.senderEmail ?? sender.email,
@@ -4737,7 +4821,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (!html.trim()) {
       setCommunicationForm((prev) => ({
         ...prev,
-        copyStatus: "Generate the email preview before copying formatted email.",
+        copyStatus:
+          "Generate the email preview before copying formatted email.",
       }));
       return;
     }
@@ -4903,10 +4988,87 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       const data = (await res.json().catch(() => null)) as {
         message?: string;
       } | null;
-      throw new Error(data?.message ?? "Failed to mark communication sent");
+      setActionError(data?.message ?? "Failed to mark communication sent");
+      return;
     }
     setPendingSendPrompt(null);
     await Promise.all([loadCommunications(), loadSummary(), loadTasks()]);
+  }
+
+  async function openCommunicationInEmail(item: Communication) {
+    setActionError(null);
+    try {
+      const response = await apiFetch(
+        `${apiBase}/operations/email/messages/from-communication/${encodeURIComponent(item.id)}`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        throw new Error(
+          await apiErrorMessage(
+            response,
+            "Failed to open Communication in Email",
+          ),
+        );
+      }
+      const data = (await response.json()) as {
+        message: { id: string; status: string };
+      };
+      const folder =
+        data.message.status === "sent"
+          ? "sent"
+          : data.message.status === "ready"
+            ? "ready"
+            : data.message.status === "draft"
+              ? "drafts"
+              : "failed";
+      onNavigate(
+        `/operations/email?folder=${folder}&message=${encodeURIComponent(data.message.id)}`,
+      );
+    } catch (caught) {
+      setActionError(
+        caught instanceof Error
+          ? caught.message
+          : "Failed to open Communication in Email",
+      );
+    }
+  }
+
+  function emailLinkLabel(link: CommunicationEmailLink) {
+    if (link.messageStatus === "sent") return "View sent email";
+    if (link.messageStatus === "delivery_uncertain")
+      return "Investigate Email delivery";
+    if (link.messageStatus === "failed") return "Open failed Email";
+    if (link.messageStatus === "cancelled") return "View cancelled Email";
+    return "Continue in Email Editor";
+  }
+
+  function emailLinkAnnotation(link: CommunicationEmailLink) {
+    if (link.messageStatus === "sent") {
+      return `Sent through Email${link.sentAt ? ` on ${formatDateTime(link.sentAt)}` : ""}${link.sentActorLabel ? ` by ${link.sentActorLabel}` : ""}`;
+    }
+    if (link.messageStatus === "delivery_uncertain") {
+      return "Delivery outcome uncertain — this message may have been accepted. Do not prepare a duplicate automatically.";
+    }
+    if (link.messageStatus === "failed") return "Linked Email delivery failed";
+    if (link.messageStatus === "cancelled")
+      return "Linked Email workflow cancelled";
+    if (link.messageStatus === "draft") return "Editing in Email";
+    if (link.messageStatus === "ready") return "Ready in Email";
+    return `Email delivery ${link.messageStatus}`;
+  }
+
+  function openLinkedEmail(link: CommunicationEmailLink) {
+    const folder =
+      link.messageStatus === "sent"
+        ? "sent"
+        : link.messageStatus === "ready"
+          ? "ready"
+          : link.messageStatus === "draft"
+            ? "drafts"
+            : "failed";
+    onNavigate(
+      `/operations/email?folder=${folder}&message=${encodeURIComponent(link.messageId)}`,
+    );
   }
 
   async function submitTemplate(event: React.FormEvent) {
@@ -5817,9 +5979,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               )}
               {communicationForm.hasUnsavedRenderEdits && (
                 <div className="ops-warning">
-                  Render your latest changes before copying formatted email.
-                  The preview can show unsaved edits, but clipboard actions use
-                  the latest rendered HTML.
+                  Render your latest changes before copying formatted email. The
+                  preview can show unsaved edits, but clipboard actions use the
+                  latest rendered HTML.
                 </div>
               )}
               {communicationForm.attachmentRequirements.length > 0 && (
@@ -6106,6 +6268,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           selectedCommunication.body,
         )
       : [];
+    const selectedEmailLink = selectedCommunication
+      ? communicationEmailLinks[selectedCommunication.id]
+      : undefined;
 
     return (
       <>
@@ -6263,6 +6428,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       item.subject ?? "",
                       item.body,
                     );
+                    const emailLink = communicationEmailLinks[item.id];
                     return (
                       <button
                         key={item.id}
@@ -6288,6 +6454,17 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                           {formatDateTime(item.occurred_at)}
                         </small>
                         <small>{communicationFollowUpState(item)}</small>
+                        {emailLink && (
+                          <small
+                            className={
+                              emailLink.messageStatus === "delivery_uncertain"
+                                ? "ops-email-link-note ops-email-link-note--uncertain"
+                                : "ops-email-link-note"
+                            }
+                          >
+                            {emailLinkAnnotation(emailLink)}
+                          </small>
+                        )}
                         <small>
                           {placeholders.length > 0
                             ? `Unresolved placeholders: ${placeholders.join(
@@ -6347,6 +6524,52 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                       {communicationPlaceholders.join(", ")}
                     </div>
                   )}
+                  {selectedEmailLink && (
+                    <div
+                      className={
+                        selectedEmailLink.messageStatus === "delivery_uncertain"
+                          ? "ops-email-linked-status ops-email-linked-status--uncertain"
+                          : "ops-email-linked-status"
+                      }
+                    >
+                      <div>
+                        <strong>
+                          {emailLinkAnnotation(selectedEmailLink)}
+                        </strong>
+                        <span>
+                          The source Communication is preserved unchanged. Email
+                          owns the linked delivery state.
+                        </span>
+                      </div>
+                      <div className="ops-inline-actions">
+                        <button
+                          type="button"
+                          className="ops-button"
+                          onClick={() => openLinkedEmail(selectedEmailLink)}
+                        >
+                          {emailLinkLabel(selectedEmailLink)}
+                        </button>
+                        {selectedEmailLink.sentCommunicationId && (
+                          <button
+                            type="button"
+                            className="ops-button"
+                            onClick={() => {
+                              setSelectedCommunicationId(
+                                selectedEmailLink.sentCommunicationId,
+                              );
+                              onNavigate(
+                                `/operations/communications?communication=${encodeURIComponent(
+                                  selectedEmailLink.sentCommunicationId!,
+                                )}`,
+                              );
+                            }}
+                          >
+                            View sent Communication event
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   <div className="ops-communication-reader">
                     <strong>
                       {selectedCommunication.subject || "No subject"}
@@ -6365,6 +6588,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     <div className="ops-muted">{communicationCopyStatus}</div>
                   )}
                   <div className="ops-form-actions">
+                    {canShowOperationsEmailNavigation(capabilities) &&
+                      selectedCommunication.status === "ready" &&
+                      selectedCommunication.direction === "outbound" &&
+                      selectedCommunication.channel === "email" &&
+                      !selectedEmailLink && (
+                        <button
+                          type="button"
+                          className="ops-button ops-button--primary"
+                          onClick={() =>
+                            void openCommunicationInEmail(selectedCommunication)
+                          }
+                        >
+                          Open in Email Editor
+                        </button>
+                      )}
+                    {selectedEmailLink && (
+                      <button
+                        type="button"
+                        className="ops-button"
+                        onClick={() => openLinkedEmail(selectedEmailLink)}
+                      >
+                        {emailLinkLabel(selectedEmailLink)}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="ops-button"
@@ -11276,6 +11523,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       | "home"
       | "businesses"
       | "pipeline"
+      | "email"
       | "reports"
       | "quotes"
       | "work"
@@ -11340,7 +11588,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         <aside className="ops-sidebar">
           <div className="ops-sidebar__title">Operations</div>
           <nav aria-label="Operations sections">
-            {routeItems.map((item) => (
+            {visibleRouteItems.map((item) => (
               <React.Fragment key={item.key}>
                 {renderLink(
                   item.href,
@@ -11354,29 +11602,40 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </nav>
         </aside>
         <main className="ops-main">
-          {activeRoute === "home"
-            ? renderHome()
-            : activeRoute === "businesses"
-              ? businessId
-                ? renderBusinessDetail()
-                : renderBusinessesList()
-              : activeRoute === "pipeline"
-                ? renderPipeline()
-                : activeRoute === "communications"
-                  ? renderCommunicationsPage()
-                  : activeRoute === "tasks"
-                    ? renderTasksPage()
-                    : activeRoute === "reports"
-                      ? renderReportsPage()
-                      : activeRoute === "quotes"
-                        ? renderQuotesPage()
-                        : activeRoute === "work"
-                          ? renderWorkPage()
-                          : activeRoute === "services"
-                            ? renderServicesPage()
-                            : activeRoute === "servicePlans"
-                              ? renderServicePlansPage()
-                              : renderPlaceholder(activeRoute)}
+          {activeRoute === "home" ? (
+            renderHome()
+          ) : activeRoute === "businesses" ? (
+            businessId ? (
+              renderBusinessDetail()
+            ) : (
+              renderBusinessesList()
+            )
+          ) : activeRoute === "pipeline" ? (
+            renderPipeline()
+          ) : activeRoute === "communications" ? (
+            renderCommunicationsPage()
+          ) : activeRoute === "email" ? (
+            <OperationsEmailWorkspace
+              apiBase={apiBase}
+              apiFetch={apiFetch}
+              currentSearch={currentSearch}
+              onNavigate={onNavigate}
+            />
+          ) : activeRoute === "tasks" ? (
+            renderTasksPage()
+          ) : activeRoute === "reports" ? (
+            renderReportsPage()
+          ) : activeRoute === "quotes" ? (
+            renderQuotesPage()
+          ) : activeRoute === "work" ? (
+            renderWorkPage()
+          ) : activeRoute === "services" ? (
+            renderServicesPage()
+          ) : activeRoute === "servicePlans" ? (
+            renderServicePlansPage()
+          ) : (
+            renderPlaceholder(activeRoute)
+          )}
         </main>
       </div>
     </div>
@@ -11389,6 +11648,34 @@ const operationsStyles = `
     background: var(--bg);
     color: var(--text);
     padding: 16px;
+  }
+  .ops-email-linked-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+    border-radius: 10px;
+    background: var(--accent-soft);
+  }
+  .ops-email-linked-status > div:first-child {
+    display: grid;
+    gap: 3px;
+  }
+  .ops-email-linked-status span,
+  .ops-email-link-note {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .ops-email-linked-status--uncertain {
+    border-color: #cf7b55;
+    background: #fff0e7;
+    color: #7e301d;
+  }
+  .ops-email-link-note--uncertain {
+    color: #a13b25 !important;
+    font-weight: 750;
   }
   .ops-page--embedded {
     min-height: auto;

@@ -1418,18 +1418,89 @@ export async function markOperationsCommunicationSent(
     values.push(input.followUpAt);
     sets.push(`follow_up_at = $${values.length}`);
   }
-  const res = await client.query<OperationsCommunicationRow>(
+  const res = await client.query<
+    OperationsCommunicationRow & {
+      linked_email_id: string | null;
+      linked_email_workspace_id: string | null;
+      linked_email_previous_status: string | null;
+      linked_email_cancelled: boolean;
+    }
+  >(
     `
-      UPDATE operations_communications
-      SET ${sets.join(", ")}
-      WHERE id = $1
-        AND business_id = $2
-      RETURNING *
+      WITH linked_email AS MATERIALIZED (
+        SELECT id, workspace_id, status
+        FROM operations_email_messages
+        WHERE source_communication_id = $1
+        FOR UPDATE
+      ), cancelled_email AS (
+        UPDATE operations_email_messages message
+        SET status = 'cancelled',
+            cancelled_at = now(),
+            cancelled_by_user_id = $${values.length + 1},
+            cancellation_reason = 'manual_workflow_completed',
+            revision = revision + 1,
+            updated_at = now()
+        FROM linked_email
+        WHERE message.id = linked_email.id
+          AND linked_email.status IN ('draft', 'ready')
+        RETURNING message.id
+      ), updated_communication AS (
+        UPDATE operations_communications
+        SET ${sets.join(", ")}
+        WHERE id = $1
+          AND business_id = $2
+          AND NOT EXISTS (
+            SELECT 1
+            FROM linked_email
+            WHERE status IN ('queued', 'sending', 'sent', 'delivery_uncertain')
+          )
+        RETURNING *
+      )
+      SELECT
+        updated_communication.*,
+        linked_email.id AS linked_email_id,
+        linked_email.workspace_id AS linked_email_workspace_id,
+        linked_email.status AS linked_email_previous_status,
+        cancelled_email.id IS NOT NULL AS linked_email_cancelled
+      FROM updated_communication
+      LEFT JOIN linked_email ON true
+      LEFT JOIN cancelled_email ON cancelled_email.id = linked_email.id
     `,
-    values,
+    [...values, actor.id],
   );
-  const communication = res.rows[0] ?? null;
-  if (!communication) return null;
+  const result = res.rows[0] ?? null;
+  if (!result) {
+    const protectedEmail = await client.query<{
+      id: string;
+      status: string;
+    }>(
+      `
+        SELECT message.id, message.status
+        FROM operations_email_messages message
+        JOIN operations_communications communication
+          ON communication.id = message.source_communication_id
+        WHERE message.source_communication_id = $1
+          AND communication.business_id = $2
+          AND message.status IN ('queued', 'sending', 'sent', 'delivery_uncertain')
+      `,
+      [communicationId, businessId],
+    );
+    if (protectedEmail.rows[0]) {
+      return {
+        outcome: "email_protected_state" as const,
+        messageId: protectedEmail.rows[0].id,
+        status: protectedEmail.rows[0].status,
+      };
+    }
+    return null;
+  }
+  const {
+    linked_email_id: linkedEmailId,
+    linked_email_workspace_id: linkedEmailWorkspaceId,
+    linked_email_previous_status: linkedEmailPreviousStatus,
+    linked_email_cancelled: linkedEmailCancelled,
+    ...communication
+  } = result;
   await client.query(
     `
       UPDATE operations_businesses
@@ -1463,8 +1534,25 @@ export async function markOperationsCommunicationSent(
       hasFollowUp: communication.follow_up_at != null,
       hasSubjectChange: input.subject !== undefined,
       hasBodyChange: input.body !== undefined,
+      linkedEmailId,
+      linkedEmailWorkspaceId,
+      linkedEmailPreviousStatus,
+      linkedEmailCancelled,
     },
   });
+  if (linkedEmailCancelled && linkedEmailId) {
+    await recordAdminAuditLog(actor, {
+      action: "operations.email.cancel_for_manual_workflow",
+      targetType: "operations_email_message",
+      targetId: linkedEmailId,
+      metadata: {
+        businessId,
+        workspaceId: linkedEmailWorkspaceId,
+        sourceCommunicationId: communicationId,
+        previousStatus: linkedEmailPreviousStatus,
+      },
+    });
+  }
   return communication;
 }
 

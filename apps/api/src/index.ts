@@ -123,6 +123,7 @@ import {
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { mountAdminRoutes } from "./routes/admin";
 import { mountOperationsRoutes } from "./routes/operations";
+import { mountOperationsEmailRoutes } from "./routes/operationsEmail";
 import { serializeScanRun } from "./serializers";
 import {
   isSampleSiteUrl,
@@ -144,6 +145,7 @@ import {
   isInternalOnlyMode,
   isTrustedWorkerNotifyRequest,
 } from "./internalAccess";
+import { getOperationsCapabilities } from "./operationsAccess";
 import {
   assertSecurityConfig,
   getAllowedCorsOrigins,
@@ -1019,7 +1021,7 @@ app.get("/public/config", (_req, res) => {
 app.use("/public/reports", publicReportLimiter);
 app.use(authMiddleware);
 
-function getAuthenticatedUserPayload(user: {
+async function getAuthenticatedUserPayload(user: {
   id: string;
   email: string;
   displayName?: string | null;
@@ -1034,14 +1036,20 @@ function getAuthenticatedUserPayload(user: {
     name: displayName,
     isAdmin: user.isAdmin === true,
     isInternalAdmin: isInternalOnlyMode() && isInternalAdminEmail(user.email),
+    capabilities: await getOperationsCapabilities(user),
   };
 }
 
-app.get("/me", (req, res) => {
+app.get("/me", async (req, res) => {
   if (!req.user) {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
-  return res.json(getAuthenticatedUserPayload(req.user));
+  try {
+    return res.json(await getAuthenticatedUserPayload(req.user));
+  } catch (err: unknown) {
+    console.error("Error in GET /me", err);
+    return sendInternalError(res, "Failed to load account capabilities", err);
+  }
 });
 
 app.use(internalOnlyGuard);
@@ -1049,16 +1057,22 @@ app.use(authenticatedWriteLimiter);
 
 mountEventStream(app);
 mountScanRunEvents(app);
+mountOperationsEmailRoutes(app);
 mountOperationsRoutes(app);
 mountAdminRoutes(app);
 
-app.get("/account/profile", (req, res) => {
+app.get("/account/profile", async (req, res) => {
   if (!req.user) {
     return sendApiError(res, 401, "unauthorized", "Unauthorized");
   }
-  return res.json({
-    user: getAuthenticatedUserPayload(req.user),
-  });
+  try {
+    return res.json({
+      user: await getAuthenticatedUserPayload(req.user),
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /account/profile", err);
+    return sendInternalError(res, "Failed to load profile", err);
+  }
 });
 
 app.patch("/account/profile", async (req, res) => {
@@ -1116,7 +1130,7 @@ app.patch("/account/profile", async (req, res) => {
     if (!user) return sendNotFound(res);
     return res.json({
       user: {
-        ...getAuthenticatedUserPayload(user),
+        ...(await getAuthenticatedUserPayload(user)),
         isInternalAdmin:
           isInternalOnlyMode() && isInternalAdminEmail(user.email),
       },
