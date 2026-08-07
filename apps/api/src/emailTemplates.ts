@@ -94,7 +94,8 @@ export function isMissingEmailTemplateRelationError(error: unknown): boolean {
     return true;
   }
 
-  const message = typeof candidate.message === "string" ? candidate.message : "";
+  const message =
+    typeof candidate.message === "string" ? candidate.message : "";
   return message.includes('relation "email_templates" does not exist');
 }
 
@@ -155,7 +156,9 @@ export async function renderTransactionalEmail(
     }
   } catch (err) {
     if (isMissingEmailTemplateRelationError(err)) {
-      console.warn(`Email templates table not found; using defaults for ${key}`);
+      console.warn(
+        `Email templates table not found; using defaults for ${key}`,
+      );
     } else {
       console.error(`Email template lookup failed for ${key}`, err);
       throw err;

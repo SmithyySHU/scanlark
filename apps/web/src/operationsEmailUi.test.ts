@@ -231,10 +231,7 @@ test("final Communication link is conditional on its linked ID", () => {
     communicationsSource.includes("selectedEmailLink.sentCommunicationId &&"),
     true,
   );
-  assert.equal(
-    communicationsSource.includes("View final Communication"),
-    true,
-  );
+  assert.equal(communicationsSource.includes("View final Communication"), true);
 });
 
 test("manual Communications tools remain alongside Email actions", () => {

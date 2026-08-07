@@ -59,7 +59,8 @@ test("unexpected template lookup errors are not silently swallowed", async () =>
           reportUrl: "https://scanlark.app/report?scanRunId=run-1",
           scanRunId: "run-1",
           dashboardUrl: "https://scanlark.app",
-          unsubscribeOrPreferencesUrl: "https://scanlark.app/dashboard/settings",
+          unsubscribeOrPreferencesUrl:
+            "https://scanlark.app/dashboard/settings",
           startedAt: "2026-08-02T00:00:00Z",
           completedAt: "2026-08-02T00:01:00Z",
           errorMessage: "timeout",

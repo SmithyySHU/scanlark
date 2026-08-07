@@ -132,8 +132,7 @@ export async function authMiddleware(
       displayName: user.displayName,
       name: user.displayName ?? undefined,
       isAdmin: isAdminEmail(user.email),
-      isInternalAdmin:
-        isInternalOnlyMode() && isInternalAdminEmail(user.email),
+      isInternalAdmin: isInternalOnlyMode() && isInternalAdminEmail(user.email),
     };
     return next();
   } catch (err) {
