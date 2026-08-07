@@ -59,6 +59,7 @@ export type OperationsReportRow = {
   status: OperationsReportStatus;
   report_type: OperationsReportType;
   version_number: number;
+  supersedes_report_id?: string | null;
   executive_summary: string | null;
   overall_summary: string | null;
   main_strengths: string | null;
@@ -191,6 +192,16 @@ export type OperationsReportActivity = {
   created_at: string;
 };
 
+export type OperationsReportRevisionHistory = {
+  id: string;
+  supersedes_report_id: string | null;
+  version_number: number;
+  status: OperationsReportStatus;
+  title: string;
+  sent_at: string | null;
+  created_at: string;
+};
+
 export type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFinding[];
@@ -199,6 +210,7 @@ export type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
   activity: OperationsReportActivity[];
+  revisionHistory?: OperationsReportRevisionHistory[];
 };
 
 export type ClientReportPayload = {

@@ -51,9 +51,9 @@ router package.
   `INTERNAL_ONLY_MODE=true`.
 - `/learn` and `/learn/:slug`: Scanlark Learn index and article pages.
 - `/operations`, `/operations/businesses`, `/operations/reports`,
-  `/operations/quotes`, `/operations/work`, `/operations/services`, and
-  `/operations/service-plans`: internal Operations workspace routes for
-  approved administrators only.
+  `/operations/quotes`, `/operations/work`, `/operations/services`,
+  `/operations/service-plans`, and `/operations/email`: internal Operations
+  workspace routes for approved administrators only.
 
 Compatibility redirects/normalization exist for `/app...` and
 `/shared-results/:token`.
@@ -192,13 +192,9 @@ The API listens on `PORT` or `3001`. The web dev server is Vite, normally
 Run before merging alpha changes:
 
 ```bash
-npm run typecheck
-npm run -w @scanlark/db typecheck
-npm run -w @scanlark/crawler typecheck
-npm run -w @scanlark/api typecheck
-npm run -w @scanlark/worker typecheck
-npm run -w @scanlark/web typecheck
-npm run -w @scanlark/web build
+npm --workspaces run typecheck --if-present
+npm --workspaces run test --if-present
+npm --workspaces run build --if-present
 npm run format:check
 git diff --check
 ```
@@ -233,7 +229,9 @@ database and a deployed environment.
 Known limits:
 
 - No managed production auth provider yet; local bypass is dev-only.
-- No automated test suite beyond TypeScript/build/format checks.
+- CI provisions a disposable PostgreSQL database, applies migrations, and runs
+  each workspace's test script. Historical-evidence and workspace-isolation
+  contract scripts are documented in [docs/DEV.md](docs/DEV.md).
 - The frontend is a large single file, so feature discovery depends on the
   codebase map.
 - Public crawling intentionally rejects localhost/private IPs and performs

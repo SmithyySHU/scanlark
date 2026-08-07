@@ -1,6 +1,9 @@
 import "express-serve-static-core";
 import type { IronSession } from "iron-session";
-import type { OperationsCapabilities } from "./operationsAccess";
+import type {
+  OperationsCapabilities,
+  OperationsRequestContext,
+} from "./operationsAccess";
 
 declare module "express-serve-static-core" {
   interface Request {
@@ -14,5 +17,6 @@ declare module "express-serve-static-core" {
       isInternalAdmin?: boolean;
     };
     operationsCapabilities?: OperationsCapabilities;
+    operationsContext?: OperationsRequestContext;
   }
 }

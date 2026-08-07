@@ -5,13 +5,16 @@ import { isOperationsEmailModuleEnabled } from "../../../packages/db/src/operati
 import {
   createRequireOperationsEmailAccess,
   deriveOperationsCapabilities,
+  requireOperationsMutation,
   type OperationsCapabilities,
 } from "./operationsAccess";
 
 const enabledAuthorised: OperationsCapabilities = {
   canAccessOperations: true,
+  canMutateOperations: true,
   canUseOperationsEmail: true,
   operationsEmailEnabled: true,
+  workspaceSelectionRequired: false,
 };
 
 function capabilitiesFor(
@@ -20,20 +23,18 @@ function capabilitiesFor(
     active?: boolean;
     enabled?: boolean;
     internalAccessAllowed?: boolean;
-    existingAdmin?: boolean;
   } = {},
 ) {
   return deriveOperationsCapabilities({
     memberships: role
       ? [
           {
-            workspace_code: "scanlark-operations",
+            workspace_id: "00000000-0000-4000-8000-000000000001",
             role,
             is_active: options.active ?? true,
           },
         ]
       : [],
-    hasExistingOperationsAdminAccess: options.existingAdmin ?? false,
     internalAccessAllowed: options.internalAccessAllowed ?? true,
     operationsEmailEnabled: options.enabled ?? true,
   });
@@ -145,8 +146,10 @@ test("internal-only access remains an additional capability requirement", () => 
   });
   assert.deepEqual(capabilities, {
     canAccessOperations: false,
+    canMutateOperations: false,
     canUseOperationsEmail: false,
     operationsEmailEnabled: true,
+    workspaceSelectionRequired: false,
   });
 });
 
@@ -154,4 +157,50 @@ test("enabling Email does not grant an ordinary SaaS user Operations access", ()
   const capabilities = capabilitiesFor(null, { enabled: true });
   assert.equal(capabilities.canAccessOperations, false);
   assert.equal(capabilities.canUseOperationsEmail, false);
+});
+
+test("multiple active memberships fail closed and request selection", () => {
+  const capabilities = deriveOperationsCapabilities({
+    memberships: [
+      { workspace_id: "workspace-a", role: "owner", is_active: true },
+      { workspace_id: "workspace-b", role: "viewer", is_active: true },
+    ],
+    internalAccessAllowed: true,
+    operationsEmailEnabled: true,
+  });
+  assert.deepEqual(capabilities, {
+    canAccessOperations: false,
+    canMutateOperations: false,
+    canUseOperationsEmail: false,
+    operationsEmailEnabled: true,
+    workspaceSelectionRequired: true,
+  });
+});
+
+test("viewer mutation guard returns the stable read-only error", () => {
+  const req = {
+    operationsContext: { canMutateOperations: false },
+  } as Request;
+  let status = 0;
+  let body: unknown;
+  let nextCalled = false;
+  const res = {
+    status(value: number) {
+      status = value;
+      return this;
+    },
+    json(value: unknown) {
+      body = value;
+      return this;
+    },
+  } as unknown as Response;
+  requireOperationsMutation(req, res, () => {
+    nextCalled = true;
+  });
+  assert.equal(status, 403);
+  assert.deepEqual(body, {
+    error: "operations_write_required",
+    message: "Your Operations access is read-only.",
+  });
+  assert.equal(nextCalled, false);
 });

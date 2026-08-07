@@ -1,33 +1,46 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import {
+  getInternalWorkspaceById,
   getUserInternalWorkspaceMemberships,
-  SCANLARK_OPERATIONS_WORKSPACE_CODE,
   type InternalWorkspaceMembershipRow,
   type InternalWorkspaceRole,
+  type InternalWorkspaceRow,
 } from "../../../packages/db/src/internalWorkspaces";
 import { isOperationsEmailModuleEnabled } from "../../../packages/db/src/operationsEmailConfig";
-import { isAdminEmail } from "./adminAccess";
 import { isInternalAdminEmail, isInternalOnlyMode } from "./internalAccess";
 
 type Environment = Record<string, string | undefined>;
 
 export type OperationsCapabilities = {
   canAccessOperations: boolean;
+  canMutateOperations: boolean;
   canUseOperationsEmail: boolean;
   operationsEmailEnabled: boolean;
+  workspaceSelectionRequired: boolean;
+};
+
+export type OperationsRequestContext = {
+  actor: { id: string; email: string };
+  workspace: InternalWorkspaceRow;
+  membership: InternalWorkspaceMembershipRow;
+  role: InternalWorkspaceRole;
+  canReadOperations: true;
+  canMutateOperations: boolean;
+  canUseOperationsEmail: boolean;
+  operationsEmailEnabled: boolean;
+  canManageMembers: boolean;
 };
 
 type CapabilityInputs = {
   memberships: Pick<
     InternalWorkspaceMembershipRow,
-    "workspace_code" | "role" | "is_active"
+    "workspace_id" | "role" | "is_active"
   >[];
-  hasExistingOperationsAdminAccess: boolean;
   internalAccessAllowed: boolean;
   operationsEmailEnabled: boolean;
 };
 
-const OPERATIONS_EMAIL_ROLES = new Set<InternalWorkspaceRole>([
+const OPERATIONS_WRITE_ROLES = new Set<InternalWorkspaceRole>([
   "owner",
   "operations_admin",
   "operations_member",
@@ -35,26 +48,48 @@ const OPERATIONS_EMAIL_ROLES = new Set<InternalWorkspaceRole>([
 
 export function deriveOperationsCapabilities({
   memberships,
-  hasExistingOperationsAdminAccess,
   internalAccessAllowed,
   operationsEmailEnabled,
 }: CapabilityInputs): OperationsCapabilities {
-  const operationsMembership = memberships.find(
-    (membership) =>
-      membership.is_active &&
-      membership.workspace_code === SCANLARK_OPERATIONS_WORKSPACE_CODE,
+  const activeMemberships = memberships.filter(
+    (membership) => membership.is_active,
   );
-  const hasOperationsMembership = operationsMembership !== undefined;
-  const hasOperationsEmailRole =
-    operationsMembership !== undefined &&
-    OPERATIONS_EMAIL_ROLES.has(operationsMembership.role);
+  const membership =
+    activeMemberships.length === 1 ? activeMemberships[0] : null;
+  const canMutate =
+    membership !== null && OPERATIONS_WRITE_ROLES.has(membership.role);
 
   return {
-    canAccessOperations:
-      internalAccessAllowed &&
-      (hasOperationsMembership || hasExistingOperationsAdminAccess),
-    canUseOperationsEmail: internalAccessAllowed && hasOperationsEmailRole,
+    canAccessOperations: internalAccessAllowed && membership !== null,
+    canMutateOperations: internalAccessAllowed && canMutate,
+    canUseOperationsEmail: internalAccessAllowed && canMutate,
     operationsEmailEnabled,
+    workspaceSelectionRequired:
+      internalAccessAllowed && activeMemberships.length > 1,
+  };
+}
+
+async function resolveOperationsAccess(
+  user: { id: string; email: string },
+  env: Environment = process.env,
+) {
+  const memberships = await getUserInternalWorkspaceMemberships(user.id);
+  const internalAccessAllowed =
+    !isInternalOnlyMode(env) || isInternalAdminEmail(user.email, env);
+  const operationsEmailEnabled = isOperationsEmailModuleEnabled(env);
+  const capabilities = deriveOperationsCapabilities({
+    memberships,
+    internalAccessAllowed,
+    operationsEmailEnabled,
+  });
+  const activeMemberships = memberships.filter(
+    (membership) => membership.is_active,
+  );
+  return {
+    memberships,
+    activeMemberships,
+    capabilities,
+    internalAccessAllowed,
   };
 }
 
@@ -62,16 +97,7 @@ export async function getOperationsCapabilities(
   user: { id: string; email: string },
   env: Environment = process.env,
 ): Promise<OperationsCapabilities> {
-  const memberships = await getUserInternalWorkspaceMemberships(user.id);
-  const internalAccessAllowed =
-    !isInternalOnlyMode(env) || isInternalAdminEmail(user.email, env);
-
-  return deriveOperationsCapabilities({
-    memberships,
-    hasExistingOperationsAdminAccess: isAdminEmail(user.email, env),
-    internalAccessAllowed,
-    operationsEmailEnabled: isOperationsEmailModuleEnabled(env),
-  });
+  return (await resolveOperationsAccess(user, env)).capabilities;
 }
 
 function sendAccessError(
@@ -83,7 +109,20 @@ function sendAccessError(
   return res.status(status).json({ error, message });
 }
 
-export const requireOperationsWorkspaceMember: RequestHandler = async (
+function hasClientWorkspaceSelection(req: Request) {
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>)
+      : null;
+  return (
+    req.get("x-operations-workspace-id") !== undefined ||
+    body?.workspaceId !== undefined ||
+    body?.internalWorkspaceId !== undefined ||
+    body?.internal_workspace_id !== undefined
+  );
+}
+
+export const requireOperationsContext: RequestHandler = async (
   req,
   res,
   next,
@@ -92,11 +131,23 @@ export const requireOperationsWorkspaceMember: RequestHandler = async (
     sendAccessError(res, 401, "unauthorized", "Unauthorized");
     return;
   }
+  if (hasClientWorkspaceSelection(req)) {
+    sendAccessError(
+      res,
+      400,
+      "workspace_is_server_resolved",
+      "Operations workspace is resolved by the server",
+    );
+    return;
+  }
 
   try {
-    const capabilities = await getOperationsCapabilities(req.user);
-    req.operationsCapabilities = capabilities;
-    if (!capabilities.canAccessOperations) {
+    const resolution = await resolveOperationsAccess(req.user);
+    req.operationsCapabilities = resolution.capabilities;
+    if (
+      !resolution.internalAccessAllowed ||
+      resolution.activeMemberships.length === 0
+    ) {
       sendAccessError(
         res,
         403,
@@ -105,6 +156,38 @@ export const requireOperationsWorkspaceMember: RequestHandler = async (
       );
       return;
     }
+    if (resolution.activeMemberships.length > 1) {
+      sendAccessError(
+        res,
+        409,
+        "operations_workspace_selection_required",
+        "Resolve multiple active Operations workspace memberships before continuing",
+      );
+      return;
+    }
+
+    const membership = resolution.activeMemberships[0];
+    const workspace = await getInternalWorkspaceById(membership.workspace_id);
+    if (!workspace) {
+      sendAccessError(
+        res,
+        403,
+        "operations_workspace_required",
+        "Operations workspace access required",
+      );
+      return;
+    }
+    req.operationsContext = {
+      actor: { id: req.user.id, email: req.user.email },
+      workspace,
+      membership,
+      role: membership.role,
+      canReadOperations: true,
+      canMutateOperations: resolution.capabilities.canMutateOperations,
+      canUseOperationsEmail: resolution.capabilities.canUseOperationsEmail,
+      operationsEmailEnabled: resolution.capabilities.operationsEmailEnabled,
+      canManageMembers: membership.role === "owner",
+    };
     next();
   } catch (error) {
     console.error("Operations workspace access check failed", error);
@@ -116,6 +199,34 @@ export const requireOperationsWorkspaceMember: RequestHandler = async (
     );
   }
 };
+
+export const requireOperationsMutation: RequestHandler = (req, res, next) => {
+  if (!req.operationsContext?.canMutateOperations) {
+    sendAccessError(
+      res,
+      403,
+      "operations_write_required",
+      "Your Operations access is read-only.",
+    );
+    return;
+  }
+  next();
+};
+
+export const requireOperationsOwner: RequestHandler = (req, res, next) => {
+  if (!req.operationsContext?.canManageMembers) {
+    sendAccessError(
+      res,
+      403,
+      "operations_workspace_owner_required",
+      "Operations workspace owner access required",
+    );
+    return;
+  }
+  next();
+};
+
+export const requireOperationsWorkspaceMember = requireOperationsContext;
 
 type CapabilityResolver = (user: {
   id: string;
@@ -133,7 +244,10 @@ export function createRequireOperationsEmailAccess(
 
     try {
       const capabilities =
-        req.operationsCapabilities ?? (await resolveCapabilities(req.user));
+        req.operationsContext !== undefined
+          ? req.operationsCapabilities!
+          : (req.operationsCapabilities ??
+            (await resolveCapabilities(req.user)));
       req.operationsCapabilities = capabilities;
 
       if (

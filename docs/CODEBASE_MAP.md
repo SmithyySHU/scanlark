@@ -44,10 +44,13 @@ Use this as the first stop for "where do I change X?"
   `markAllNotificationsRead`.
 - Print/PDF report behavior: `apps/web/src/app.tsx`, `handlePrintReport`,
   `getReportAutoPrintFromLocation`, and `@media print` CSS blocks.
+- Internal Operations shell and navigation: `apps/web/src/components/OperationsPage.tsx`.
+- Operations report editor: `apps/web/src/components/operations/reports/`.
+- Operations Email editor: `apps/web/src/components/operations/email/`.
 
 ## API Map
 
-Most REST routes are currently in `apps/api/src/index.ts`.
+Most public and dashboard REST routes are in `apps/api/src/index.ts`.
 
 - Auth/session setup: `apps/api/src/auth.ts`,
   `apps/api/src/authMiddleware.ts`, `apps/api/src/routes/auth.ts`.
@@ -72,6 +75,9 @@ Most REST routes are currently in `apps/api/src/index.ts`.
 - Scan-run SSE: `apps/api/src/routes/scanRunEvents.ts`.
 - Email notification assembly: `apps/api/src/notifyOnScanComplete.ts`.
 - SMTP/outbox sending: `apps/api/src/email.ts`.
+- Operations API: `apps/api/src/routes/operations.ts`; Operations Email API:
+  `apps/api/src/routes/operationsEmail.ts`; internal workspace administration:
+  `apps/api/src/routes/admin.ts`.
 
 ## Worker And Background Jobs
 
@@ -130,6 +136,14 @@ Most REST routes are currently in `apps/api/src/index.ts`.
 - Report shares: `reportShares.ts`.
 - SSE event emission: `events.ts`.
 - Auth users: `auth.ts`.
+- Operations CRM and Communications: `operationsCrm.ts`,
+  `operationsCommunications.ts`.
+- Operations reports and quotes/work: `operationsReports.ts`,
+  `operationsQuotesWork.ts`.
+- Operations services and Email: `operationsServices.ts`, `operationsEmail.ts`,
+  `operationsEmailPreparation.ts`, and `operationsEmailFinalisation.ts`.
+- Workspace-resource checks and historical-evidence helpers:
+  `operationsScope.ts` and `operationsEvidence.ts`.
 
 ## Config And Scripts
 
@@ -138,6 +152,8 @@ Most REST routes are currently in `apps/api/src/index.ts`.
 - Local env template: `.env.example`.
 - TypeScript path aliases: `tsconfig.base.json`.
 - Web build config: `apps/web/vite.config.ts`.
+- Disposable migration and contract checks: `scripts/run-migrations.sh` and
+  `scripts/test/`.
 
 ## Common Change Targets
 

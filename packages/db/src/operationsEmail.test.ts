@@ -41,6 +41,7 @@ import {
   type OperationsEmailMessageRow,
 } from "./operationsEmail";
 import { markOperationsCommunicationSent } from "./operationsCommunications";
+import { createRevisedOperationsQuote } from "./operationsQuotesWork";
 import {
   claimDueOperationsEmailCrmFinalisation,
   claimOperationsEmailCrmFinalisationForMessage,
@@ -59,6 +60,9 @@ import {
 } from "./operationsEmailPreparation";
 
 const db = new Client({ connectionString: DATABASE_URL });
+const disposableDatabase = /test|audit|verify/i.test(
+  new URL(DATABASE_URL).pathname.slice(1),
+);
 const testKey = randomUUID();
 let actorUserId = "";
 let workspaceId = "";
@@ -87,56 +91,82 @@ before(async () => {
   );
   communicationsBeforeMigration = Number(beforeCount.rows[0].count);
 
-  const foundationMigration = readFileSync(
-    new URL(
-      "../migrations/045_operations_email_foundation.sql",
-      import.meta.url,
-    ),
-    "utf8",
+  const evidenceGuardsInstalled = await db.query<{ installed: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'operations_reports_historical_evidence_check'
+     ) AS installed`,
   );
-  await db.query("BEGIN");
-  try {
-    await db.query(foundationMigration);
-    await db.query(
-      readFileSync(
-        new URL(
-          "../migrations/046_operations_email_content_preparation.sql",
-          import.meta.url,
-        ),
-        "utf8",
+  if (!evidenceGuardsInstalled.rows[0]?.installed) {
+    const foundationMigration = readFileSync(
+      new URL(
+        "../migrations/045_operations_email_foundation.sql",
+        import.meta.url,
       ),
+      "utf8",
     );
-    await db.query(
-      readFileSync(
-        new URL(
-          "../migrations/047_operations_email_smtp_queue.sql",
-          import.meta.url,
+    await db.query("BEGIN");
+    try {
+      await db.query(foundationMigration);
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/046_operations_email_content_preparation.sql",
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
-    await db.query(
-      readFileSync(
-        new URL(
-          "../migrations/048_operations_email_standalone_drafts.sql",
-          import.meta.url,
+      );
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/047_operations_email_smtp_queue.sql",
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
-    await db.query(
-      readFileSync(
-        new URL(
-          "../migrations/049_operations_email_crm_finalisation.sql",
-          import.meta.url,
+      );
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/048_operations_email_standalone_drafts.sql",
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
-    await db.query("COMMIT");
-  } catch (error) {
-    await db.query("ROLLBACK");
-    throw error;
+      );
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/049_operations_email_crm_finalisation.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/052_operations_evidence_concurrency.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      await db.query(
+        readFileSync(
+          new URL(
+            "../migrations/053_operations_quote_revisions.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      await db.query("COMMIT");
+    } catch (error) {
+      await db.query("ROLLBACK");
+      throw error;
+    }
   }
 
   const afterCount = await db.query<{ count: string }>(
@@ -203,18 +233,23 @@ before(async () => {
   const quote = await db.query<{ id: string }>(
     `
       INSERT INTO operations_quotes (
-        business_id, contact_id, quote_number, title, created_by_user_id
+        business_id, contact_id, revision_series_id, revision_number,
+        quote_number, title, created_by_user_id
       )
-      VALUES ($1, $2, $3, 'Checkpoint 2 quote', $4)
+      VALUES ($1, $2, $3, $4, $5, 'Checkpoint 2 quote', $6)
       RETURNING id
     `,
-    [businessId, contactId, `SL-TEST-${testKey}`, actorUserId],
+    [businessId, contactId, randomUUID(), 1, `SL-TEST-${testKey}`, actorUserId],
   );
   quoteId = quote.rows[0].id;
 });
 
 after(async () => {
   await closeConnection();
+  if (disposableDatabase) {
+    await db.end();
+    return;
+  }
   if (workspaceId && otherWorkspaceId) {
     const workspaceIds = [workspaceId, otherWorkspaceId];
     await db.query(
@@ -428,6 +463,153 @@ async function deferAllClaims() {
 
 test("migration 045 applies cleanly and leaves Communications unchanged", () => {
   assert.equal(communicationsAfterMigration, communicationsBeforeMigration);
+});
+
+test("historical quotes create independent linear revisions without changing the source", async () => {
+  const seriesId = randomUUID();
+  const sourceResult = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_quotes (
+        business_id, contact_id, revision_series_id, revision_number,
+        quote_number, title, status, currency, subtotal_minor, total_minor,
+        sent_at, frozen_render_json, frozen_at, created_by_user_id
+      )
+      VALUES ($1, $2, $3, 1, $4, 'Historical source', 'draft', 'GBP', 1000, 1000,
+              now(), '{"source":"frozen"}'::jsonb, now(), $5)
+      RETURNING id
+    `,
+    [businessId, contactId, seriesId, `SL-REV-${testKey}`, actorUserId],
+  );
+  const sourceId = sourceResult.rows[0].id;
+  let revisionId: string | undefined;
+  try {
+    await db.query(
+      `
+        INSERT INTO operations_quote_items (
+          quote_id, title, quantity, unit_price_minor, line_total_minor,
+          display_order
+        )
+        VALUES ($1, 'Historical item', 1, 1000, 1000, 0)
+      `,
+      [sourceId],
+    );
+    await db.query(
+      `
+        INSERT INTO operations_quote_access_requirements (
+          quote_id, description, display_order
+        )
+        VALUES ($1, 'Historical access', 0)
+      `,
+      [sourceId],
+    );
+    await db.query(
+      `UPDATE operations_quotes SET status = 'sent' WHERE id = $1`,
+      [sourceId],
+    );
+    const result = await createRevisedOperationsQuote(
+      workspaceId,
+      { id: actorUserId, email: `checkpoint-2-${testKey}@scanlark.test` },
+      sourceId,
+      { expectedRevision: 1, reason: "Changed terms" },
+    );
+    assert.notEqual(typeof result, "string");
+    if (typeof result === "string") assert.fail(result);
+    assert.equal(result.quote.status, "draft");
+    assert.equal(result.quote.revision_series_id, seriesId);
+    assert.equal(result.quote.revision_number, 2);
+    assert.equal(result.quote.supersedes_quote_id, sourceId);
+    assert.equal(result.quote.sent_at, null);
+    assert.equal(result.quote.frozen_render_json, null);
+    assert.equal(result.items.length, 1);
+    assert.equal(result.accessRequirements.length, 1);
+    revisionId = result.quote.id;
+    assert.equal(
+      await createRevisedOperationsQuote(
+        workspaceId,
+        { id: actorUserId, email: `checkpoint-2-${testKey}@scanlark.test` },
+        sourceId,
+        { expectedRevision: 1 },
+      ),
+      "quote_revision_not_latest",
+    );
+    const source = await db.query<{
+      status: string;
+      sent_at: Date | null;
+      frozen_render_json: unknown;
+      revision_number: number;
+    }>(
+      `SELECT status, sent_at, frozen_render_json, revision_number FROM operations_quotes WHERE id = $1`,
+      [sourceId],
+    );
+    assert.equal(source.rows[0].status, "sent");
+    assert.ok(source.rows[0].sent_at);
+    assert.deepEqual(source.rows[0].frozen_render_json, { source: "frozen" });
+    assert.equal(source.rows[0].revision_number, 1);
+    const history = await db.query<{ id: string; revision_number: number }>(
+      `SELECT id, revision_number FROM operations_quotes WHERE revision_series_id = $1 ORDER BY revision_number`,
+      [seriesId],
+    );
+    assert.deepEqual(history.rows, [
+      { id: sourceId, revision_number: 1 },
+      { id: revisionId, revision_number: 2 },
+    ]);
+  } finally {
+    if (!disposableDatabase) {
+      if (revisionId)
+        await db.query(`DELETE FROM operations_quotes WHERE id = $1`, [
+          revisionId,
+        ]);
+      await db.query(`DELETE FROM operations_quotes WHERE id = $1`, [sourceId]);
+    }
+  }
+});
+
+test("concurrent revision requests produce one next revision", async () => {
+  const sourceResult = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_quotes (
+        business_id, contact_id, revision_series_id, revision_number,
+        quote_number, title, status, sent_at, frozen_render_json, frozen_at,
+        created_by_user_id
+      )
+      VALUES ($1, $2, $3, 1, $4, 'Concurrent source', 'sent', now(), '{}', now(), $5)
+      RETURNING id
+    `,
+    [businessId, contactId, randomUUID(), `SL-CON-${testKey}`, actorUserId],
+  );
+  const sourceId = sourceResult.rows[0].id;
+  const actor = {
+    id: actorUserId,
+    email: `checkpoint-2-${testKey}@scanlark.test`,
+  };
+  try {
+    const results = await Promise.all([
+      createRevisedOperationsQuote(workspaceId, actor, sourceId),
+      createRevisedOperationsQuote(workspaceId, actor, sourceId),
+    ]);
+    assert.equal(
+      results.filter((result) => typeof result !== "string").length,
+      1,
+    );
+    assert.equal(
+      results.filter((result) => result === "quote_revision_not_latest").length,
+      1,
+    );
+    const revisions = await db.query<{ id: string; revision_number: number }>(
+      `SELECT id, revision_number FROM operations_quotes WHERE supersedes_quote_id = $1`,
+      [sourceId],
+    );
+    assert.equal(revisions.rows.length, 1);
+    assert.equal(revisions.rows[0].revision_number, 2);
+  } finally {
+    if (!disposableDatabase) {
+      await db.query(
+        `DELETE FROM operations_quotes WHERE supersedes_quote_id = $1`,
+        [sourceId],
+      );
+      await db.query(`DELETE FROM operations_quotes WHERE id = $1`, [sourceId]);
+    }
+  }
 });
 
 test("concurrent source transfers converge on one Email message", async () => {
@@ -759,6 +941,7 @@ test("Email list summaries omit editor bodies and return folder counts", async (
 test("manual mark-sent atomically cancels a linked draft Email", async () => {
   const { sourceCommunicationId, message } = await createSourceMessage();
   const result = await markOperationsCommunicationSent(
+    workspaceId,
     { id: actorUserId, email: `checkpoint-2-${testKey}@scanlark.test` },
     businessId,
     sourceCommunicationId,
@@ -781,6 +964,7 @@ test("manual mark-sent is blocked once linked Email delivery is protected", asyn
     [message.id],
   );
   const result = await markOperationsCommunicationSent(
+    workspaceId,
     { id: actorUserId, email: `checkpoint-2-${testKey}@scanlark.test` },
     businessId,
     sourceCommunicationId,
@@ -1401,20 +1585,22 @@ test("delivery attempts receive transport-scoped sequential numbers", async () =
 
 test("quote PDF render bytes are versioned and durably retrievable", async () => {
   const pdfBytes = Buffer.from("%PDF-1.4 checkpoint-2");
+  const pdfSha256 = createHash("sha256").update(pdfBytes).digest("hex");
   const render = await saveOperationsQuotePdfRender({
+    workspaceId,
     quoteId,
     quoteRevision: 1,
     filename: "checkpoint-2-quote.pdf",
     pdfBytes,
-    sha256: "b".repeat(64),
+    sha256: pdfSha256,
     generatedByUserId: actorUserId,
     generationSource: "actor",
   });
   assert.equal(render.quote_revision, 1);
   assert.equal(Number(render.size_bytes), pdfBytes.length);
-  const stored = await getOperationsQuotePdfRender(quoteId, 1);
+  const stored = await getOperationsQuotePdfRender(workspaceId, quoteId, 1);
   assert.deepEqual(stored?.pdf_bytes, pdfBytes);
-  assert.equal(stored?.sha256, "b".repeat(64));
+  assert.equal(stored?.sha256, pdfSha256);
 });
 
 test("manual bytes remain private while add and remove atomically invalidate Ready", async () => {
@@ -1505,6 +1691,7 @@ test("generated quote attachment freezes one exact persisted render", async () =
   const { message } = await createSourceMessage();
   const firstBytes = Buffer.from("%PDF-1.4 quote frozen one");
   const first = await saveOperationsQuotePdfRender({
+    workspaceId,
     quoteId,
     quoteRevision: 2,
     filename: "quote-v2.pdf",
@@ -1533,6 +1720,7 @@ test("generated quote attachment freezes one exact persisted render", async () =
 
   const newerBytes = Buffer.from("%PDF-1.4 quote newer two");
   await saveOperationsQuotePdfRender({
+    workspaceId,
     quoteId,
     quoteRevision: 3,
     filename: "quote-v3.pdf",
@@ -1556,6 +1744,7 @@ test("concurrent quote snapshot persistence converges on one durable version", a
   const sourceSnapshotSha256 = "e".repeat(64);
   const save = () =>
     saveOperationsQuotePdfRenderAtNextRevision({
+      workspaceId,
       quoteId,
       filename: "quote-concurrent.pdf",
       pdfBytes,

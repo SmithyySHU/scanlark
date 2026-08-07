@@ -163,6 +163,21 @@ and `023_*`.
 
 The command uses `ON_ERROR_STOP=1`, so deployment fails if any migration fails.
 
+### Historical-evidence deployment gate
+
+Before applying migrations `050` through `054` to an existing database, run
+`scripts/batch-a-workspace-preflight.sql` and
+`scripts/batch-b-evidence-preflight.sql` against that database and record the
+outputs. Migration 050 fails closed when workspace mappings cannot be inferred;
+migration 054 fails closed when historical evidence or revision lineage is
+incomplete. These are deployment-data checks, not source commit or push gates:
+resolve all blocking findings immediately before applying the affected migration.
+
+Keep the public/private host split: `scanlark.com` serves public pages,
+`www.scanlark.com` redirects to it, and `app.scanlark.com` serves the private
+application and API. Keep auth cookies host-only for the app host, preserve
+SMTP DNS records, and do not change DNS or deploy without owner approval.
+
 ## Updates
 
 Use the deploy script:

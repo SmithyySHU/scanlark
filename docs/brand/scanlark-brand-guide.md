@@ -90,6 +90,26 @@ Position Scanlark around managed outcomes for business owners:
 Avoid claims about guaranteed rankings, guaranteed revenue, complete security,
 penetration testing, legal compliance, or complete accessibility compliance.
 
+## Public launch boundaries
+
+- Scanlark is founder-operated in the United Kingdom; formal commercial wording
+  is `Connor Smith, operating under the trading name Scanlark.`
+- Launch sales are B2B-only. Do not describe Scanlark as incorporated or as a
+  registered company, and do not publish a personal address.
+- Use the public contact address and mailto CTA; do not add a public contact
+  form, analytics, advertising pixels, or session-recording tools without
+  approval.
+- The public site belongs on `scanlark.com`; `www` redirects to it and the
+  private application remains on `app.scanlark.com`.
+
+## Asset provenance
+
+The approved horizontal artwork is the sole shape source for the SVG family.
+Horizontal, stacked, mark, favicon, dark, monochrome, and print variants share
+that path geometry. The supplied SVGs are suitable for normal web, email,
+report, social, and general business use; obtain a professional node clean-up
+before trademark filing or very large-format print work.
+
 ## Typography and shape
 
 - Display: `Space Grotesk`, then system sans-serif fallback.

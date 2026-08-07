@@ -103,6 +103,7 @@ function clientReportFilename(payload: ClientReportPayload | null) {
 }
 
 type Props = {
+  readOnly: boolean;
   detail: OperationsReportDetail;
   preview: ClientReportPayload | null;
   readinessIssues: OperationsReportReadinessIssue[];
@@ -129,10 +130,12 @@ type Props = {
   onGeneratePdf: (mode: "draft" | "final") => Promise<void>;
   onArchive: () => Promise<void>;
   onCreateRetest: () => Promise<void>;
+  onCreateRevision: () => Promise<void>;
   onCreateQuote: () => void;
 };
 
 export function OperationsReportWorkspace({
+  readOnly,
   detail,
   preview,
   readinessIssues,
@@ -150,8 +153,18 @@ export function OperationsReportWorkspace({
   onGeneratePdf,
   onArchive,
   onCreateRetest,
+  onCreateRevision,
   onCreateQuote,
 }: Props) {
+  const historicalReport = [
+    "sent",
+    "client_replied",
+    "fixes_quoted",
+    "work_in_progress",
+    "completed",
+    "archived",
+  ].includes(detail.report.status);
+  const artifactReadOnly = readOnly || historicalReport;
   const initialFindingFilter: ReportFindingFilter = detail.findings.some(
     (finding) => findingIsIncluded(finding) && !isFindingReady(finding),
   )
@@ -176,12 +189,13 @@ export function OperationsReportWorkspace({
   const [dirtyChildKeys, setDirtyChildKeys] = useState<Set<string>>(
     () => new Set(),
   );
-  const reportDraft = useOperationsReportDraft(detail.report);
+  const reportDraft = useOperationsReportDraft(detail.report, artifactReadOnly);
   const selectedFinding = detail.findings.find(
     (finding) => finding.id === selectedFindingId,
   );
   const findingDraft = useOptionalOperationsReportDraft(
     selectedFinding ?? detail.findings[0],
+    artifactReadOnly,
   );
   const { filtered, counts, categories } = useReportFindings(
     detail.findings,
@@ -511,8 +525,25 @@ export function OperationsReportWorkspace({
   const previousIncomplete = incomplete[currentIncompleteIndex - 1];
   const nextIncomplete = incomplete[currentIncompleteIndex + 1];
 
+  function blockReadOnlyEditorChange(event: React.FormEvent<HTMLDivElement>) {
+    if (!artifactReadOnly) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest(".ops-report-filterbar")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   return (
-    <div className="ops-report-workspace">
+    <div
+      className={`ops-report-workspace${artifactReadOnly ? " ops-report-workspace--read-only" : ""}`}
+      aria-readonly={artifactReadOnly}
+      onChangeCapture={blockReadOnlyEditorChange}
+      onSubmitCapture={(event) => {
+        if (artifactReadOnly) event.preventDefault();
+      }}
+    >
       <section className="ops-report-header">
         <div>
           <div className="ops-eyebrow">Report review</div>
@@ -529,16 +560,18 @@ export function OperationsReportWorkspace({
           </span>
         </div>
         <div className="ops-inline-actions">
-          <button
-            className="ops-button"
-            onClick={() => void saveReportSettings()}
-          >
-            Save
-          </button>
+          {!artifactReadOnly && (
+            <button
+              className="ops-button"
+              onClick={() => void saveReportSettings()}
+            >
+              Save
+            </button>
+          )}
           <button className="ops-button" onClick={() => switchTab("preview")}>
             Preview
           </button>
-          {editableDraftReport && (
+          {!artifactReadOnly && editableDraftReport && (
             <button
               className="ops-button"
               disabled={previewStale}
@@ -547,30 +580,37 @@ export function OperationsReportWorkspace({
               Generate draft PDF
             </button>
           )}
-          <button
-            className="ops-button"
-            disabled={pdfBlockingIssues.length > 0 || previewStale}
-            onClick={() => void onGeneratePdf("final")}
-          >
-            Generate final PDF
-          </button>
-          <button
-            className="ops-button"
-            disabled={
-              detail.report.status === "ready_to_send" ||
-              readinessIssues.length > 0 ||
-              previewStale
-            }
-            onClick={() => void onMarkReady()}
-          >
-            Mark ready
-          </button>
-          <button className="ops-button" onClick={() => void onRecordSent()}>
-            Record sent
-          </button>
-          <button className="ops-button" onClick={onCreateQuote}>
-            Create quote
-          </button>
+          {!artifactReadOnly && (
+            <>
+              <button
+                className="ops-button"
+                disabled={pdfBlockingIssues.length > 0 || previewStale}
+                onClick={() => void onGeneratePdf("final")}
+              >
+                Generate final PDF
+              </button>
+              <button
+                className="ops-button"
+                disabled={
+                  detail.report.status === "ready_to_send" ||
+                  readinessIssues.length > 0 ||
+                  previewStale
+                }
+                onClick={() => void onMarkReady()}
+              >
+                Mark ready
+              </button>
+              <button
+                className="ops-button"
+                onClick={() => void onRecordSent()}
+              >
+                Record sent
+              </button>
+              <button className="ops-button" onClick={onCreateQuote}>
+                Create quote
+              </button>
+            </>
+          )}
         </div>
       </section>
       {actionError && <div className="ops-error">{actionError}</div>}
@@ -582,11 +622,59 @@ export function OperationsReportWorkspace({
             : ""}
         </div>
       )}
-      {clientOutputFrozen && (
+      {(clientOutputFrozen || historicalReport) && (
         <div className="ops-warning">
-          The approved client output is frozen. Later review-record edits do not
-          change the saved preview or PDF.
+          This report is frozen because it has been sent to the client.
+          {historicalReport && !readOnly && (
+            <button
+              className="ops-button ops-button--primary"
+              type="button"
+              onClick={() => void onCreateRevision()}
+            >
+              Create revised report
+            </button>
+          )}
         </div>
+      )}
+      {detail.revisionHistory && detail.revisionHistory.length > 1 && (
+        <section className="ops-panel">
+          <h2>Version history</h2>
+          {detail.report.supersedes_report_id && (
+            <p className="ops-muted">
+              Revision of Version{" "}
+              {detail.revisionHistory.find(
+                (item) => item.id === detail.report.supersedes_report_id,
+              )?.version_number ?? detail.report.version_number - 1}
+            </p>
+          )}
+          {detail.revisionHistory.some(
+            (item) => item.supersedes_report_id === detail.report.id,
+          ) && (
+            <p className="ops-muted">Superseded by a newer report version.</p>
+          )}
+          <div className="ops-list">
+            {detail.revisionHistory.map((revision) => (
+              <div key={revision.id} className="ops-list-card">
+                <strong>Version {revision.version_number}</strong>
+                <span>{revision.title}</span>
+                <small>
+                  {reportStatusLabel(revision.status)}
+                  {revision.sent_at
+                    ? ` · sent ${formatOperationsDateTime(revision.sent_at)}`
+                    : ""}
+                </small>
+                {revision.id !== detail.report.id && (
+                  <a
+                    className="ops-button"
+                    href={`/operations/reports/${revision.id}`}
+                  >
+                    Open version
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
       )}
       {readinessIssues.length > 0 && (
         <section className="ops-readiness-summary">

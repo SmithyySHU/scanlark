@@ -10,7 +10,6 @@ import {
   createOrGetOperationsEmailTestDelivery,
   createOrGetOperationsEmailMessageFromCommunication,
   getOperationsEmailAttachmentDownload,
-  getInternalWorkspaceByCode,
   getOperationsEmailMessageDetail,
   getOperationsEmailMessageDelivery,
   getOperationsEmailRealDeliveryForMessage,
@@ -42,14 +41,16 @@ import {
   removeOperationsEmailAttachment,
   returnOperationsEmailMessageToDraft,
   saveOperationsQuotePdfRenderAtNextRevision,
-  SCANLARK_OPERATIONS_WORKSPACE_CODE,
   updateOperationsEmailMessageEditor,
   type OperationsEmailMessageStatus,
   type OperationsEmailOptimisticResult,
   deriveOperationsEmailTestRecipient,
   operationsEmailRealSendPolicy,
 } from "@scanlark/db";
-import { requireOperationsEmailAccess } from "../operationsAccess";
+import {
+  requireOperationsContext,
+  requireOperationsEmailAccess,
+} from "../operationsAccess";
 import {
   findUnresolvedClientCommunicationPlaceholders,
   sanitizeClientEmailHtml,
@@ -105,22 +106,6 @@ function uuidParam(req: Request, res: Response, name: string) {
     return null;
   }
   return value;
-}
-
-async function emailWorkspace(res: Response) {
-  const workspace = await getInternalWorkspaceByCode(
-    SCANLARK_OPERATIONS_WORKSPACE_CODE,
-  );
-  if (!workspace) {
-    sendApiError(
-      res,
-      503,
-      "operations_workspace_missing",
-      "Operations workspace is not configured",
-    );
-    return null;
-  }
-  return workspace;
 }
 
 function validationError(res: Response, error: unknown) {
@@ -300,6 +285,7 @@ async function auditEmail(
 
 export function mountOperationsEmailRoutes(app: express.Application) {
   const router = express.Router();
+  router.use(requireOperationsContext);
   router.use(requireOperationsEmailAccess);
   const attachmentLimits = getOperationsEmailAttachmentLimits();
   const upload = multer({
@@ -309,7 +295,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
 
   router.get("/config", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const smtp = getOperationsEmailSmtpConfig();
       const imap = getOperationsEmailImapConfig();
@@ -363,9 +349,9 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     }
   });
 
-  router.get("/sent-copy-status", async (_req, res) => {
+  router.get("/sent-copy-status", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const config = getOperationsEmailImapConfig();
       const readiness = await getOperationsEmailImapReadiness(workspace.id);
@@ -390,7 +376,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
 
   router.post("/messages", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const initial = parseOperationsEmailStandaloneDraft(req.body);
       const smtp = getOperationsEmailSmtpConfig();
@@ -445,7 +431,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
 
   router.get("/messages", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const folder = parseEmailFolder(req.query.folder);
       const limit = Math.min(
@@ -483,7 +469,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
 
   router.post("/source-links", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const body =
         req.body && typeof req.body === "object"
@@ -525,7 +511,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const communicationId = uuidParam(req, res, "communicationId");
       if (!communicationId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const source = await getOperationsEmailTransferSource(
           workspace.id,
@@ -665,7 +651,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const message = await getOperationsEmailMessageDetail(
         workspace.id,
@@ -693,7 +679,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const message = await getOperationsEmailMessageDetail(
         workspace.id,
@@ -723,7 +709,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const messageId = uuidParam(req, res, "messageId");
       if (!messageId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const body =
           req.body && typeof req.body === "object"
@@ -805,7 +791,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const messageId = uuidParam(req, res, "messageId");
       if (!messageId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         if (!req.file)
           return sendApiError(
@@ -875,7 +861,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const attachmentId = uuidParam(req, res, "attachmentId");
       if (!messageId || !attachmentId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const result = await removeOperationsEmailAttachment({
           workspaceId: workspace.id,
@@ -919,7 +905,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const attachmentId = uuidParam(req, res, "attachmentId");
       if (!messageId || !attachmentId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const attachment = await getOperationsEmailAttachmentDownload(
           workspace.id,
@@ -970,7 +956,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const quoteId = uuidParam(req, res, "quoteId");
       if (!messageId || !quoteId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const expectedRevision = parseExpectedRevision(req.body);
         const message = await getOperationsEmailMessageDetail(
@@ -998,7 +984,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
             "not_found",
             "Eligible quote not found",
           );
-        const preview = await getOperationsQuotePreview(quoteId);
+        const preview = await getOperationsQuotePreview(workspace.id, quoteId);
         if (!preview)
           return sendApiError(res, 404, "not_found", "Quote not found");
         if (preview.readinessIssues.length)
@@ -1018,6 +1004,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
           .update(snapshotJson)
           .digest("hex");
         const existing = await getOperationsEmailQuotePdfRender(
+          workspace.id,
           quoteId,
           snapshotSha256,
         );
@@ -1027,6 +1014,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
             const pdf = await renderOperationsQuotePdf(snapshot);
             const pdfSha256 = createHash("sha256").update(pdf).digest("hex");
             return saveOperationsQuotePdfRenderAtNextRevision({
+              workspaceId: workspace.id,
               quoteId,
               filename: operationsQuotePdfFilename(snapshot),
               pdfBytes: pdf,
@@ -1082,7 +1070,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const result = await prepareOperationsEmailFinal({
         workspaceId: workspace.id,
@@ -1139,7 +1127,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const message = await getOperationsEmailMessageDetail(
         workspace.id,
@@ -1163,9 +1151,9 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     }
   });
 
-  router.get("/client-link-options", async (_req, res) => {
+  router.get("/client-link-options", async (req, res) => {
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const options = await listOperationsEmailClientLinkOptions(workspace.id);
       return res.json({ options });
@@ -1184,7 +1172,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const body =
         req.body && typeof req.body === "object"
@@ -1321,7 +1309,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const deliveryId = uuidParam(req, res, "deliveryId");
       if (!messageId || !deliveryId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         if (!getOperationsEmailImapConfig().configured)
           return sendApiError(
@@ -1404,7 +1392,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
           "The test recipient is derived from the authenticated actor",
         );
       }
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const expectedRevision = parseExpectedRevision(body);
       const idempotencyKey = parseIdempotencyKey(body);
@@ -1594,7 +1582,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
           "Recipient and confirmation details are loaded server-side",
         );
       }
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const expectedRevision = parseExpectedRevision(body);
       const idempotencyKey = parseIdempotencyKey(body);
@@ -1771,7 +1759,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
       const deliveryId = uuidParam(req, res, "deliveryId");
       if (!messageId || !deliveryId) return;
       try {
-        const workspace = await emailWorkspace(res);
+        const workspace = req.operationsContext!.workspace;
         if (!workspace) return;
         const smtp = getOperationsEmailSmtpConfig();
         if (!smtp.configured)
@@ -1873,7 +1861,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const { expectedRevision, patch } = parseOperationsEmailEditorPatch(
         req.body,
@@ -1932,7 +1920,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const expectedRevision = parseExpectedRevision(req.body);
       const current = await getOperationsEmailMessageDetail(
@@ -2033,7 +2021,7 @@ export function mountOperationsEmailRoutes(app: express.Application) {
     const messageId = uuidParam(req, res, "messageId");
     if (!messageId) return;
     try {
-      const workspace = await emailWorkspace(res);
+      const workspace = req.operationsContext!.workspace;
       if (!workspace) return;
       const expectedRevision = parseExpectedRevision(req.body);
       const result = await returnOperationsEmailMessageToDraft({

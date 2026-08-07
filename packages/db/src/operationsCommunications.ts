@@ -1,5 +1,10 @@
 import { recordAdminAuditLog, type AdminActor } from "./admin";
 import { ensureConnected } from "./client";
+import {
+  immutableArtifactError,
+  isHistoricalCommunicationStatus,
+  staleRevisionError,
+} from "./operationsEvidence";
 
 export const OPERATIONS_COMMUNICATION_TEMPLATE_CATEGORIES = [
   "warm_introduction",
@@ -103,6 +108,7 @@ export type OperationsCommunicationRow = {
   direction: OperationsCommunicationDirection;
   channel: OperationsCommunicationChannel;
   status: OperationsCommunicationStatus;
+  content_revision?: number;
   subject: string | null;
   body: string;
   preheader: string | null;
@@ -193,6 +199,7 @@ export type OperationsCommunicationAttachmentRequirement = {
 };
 
 export type OperationsCommunicationInput = {
+  expectedRevision?: number;
   contactId?: string | null;
   templateId?: string | null;
   direction?: OperationsCommunicationDirection;
@@ -289,6 +296,62 @@ function textValue(value: string | null | undefined) {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+const COMMUNICATION_EVIDENCE_FIELDS = new Set<
+  keyof OperationsCommunicationInput
+>([
+  "contactId",
+  "templateId",
+  "direction",
+  "channel",
+  "status",
+  "subject",
+  "body",
+  "preheader",
+  "htmlFragment",
+  "htmlDocument",
+  "plainTextBody",
+  "layoutKey",
+  "wordingVariantKey",
+  "signatureMode",
+  "senderIdentityKey",
+  "senderName",
+  "senderEmail",
+  "recipientName",
+  "recipientEmail",
+  "templateSnapshotJson",
+  "publicAssetUrlsJson",
+  "attachmentRequirementsJson",
+  "attachmentConfirmedAt",
+  "attachmentConfirmationNote",
+  "occurredAt",
+  "sentAt",
+  "receivedAt",
+  "externalMessageId",
+]);
+
+function assertCommunicationContentMutable(
+  communication: OperationsCommunicationRow,
+  input: Partial<OperationsCommunicationInput> = {},
+) {
+  if (
+    isHistoricalCommunicationStatus(communication.status) ||
+    communication.status === "cancelled"
+  ) {
+    const changedEvidence = Object.keys(input).some((key) =>
+      COMMUNICATION_EVIDENCE_FIELDS.has(
+        key as keyof OperationsCommunicationInput,
+      ),
+    );
+    if (changedEvidence) throw immutableArtifactError("communication");
+  }
+  if (
+    input.expectedRevision !== undefined &&
+    input.expectedRevision !== (communication.content_revision ?? 1)
+  ) {
+    throw staleRevisionError("communication");
+  }
+}
+
 async function ensureBusinessExists(businessId: string) {
   const client = await ensureConnected();
   const res = await client.query<{ id: string }>(
@@ -299,29 +362,30 @@ async function ensureBusinessExists(businessId: string) {
 }
 
 async function validateBusinessChildIds(input: {
+  workspaceId: string;
   businessId: string;
   contactId?: string | null;
   templateId?: string | null;
 }) {
   const client = await ensureConnected();
   const business = await client.query<{ id: string }>(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [input.businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [input.businessId, input.workspaceId],
   );
   if (!business.rows[0]) return "business_not_found" as const;
 
   if (input.contactId) {
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
-      [input.contactId, input.businessId],
+      `SELECT c.id FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3 AND c.archived_at IS NULL`,
+      [input.contactId, input.businessId, input.workspaceId],
     );
     if (!contact.rows[0]) return "contact_not_found" as const;
   }
 
   if (input.templateId) {
     const template = await client.query<{ id: string }>(
-      `SELECT id FROM operations_client_communication_templates WHERE id = $1`,
-      [input.templateId],
+      `SELECT id FROM operations_client_communication_templates WHERE id = $1 AND internal_workspace_id = $2`,
+      [input.templateId, input.workspaceId],
     );
     if (!template.rows[0]) return "template_not_found" as const;
   }
@@ -329,7 +393,10 @@ async function validateBusinessChildIds(input: {
   return "ok" as const;
 }
 
-async function syncBusinessFollowUpFields(businessId: string) {
+async function syncBusinessFollowUpFields(
+  workspaceId: string,
+  businessId: string,
+) {
   const client = await ensureConnected();
   await client.query(
     `
@@ -347,9 +414,9 @@ async function syncBusinessFollowUpFields(businessId: string) {
         ORDER BY COALESCE(t.snoozed_until, t.due_at) ASC, t.created_at ASC
         LIMIT 1
       ) task
-      WHERE b.id = task.business_id
+      WHERE b.id = task.business_id AND b.internal_workspace_id = $2
     `,
-    [businessId],
+    [businessId, workspaceId],
   );
   await client.query(
     `
@@ -357,7 +424,7 @@ async function syncBusinessFollowUpFields(businessId: string) {
       SET next_follow_up_at = NULL,
           next_action = NULL,
           updated_at = now()
-      WHERE b.id = $1
+        WHERE b.id = $1 AND b.internal_workspace_id = $2
         AND NOT EXISTS (
           SELECT 1
           FROM operations_tasks t
@@ -365,11 +432,12 @@ async function syncBusinessFollowUpFields(businessId: string) {
             AND t.status IN ('open', 'snoozed')
         )
     `,
-    [businessId],
+    [businessId, workspaceId],
   );
 }
 
 async function upsertFollowUpTask(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsTaskInput,
 ) {
@@ -445,7 +513,7 @@ async function upsertFollowUpTask(
   }
 
   if (task) {
-    await syncBusinessFollowUpFields(input.businessId);
+    await syncBusinessFollowUpFields(workspaceId, input.businessId);
     await recordAdminAuditLog(actor, {
       action: "operations.task.schedule",
       targetType: "operations_task",
@@ -462,24 +530,28 @@ async function upsertFollowUpTask(
 }
 
 export async function listOperationsCommunicationTemplates(
+  workspaceId: string,
   options: {
     activeOnly?: boolean;
   } = {},
 ) {
   const client = await ensureConnected();
-  const filters = options.activeOnly ? "WHERE is_active = true" : "";
+  const filters = options.activeOnly ? "AND is_active = true" : "";
   const res = await client.query<OperationsCommunicationTemplateRow>(
     `
       SELECT *
       FROM operations_client_communication_templates
+      WHERE internal_workspace_id = $1
       ${filters}
       ORDER BY is_system_default DESC, category ASC, name ASC
     `,
+    [workspaceId],
   );
   return res.rows;
 }
 
 export async function createOperationsCommunicationTemplate(
+  workspaceId: string,
   actor: AdminActor,
   input: {
     name: string;
@@ -509,6 +581,7 @@ export async function createOperationsCommunicationTemplate(
   const res = await client.query<OperationsCommunicationTemplateRow>(
     `
       INSERT INTO operations_client_communication_templates (
+        internal_workspace_id,
         name,
         category,
         subject_template,
@@ -525,10 +598,11 @@ export async function createOperationsCommunicationTemplate(
         is_active,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16)
       RETURNING *
     `,
     [
+      workspaceId,
       name,
       input.category,
       subject,
@@ -556,6 +630,7 @@ export async function createOperationsCommunicationTemplate(
 }
 
 export async function updateOperationsCommunicationTemplate(
+  workspaceId: string,
   actor: AdminActor,
   templateId: string,
   input: Partial<{
@@ -635,19 +710,21 @@ export async function updateOperationsCommunicationTemplate(
   if (sets.length === 0) {
     const client = await ensureConnected();
     const current = await client.query<OperationsCommunicationTemplateRow>(
-      `SELECT * FROM operations_client_communication_templates WHERE id = $1`,
-      [templateId],
+      `SELECT * FROM operations_client_communication_templates WHERE id = $1 AND internal_workspace_id = $2`,
+      [templateId, workspaceId],
     );
     return current.rows[0] ?? null;
   }
   values.push(templateId);
+  values.push(workspaceId);
   const client = await ensureConnected();
   const res = await client.query<OperationsCommunicationTemplateRow>(
     `
       UPDATE operations_client_communication_templates
       SET ${sets.join(", ")},
           updated_at = now()
-      WHERE id = $${values.length}
+      WHERE id = $${values.length - 1}
+        AND internal_workspace_id = $${values.length}
       RETURNING *
     `,
     values,
@@ -668,21 +745,26 @@ export async function updateOperationsCommunicationTemplate(
   return template;
 }
 
-export async function getOperationsCommunicationTemplate(templateId: string) {
+export async function getOperationsCommunicationTemplate(
+  workspaceId: string,
+  templateId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsCommunicationTemplateRow>(
-    `SELECT * FROM operations_client_communication_templates WHERE id = $1`,
-    [templateId],
+    `SELECT * FROM operations_client_communication_templates WHERE id = $1 AND internal_workspace_id = $2`,
+    [templateId, workspaceId],
   );
   return res.rows[0] ?? null;
 }
 
 export async function setOperationsCommunicationTemplateActive(
+  workspaceId: string,
   actor: AdminActor,
   templateId: string,
   isActive: boolean,
 ) {
   const template = await updateOperationsCommunicationTemplate(
+    workspaceId,
     actor,
     templateId,
     { isActive },
@@ -701,6 +783,7 @@ export async function setOperationsCommunicationTemplateActive(
 }
 
 export async function getOperationsCommunicationDraftContext(
+  workspaceId: string,
   businessId: string,
   options: { contactId?: string | null } = {},
 ): Promise<OperationsCommunicationDraftContext | null> {
@@ -714,9 +797,9 @@ export async function getOperationsCommunicationDraftContext(
     `
       SELECT id, name, website_url, general_email
       FROM operations_businesses
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $3
     `,
-    [businessId],
+    [businessId, null, workspaceId],
   );
   const business = businessRes.rows[0];
   if (!business) return null;
@@ -817,11 +900,12 @@ export async function getOperationsCommunicationDraftContext(
 }
 
 export async function listOperationsCommunications(
+  workspaceId: string,
   options: OperationsCommunicationListOptions,
 ) {
   const client = await ensureConnected();
-  const values: unknown[] = [];
-  const filters: string[] = [];
+  const values: unknown[] = [workspaceId];
+  const filters: string[] = ["b.internal_workspace_id = $1"];
   if (options.businessId) {
     values.push(options.businessId);
     filters.push(`c.business_id = $${values.length}`);
@@ -920,7 +1004,10 @@ export async function listOperationsCommunications(
   };
 }
 
-export async function getOperationsCommunication(communicationId: string) {
+export async function getOperationsCommunication(
+  workspaceId: string,
+  communicationId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsCommunicationRow>(
     `
@@ -935,19 +1022,21 @@ export async function getOperationsCommunication(communicationId: string) {
       LEFT JOIN operations_contacts contact ON contact.id = c.contact_id
       LEFT JOIN operations_client_communication_templates template
         ON template.id = c.template_id
-      WHERE c.id = $1
+      WHERE c.id = $2 AND b.internal_workspace_id = $1
     `,
-    [communicationId],
+    [workspaceId, communicationId],
   );
   return res.rows[0] ?? null;
 }
 
 export async function createOperationsCommunication(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   input: OperationsCommunicationInput,
 ) {
   const valid = await validateBusinessChildIds({
+    workspaceId,
     businessId,
     contactId: input.contactId,
     templateId: input.templateId,
@@ -1048,20 +1137,20 @@ export async function createOperationsCommunication(
           UPDATE operations_businesses
           SET last_contacted_at = $2,
               updated_at = now()
-          WHERE id = $1
+          WHERE id = $1 AND internal_workspace_id = $3
         `,
-        [businessId, occurredAt],
+        [businessId, occurredAt, workspaceId],
       );
     } else {
       await client.query(
-        `UPDATE operations_businesses SET updated_at = now() WHERE id = $1`,
-        [businessId],
+        `UPDATE operations_businesses SET updated_at = now() WHERE id = $1 AND internal_workspace_id = $2`,
+        [businessId, workspaceId],
       );
     }
     await client.query("COMMIT");
 
     if (input.followUpAt) {
-      await upsertFollowUpTask(actor, {
+      await upsertFollowUpTask(workspaceId, actor, {
         businessId,
         contactId: input.contactId ?? null,
         sourceCommunicationId: communication.id,
@@ -1072,7 +1161,7 @@ export async function createOperationsCommunication(
         dueAt: input.followUpAt,
       });
     } else {
-      await syncBusinessFollowUpFields(businessId);
+      await syncBusinessFollowUpFields(workspaceId, businessId);
     }
 
     await recordAdminAuditLog(actor, {
@@ -1100,27 +1189,20 @@ export async function createOperationsCommunication(
 }
 
 export async function updateOperationsCommunication(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   communicationId: string,
   input: Partial<OperationsCommunicationInput>,
 ) {
-  const existing = await getOperationsCommunication(communicationId);
+  const existing = await getOperationsCommunication(
+    workspaceId,
+    communicationId,
+  );
   if (!existing || existing.business_id !== businessId) return null;
-  if (
-    (existing.status === "sent" || existing.status === "received") &&
-    (input.subject !== undefined ||
-      input.body !== undefined ||
-      input.status !== undefined ||
-      input.direction !== undefined ||
-      input.channel !== undefined ||
-      input.sentAt !== undefined ||
-      input.receivedAt !== undefined ||
-      input.occurredAt !== undefined)
-  ) {
-    throw new Error("communication_sent_locked");
-  }
+  assertCommunicationContentMutable(existing, input);
   const valid = await validateBusinessChildIds({
+    workspaceId,
     businessId,
     contactId: input.contactId,
     templateId: input.templateId,
@@ -1224,33 +1306,45 @@ export async function updateOperationsCommunication(
     setColumn("external_message_id", textValue(input.externalMessageId));
   }
   if (sets.length === 0) {
-    const existing = await listOperationsCommunications({
-      businessId,
-      limit: 100,
-      offset: 0,
-    });
-    return (
-      existing.communications.find((item) => item.id === communicationId) ??
-      null
-    );
+    return getOperationsCommunication(workspaceId, communicationId);
   }
-  values.push(communicationId, businessId);
+  values.push(communicationId, businessId, workspaceId);
+  values.push(input.expectedRevision ?? null);
   const client = await ensureConnected();
   const res = await client.query<OperationsCommunicationRow>(
     `
       UPDATE operations_communications
       SET ${sets.join(", ")},
+          content_revision = content_revision + CASE WHEN status IN ('draft', 'ready') THEN 1 ELSE 0 END,
           updated_at = now()
-      WHERE id = $${values.length - 1}
-        AND business_id = $${values.length}
+      WHERE id = $${values.length - 3}
+        AND business_id = $${values.length - 2}
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_communications.business_id AND b.internal_workspace_id = $${values.length - 1})
+        AND ($${values.length}::integer IS NULL OR content_revision = $${values.length})
       RETURNING *
     `,
     values,
   );
   const communication = res.rows[0] ?? null;
-  if (!communication) return null;
+  if (!communication) {
+    const latest = await getOperationsCommunication(
+      workspaceId,
+      communicationId,
+    );
+    if (
+      latest &&
+      input.expectedRevision !== undefined &&
+      (latest.content_revision ?? 1) !== input.expectedRevision
+    ) {
+      throw staleRevisionError("communication");
+    }
+    if (latest && isHistoricalCommunicationStatus(latest.status)) {
+      throw immutableArtifactError("communication");
+    }
+    return null;
+  }
   if (input.followUpAt) {
-    await upsertFollowUpTask(actor, {
+    await upsertFollowUpTask(workspaceId, actor, {
       businessId,
       contactId: communication.contact_id,
       sourceCommunicationId: communication.id,
@@ -1261,7 +1355,7 @@ export async function updateOperationsCommunication(
       dueAt: input.followUpAt,
     });
   } else if (input.followUpAt === null) {
-    await syncBusinessFollowUpFields(businessId);
+    await syncBusinessFollowUpFields(workspaceId, businessId);
   }
   await recordAdminAuditLog(actor, {
     action: "operations.communication.update",
@@ -1280,6 +1374,7 @@ export async function updateOperationsCommunication(
 }
 
 export async function markOperationsCommunicationSent(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   communicationId: string,
@@ -1431,6 +1526,7 @@ export async function markOperationsCommunicationSent(
         SELECT id, workspace_id, status
         FROM operations_email_messages
         WHERE source_communication_id = $1
+          AND workspace_id = $${values.length + 2}
         FOR UPDATE
       ), cancelled_email AS (
         UPDATE operations_email_messages message
@@ -1445,10 +1541,13 @@ export async function markOperationsCommunicationSent(
           AND linked_email.status IN ('draft', 'ready')
         RETURNING message.id
       ), updated_communication AS (
-        UPDATE operations_communications
-        SET ${sets.join(", ")}
+      UPDATE operations_communications
+        SET ${sets.join(", ")},
+            content_revision = content_revision + 1
         WHERE id = $1
           AND business_id = $2
+          AND status IN ('draft', 'ready')
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_communications.business_id AND b.internal_workspace_id = $${values.length + 2})
           AND NOT EXISTS (
             SELECT 1
             FROM linked_email
@@ -1466,7 +1565,7 @@ export async function markOperationsCommunicationSent(
       LEFT JOIN linked_email ON true
       LEFT JOIN cancelled_email ON cancelled_email.id = linked_email.id
     `,
-    [...values, actor.id],
+    [...values, actor.id, workspaceId],
   );
   const result = res.rows[0] ?? null;
   if (!result) {
@@ -1506,12 +1605,12 @@ export async function markOperationsCommunicationSent(
       UPDATE operations_businesses
       SET last_contacted_at = $2,
           updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $3
     `,
-    [businessId, now],
+    [businessId, now, workspaceId],
   );
   if (communication.follow_up_at) {
-    await upsertFollowUpTask(actor, {
+    await upsertFollowUpTask(workspaceId, actor, {
       businessId,
       contactId: communication.contact_id,
       sourceCommunicationId: communication.id,
@@ -1522,7 +1621,7 @@ export async function markOperationsCommunicationSent(
       dueAt: communication.follow_up_at,
     });
   } else {
-    await syncBusinessFollowUpFields(businessId);
+    await syncBusinessFollowUpFields(workspaceId, businessId);
   }
   await recordAdminAuditLog(actor, {
     action: "operations.communication.mark_sent",
@@ -1557,6 +1656,7 @@ export async function markOperationsCommunicationSent(
 }
 
 export async function markOperationsCommunicationReceived(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   communicationId: string,
@@ -1573,6 +1673,7 @@ export async function markOperationsCommunicationReceived(
   const sets = [
     "direction = 'inbound'",
     "status = 'received'",
+    "content_revision = content_revision + 1",
     "received_at = COALESCE(received_at, $3)",
     "occurred_at = $3",
     "updated_at = now()",
@@ -1592,29 +1693,33 @@ export async function markOperationsCommunicationReceived(
     values.push(input.followUpAt);
     sets.push(`follow_up_at = $${values.length}`);
   }
+  const workspacePlaceholder = values.length + 1;
   const res = await client.query<OperationsCommunicationRow>(
     `
       UPDATE operations_communications
       SET ${sets.join(", ")}
       WHERE id = $1
         AND business_id = $2
+        AND status IN ('draft', 'ready')
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_communications.business_id AND b.internal_workspace_id = $${workspacePlaceholder})
       RETURNING *
     `,
-    values,
+    [...values, workspaceId],
   );
   const communication = res.rows[0] ?? null;
   if (!communication) return null;
   await client.query(
     `
-      UPDATE operations_businesses
-      SET last_contacted_at = $2,
-          updated_at = now()
-      WHERE id = $1
+     UPDATE operations_businesses
+     SET last_contacted_at = $2,
+         updated_at = now()
+     WHERE id = $1
+        AND internal_workspace_id = $3
     `,
-    [businessId, now],
+    [businessId, now, workspaceId],
   );
   if (communication.follow_up_at) {
-    await upsertFollowUpTask(actor, {
+    await upsertFollowUpTask(workspaceId, actor, {
       businessId,
       contactId: communication.contact_id,
       sourceCommunicationId: communication.id,
@@ -1625,7 +1730,7 @@ export async function markOperationsCommunicationReceived(
       dueAt: communication.follow_up_at,
     });
   } else {
-    await syncBusinessFollowUpFields(businessId);
+    await syncBusinessFollowUpFields(workspaceId, businessId);
   }
   await recordAdminAuditLog(actor, {
     action: "operations.communication.mark_received",
@@ -1643,6 +1748,7 @@ export async function markOperationsCommunicationReceived(
 }
 
 export async function completeOperationsCommunicationFollowUp(
+  workspaceId: string,
   actor: AdminActor,
   communicationId: string,
 ) {
@@ -1651,30 +1757,32 @@ export async function completeOperationsCommunicationFollowUp(
     `
       SELECT *
       FROM operations_tasks
-      WHERE source_communication_id = $1
-        AND status IN ('open', 'snoozed')
+     WHERE source_communication_id = $1
+      AND status IN ('open', 'snoozed')
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_tasks.business_id AND b.internal_workspace_id = $2)
       ORDER BY created_at DESC
       LIMIT 1
     `,
-    [communicationId],
+    [communicationId, workspaceId],
   );
   const task = taskRes.rows[0] ?? null;
-  if (task) return completeOperationsTask(actor, task.id);
+  if (task) return completeOperationsTask(workspaceId, actor, task.id);
 
   const now = new Date();
   const communicationRes = await client.query<OperationsCommunicationRow>(
     `
-      UPDATE operations_communications
-      SET follow_up_completed_at = $2,
-          updated_at = now()
-      WHERE id = $1
-      RETURNING *
+     UPDATE operations_communications
+     SET follow_up_completed_at = $2,
+         updated_at = now()
+     WHERE id = $1
+       AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_communications.business_id AND b.internal_workspace_id = $3)
+     RETURNING *
     `,
-    [communicationId, now],
+    [communicationId, now, workspaceId],
   );
   const communication = communicationRes.rows[0] ?? null;
   if (!communication) return null;
-  await syncBusinessFollowUpFields(communication.business_id);
+  await syncBusinessFollowUpFields(workspaceId, communication.business_id);
   await recordAdminAuditLog(actor, {
     action: "operations.communication.follow_up_complete",
     targetType: "operations_communication",
@@ -1685,10 +1793,17 @@ export async function completeOperationsCommunicationFollowUp(
 }
 
 export async function cancelOperationsCommunication(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   communicationId: string,
 ) {
+  const existing = await getOperationsCommunication(
+    workspaceId,
+    communicationId,
+  );
+  if (!existing || existing.business_id !== businessId) return null;
+  assertCommunicationContentMutable(existing, { status: "cancelled" });
   const client = await ensureConnected();
   const res = await client.query<OperationsCommunicationRow>(
     `
@@ -1697,9 +1812,10 @@ export async function cancelOperationsCommunication(
           updated_at = now()
       WHERE id = $1
         AND business_id = $2
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_communications.business_id AND b.internal_workspace_id = $3)
       RETURNING *
     `,
-    [communicationId, businessId],
+    [communicationId, businessId, workspaceId],
   );
   const communication = res.rows[0] ?? null;
   if (!communication) return null;
@@ -1710,10 +1826,11 @@ export async function cancelOperationsCommunication(
           updated_at = now()
       WHERE source_communication_id = $1
         AND status IN ('open', 'snoozed')
+        AND EXISTS (SELECT 1 FROM operations_tasks t JOIN operations_businesses b ON b.id = t.business_id WHERE t.id = operations_tasks.id AND b.internal_workspace_id = $2)
     `,
-    [communicationId],
+    [communicationId, workspaceId],
   );
-  await syncBusinessFollowUpFields(businessId);
+  await syncBusinessFollowUpFields(workspaceId, businessId);
   await recordAdminAuditLog(actor, {
     action: "operations.communication.cancel",
     targetType: "operations_communication",
@@ -1723,14 +1840,20 @@ export async function cancelOperationsCommunication(
   return communication;
 }
 
-export async function listOperationsTasks(options: {
-  status?: OperationsTaskStatus | "active" | "due" | null;
-  limit: number;
-  offset: number;
-}) {
+export async function listOperationsTasks(
+  workspaceId: string,
+  options: {
+    status?: OperationsTaskStatus | "active" | "due" | null;
+    limit: number;
+    offset: number;
+  },
+) {
   const client = await ensureConnected();
-  const values: unknown[] = [];
-  const filters: string[] = ["b.is_archived = false"];
+  const values: unknown[] = [workspaceId];
+  const filters: string[] = [
+    "b.internal_workspace_id = $1",
+    "b.is_archived = false",
+  ];
   if (options.status === "active") {
     filters.push("t.status IN ('open', 'snoozed')");
   } else if (options.status === "due") {
@@ -1785,6 +1908,7 @@ export async function listOperationsTasks(options: {
 }
 
 export async function updateOperationsTask(
+  workspaceId: string,
   actor: AdminActor,
   taskId: string,
   input: Partial<{
@@ -1818,14 +1942,15 @@ export async function updateOperationsTask(
       UPDATE operations_tasks
       SET ${sets.join(", ")},
           updated_at = now()
-      WHERE id = $${values.length}
+     WHERE id = $${values.length}
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_tasks.business_id AND b.internal_workspace_id = $${values.length + 1})
       RETURNING *
     `,
-    values,
+    [...values, workspaceId],
   );
   const task = res.rows[0] ?? null;
   if (!task) return null;
-  await syncBusinessFollowUpFields(task.business_id);
+  await syncBusinessFollowUpFields(workspaceId, task.business_id);
   await recordAdminAuditLog(actor, {
     action: "operations.task.update",
     targetType: "operations_task",
@@ -1840,6 +1965,7 @@ export async function updateOperationsTask(
 }
 
 export async function completeOperationsTask(
+  workspaceId: string,
   actor: AdminActor,
   taskId: string,
 ) {
@@ -1853,9 +1979,10 @@ export async function completeOperationsTask(
           snoozed_until = NULL,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_tasks.business_id AND b.internal_workspace_id = $3)
       RETURNING *
     `,
-    [taskId, now],
+    [taskId, now, workspaceId],
   );
   const task = res.rows[0] ?? null;
   if (!task) return null;
@@ -1866,11 +1993,12 @@ export async function completeOperationsTask(
         SET follow_up_completed_at = $2,
             updated_at = now()
         WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_tasks t JOIN operations_businesses b ON b.id = t.business_id WHERE t.id = $1 AND b.internal_workspace_id = $3)
       `,
-      [task.source_communication_id, now],
+      [task.source_communication_id, now, workspaceId],
     );
   }
-  await syncBusinessFollowUpFields(task.business_id);
+  await syncBusinessFollowUpFields(workspaceId, task.business_id);
   await recordAdminAuditLog(actor, {
     action: "operations.task.complete",
     targetType: "operations_task",
@@ -1884,6 +2012,7 @@ export async function completeOperationsTask(
 }
 
 export async function snoozeOperationsTask(
+  workspaceId: string,
   actor: AdminActor,
   taskId: string,
   snoozedUntil: Date,
@@ -1897,13 +2026,14 @@ export async function snoozeOperationsTask(
           completed_at = NULL,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_tasks.business_id AND b.internal_workspace_id = $3)
       RETURNING *
     `,
-    [taskId, snoozedUntil],
+    [taskId, snoozedUntil, workspaceId],
   );
   const task = res.rows[0] ?? null;
   if (!task) return null;
-  await syncBusinessFollowUpFields(task.business_id);
+  await syncBusinessFollowUpFields(workspaceId, task.business_id);
   await recordAdminAuditLog(actor, {
     action: "operations.task.snooze",
     targetType: "operations_task",
@@ -1913,7 +2043,11 @@ export async function snoozeOperationsTask(
   return task;
 }
 
-export async function cancelOperationsTask(actor: AdminActor, taskId: string) {
+export async function cancelOperationsTask(
+  workspaceId: string,
+  actor: AdminActor,
+  taskId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsTaskRow>(
     `
@@ -1921,13 +2055,14 @@ export async function cancelOperationsTask(actor: AdminActor, taskId: string) {
       SET status = 'cancelled',
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_tasks.business_id AND b.internal_workspace_id = $2)
       RETURNING *
     `,
-    [taskId],
+    [taskId, workspaceId],
   );
   const task = res.rows[0] ?? null;
   if (!task) return null;
-  await syncBusinessFollowUpFields(task.business_id);
+  await syncBusinessFollowUpFields(workspaceId, task.business_id);
   await recordAdminAuditLog(actor, {
     action: "operations.task.cancel",
     targetType: "operations_task",
@@ -1940,7 +2075,7 @@ export async function cancelOperationsTask(actor: AdminActor, taskId: string) {
   return task;
 }
 
-export async function getOperationsTaskCounts() {
+export async function getOperationsTaskCounts(workspaceId: string) {
   const client = await ensureConnected();
   const [followUpsDue, openWorkItems] = await Promise.all([
     client.query<CountRow>(
@@ -1948,19 +2083,23 @@ export async function getOperationsTaskCounts() {
         SELECT COUNT(*)::text AS count
         FROM operations_tasks t
         JOIN operations_businesses b ON b.id = t.business_id
-        WHERE b.is_archived = false
+        WHERE b.internal_workspace_id = $1
+          AND b.is_archived = false
           AND t.status IN ('open', 'snoozed')
           AND COALESCE(t.snoozed_until, t.due_at) <= NOW()
       `,
+      [workspaceId],
     ),
     client.query<CountRow>(
       `
         SELECT COUNT(*)::text AS count
         FROM operations_tasks t
         JOIN operations_businesses b ON b.id = t.business_id
-        WHERE b.is_archived = false
+        WHERE b.internal_workspace_id = $1
+          AND b.is_archived = false
           AND t.status IN ('open', 'snoozed')
       `,
+      [workspaceId],
     ),
   ]);
   return {
@@ -1970,6 +2109,7 @@ export async function getOperationsTaskCounts() {
 }
 
 export async function createOperationsTask(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsTaskInput,
 ) {
@@ -1978,10 +2118,11 @@ export async function createOperationsTask(
   }
   if (input.contactId) {
     const valid = await validateBusinessChildIds({
+      workspaceId,
       businessId: input.businessId,
       contactId: input.contactId,
     });
     if (valid !== "ok") return valid;
   }
-  return upsertFollowUpTask(actor, input);
+  return upsertFollowUpTask(workspaceId, actor, input);
 }

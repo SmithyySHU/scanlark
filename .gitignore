@@ -35,9 +35,14 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+/.tmp/
+
+# Reproducible local test and verification output
+/artifacts/
+/playwright-report/
+/test-results/
+/blob-report/
+/coverage/
 
 # Local-only rebrand notes
 REBRAND_NOTES.md
-
-# Local AI session handoff notes
-docs/AI_HANDOFF.md

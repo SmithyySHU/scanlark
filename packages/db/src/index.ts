@@ -330,6 +330,7 @@ export {
   buildOperationsClientReportPayload,
   bulkUpdateOperationsReportFindings,
   createOperationsReport,
+  createRevisedOperationsReport,
   createOperationsReportRetest,
   deleteOperationsReport,
   duplicateOperationsReport,
@@ -337,6 +338,7 @@ export {
   getOperationsReportDeleteEligibility,
   getOperationsReportCountsForSummary,
   getOperationsReportDetail,
+  getOperationsReportRevisionHistory,
   getOperationsReportPreview,
   getOperationsReportPdfRender,
   getOperationsReportReadinessIssues,
@@ -383,6 +385,7 @@ export type {
   OperationsReportRow,
   OperationsReportReadinessIssue,
   OperationsReportReadinessSection,
+  OperationsReportRevisionHistoryRow,
   OperationsReportRegroupPreview,
   OperationsReportRegroupPreviewGroup,
   OperationsReportStatus,
@@ -399,6 +402,7 @@ export {
   completeOperationsWorkOrder,
   convertOperationsQuoteToWorkOrder,
   createOperationsQuote,
+  createRevisedOperationsQuote,
   createOperationsQuoteServiceItem,
   deleteOperationsQuoteAccessRequirement,
   deleteOperationsQuoteItem,
@@ -408,6 +412,7 @@ export {
   getOperationsCommercialConfig,
   getOperationsCommercialCounts,
   getOperationsQuoteDetail,
+  getOperationsQuoteRevisionHistory,
   getOperationsQuotePreview,
   getOperationsWorkOrderDetail,
   listOperationsQuotes,
@@ -442,6 +447,7 @@ export type {
   OperationsCommercialCounts,
   OperationsQuoteAccessRequirementRow,
   OperationsQuoteDetail,
+  OperationsQuoteRevisionHistoryRow,
   OperationsQuoteInput,
   OperationsQuoteItemInput,
   OperationsQuoteItemRow,
@@ -695,7 +701,9 @@ export {
   canManageOperationsWorkspace,
   canManageSite,
   getInternalWorkspaceByCode,
+  getInternalWorkspaceById,
   getUserInternalWorkspaceMemberships,
+  listInternalWorkspaces,
   listInternalWorkspaceMembers,
   SCANLARK_OPERATIONS_WORKSPACE_CODE,
   setInternalWorkspaceMembershipActive,
@@ -703,6 +711,16 @@ export {
   siteManagePredicate,
   upsertInternalWorkspaceMembership,
 } from "./internalWorkspaces";
+export {
+  canAccessOperationsResource,
+  canLinkOperationsSite,
+} from "./operationsScope";
+export type { OperationsResourceKind } from "./operationsScope";
+export {
+  operationsRepositoryInventory,
+  classifyOperationsRepositoryExport,
+  documentedGlobalOperationsRepositoryExports,
+} from "./operationsRepositoryInventory";
 export type {
   InternalWorkspaceMembershipRow,
   InternalWorkspaceRole,
@@ -710,6 +728,16 @@ export type {
 } from "./internalWorkspaces";
 
 export { isOperationsEmailModuleEnabled } from "./operationsEmailConfig";
+export {
+  IMMUTABLE_ARTIFACT_ERROR,
+  STALE_REVISION_ERROR,
+  HISTORICAL_REPORT_STATUSES,
+  HISTORICAL_QUOTE_STATUSES,
+  HISTORICAL_COMMUNICATION_STATUSES,
+  isHistoricalReportStatus,
+  isHistoricalQuoteStatus,
+  isHistoricalCommunicationStatus,
+} from "./operationsEvidence";
 export * from "./operationsEmail";
 export * from "./operationsEmailPreparation";
 export * from "./operationsEmailSmtpConfig";

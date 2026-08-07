@@ -12,6 +12,8 @@ import {
   getAdminSiteDetail,
   getAdminUserDetail,
   getJobForScanRun,
+  getInternalWorkspaceById,
+  getUserByEmail,
   getScanRunById,
   listAdminAuditLog,
   listAdminEmailOutbox,
@@ -21,6 +23,8 @@ import {
   listAdminSites,
   listAdminUptime,
   listAdminUsers,
+  listInternalWorkspaceMembers,
+  listInternalWorkspaces,
   recordAdminAuditLog,
   restoreDefaultEmailTemplate,
   revokeAdminShareLink,
@@ -30,7 +34,10 @@ import {
   setAdminUserDisabled,
   setScanRunStatus,
   updateEmailTemplate,
+  setInternalWorkspaceMembershipActive,
+  upsertInternalWorkspaceMembership,
   type AdminActor,
+  type InternalWorkspaceRole,
 } from "@scanlark/db";
 import { adminGuard } from "../adminAccess";
 import { sendEmail } from "../email";
@@ -58,6 +65,14 @@ const EMAIL_STATUSES = new Set([
   "failed",
   "recorded",
   "suppressed",
+]);
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const INTERNAL_WORKSPACE_ROLES = new Set<InternalWorkspaceRole>([
+  "owner",
+  "operations_admin",
+  "operations_member",
+  "viewer",
 ]);
 
 function sendApiError(
@@ -93,6 +108,183 @@ function parseSearch(req: Request) {
 
 function getErrorMessage(err: unknown, fallback: string) {
   return err instanceof Error && err.message ? err.message : fallback;
+}
+
+function workspaceIdParam(req: Request, res: Response) {
+  const workspaceId = req.params.workspaceId;
+  if (!workspaceId || !UUID_RE.test(workspaceId)) {
+    sendApiError(res, 404, "not_found", "Workspace not found");
+    return null;
+  }
+  return workspaceId;
+}
+
+function parseInternalWorkspaceRole(value: unknown) {
+  return typeof value === "string" &&
+    INTERNAL_WORKSPACE_ROLES.has(value as InternalWorkspaceRole)
+    ? (value as InternalWorkspaceRole)
+    : null;
+}
+
+function mountInternalWorkspaceRecoveryRoutes(router: express.Router) {
+  router.get("/internal-workspaces", async (_req, res) => {
+    try {
+      return res.json({ workspaces: await listInternalWorkspaces() });
+    } catch (err) {
+      console.error("Admin internal workspaces failed", err);
+      return sendApiError(
+        res,
+        500,
+        "internal_workspaces_failed",
+        "Failed to load internal workspaces",
+      );
+    }
+  });
+
+  router.get("/internal-workspaces/:workspaceId/members", async (req, res) => {
+    try {
+      const workspaceId = workspaceIdParam(req, res);
+      if (!workspaceId) return;
+      const workspace = await getInternalWorkspaceById(workspaceId);
+      if (!workspace)
+        return sendApiError(res, 404, "not_found", "Workspace not found");
+      return res.json({
+        workspace,
+        members: await listInternalWorkspaceMembers(workspaceId),
+      });
+    } catch (err) {
+      console.error("Admin internal workspace members failed", err);
+      return sendApiError(
+        res,
+        500,
+        "internal_workspace_members_failed",
+        "Failed to load workspace members",
+      );
+    }
+  });
+
+  router.post("/internal-workspaces/:workspaceId/members", async (req, res) => {
+    try {
+      const workspaceId = workspaceIdParam(req, res);
+      if (!workspaceId) return;
+      if (!(await getInternalWorkspaceById(workspaceId))) {
+        return sendApiError(res, 404, "not_found", "Workspace not found");
+      }
+      const body =
+        req.body && typeof req.body === "object"
+          ? (req.body as Record<string, unknown>)
+          : {};
+      const email =
+        typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+      const role = parseInternalWorkspaceRole(body.role);
+      if (!email)
+        return sendApiError(res, 400, "invalid_email", "Email is required");
+      if (!role)
+        return sendApiError(res, 400, "invalid_role", "Role is invalid");
+      const user = await getUserByEmail(email);
+      if (!user)
+        return sendApiError(
+          res,
+          404,
+          "user_not_found",
+          "User must already exist before adding membership",
+        );
+      const member = await upsertInternalWorkspaceMembership({
+        workspaceId,
+        userId: user.id,
+        role,
+        isActive: true,
+      });
+      return res.status(201).json({ member });
+    } catch (err) {
+      console.error("Admin internal workspace member add failed", err);
+      return sendApiError(
+        res,
+        500,
+        "internal_workspace_member_add_failed",
+        "Failed to add workspace member",
+      );
+    }
+  });
+
+  router.patch(
+    "/internal-workspaces/:workspaceId/members/:userId",
+    async (req, res) => {
+      try {
+        const workspaceId = workspaceIdParam(req, res);
+        if (!workspaceId) return;
+        const userId = req.params.userId;
+        if (
+          !userId ||
+          !UUID_RE.test(userId) ||
+          !(await getInternalWorkspaceById(workspaceId))
+        ) {
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Workspace member not found",
+          );
+        }
+        const body =
+          req.body && typeof req.body === "object"
+            ? (req.body as Record<string, unknown>)
+            : {};
+        const role =
+          body.role === undefined
+            ? null
+            : parseInternalWorkspaceRole(body.role);
+        if (body.role !== undefined && !role)
+          return sendApiError(res, 400, "invalid_role", "Role is invalid");
+        if (body.isActive !== undefined && typeof body.isActive !== "boolean") {
+          return sendApiError(
+            res,
+            400,
+            "invalid_active_state",
+            "isActive must be boolean",
+          );
+        }
+        if (role) {
+          const member = await upsertInternalWorkspaceMembership({
+            workspaceId,
+            userId,
+            role,
+            isActive: typeof body.isActive === "boolean" ? body.isActive : true,
+          });
+          return res.json({ member });
+        }
+        if (typeof body.isActive === "boolean") {
+          const member = await setInternalWorkspaceMembershipActive({
+            workspaceId,
+            userId,
+            isActive: body.isActive,
+          });
+          if (!member)
+            return sendApiError(
+              res,
+              404,
+              "not_found",
+              "Workspace member not found",
+            );
+          return res.json({ member });
+        }
+        return sendApiError(
+          res,
+          400,
+          "empty_patch",
+          "Role or isActive must be provided",
+        );
+      } catch (err) {
+        console.error("Admin internal workspace member update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "internal_workspace_member_update_failed",
+          "Failed to update workspace member",
+        );
+      }
+    },
+  );
 }
 
 function getTemplateKey(req: Request, res: Response) {
@@ -946,6 +1138,7 @@ function mountActionRoutes(router: express.Router) {
 export function mountAdminRoutes(app: express.Application) {
   const router = express.Router();
   router.use(adminGuard);
+  mountInternalWorkspaceRecoveryRoutes(router);
   mountListRoutes(router);
   mountActionRoutes(router);
   app.use("/admin", router);

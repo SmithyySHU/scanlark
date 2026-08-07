@@ -379,6 +379,7 @@ type BusinessReport = {
   report_type: OperationsReportType;
   status: OperationsReportStatus;
   version_number: number;
+  content_revision: number;
   scan_run_id: string;
   site_id: string;
   site_url: string;
@@ -462,6 +463,7 @@ type Communication = {
   direction: CommunicationDirection;
   channel: CommunicationChannel;
   status: CommunicationStatus;
+  content_revision: number;
   subject: string | null;
   body: string;
   preheader: string | null;
@@ -541,6 +543,7 @@ type OperationsReportRow = {
   status: OperationsReportStatus;
   report_type: OperationsReportType;
   version_number: number;
+  content_revision: number;
   executive_summary: string | null;
   overall_summary: string | null;
   main_strengths: string | null;
@@ -694,6 +697,16 @@ type OperationsReportActivity = {
   created_at: string;
 };
 
+type OperationsReportRevisionHistory = {
+  id: string;
+  supersedes_report_id: string | null;
+  version_number: number;
+  status: OperationsReportStatus;
+  title: string;
+  sent_at: string | null;
+  created_at: string;
+};
+
 type OperationsReportDetail = {
   report: OperationsReportRow;
   findings: OperationsReportFinding[];
@@ -702,6 +715,7 @@ type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
   activity: OperationsReportActivity[];
+  revisionHistory?: OperationsReportRevisionHistory[];
 };
 
 type ClientReportPayload = {
@@ -815,7 +829,11 @@ type OperationsQuoteRow = {
   business_id: string;
   contact_id: string | null;
   operations_report_id: string | null;
+  revision_series_id: string;
+  revision_number: number;
+  supersedes_quote_id: string | null;
   quote_number: string;
+  content_revision: number;
   title: string;
   status: OperationsQuoteStatus;
   currency: string;
@@ -868,6 +886,16 @@ type OperationsQuoteDetail = {
   }>;
   readinessIssues: string[];
   linkedWorkOrder: OperationsWorkOrderRow | null;
+  revisionHistory?: Array<{
+    id: string;
+    quote_number: string;
+    revision_number: number;
+    supersedes_quote_id: string | null;
+    status: OperationsQuoteStatus;
+    title: string;
+    sent_at: string | null;
+    created_at: string;
+  }>;
 };
 
 type OperationsQuotePreviewPayload = {
@@ -2160,7 +2188,7 @@ function buildQuery(params: Record<string, string | null | undefined>) {
 
 export const OperationsPage: React.FC<OperationsPageProps> = ({
   apiBase,
-  apiFetch,
+  apiFetch: rawApiFetch,
   currentPath,
   currentSearch,
   authEmail,
@@ -2169,6 +2197,39 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   onLogout,
   embedded = false,
 }) => {
+  const readOnly = capabilities?.canMutateOperations !== true;
+  const [readOnlyNotice, setReadOnlyNotice] = useState<string | null>(null);
+  const apiFetch = useCallback(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (readOnly && method !== "GET" && method !== "HEAD") {
+        const message = "Your Operations access is read-only.";
+        setReadOnlyNotice(message);
+        return new Response(
+          JSON.stringify({ error: "operations_write_required", message }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+      const response = await rawApiFetch(input, init);
+      if (response.status === 403) {
+        const copy = response.clone();
+        void copy
+          .json()
+          .then((body: unknown) => {
+            if (
+              body &&
+              typeof body === "object" &&
+              (body as { error?: string }).error === "operations_write_required"
+            ) {
+              setReadOnlyNotice("Your Operations access is read-only.");
+            }
+          })
+          .catch(() => {});
+      }
+      return response;
+    },
+    [rawApiFetch, readOnly],
+  );
   const activeRoute = getRouteKey(currentPath);
   const visibleRouteItems = useMemo(
     () =>
@@ -3403,7 +3464,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3769,7 +3834,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3791,7 +3860,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3824,7 +3897,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3902,7 +3979,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3923,7 +4004,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? reportDetail?.report.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -3989,6 +4074,46 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       scanRunId,
       reportType: "post_fix_retest",
     });
+  }
+
+  async function createReportRevision() {
+    if (!operationsReportId || !reportDetail) return;
+    if (
+      !window.confirm(
+        "Create a new editable version of this report? The original sent report and PDF will remain unchanged.",
+      )
+    ) {
+      return;
+    }
+    const reason = window.prompt(
+      "Optional reason for revision (for example, Updated after client feedback)",
+      "",
+    );
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/revise`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedRevision: reportDetail.report.content_revision,
+            reason: reason?.trim() || null,
+          }),
+        },
+      );
+      if (!res.ok)
+        throw new Error(
+          await apiErrorMessage(res, "Failed to create revised report"),
+        );
+      const data = (await res.json()) as { report: OperationsReportDetail };
+      await loadReports();
+      onNavigate(`/operations/reports/${data.report.report.id}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create revised report",
+      );
+    }
   }
 
   async function generateReportPdf(mode: "draft" | "final" = "final") {
@@ -4179,7 +4304,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? quoteDetail.quote.content_revision,
+        }),
       },
     );
     if (!res.ok) {
@@ -4232,6 +4361,46 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }
 
+  async function createQuoteRevision() {
+    if (!quoteDetail) return;
+    const acceptedOrConverted = ["accepted", "converted_to_work"].includes(
+      quoteDetail.quote.status,
+    );
+    const confirmation = acceptedOrConverted
+      ? "Create a new commercial proposal based on this quote? This will not change the accepted quote or existing work order."
+      : "Create a new editable quote based on this one? The original quote, commercial terms and PDF will remain unchanged. The new quote will receive a new quote number.";
+    if (!window.confirm(confirmation)) return;
+    const reason = window.prompt(
+      "Optional reason for revision (for example, Changed scope requested by client)",
+      "",
+    );
+    setActionError(null);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/quotes/${encodeURIComponent(quoteDetail.quote.id)}/revise`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            expectedRevision: quoteDetail.quote.content_revision,
+            reason: reason?.trim() || null,
+          }),
+        },
+      );
+      if (!res.ok)
+        throw new Error(
+          await apiErrorMessage(res, "Failed to create revised quote"),
+        );
+      const data = (await res.json()) as { quote: OperationsQuoteDetail };
+      await loadQuotes();
+      onNavigate(`/operations/quotes/${data.quote.quote.id}`);
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : "Failed to create revised quote",
+      );
+    }
+  }
+
   async function addQuoteItem(event: React.FormEvent) {
     event.preventDefault();
     if (!quoteDetail || !quoteItemForm.title.trim()) return;
@@ -4251,6 +4420,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             isOptional: quoteItemForm.isOptional,
             isSelected: quoteItemForm.isSelected,
             estimatedEffort: quoteItemForm.estimatedEffort,
+            expectedRevision: quoteDetail.quote.content_revision,
           }),
         },
       );
@@ -4272,7 +4442,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          ...input,
+          expectedRevision:
+            input.expectedRevision ?? quoteDetail.quote.content_revision,
+        }),
       },
     );
     if (!res.ok) throw new Error("Failed to update quote item");
@@ -6522,6 +6696,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     <dt>Follow-up</dt>
                     <dd>{communicationFollowUpState(selectedCommunication)}</dd>
                   </dl>
+                  {["sent", "received"].includes(
+                    selectedCommunication.status,
+                  ) && (
+                    <div className="ops-warning">
+                      This Communication is historical evidence and is
+                      read-only.
+                    </div>
+                  )}
                   {communicationPlaceholders.length > 0 && (
                     <div className="ops-warning">
                       Stored content contains unresolved placeholders:{" "}
@@ -7967,6 +8149,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (!quoteDetail)
       return <section className="ops-panel">Quote not found.</section>;
     const quote = quoteDetail.quote;
+    const quoteImmutable = [
+      "sent",
+      "accepted",
+      "declined",
+      "expired",
+      "cancelled",
+      "converted_to_work",
+    ].includes(quote.status);
     return (
       <>
         <section className="ops-hero">
@@ -7980,24 +8170,28 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </span>
           </div>
           <div className="ops-inline-actions">
-            <button
-              className="ops-button"
-              onClick={() => void runQuoteAction("mark-ready")}
-            >
-              Mark ready
-            </button>
-            <button
-              className="ops-button"
-              onClick={() =>
-                void runQuoteAction("record-sent", {
-                  deliveryMethod: "email_attachment",
-                  sentAt: new Date().toISOString(),
-                  updatePipelineStage: true,
-                })
-              }
-            >
-              Record sent
-            </button>
+            {!quoteImmutable && (
+              <>
+                <button
+                  className="ops-button"
+                  onClick={() => void runQuoteAction("mark-ready")}
+                >
+                  Mark ready
+                </button>
+                <button
+                  className="ops-button"
+                  onClick={() =>
+                    void runQuoteAction("record-sent", {
+                      deliveryMethod: "email_attachment",
+                      sentAt: new Date().toISOString(),
+                      updatePipelineStage: true,
+                    })
+                  }
+                >
+                  Record sent
+                </button>
+              </>
+            )}
             <button
               className="ops-button"
               onClick={() => void recordQuoteAccepted()}
@@ -8036,6 +8230,59 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </div>
         </section>
         {actionError && <div className="ops-error">{actionError}</div>}
+        {quoteImmutable && (
+          <div className="ops-warning">
+            The commercial terms in this quote are frozen.
+            {!readOnly && (
+              <button
+                className="ops-button ops-button--primary"
+                type="button"
+                onClick={() => void createQuoteRevision()}
+              >
+                Create revised quote
+              </button>
+            )}
+          </div>
+        )}
+        {quoteDetail.revisionHistory &&
+          quoteDetail.revisionHistory.length > 1 && (
+            <section className="ops-panel">
+              <h2>Quote history</h2>
+              {quote.supersedes_quote_id && (
+                <p className="ops-muted">
+                  Revision of the preceding quote in this series.
+                </p>
+              )}
+              {quoteDetail.revisionHistory.some(
+                (item) => item.supersedes_quote_id === quote.id,
+              ) && <p className="ops-muted">Superseded by a newer quote.</p>}
+              <div className="ops-list">
+                {quoteDetail.revisionHistory.map((revision) => (
+                  <div key={revision.id} className="ops-list-card">
+                    <strong>
+                      {revision.quote_number} · Revision{" "}
+                      {revision.revision_number}
+                    </strong>
+                    <span>{revision.title}</span>
+                    <small>
+                      {quoteStatusLabel(revision.status)}
+                      {revision.sent_at
+                        ? ` · sent ${formatDateTime(revision.sent_at)}`
+                        : ""}
+                    </small>
+                    {revision.id !== quote.id && (
+                      <a
+                        className="ops-button"
+                        href={`/operations/quotes/${revision.id}`}
+                      >
+                        Open quote
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
         {quoteDetail.readinessIssues.length > 0 && (
           <section className="ops-warning">
             {quoteDetail.readinessIssues.map((issue) => (
@@ -8067,6 +8314,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               Scope summary
               <textarea
                 defaultValue={quote.scope_summary ?? ""}
+                readOnly={quoteImmutable}
                 onBlur={(event) =>
                   void patchQuote({ scopeSummary: event.target.value })
                 }
@@ -8076,6 +8324,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               Payment terms
               <textarea
                 defaultValue={quote.payment_terms ?? ""}
+                readOnly={quoteImmutable}
                 onBlur={(event) =>
                   void patchQuote({ paymentTerms: event.target.value })
                 }
@@ -8106,96 +8355,102 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                 {item.finding_title && (
                   <small>Finding: {item.finding_title}</small>
                 )}
-                <div className="ops-inline-actions">
-                  <button
-                    className="ops-button"
-                    onClick={() =>
-                      void updateQuoteItem(item, {
-                        isSelected: !item.is_selected,
-                      })
-                    }
-                  >
-                    {item.is_selected ? "Exclude from total" : "Select"}
-                  </button>
-                </div>
+                {!quoteImmutable && (
+                  <div className="ops-inline-actions">
+                    <button
+                      className="ops-button"
+                      onClick={() =>
+                        void updateQuoteItem(item, {
+                          isSelected: !item.is_selected,
+                        })
+                      }
+                    >
+                      {item.is_selected ? "Exclude from total" : "Select"}
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
-          <form className="ops-form" onSubmit={addQuoteItem}>
-            <div className="ops-form-grid">
+          {!quoteImmutable && (
+            <form className="ops-form" onSubmit={addQuoteItem}>
+              <div className="ops-form-grid">
+                <label>
+                  Item title
+                  <input
+                    value={quoteItemForm.title}
+                    onChange={(event) =>
+                      setQuoteItemForm((prev) => ({
+                        ...prev,
+                        title: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Type
+                  <select
+                    value={quoteItemForm.itemType}
+                    onChange={(event) =>
+                      setQuoteItemForm((prev) => ({
+                        ...prev,
+                        itemType: event.target.value as OperationsQuoteItemType,
+                      }))
+                    }
+                  >
+                    {quoteItemTypeOptions.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Unit price ({quote.currency === "GBP" ? "£" : quote.currency})
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    inputMode="decimal"
+                    value={quoteItemForm.unitPrice}
+                    onChange={(event) =>
+                      setQuoteItemForm((prev) => ({
+                        ...prev,
+                        unitPrice: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Estimated effort
+                  <input
+                    value={quoteItemForm.estimatedEffort}
+                    onChange={(event) =>
+                      setQuoteItemForm((prev) => ({
+                        ...prev,
+                        estimatedEffort: event.target.value,
+                      }))
+                    }
+                  />
+                </label>
+              </div>
               <label>
-                Item title
-                <input
-                  value={quoteItemForm.title}
+                Description
+                <textarea
+                  value={quoteItemForm.description}
                   onChange={(event) =>
                     setQuoteItemForm((prev) => ({
                       ...prev,
-                      title: event.target.value,
+                      description: event.target.value,
                     }))
                   }
                 />
               </label>
-              <label>
-                Type
-                <select
-                  value={quoteItemForm.itemType}
-                  onChange={(event) =>
-                    setQuoteItemForm((prev) => ({
-                      ...prev,
-                      itemType: event.target.value as OperationsQuoteItemType,
-                    }))
-                  }
-                >
-                  {quoteItemTypeOptions.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Unit price ({quote.currency === "GBP" ? "£" : quote.currency})
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  inputMode="decimal"
-                  value={quoteItemForm.unitPrice}
-                  onChange={(event) =>
-                    setQuoteItemForm((prev) => ({
-                      ...prev,
-                      unitPrice: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                Estimated effort
-                <input
-                  value={quoteItemForm.estimatedEffort}
-                  onChange={(event) =>
-                    setQuoteItemForm((prev) => ({
-                      ...prev,
-                      estimatedEffort: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-            </div>
-            <label>
-              Description
-              <textarea
-                value={quoteItemForm.description}
-                onChange={(event) =>
-                  setQuoteItemForm((prev) => ({
-                    ...prev,
-                    description: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <button className="ops-button ops-button--primary">Add item</button>
-          </form>
+              <button className="ops-button ops-button--primary">
+                Add item
+              </button>
+            </form>
+          )}
         </section>
         <section className="ops-panel">
           <div className="ops-panel__header">
@@ -9684,6 +9939,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     return (
       <>
         <OperationsReportWorkspace
+          readOnly={readOnly}
           detail={reportDetail}
           preview={reportPreview}
           readinessIssues={reportReadinessIssues}
@@ -9701,6 +9957,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           onGeneratePdf={generateReportPdf}
           onArchive={() => runReportAction("archive")}
           onCreateRetest={createRetestReport}
+          onCreateRevision={createReportRevision}
           onCreateQuote={() =>
             openCreateQuote({
               businessId: report.business_id,
@@ -11567,7 +11824,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   return (
-    <div className={`ops-page ${embedded ? "ops-page--embedded" : ""}`}>
+    <div
+      className={`ops-page ${embedded ? "ops-page--embedded" : ""}`}
+      data-read-only={readOnly ? "true" : "false"}
+    >
       <style>{operationsStyles}</style>
       {!embedded && (
         <header className="ops-topbar">
@@ -11606,6 +11866,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           </nav>
         </aside>
         <main className="ops-main">
+          {readOnly && (
+            <div className="ops-warning" role="status">
+              {readOnlyNotice ?? "Your Operations access is read-only."}
+            </div>
+          )}
           {activeRoute === "home" ? (
             renderHome()
           ) : activeRoute === "businesses" ? (
@@ -11652,6 +11917,28 @@ const operationsStyles = `
     background: var(--bg);
     color: var(--text);
     padding: 16px;
+  }
+  .ops-page[data-read-only="true"] .ops-button--primary {
+    display: none;
+  }
+  .ops-report-workspace--read-only .ops-report-header .ops-inline-actions,
+  .ops-report-workspace--read-only .ops-report-editor-toolbar,
+  .ops-report-workspace--read-only .ops-report-bulkbar,
+  .ops-report-workspace--read-only .ops-regroup-preview .ops-button,
+  .ops-report-workspace--read-only .ops-report-finding-editor .ops-button,
+  .ops-report-workspace--read-only .ops-form > .ops-inline-actions {
+    display: none;
+  }
+  .ops-report-workspace--read-only input:not([readonly]),
+  .ops-report-workspace--read-only textarea,
+  .ops-report-workspace--read-only select {
+    cursor: not-allowed;
+    opacity: 0.78;
+  }
+  .ops-report-workspace--read-only .ops-report-filterbar input,
+  .ops-report-workspace--read-only .ops-report-filterbar select {
+    cursor: auto;
+    opacity: 1;
   }
   .ops-email-linked-status {
     display: flex;

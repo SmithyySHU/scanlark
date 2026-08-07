@@ -14,6 +14,20 @@ concurrency:
 jobs:
   build_and_check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: scanlark
+          POSTGRES_PASSWORD: scanlark_ci
+          POSTGRES_DB: scanlark_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scanlark -d scanlark_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,7 +61,16 @@ jobs:
       - name: Format check
         run: npm run format:check
 
+      - name: Apply disposable test migrations
+        env:
+          DATABASE_URL: postgresql://scanlark:scanlark_ci@127.0.0.1:5432/scanlark_test
+          NODE_ENV: test
+        run: bash scripts/run-migrations.sh
+
       - name: Workspace tests
+        env:
+          DATABASE_URL: postgresql://scanlark:scanlark_ci@127.0.0.1:5432/scanlark_test
+          NODE_ENV: test
         run: npm --workspaces run test --if-present
 
       - name: Workspace typecheck

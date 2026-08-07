@@ -1844,6 +1844,7 @@ export function parseOperationsCommunicationInput(
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;
   const parsed: Partial<OperationsCommunicationInput> = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
 
   parsed.contactId = optionalUuidField(record, "contactId");
   parsed.templateId = optionalUuidField(record, "templateId");
@@ -2062,6 +2063,7 @@ export function parseOperationsReportUpdateInput(
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;
   const parsed: OperationsReportUpdateInput = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("title" in record) {
     parsed.title = requiredClientTextField(record, "title");
   }
@@ -2172,6 +2174,7 @@ export function parseOperationsReportFindingUpdateInput(
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;
   const parsed: OperationsReportFindingUpdateInput = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("clientPriority" in record) {
     const priority = parseOperationsReportClientPriority(record.clientPriority);
     if (!priority) throw new Error("invalid_client_priority");
@@ -2261,12 +2264,25 @@ function optionalDisplayOrder(record: Record<string, unknown>) {
   return order;
 }
 
+function optionalExpectedRevision(record: Record<string, unknown>) {
+  if (!("expectedRevision" in record)) return undefined;
+  const revision =
+    typeof record.expectedRevision === "number"
+      ? record.expectedRevision
+      : Number.parseInt(String(record.expectedRevision), 10);
+  if (!Number.isInteger(revision) || revision < 1) {
+    throw new Error("invalid_expected_revision");
+  }
+  return revision;
+}
+
 export function parseOperationsReportPositiveObservationUpdateInput(
   body: unknown,
 ): OperationsReportPositiveObservationUpdateInput {
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;
   const parsed: OperationsReportPositiveObservationUpdateInput = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("title" in record) {
     parsed.title = requiredClientTextField(record, "title");
   }
@@ -2289,6 +2305,7 @@ export function parseOperationsReportActionPlanItemUpdateInput(
   const input = body && typeof body === "object" ? body : {};
   const record = input as Record<string, unknown>;
   const parsed: OperationsReportActionPlanItemUpdateInput = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("groupKey" in record) {
     const group = parseOperationsReportActionPlanGroup(record.groupKey);
     if (!group) throw new Error("invalid_action_plan_group");
@@ -2335,6 +2352,7 @@ export function parseOperationsReportFindingBulkInput(
   const parsed: OperationsReportFindingBulkInput = {
     findingIds: ids as string[],
     action,
+    expectedRevision: optionalExpectedRevision(record),
   };
   if (action === "change_priority") {
     const priority = parseOperationsReportClientPriority(record.clientPriority);
@@ -2508,6 +2526,7 @@ export function parseOperationsQuoteItemInput(
       ? (body as Record<string, unknown>)
       : {};
   const parsed: Partial<OperationsQuoteItemInput> = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("title" in record || !options.partial) {
     parsed.title = options.partial
       ? (optionalClientTextField(record, "title") ?? undefined)
@@ -2559,6 +2578,7 @@ export function parseOperationsAccessRequirementInput(
       ? (body as Record<string, unknown>)
       : {};
   const parsed: Partial<OperationsAccessRequirementInput> = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("description" in record || !options.partial) {
     parsed.description = options.partial
       ? (optionalClientTextField(record, "description") ?? undefined)
@@ -2648,6 +2668,7 @@ export function parseOperationsQuoteUpdateInput(
       ? (body as Record<string, unknown>)
       : {};
   const parsed: OperationsQuoteUpdateInput = {};
+  parsed.expectedRevision = optionalExpectedRevision(record);
   if ("contactId" in record)
     parsed.contactId = optionalUuidField(record, "contactId");
   if ("operationsReportId" in record) {

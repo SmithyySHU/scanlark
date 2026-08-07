@@ -27,8 +27,10 @@ import {
   createOperationsTask,
   createOperationsBusiness,
   createOperationsQuote,
+  createRevisedOperationsQuote,
   createOperationsQuoteServiceItem,
   createOperationsReport,
+  createRevisedOperationsReport,
   createOperationsReportRetest,
   deleteOperationsBusiness,
   deleteOperationsQuoteAccessRequirement,
@@ -57,9 +59,7 @@ import {
   getOperationsServiceSchedule,
   getOperationsSummary,
   getOperationsWorkOrderDetail,
-  getInternalWorkspaceByCode,
   getUserByEmail,
-  getUserInternalWorkspaceMemberships,
   generateOperationsServiceTasks,
   linkOperationsBusinessSite,
   listInternalWorkspaceMembers,
@@ -142,13 +142,18 @@ import {
   type OperationsServiceBillingCadence,
   type OperationsServicePlanType,
   type OperationsTaskStatus,
-  SCANLARK_OPERATIONS_WORKSPACE_CODE,
   setInternalWorkspaceMembershipActive,
   upsertInternalWorkspaceMembership,
   type InternalWorkspaceRole,
+  canAccessOperationsResource,
+  canLinkOperationsSite,
+  type OperationsResourceKind,
 } from "@scanlark/db";
-import { isAdminEmail } from "../adminAccess";
-import { requireOperationsWorkspaceMember } from "../operationsAccess";
+import {
+  requireOperationsContext,
+  requireOperationsMutation,
+  requireOperationsOwner,
+} from "../operationsAccess";
 import {
   operationsReportPdfFilename,
   renderOperationsReportPdf,
@@ -262,41 +267,8 @@ function getActor(req: Request): AdminActor {
   return { id: req.user.id, email: req.user.email };
 }
 
-async function requireOperationsMembershipAdmin(req: Request, res: Response) {
-  if (!req.user) {
-    sendApiError(res, 401, "unauthorized", "Unauthorized");
-    return null;
-  }
-  const workspace = await getInternalWorkspaceByCode(
-    SCANLARK_OPERATIONS_WORKSPACE_CODE,
-  );
-  if (!workspace) {
-    sendApiError(
-      res,
-      503,
-      "operations_workspace_missing",
-      "Operations workspace is not configured",
-    );
-    return null;
-  }
-  if (isAdminEmail(req.user.email)) return workspace;
-  const memberships = await getUserInternalWorkspaceMemberships(req.user.id);
-  const canManage = memberships.some(
-    (membership) =>
-      membership.workspace_id === workspace.id &&
-      membership.is_active &&
-      membership.role === "owner",
-  );
-  if (!canManage) {
-    sendApiError(
-      res,
-      403,
-      "operations_workspace_owner_required",
-      "Operations workspace owner access required",
-    );
-    return null;
-  }
-  return workspace;
+function getWorkspaceId(req: Request) {
+  return req.operationsContext!.workspace.id;
 }
 
 function parseInternalWorkspaceRole(value: unknown) {
@@ -551,8 +523,15 @@ function parseClientServiceListOptions(req: Request) {
   };
 }
 
-async function getCommunicationOr404(res: Response, communicationId: string) {
-  const communication = await getOperationsCommunication(communicationId);
+async function getCommunicationOr404(
+  res: Response,
+  workspaceId: string,
+  communicationId: string,
+) {
+  const communication = await getOperationsCommunication(
+    workspaceId,
+    communicationId,
+  );
   if (!communication) {
     sendApiError(res, 404, "not_found", "Communication not found");
     return null;
@@ -653,6 +632,65 @@ function serializeOperationsBusinessDetail(
 
 function handleValidationError(res: Response, err: unknown) {
   const message = err instanceof Error ? err.message : "invalid_request";
+  const databaseError = err as {
+    code?: string;
+    constraint?: string;
+    detail?: string;
+  };
+  if (message === "stale_revision" || message.startsWith("stale_revision:")) {
+    return sendApiError(
+      res,
+      409,
+      "stale_revision",
+      "This record changed before your edit was saved.",
+    );
+  }
+  if (
+    message === "artifact_immutable" ||
+    message.startsWith("artifact_immutable:") ||
+    message.includes("scanlark_artifact_immutable")
+  ) {
+    return sendApiError(
+      res,
+      409,
+      "artifact_immutable",
+      "This client evidence is frozen and cannot be edited.",
+    );
+  }
+  if (message.includes("scanlark_invalid_lifecycle_transition")) {
+    return sendApiError(
+      res,
+      409,
+      "invalid_lifecycle_transition",
+      "This lifecycle transition is not allowed.",
+    );
+  }
+  if (
+    message.includes("scanlark_historical_evidence_required") ||
+    databaseError.constraint ===
+      "operations_reports_historical_evidence_check" ||
+    databaseError.constraint === "operations_quotes_historical_evidence_check"
+  ) {
+    return sendApiError(
+      res,
+      409,
+      "historical_evidence_required",
+      "Required historical evidence is missing.",
+    );
+  }
+  if (
+    message.includes("scanlark_revision_lineage_conflict") ||
+    databaseError.constraint === "operations_reports_one_successor_idx" ||
+    databaseError.constraint === "operations_quotes_one_successor_idx" ||
+    databaseError.constraint === "operations_quotes_revision_series_number_idx"
+  ) {
+    return sendApiError(
+      res,
+      409,
+      "revision_lineage_conflict",
+      "This artifact revision conflicts with the existing lineage.",
+    );
+  }
   if (message === "business_name_required") {
     return sendApiError(
       res,
@@ -799,39 +837,148 @@ function handleValidationError(res: Response, err: unknown) {
 
 export function mountOperationsRoutes(app: express.Application) {
   const router = express.Router();
-  router.use(requireOperationsWorkspaceMember);
+  router.use(requireOperationsContext);
+  router.use((req, res, next) => {
+    if (req.method === "GET" || req.method === "HEAD") return next();
+    return requireOperationsMutation(req, res, next);
+  });
+
+  router.use(async (req, res, next) => {
+    if (req.method === "GET" || req.method === "HEAD") return next();
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body))
+      return next();
+    const body = req.body as Record<string, unknown>;
+    const bodyKinds: Record<string, OperationsResourceKind> = {
+      businessId: "business",
+      contactId: "contact",
+      scanRunId: "scan_run",
+      reportId: "report",
+      operationsReportId: "report",
+      quoteId: "quote",
+      workOrderId: "work_order",
+      communicationId: "communication",
+      sourceCommunicationId: "communication",
+      templateId: "communication_template",
+      servicePlanId: "service_plan",
+      clientServiceId: "service",
+      sourceQuoteId: "quote",
+    };
+    try {
+      for (const [field, resourceKind] of Object.entries(bodyKinds)) {
+        const value = body[field];
+        if (typeof value !== "string" || !UUID_RE.test(value)) continue;
+        if (
+          !(await canAccessOperationsResource(
+            getWorkspaceId(req),
+            resourceKind,
+            value,
+          ))
+        ) {
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Related record not found",
+          );
+        }
+      }
+      if (typeof body.siteId === "string" && UUID_RE.test(body.siteId)) {
+        if (
+          !(await canLinkOperationsSite(
+            getWorkspaceId(req),
+            req.user!.id,
+            body.siteId,
+          ))
+        ) {
+          return sendApiError(
+            res,
+            404,
+            "not_found",
+            "Related record not found",
+          );
+        }
+      }
+      next();
+    } catch (err) {
+      console.error("Operations request relationship scope check failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_scope_check_failed",
+        "Failed to verify related record access",
+      );
+    }
+  });
+
+  const scopedParams: Record<string, OperationsResourceKind> = {
+    businessId: "business",
+    contactId: "contact",
+    reportId: "report",
+    findingId: "finding",
+    observationId: "positive_observation",
+    comparisonItemId: "comparison_item",
+    quoteId: "quote",
+    itemId: "quote_or_work_item",
+    requirementId: "quote_or_work_requirement",
+    workOrderId: "work_order",
+    communicationId: "communication",
+    taskId: "task",
+    templateId: "communication_template",
+    serviceId: "service",
+    planId: "service_plan",
+    serviceItemId: "service_item",
+    usageId: "service_usage",
+  };
+  for (const [paramName, resourceKind] of Object.entries(scopedParams)) {
+    router.param(paramName, async (req, res, next, resourceId) => {
+      try {
+        const allowed = await canAccessOperationsResource(
+          req.operationsContext!.workspace.id,
+          resourceKind,
+          resourceId,
+        );
+        if (!allowed)
+          return sendApiError(res, 404, "not_found", "Record not found");
+        next();
+      } catch (err) {
+        console.error("Operations resource scope check failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_scope_check_failed",
+          "Failed to verify record access",
+        );
+      }
+    });
+  }
+  router.param("siteId", async (req, res, next, siteId) => {
+    try {
+      const allowed = await canLinkOperationsSite(
+        req.operationsContext!.workspace.id,
+        req.operationsContext!.actor.id,
+        siteId,
+      );
+      if (!allowed)
+        return sendApiError(res, 404, "not_found", "Record not found");
+      next();
+    } catch (err) {
+      console.error("Operations site scope check failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_scope_check_failed",
+        "Failed to verify record access",
+      );
+    }
+  });
 
   router.get("/staff/workspace", async (req, res) => {
     try {
-      const workspace = await getInternalWorkspaceByCode(
-        SCANLARK_OPERATIONS_WORKSPACE_CODE,
-      );
-      if (!workspace) {
-        return sendApiError(
-          res,
-          503,
-          "operations_workspace_missing",
-          "Operations workspace is not configured",
-        );
-      }
-      const memberships = await getUserInternalWorkspaceMemberships(
-        req.user!.id,
-      );
+      const context = req.operationsContext!;
       return res.json({
-        workspace: serializeObject(workspace),
-        memberships: serializeObject(
-          memberships.filter(
-            (membership) => membership.workspace_id === workspace.id,
-          ),
-        ),
-        canManageMembers:
-          isAdminEmail(req.user!.email) ||
-          memberships.some(
-            (membership) =>
-              membership.workspace_id === workspace.id &&
-              membership.is_active &&
-              membership.role === "owner",
-          ),
+        workspace: serializeObject(context.workspace),
+        memberships: serializeObject([context.membership]),
+        canManageMembers: context.canManageMembers,
       });
     } catch (err) {
       console.error("Operations staff workspace failed", err);
@@ -844,10 +991,9 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
-  router.get("/staff/members", async (req, res) => {
+  router.get("/staff/members", requireOperationsOwner, async (req, res) => {
     try {
-      const workspace = await requireOperationsMembershipAdmin(req, res);
-      if (!workspace) return;
+      const workspace = req.operationsContext!.workspace;
       return res.json({
         workspace: serializeObject(workspace),
         members: serializeObject(
@@ -865,10 +1011,9 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
-  router.post("/staff/members", async (req, res) => {
+  router.post("/staff/members", requireOperationsOwner, async (req, res) => {
     try {
-      const workspace = await requireOperationsMembershipAdmin(req, res);
-      if (!workspace) return;
+      const workspace = req.operationsContext!.workspace;
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const email =
         typeof (body as Record<string, unknown>).email === "string"
@@ -912,68 +1057,73 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
-  router.patch("/staff/members/:userId", async (req, res) => {
-    try {
-      const workspace = await requireOperationsMembershipAdmin(req, res);
-      if (!workspace) return;
-      const userId = getUuidParam(req, res, "userId");
-      if (!userId) return;
-      const body = req.body && typeof req.body === "object" ? req.body : {};
-      const roleValue = (body as Record<string, unknown>).role;
-      const activeValue = (body as Record<string, unknown>).isActive;
-      const role =
-        roleValue === undefined ? null : parseInternalWorkspaceRole(roleValue);
-      if (roleValue !== undefined && !role) {
-        return sendApiError(res, 400, "invalid_role", "Role is invalid");
-      }
-      if (activeValue !== undefined && typeof activeValue !== "boolean") {
+  router.patch(
+    "/staff/members/:userId",
+    requireOperationsOwner,
+    async (req, res) => {
+      try {
+        const workspace = req.operationsContext!.workspace;
+        const userId = getUuidParam(req, res, "userId");
+        if (!userId) return;
+        const body = req.body && typeof req.body === "object" ? req.body : {};
+        const roleValue = (body as Record<string, unknown>).role;
+        const activeValue = (body as Record<string, unknown>).isActive;
+        const role =
+          roleValue === undefined
+            ? null
+            : parseInternalWorkspaceRole(roleValue);
+        if (roleValue !== undefined && !role) {
+          return sendApiError(res, 400, "invalid_role", "Role is invalid");
+        }
+        if (activeValue !== undefined && typeof activeValue !== "boolean") {
+          return sendApiError(
+            res,
+            400,
+            "invalid_active_state",
+            "isActive must be boolean",
+          );
+        }
+        if (role) {
+          const membership = await upsertInternalWorkspaceMembership({
+            workspaceId: workspace.id,
+            userId,
+            role,
+            isActive: activeValue === undefined ? true : activeValue,
+          });
+          return res.json({ member: serializeObject(membership) });
+        }
+        if (typeof activeValue === "boolean") {
+          const membership = await setInternalWorkspaceMembershipActive({
+            workspaceId: workspace.id,
+            userId,
+            isActive: activeValue,
+          });
+          if (!membership) {
+            return sendApiError(res, 404, "not_found", "Member not found");
+          }
+          return res.json({ member: serializeObject(membership) });
+        }
         return sendApiError(
           res,
           400,
-          "invalid_active_state",
-          "isActive must be boolean",
+          "empty_patch",
+          "Role or isActive must be provided",
+        );
+      } catch (err) {
+        console.error("Operations staff member update failed", err);
+        return sendApiError(
+          res,
+          500,
+          "operations_staff_member_update_failed",
+          "Failed to update Operations staff member",
         );
       }
-      if (role) {
-        const membership = await upsertInternalWorkspaceMembership({
-          workspaceId: workspace.id,
-          userId,
-          role,
-          isActive: activeValue === undefined ? true : activeValue,
-        });
-        return res.json({ member: serializeObject(membership) });
-      }
-      if (typeof activeValue === "boolean") {
-        const membership = await setInternalWorkspaceMembershipActive({
-          workspaceId: workspace.id,
-          userId,
-          isActive: activeValue,
-        });
-        if (!membership) {
-          return sendApiError(res, 404, "not_found", "Member not found");
-        }
-        return res.json({ member: serializeObject(membership) });
-      }
-      return sendApiError(
-        res,
-        400,
-        "empty_patch",
-        "Role or isActive must be provided",
-      );
-    } catch (err) {
-      console.error("Operations staff member update failed", err);
-      return sendApiError(
-        res,
-        500,
-        "operations_staff_member_update_failed",
-        "Failed to update Operations staff member",
-      );
-    }
-  });
+    },
+  );
 
-  router.get("/summary", async (_req, res) => {
+  router.get("/summary", async (req, res) => {
     try {
-      const summary = await getOperationsSummary();
+      const summary = await getOperationsSummary(getWorkspaceId(req));
       return res.json(serializeOperationsSummary(summary));
     } catch (err) {
       console.error("Operations summary failed", err);
@@ -981,9 +1131,11 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
-  router.get("/pipeline", async (_req, res) => {
+  router.get("/pipeline", async (req, res) => {
     try {
-      return res.json(serializeObject(await listOperationsPipeline()));
+      return res.json(
+        serializeObject(await listOperationsPipeline(getWorkspaceId(req))),
+      );
     } catch (err) {
       console.error("Operations pipeline failed", err);
       return sendApiError(
@@ -1000,10 +1152,14 @@ export function mountOperationsRoutes(app: express.Application) {
       const search =
         typeof req.query.search === "string" ? req.query.search : null;
       return res.json({
-        sites: await listOperationsAvailableSites({
-          search,
-          limit: 100,
-        }),
+        sites: await listOperationsAvailableSites(
+          getWorkspaceId(req),
+          req.user!.id,
+          {
+            search,
+            limit: 100,
+          },
+        ),
       });
     } catch (err) {
       console.error("Operations sites failed", err);
@@ -1020,7 +1176,10 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsServicePlans(parseServicePlanListOptions(req)),
+          await listOperationsServicePlans(
+            getWorkspaceId(req),
+            parseServicePlanListOptions(req),
+          ),
         ),
       );
     } catch (err) {
@@ -1039,6 +1198,7 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/service-plans", async (req, res) => {
     try {
       const servicePlan = await createOperationsServicePlan(
+        getWorkspaceId(req),
         getActor(req),
         parseOperationsServicePlanInput(req.body),
       );
@@ -1061,7 +1221,10 @@ export function mountOperationsRoutes(app: express.Application) {
   router.get("/service-plans/:planId", async (req, res) => {
     const planId = getUuidParam(req, res, "planId");
     if (!planId) return;
-    const servicePlan = await getOperationsServicePlan(planId);
+    const servicePlan = await getOperationsServicePlan(
+      getWorkspaceId(req),
+      planId,
+    );
     if (!servicePlan) {
       return sendApiError(res, 404, "not_found", "Service plan not found");
     }
@@ -1073,6 +1236,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!planId) return;
     try {
       const servicePlan = await updateOperationsServicePlan(
+        getWorkspaceId(req),
         getActor(req),
         planId,
         parseOperationsServicePlanInput(req.body, { partial: true }),
@@ -1098,6 +1262,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const planId = getUuidParam(req, res, "planId");
     if (!planId) return;
     const servicePlan = await duplicateOperationsServicePlan(
+      getWorkspaceId(req),
       getActor(req),
       planId,
     );
@@ -1111,6 +1276,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const planId = getUuidParam(req, res, "planId");
     if (!planId) return;
     const servicePlan = await setOperationsServicePlanArchived(
+      getWorkspaceId(req),
       getActor(req),
       planId,
       true,
@@ -1125,6 +1291,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const planId = getUuidParam(req, res, "planId");
     if (!planId) return;
     const servicePlan = await setOperationsServicePlanArchived(
+      getWorkspaceId(req),
       getActor(req),
       planId,
       false,
@@ -1140,6 +1307,7 @@ export function mountOperationsRoutes(app: express.Application) {
       return res.json(
         serializeObject(
           await listOperationsClientServices(
+            getWorkspaceId(req),
             parseClientServiceListOptions(req),
           ),
         ),
@@ -1160,10 +1328,11 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/services", async (req, res) => {
     try {
       const service = await createOperationsClientService(
+        getWorkspaceId(req),
         getActor(req),
         parseOperationsClientServiceInput(req.body) as Parameters<
           typeof createOperationsClientService
-        >[1],
+        >[2],
       );
       if (typeof service === "string") {
         return sendApiError(
@@ -1190,7 +1359,10 @@ export function mountOperationsRoutes(app: express.Application) {
   router.get("/services/:serviceId", async (req, res) => {
     const serviceId = getUuidParam(req, res, "serviceId");
     if (!serviceId) return;
-    const service = await getOperationsClientServiceDetail(serviceId);
+    const service = await getOperationsClientServiceDetail(
+      getWorkspaceId(req),
+      serviceId,
+    );
     if (!service) {
       return sendApiError(res, 404, "not_found", "Service not found");
     }
@@ -1202,11 +1374,12 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const service = await updateOperationsClientService(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         parseOperationsClientServiceInput(req.body, {
           partial: true,
-        }) as Parameters<typeof updateOperationsClientService>[2],
+        }) as Parameters<typeof updateOperationsClientService>[3],
       );
       if (!service) {
         return sendApiError(res, 404, "not_found", "Service not found");
@@ -1238,6 +1411,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const result = await setOperationsClientServiceArchived(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         true,
@@ -1274,6 +1448,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const service = await setOperationsClientServiceArchived(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         false,
@@ -1299,13 +1474,19 @@ export function mountOperationsRoutes(app: express.Application) {
       actor: ReturnType<typeof getActor>,
       serviceId: string,
       body: unknown,
+      workspaceId: string,
     ) => Promise<unknown>,
   ) => {
     router.post(path, async (req, res) => {
       const serviceId = getUuidParam(req, res, "serviceId");
       if (!serviceId) return;
       try {
-        const result = await handler(getActor(req), serviceId, req.body);
+        const result = await handler(
+          getActor(req),
+          serviceId,
+          req.body,
+          getWorkspaceId(req),
+        );
         if (!result) {
           return sendApiError(res, 404, "not_found", "Service not found");
         }
@@ -1340,65 +1521,83 @@ export function mountOperationsRoutes(app: express.Application) {
     });
   };
 
-  serviceAction("/services/:serviceId/propose", (actor, serviceId, body) =>
-    proposeOperationsClientService(
-      actor,
-      serviceId,
-      parseOperationsClientServiceTransitionInput(body),
-    ),
-  );
-  serviceAction("/services/:serviceId/activate", (actor, serviceId, body) =>
-    activateOperationsClientService(
-      actor,
-      serviceId,
-      parseOperationsClientServiceActivationInput(body),
-    ),
-  );
-  serviceAction("/services/:serviceId/pause", (actor, serviceId, body) =>
-    pauseOperationsClientService(
-      actor,
-      serviceId,
-      parseOperationsClientServiceTransitionInput(body),
-    ),
-  );
-  serviceAction("/services/:serviceId/resume", (actor, serviceId) =>
-    resumeOperationsClientService(actor, serviceId),
-  );
   serviceAction(
-    "/services/:serviceId/request-cancellation",
-    (actor, serviceId, body) =>
-      requestOperationsClientServiceCancellation(
+    "/services/:serviceId/propose",
+    (actor, serviceId, body, workspaceId) =>
+      proposeOperationsClientService(
+        workspaceId,
         actor,
         serviceId,
         parseOperationsClientServiceTransitionInput(body),
       ),
   );
-  serviceAction("/services/:serviceId/cancel", (actor, serviceId, body) =>
-    cancelOperationsClientService(
-      actor,
-      serviceId,
-      parseOperationsClientServiceTransitionInput(body),
-    ),
+  serviceAction(
+    "/services/:serviceId/activate",
+    (actor, serviceId, body, workspaceId) =>
+      activateOperationsClientService(
+        workspaceId,
+        actor,
+        serviceId,
+        parseOperationsClientServiceActivationInput(body),
+      ),
   );
-  serviceAction("/services/:serviceId/renew", (actor, serviceId, body) => {
-    const record = body && typeof body === "object" ? body : {};
-    return renewOperationsClientService(actor, serviceId, {
-      renewalDate: parseDateField(
-        record as Record<string, unknown>,
-        "renewalDate",
+  serviceAction(
+    "/services/:serviceId/pause",
+    (actor, serviceId, body, workspaceId) =>
+      pauseOperationsClientService(
+        workspaceId,
+        actor,
+        serviceId,
+        parseOperationsClientServiceTransitionInput(body),
       ),
-      nextReviewAt: parseDateField(
-        record as Record<string, unknown>,
-        "nextReviewAt",
+  );
+  serviceAction(
+    "/services/:serviceId/resume",
+    (actor, serviceId, _body, workspaceId) =>
+      resumeOperationsClientService(workspaceId, actor, serviceId),
+  );
+  serviceAction(
+    "/services/:serviceId/request-cancellation",
+    (actor, serviceId, body, workspaceId) =>
+      requestOperationsClientServiceCancellation(
+        workspaceId,
+        actor,
+        serviceId,
+        parseOperationsClientServiceTransitionInput(body),
       ),
-      reason: optionalTextField(record as Record<string, unknown>, "reason"),
-    });
-  });
+  );
+  serviceAction(
+    "/services/:serviceId/cancel",
+    (actor, serviceId, body, workspaceId) =>
+      cancelOperationsClientService(
+        workspaceId,
+        actor,
+        serviceId,
+        parseOperationsClientServiceTransitionInput(body),
+      ),
+  );
+  serviceAction(
+    "/services/:serviceId/renew",
+    (actor, serviceId, body, workspaceId) => {
+      const record = body && typeof body === "object" ? body : {};
+      return renewOperationsClientService(workspaceId, actor, serviceId, {
+        renewalDate: parseDateField(
+          record as Record<string, unknown>,
+          "renewalDate",
+        ),
+        nextReviewAt: parseDateField(
+          record as Record<string, unknown>,
+          "nextReviewAt",
+        ),
+        reason: optionalTextField(record as Record<string, unknown>, "reason"),
+      });
+    },
+  );
   serviceAction(
     "/services/:serviceId/change-plan",
-    (actor, serviceId, body) => {
+    (actor, serviceId, body, workspaceId) => {
       const record = body && typeof body === "object" ? body : {};
-      return changeOperationsClientServicePlan(actor, serviceId, {
+      return changeOperationsClientServicePlan(workspaceId, actor, serviceId, {
         servicePlanId: optionalUuidField(
           record as Record<string, unknown>,
           "servicePlanId",
@@ -1416,8 +1615,9 @@ export function mountOperationsRoutes(app: express.Application) {
   );
   serviceAction(
     "/services/:serviceId/mark-review-complete",
-    (actor, serviceId, body) =>
+    (actor, serviceId, body, workspaceId) =>
       markOperationsServiceReviewComplete(
+        workspaceId,
         actor,
         serviceId,
         parseOperationsClientServiceReviewInput(body),
@@ -1429,6 +1629,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const review = await markOperationsServiceReviewComplete(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         parseOperationsClientServiceReviewInput(req.body),
@@ -1455,6 +1656,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const serviceSite = await addOperationsClientServiceSite(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         parseOperationsClientServiceSiteInput(req.body),
@@ -1500,6 +1702,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId || !siteId) return;
     try {
       const serviceSite = await updateOperationsClientServiceSite(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         siteId,
@@ -1527,6 +1730,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const siteId = getUuidParam(req, res, "siteId");
     if (!serviceId || !siteId) return;
     const serviceSite = await removeOperationsClientServiceSite(
+      getWorkspaceId(req),
       getActor(req),
       serviceId,
       siteId,
@@ -1542,7 +1746,9 @@ export function mountOperationsRoutes(app: express.Application) {
     const serviceId = getUuidParam(req, res, "serviceId");
     if (!serviceId) return;
     return res.json({
-      usage: serializeObject(await listOperationsClientServiceUsage(serviceId)),
+      usage: serializeObject(
+        await listOperationsClientServiceUsage(getWorkspaceId(req), serviceId),
+      ),
     });
   });
 
@@ -1551,6 +1757,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId) return;
     try {
       const usage = await createOperationsClientServiceUsage(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         parseOperationsClientServiceUsageInput(req.body),
@@ -1578,6 +1785,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceId || !usageId) return;
     try {
       const usage = await updateOperationsClientServiceUsage(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         usageId,
@@ -1605,6 +1813,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const usageId = getUuidParam(req, res, "usageId");
     if (!serviceId || !usageId) return;
     const usage = await deleteOperationsClientServiceUsage(
+      getWorkspaceId(req),
       getActor(req),
       serviceId,
       usageId,
@@ -1618,7 +1827,10 @@ export function mountOperationsRoutes(app: express.Application) {
   router.get("/services/:serviceId/schedule", async (req, res) => {
     const serviceId = getUuidParam(req, res, "serviceId");
     if (!serviceId) return;
-    const schedule = await getOperationsServiceSchedule(serviceId);
+    const schedule = await getOperationsServiceSchedule(
+      getWorkspaceId(req),
+      serviceId,
+    );
     if (!schedule) {
       return sendApiError(res, 404, "not_found", "Service not found");
     }
@@ -1629,6 +1841,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const serviceId = getUuidParam(req, res, "serviceId");
     if (!serviceId) return;
     const result = await generateOperationsServiceTasks(
+      getWorkspaceId(req),
       getActor(req),
       serviceId,
     );
@@ -1644,6 +1857,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const record = req.body && typeof req.body === "object" ? req.body : {};
       const report = await createOperationsServiceMonthlyReport(
+        getWorkspaceId(req),
         getActor(req),
         serviceId,
         {
@@ -1692,6 +1906,7 @@ export function mountOperationsRoutes(app: express.Application) {
       return res.json({
         serviceItems: serializeObject(
           await listOperationsQuoteServiceItems(
+            getWorkspaceId(req),
             req.query.activeOnly === "true",
           ),
         ),
@@ -1710,6 +1925,7 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/quotes/service-items", async (req, res) => {
     try {
       const item = await createOperationsQuoteServiceItem(
+        getWorkspaceId(req),
         getActor(req),
         parseOperationsServiceItemInput(req.body),
       );
@@ -1732,6 +1948,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!serviceItemId) return;
     try {
       const item = await updateOperationsQuoteServiceItem(
+        getWorkspaceId(req),
         getActor(req),
         serviceItemId,
         parseOperationsServiceItemInput(req.body, { partial: true }),
@@ -1755,7 +1972,12 @@ export function mountOperationsRoutes(app: express.Application) {
   router.get("/quotes", async (req, res) => {
     try {
       return res.json(
-        serializeObject(await listOperationsQuotes(parseQuoteListOptions(req))),
+        serializeObject(
+          await listOperationsQuotes(
+            getWorkspaceId(req),
+            parseQuoteListOptions(req),
+          ),
+        ),
       );
     } catch (err) {
       const handled = handleValidationError(res, err);
@@ -1773,6 +1995,7 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/quotes", async (req, res) => {
     try {
       const result = await createOperationsQuote(
+        getWorkspaceId(req),
         getActor(req),
         parseOperationsQuoteCreateInput(req.body),
       );
@@ -1811,7 +2034,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const quoteId = getUuidParam(req, res, "quoteId");
     if (!quoteId) return;
     try {
-      const quote = await getOperationsQuoteDetail(quoteId);
+      const quote = await getOperationsQuoteDetail(
+        getWorkspaceId(req),
+        quoteId,
+      );
       if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
       return res.json({ quote: serializeObject(quote) });
     } catch (err) {
@@ -1830,11 +2056,12 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await updateOperationsQuote(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsQuoteUpdateInput(req.body),
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(
           res,
           409,
@@ -1865,11 +2092,87 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.post("/quotes/:quoteId/revise", async (req, res) => {
+    const quoteId = getUuidParam(req, res, "quoteId");
+    if (!quoteId) return;
+    const body =
+      req.body && typeof req.body === "object"
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const expectedRevision =
+      body.expectedRevision === undefined
+        ? undefined
+        : Number(body.expectedRevision);
+    if (
+      expectedRevision !== undefined &&
+      (!Number.isInteger(expectedRevision) || expectedRevision < 1)
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_expected_revision",
+        "Expected revision must be a positive integer",
+      );
+    }
+    const reason =
+      typeof body.reason === "string" ? body.reason.trim() || null : null;
+    try {
+      const result = await createRevisedOperationsQuote(
+        getWorkspaceId(req),
+        getActor(req),
+        quoteId,
+        { expectedRevision, reason },
+      );
+      if (result === "quote_not_found") {
+        return sendApiError(res, 404, "not_found", "Quote not found");
+      }
+      if (result === "quote_not_eligible") {
+        return sendApiError(
+          res,
+          409,
+          "quote_revision_not_eligible",
+          "Only historical quotes can be revised",
+        );
+      }
+      if (result === "quote_revision_not_latest") {
+        return sendApiError(
+          res,
+          409,
+          "quote_revision_not_latest",
+          "This quote already has a newer revision",
+        );
+      }
+      if (result === "stale_revision") {
+        return sendApiError(
+          res,
+          409,
+          "stale_revision",
+          "This quote changed before the revision was created",
+        );
+      }
+      return res.status(201).json({ quote: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations quote revision failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_quote_revision_failed",
+        "Failed to create revised quote",
+      );
+    }
+  });
+
   router.post("/quotes/:quoteId/duplicate", async (req, res) => {
     const quoteId = getUuidParam(req, res, "quoteId");
     if (!quoteId) return;
     try {
-      const quote = await duplicateOperationsQuote(getActor(req), quoteId);
+      const quote = await duplicateOperationsQuote(
+        getWorkspaceId(req),
+        getActor(req),
+        quoteId,
+      );
       if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
       return res.status(201).json({ quote: serializeObject(quote) });
     } catch (err) {
@@ -1889,6 +2192,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const body = req.body && typeof req.body === "object" ? req.body : {};
     try {
       const quote = await cancelOperationsQuote(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         optionalTextField(body as Record<string, unknown>, "reason"),
@@ -1896,6 +2200,8 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!quote) return sendApiError(res, 404, "not_found", "Quote not found");
       return res.json({ quote: serializeObject(quote) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote cancel failed", err);
       return sendApiError(
         res,
@@ -1910,7 +2216,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const quoteId = getUuidParam(req, res, "quoteId");
     if (!quoteId) return;
     try {
-      const result = await markOperationsQuoteReady(getActor(req), quoteId);
+      const result = await markOperationsQuoteReady(
+        getWorkspaceId(req),
+        getActor(req),
+        quoteId,
+      );
       if (!result)
         return sendApiError(res, 404, "not_found", "Quote not found");
       if (typeof result === "object" && "readinessIssues" in result) {
@@ -1924,6 +2234,8 @@ export function mountOperationsRoutes(app: express.Application) {
       }
       return res.json({ quote: serializeObject(result) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote mark ready failed", err);
       return sendApiError(
         res,
@@ -1939,6 +2251,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await recordOperationsQuoteSent(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsQuoteSentInput(req.body),
@@ -1967,6 +2280,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await recordOperationsQuoteAccepted(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsQuoteAcceptedInput(req.body),
@@ -2000,6 +2314,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await recordOperationsQuoteDeclined(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsQuoteDeclinedInput(req.body),
@@ -2026,6 +2341,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const body = req.body && typeof req.body === "object" ? req.body : {};
     try {
       const result = await markOperationsQuoteExpired(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         optionalTextField(body as Record<string, unknown>, "reason"),
@@ -2034,6 +2350,8 @@ export function mountOperationsRoutes(app: express.Application) {
         return sendApiError(res, 404, "not_found", "Quote not found");
       return res.json({ quote: serializeObject(result) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote expire failed", err);
       return sendApiError(
         res,
@@ -2049,6 +2367,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await convertOperationsQuoteToWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
       );
@@ -2072,6 +2391,8 @@ export function mountOperationsRoutes(app: express.Application) {
         return sendApiError(res, 404, "not_found", "Quote not found");
       return res.status(201).json({ workOrder: serializeObject(result) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote convert failed", err);
       return sendApiError(
         res,
@@ -2086,7 +2407,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const quoteId = getUuidParam(req, res, "quoteId");
     if (!quoteId) return;
     try {
-      const preview = await getOperationsQuotePreview(quoteId);
+      const preview = await getOperationsQuotePreview(
+        getWorkspaceId(req),
+        quoteId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Quote not found");
       return res.json(serializeObject(preview));
@@ -2106,6 +2430,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const payload = await freezeOperationsQuoteRender(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         "operations_quote_pdf_generated",
@@ -2117,6 +2442,8 @@ export function mountOperationsRoutes(app: express.Application) {
         pdfMode: "browser_print",
       });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote PDF failed", err);
       return sendApiError(
         res,
@@ -2131,7 +2458,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const quoteId = getUuidParam(req, res, "quoteId");
     if (!quoteId) return;
     try {
-      const preview = await getOperationsQuotePreview(quoteId);
+      const preview = await getOperationsQuotePreview(
+        getWorkspaceId(req),
+        quoteId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Quote not found");
       return res.json({
@@ -2154,11 +2484,12 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await addOperationsQuoteItem(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsQuoteItemInput(req.body),
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
       }
       if (
@@ -2190,12 +2521,13 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId || !itemId) return;
     try {
       const result = await updateOperationsQuoteItem(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         itemId,
         parseOperationsQuoteItemInput(req.body, { partial: true }),
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
       }
       if (!result) return sendApiError(res, 404, "not_found", "Item not found");
@@ -2219,16 +2551,19 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId || !itemId) return;
     try {
       const result = await deleteOperationsQuoteItem(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         itemId,
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
       }
       if (!result) return sendApiError(res, 404, "not_found", "Item not found");
       return res.json({ item: serializeObject(result) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations quote item delete failed", err);
       return sendApiError(
         res,
@@ -2259,11 +2594,12 @@ export function mountOperationsRoutes(app: express.Application) {
         );
       }
       const result = await reorderOperationsQuoteItems(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         itemIds as string[],
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
       }
       if (!result)
@@ -2285,11 +2621,12 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!quoteId) return;
     try {
       const result = await addOperationsQuoteAccessRequirement(
+        getWorkspaceId(req),
         getActor(req),
         quoteId,
         parseOperationsAccessRequirementInput(req.body),
       );
-      if (result === "quote_locked") {
+      if ((result as unknown) === "quote_locked") {
         return sendApiError(res, 409, "quote_locked", "Quote cannot be edited");
       }
       if (!result)
@@ -2318,12 +2655,13 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!quoteId || !requirementId) return;
       try {
         const result = await updateOperationsQuoteAccessRequirement(
+          getWorkspaceId(req),
           getActor(req),
           quoteId,
           requirementId,
           parseOperationsAccessRequirementInput(req.body, { partial: true }),
         );
-        if (result === "quote_locked") {
+        if ((result as unknown) === "quote_locked") {
           return sendApiError(
             res,
             409,
@@ -2361,11 +2699,12 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!quoteId || !requirementId) return;
       try {
         const result = await deleteOperationsQuoteAccessRequirement(
+          getWorkspaceId(req),
           getActor(req),
           quoteId,
           requirementId,
         );
-        if (result === "quote_locked") {
+        if ((result as unknown) === "quote_locked") {
           return sendApiError(
             res,
             409,
@@ -2382,6 +2721,8 @@ export function mountOperationsRoutes(app: express.Application) {
           );
         return res.json({ accessRequirement: serializeObject(result) });
       } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
         console.error("Operations quote access delete failed", err);
         return sendApiError(
           res,
@@ -2397,7 +2738,10 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsWorkOrders(parseWorkOrderListOptions(req)),
+          await listOperationsWorkOrders(
+            getWorkspaceId(req),
+            parseWorkOrderListOptions(req),
+          ),
         ),
       );
     } catch (err) {
@@ -2417,7 +2761,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const workOrderId = getUuidParam(req, res, "workOrderId");
     if (!workOrderId) return;
     try {
-      const detail = await getOperationsWorkOrderDetail(workOrderId);
+      const detail = await getOperationsWorkOrderDetail(
+        getWorkspaceId(req),
+        workOrderId,
+      );
       if (!detail)
         return sendApiError(res, 404, "not_found", "Work order not found");
       return res.json({ workOrder: serializeObject(detail) });
@@ -2446,6 +2793,7 @@ export function mountOperationsRoutes(app: express.Application) {
         );
       }
       const result = await updateOperationsWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         input,
@@ -2471,6 +2819,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!workOrderId) return;
     try {
       const result = await updateOperationsWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         {
@@ -2509,6 +2858,7 @@ export function mountOperationsRoutes(app: express.Application) {
         );
       }
       const result = await updateOperationsWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         {
@@ -2537,6 +2887,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const record = req.body && typeof req.body === "object" ? req.body : {};
       const result = await completeOperationsWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         textField(record as Record<string, unknown>, "completionSummary") ?? "",
@@ -2571,6 +2922,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!workOrderId) return;
     try {
       const result = await updateOperationsWorkOrder(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         {
@@ -2596,6 +2948,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!workOrderId) return;
     try {
       const item = await addOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         parseOperationsWorkItemInput(req.body),
@@ -2622,6 +2975,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!workOrderId || !itemId) return;
     try {
       const item = await updateOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         itemId,
@@ -2649,6 +3003,7 @@ export function mountOperationsRoutes(app: express.Application) {
       const itemId = getUuidParam(req, res, "itemId");
       if (!workOrderId || !itemId) return;
       const item = await updateOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         itemId,
@@ -2669,6 +3024,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!workOrderId || !itemId) return;
       const record = req.body && typeof req.body === "object" ? req.body : {};
       const item = await updateOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         itemId,
@@ -2696,6 +3052,7 @@ export function mountOperationsRoutes(app: express.Application) {
       const itemId = getUuidParam(req, res, "itemId");
       if (!workOrderId || !itemId) return;
       const item = await updateOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         itemId,
@@ -2715,6 +3072,7 @@ export function mountOperationsRoutes(app: express.Application) {
       const itemId = getUuidParam(req, res, "itemId");
       if (!workOrderId || !itemId) return;
       const item = await updateOperationsWorkItem(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         itemId,
@@ -2744,6 +3102,7 @@ export function mountOperationsRoutes(app: express.Application) {
       );
     }
     const items = await reorderOperationsWorkItems(
+      getWorkspaceId(req),
       getActor(req),
       workOrderId,
       itemIds as string[],
@@ -2756,7 +3115,10 @@ export function mountOperationsRoutes(app: express.Application) {
     async (req, res) => {
       const workOrderId = getUuidParam(req, res, "workOrderId");
       if (!workOrderId) return;
-      const detail = await getOperationsWorkOrderDetail(workOrderId);
+      const detail = await getOperationsWorkOrderDetail(
+        getWorkspaceId(req),
+        workOrderId,
+      );
       if (!detail)
         return sendApiError(res, 404, "not_found", "Work order not found");
       return res.json({
@@ -2772,6 +3134,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!workOrderId) return;
       try {
         const result = await addOperationsWorkOrderAccessRequirement(
+          getWorkspaceId(req),
           getActor(req),
           workOrderId,
           parseOperationsAccessRequirementInput(req.body),
@@ -2803,6 +3166,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!workOrderId || !requirementId) return;
       try {
         const result = await updateOperationsWorkOrderAccessRequirement(
+          getWorkspaceId(req),
           getActor(req),
           workOrderId,
           requirementId,
@@ -2837,6 +3201,7 @@ export function mountOperationsRoutes(app: express.Application) {
       const requirementId = getUuidParam(req, res, "requirementId");
       if (!workOrderId || !requirementId) return;
       const result = await deleteOperationsWorkOrderAccessRequirement(
+        getWorkspaceId(req),
         getActor(req),
         workOrderId,
         requirementId,
@@ -2869,11 +3234,14 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!UUID_RE.test(siteId)) {
         return sendApiError(res, 400, "invalid_siteId", "Site is invalid");
       }
-      const result = await listOperationsReportableScanRuns({
-        businessId,
-        siteId,
-        limit: 50,
-      });
+      const result = await listOperationsReportableScanRuns(
+        getWorkspaceId(req),
+        {
+          businessId,
+          siteId,
+          limit: 50,
+        },
+      );
       if (!result) {
         return sendApiError(res, 404, "not_found", "Linked site not found");
       }
@@ -2893,7 +3261,10 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsReports(parseReportListOptions(req)),
+          await listOperationsReports(
+            getWorkspaceId(req),
+            parseReportListOptions(req),
+          ),
         ),
       );
     } catch (err) {
@@ -2912,6 +3283,7 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/reports", async (req, res) => {
     try {
       const result = await createOperationsReport(
+        getWorkspaceId(req),
         getActor(req),
         parseOperationsReportCreateInput(req.body),
       );
@@ -2960,7 +3332,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const detail = await getOperationsReportDetail(reportId);
+      const detail = await getOperationsReportDetail(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!detail) {
         return sendApiError(res, 404, "not_found", "Report not found");
       }
@@ -2981,6 +3356,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await updateOperationsReport(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         parseOperationsReportUpdateInput(req.body),
@@ -3010,6 +3386,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const report = await setOperationsReportArchived(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         true,
@@ -3018,6 +3395,8 @@ export function mountOperationsRoutes(app: express.Application) {
         return sendApiError(res, 404, "not_found", "Report not found");
       return res.json({ report: serializeObject(report) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations report archive failed", err);
       return sendApiError(
         res,
@@ -3033,6 +3412,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const report = await setOperationsReportArchived(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         false,
@@ -3041,6 +3421,8 @@ export function mountOperationsRoutes(app: express.Application) {
         return sendApiError(res, 404, "not_found", "Report not found");
       return res.json({ report: serializeObject(report) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations report restore failed", err);
       return sendApiError(
         res,
@@ -3055,7 +3437,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const result = await deleteOperationsReport(getActor(req), reportId);
+      const result = await deleteOperationsReport(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+      );
       if (!result) {
         return sendApiError(res, 404, "not_found", "Report not found");
       }
@@ -3073,6 +3459,8 @@ export function mountOperationsRoutes(app: express.Application) {
       }
       return res.json({ report: serializeObject(result) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations report delete failed", err);
       return sendApiError(
         res,
@@ -3087,7 +3475,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const report = await duplicateOperationsReport(getActor(req), reportId);
+      const report = await duplicateOperationsReport(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+      );
       if (!report)
         return sendApiError(res, 404, "not_found", "Report not found");
       return res.status(201).json({ report: serializeObject(report) });
@@ -3102,11 +3494,97 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.post("/reports/:reportId/revise", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    const body =
+      req.body && typeof req.body === "object"
+        ? (req.body as Record<string, unknown>)
+        : {};
+    const expectedRevision =
+      body.expectedRevision === undefined
+        ? undefined
+        : Number(body.expectedRevision);
+    if (
+      expectedRevision !== undefined &&
+      (!Number.isInteger(expectedRevision) || expectedRevision < 1)
+    ) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_expected_revision",
+        "Expected revision must be a positive integer",
+      );
+    }
+    const reason =
+      typeof body.reason === "string" ? body.reason.trim() || null : null;
+    try {
+      const result = await createRevisedOperationsReport(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+        { expectedRevision, reason },
+      );
+      if (result === "report_not_found") {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      if (result === "report_not_eligible") {
+        return sendApiError(
+          res,
+          409,
+          "report_revision_not_eligible",
+          "Only historical reports can be revised",
+        );
+      }
+      if (result === "report_already_superseded") {
+        return sendApiError(
+          res,
+          409,
+          "report_already_superseded",
+          "This report already has a newer revision",
+        );
+      }
+      if (result === "stale_revision") {
+        return sendApiError(
+          res,
+          409,
+          "stale_revision",
+          "This report changed before the revision was created",
+        );
+      }
+      if (
+        result === "business_site_scan_invalid" ||
+        result === "scan_not_reportable"
+      ) {
+        return sendApiError(
+          res,
+          409,
+          "report_revision_relationship_invalid",
+          "The source report relationships are no longer valid",
+        );
+      }
+      return res.status(201).json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report revision failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_revision_failed",
+        "Failed to create revised report",
+      );
+    }
+  });
+
   router.get("/reports/:reportId/findings", async (req, res) => {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const detail = await getOperationsReportDetail(reportId);
+      const detail = await getOperationsReportDetail(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!detail)
         return sendApiError(res, 404, "not_found", "Report not found");
       let findings = detail.findings;
@@ -3168,6 +3646,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId || !findingId) return;
     try {
       const finding = await updateOperationsReportFinding(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         findingId,
@@ -3194,6 +3673,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const findings = await bulkUpdateOperationsReportFindings(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         parseOperationsReportFindingBulkInput(req.body),
@@ -3216,7 +3696,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const preview = await previewOperationsReportRegroup(reportId);
+      const preview = await previewOperationsReportRegroup(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
       if (preview.blockedReason) {
@@ -3245,6 +3728,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await regroupOperationsReportFindings(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         parseOperationsReportRegroupInput(req.body),
@@ -3291,6 +3775,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !findingId) return;
       try {
         const finding = await updateOperationsReportFinding(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           findingId,
@@ -3322,6 +3807,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !findingId) return;
       try {
         const finding = await updateOperationsReportFinding(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           findingId,
@@ -3352,6 +3838,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !findingId) return;
       try {
         const finding = await updateOperationsReportFinding(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           findingId,
@@ -3394,6 +3881,7 @@ export function mountOperationsRoutes(app: express.Application) {
         );
       }
       const findings = await reorderOperationsReportFindings(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         findingIds as string[],
@@ -3418,6 +3906,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !observationId) return;
       try {
         const observation = await updateOperationsReportPositiveObservation(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           observationId,
@@ -3457,6 +3946,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !itemId) return;
       try {
         const item = await updateOperationsReportActionPlanItem(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           itemId,
@@ -3490,6 +3980,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await markOperationsReportStatus(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         "needs_review",
@@ -3513,6 +4004,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await markOperationsReportStatus(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         "ready_to_send",
@@ -3545,6 +4037,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await recordOperationsReportSent(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         parseOperationsReportSentInput(req.body),
@@ -3573,6 +4066,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await markOperationsReportStatus(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         "client_replied",
@@ -3596,6 +4090,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const result = await markOperationsReportStatus(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         "completed",
@@ -3618,7 +4113,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const preview = await getOperationsReportPreview(reportId);
+      const preview = await getOperationsReportPreview(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
       return res.json(serializeObject(preview));
@@ -3638,11 +4136,17 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!reportId) return;
     try {
       const mode = req.body?.mode === "draft" ? "draft" : "final";
-      const preview = await getOperationsReportPreview(reportId);
+      const preview = await getOperationsReportPreview(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
       if (preview.frozen && mode === "final") {
-        const storedPdf = await getOperationsReportPdfRender(reportId);
+        const storedPdf = await getOperationsReportPdfRender(
+          getWorkspaceId(req),
+          reportId,
+        );
         if (storedPdf) {
           res.setHeader("content-type", "application/pdf");
           res.setHeader(
@@ -3682,19 +4186,26 @@ export function mountOperationsRoutes(app: express.Application) {
       const pdf = await renderOperationsReportPdf(preview.payload);
       const filename = operationsReportPdfFilename(preview.payload);
       await freezeOperationsReportRender(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         "operations_report_pdf_generated",
         preview.payload,
       );
-      await saveOperationsReportPdfRender(reportId, filename, pdf, {
-        sourceVersion: `report-v${preview.payload.report.versionNumber}`,
-        sourceSnapshotSha256: createHash("sha256")
-          .update(JSON.stringify(preview.payload))
-          .digest("hex"),
-        generatedByUserId: getActor(req).id,
-        generationSource: "actor",
-      });
+      await saveOperationsReportPdfRender(
+        getWorkspaceId(req),
+        reportId,
+        filename,
+        pdf,
+        {
+          sourceVersion: `report-v${preview.payload.report.versionNumber}`,
+          sourceSnapshotSha256: createHash("sha256")
+            .update(JSON.stringify(preview.payload))
+            .digest("hex"),
+          generatedByUserId: getActor(req).id,
+          generationSource: "actor",
+        },
+      );
       res.setHeader("content-type", "application/pdf");
       res.setHeader(
         "content-disposition",
@@ -3716,7 +4227,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const storedPdf = await getOperationsReportPdfRender(reportId);
+      const storedPdf = await getOperationsReportPdfRender(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (storedPdf) {
         res.setHeader("content-type", "application/pdf");
         res.setHeader(
@@ -3725,7 +4239,10 @@ export function mountOperationsRoutes(app: express.Application) {
         );
         return res.send(storedPdf.pdf_bytes);
       }
-      const preview = await getOperationsReportPreview(reportId);
+      const preview = await getOperationsReportPreview(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
       const pdf = await renderOperationsReportPdf(preview.payload);
@@ -3752,6 +4269,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const input = parseOperationsReportRetestInput(req.body);
       const result = await createOperationsReportRetest(
+        getWorkspaceId(req),
         getActor(req),
         reportId,
         input.scanRunId,
@@ -3785,7 +4303,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
     try {
-      const detail = await getOperationsReportDetail(reportId);
+      const detail = await getOperationsReportDetail(
+        getWorkspaceId(req),
+        reportId,
+      );
       if (!detail)
         return sendApiError(res, 404, "not_found", "Report not found");
       return res.json({
@@ -3810,6 +4331,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!reportId || !comparisonItemId) return;
       try {
         const item = await updateOperationsReportComparisonItem(
+          getWorkspaceId(req),
           getActor(req),
           reportId,
           comparisonItemId,
@@ -3841,7 +4363,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json({
         templates: serializeObject(
-          await listOperationsCommunicationTemplates({
+          await listOperationsCommunicationTemplates(getWorkspaceId(req), {
             activeOnly: req.query.activeOnly === "true",
           }),
         ),
@@ -3867,6 +4389,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const input = parseOperationsCommunicationTemplateInput(req.body);
       const template = await createOperationsCommunicationTemplate(
+        getWorkspaceId(req),
         getActor(req),
         input as {
           name: string;
@@ -3878,17 +4401,17 @@ export function mountOperationsRoutes(app: express.Application) {
           plainTextTemplate?: string | null;
           layoutKey?: Parameters<
             typeof createOperationsCommunicationTemplate
-          >[1]["layoutKey"];
+          >[2]["layoutKey"];
           contentVariantsJson?: Parameters<
             typeof createOperationsCommunicationTemplate
-          >[1]["contentVariantsJson"];
+          >[2]["contentVariantsJson"];
           subjectSuggestionsJson?: string[];
           attachmentPolicy?: Parameters<
             typeof createOperationsCommunicationTemplate
-          >[1]["attachmentPolicy"];
+          >[2]["attachmentPolicy"];
           signatureMode?: Parameters<
             typeof createOperationsCommunicationTemplate
-          >[1]["signatureMode"];
+          >[2]["signatureMode"];
           defaultFollowUpBusinessDays?: number | null;
           isActive?: boolean;
         },
@@ -3911,7 +4434,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const templateId = getUuidParam(req, res, "templateId");
     if (!templateId) return;
     try {
-      const template = await getOperationsCommunicationTemplate(templateId);
+      const template = await getOperationsCommunicationTemplate(
+        getWorkspaceId(req),
+        templateId,
+      );
       if (!template)
         return sendApiError(res, 404, "not_found", "Template not found");
       return res.json({
@@ -3949,13 +4475,20 @@ export function mountOperationsRoutes(app: express.Application) {
         const manualBody = optionalTextField(record, "manualBody");
         const manualPlainText = optionalTextField(record, "manualPlainText");
         const renderOptions = getCommunicationRenderOptions(record);
-        const template = await getOperationsCommunicationTemplate(templateId);
+        const template = await getOperationsCommunicationTemplate(
+          getWorkspaceId(req),
+          templateId,
+        );
         if (!template)
           return sendApiError(res, 404, "not_found", "Template not found");
         const context = businessId
-          ? await getOperationsCommunicationDraftContext(businessId, {
-              contactId,
-            })
+          ? await getOperationsCommunicationDraftContext(
+              getWorkspaceId(req),
+              businessId,
+              {
+                contactId,
+              },
+            )
           : null;
         if (businessId && !context) {
           return sendApiError(res, 404, "not_found", "Business not found");
@@ -4018,6 +4551,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!templateId) return;
       try {
         const template = await setOperationsCommunicationTemplateActive(
+          getWorkspaceId(req),
           getActor(req),
           templateId,
           false,
@@ -4044,6 +4578,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!templateId) return;
       try {
         const template = await setOperationsCommunicationTemplateActive(
+          getWorkspaceId(req),
           getActor(req),
           templateId,
           true,
@@ -4069,10 +4604,14 @@ export function mountOperationsRoutes(app: express.Application) {
       const templateId = getUuidParam(req, res, "templateId");
       if (!templateId) return;
       try {
-        const template = await getOperationsCommunicationTemplate(templateId);
+        const template = await getOperationsCommunicationTemplate(
+          getWorkspaceId(req),
+          templateId,
+        );
         if (!template)
           return sendApiError(res, 404, "not_found", "Template not found");
         const duplicate = await createOperationsCommunicationTemplate(
+          getWorkspaceId(req),
           getActor(req),
           {
             name: `${template.name} copy`,
@@ -4113,6 +4652,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!templateId) return;
     try {
       const template = await updateOperationsCommunicationTemplate(
+        getWorkspaceId(req),
         getActor(req),
         templateId,
         parseOperationsCommunicationTemplateInput(req.body, { partial: true }),
@@ -4138,6 +4678,7 @@ export function mountOperationsRoutes(app: express.Application) {
       return res.json(
         serializeObject(
           await listOperationsCommunications(
+            getWorkspaceId(req),
             parseCommunicationListOptions(req),
           ),
         ),
@@ -4166,6 +4707,7 @@ export function mountOperationsRoutes(app: express.Application) {
       assertSentCommunicationMetadata(body as Record<string, unknown>);
       const input = parseOperationsCommunicationInput(req.body);
       const communication = await createOperationsCommunication(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         input as OperationsCommunicationInput,
@@ -4199,7 +4741,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const communicationId = getUuidParam(req, res, "communicationId");
     if (!communicationId) return;
     try {
-      const communication = await getCommunicationOr404(res, communicationId);
+      const communication = await getCommunicationOr404(
+        res,
+        getWorkspaceId(req),
+        communicationId,
+      );
       if (!communication) return;
       return res.json({ communication: serializeObject(communication) });
     } catch (err) {
@@ -4217,7 +4763,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const communicationId = getUuidParam(req, res, "communicationId");
     if (!communicationId) return;
     try {
-      const existing = await getCommunicationOr404(res, communicationId);
+      const existing = await getCommunicationOr404(
+        res,
+        getWorkspaceId(req),
+        communicationId,
+      );
       if (!existing) return;
       const input = parseOperationsCommunicationInput(req.body, {
         partial: true,
@@ -4228,6 +4778,7 @@ export function mountOperationsRoutes(app: express.Application) {
         body: input.body ?? existing.body,
       });
       const communication = await updateOperationsCommunication(
+        getWorkspaceId(req),
         getActor(req),
         existing.business_id,
         communicationId,
@@ -4262,7 +4813,11 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const input = parseOperationsCommunicationInput(req.body, {
           partial: true,
@@ -4282,6 +4837,7 @@ export function mountOperationsRoutes(app: express.Application) {
               : null,
         });
         const communication = await markOperationsCommunicationSent(
+          getWorkspaceId(req),
           getActor(req),
           existing.business_id,
           communicationId,
@@ -4329,12 +4885,17 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const input = parseOperationsCommunicationInput(req.body, {
           partial: true,
         });
         const communication = await markOperationsCommunicationReceived(
+          getWorkspaceId(req),
           getActor(req),
           existing.business_id,
           communicationId,
@@ -4368,9 +4929,14 @@ export function mountOperationsRoutes(app: express.Application) {
     const communicationId = getUuidParam(req, res, "communicationId");
     if (!communicationId) return;
     try {
-      const existing = await getCommunicationOr404(res, communicationId);
+      const existing = await getCommunicationOr404(
+        res,
+        getWorkspaceId(req),
+        communicationId,
+      );
       if (!existing) return;
       const communication = await cancelOperationsCommunication(
+        getWorkspaceId(req),
         getActor(req),
         existing.business_id,
         communicationId,
@@ -4380,6 +4946,8 @@ export function mountOperationsRoutes(app: express.Application) {
       }
       return res.json({ communication: serializeObject(communication) });
     } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
       console.error("Operations cancel communication failed", err);
       return sendApiError(
         res,
@@ -4396,7 +4964,11 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const body = req.body && typeof req.body === "object" ? req.body : {};
         const followUpAt = parseRequiredDateField(
@@ -4404,6 +4976,7 @@ export function mountOperationsRoutes(app: express.Application) {
           "followUpAt",
         );
         const communication = await updateOperationsCommunication(
+          getWorkspaceId(req),
           getActor(req),
           existing.business_id,
           communicationId,
@@ -4443,9 +5016,14 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const result = await completeOperationsCommunicationFollowUp(
+          getWorkspaceId(req),
           getActor(req),
           communicationId,
         );
@@ -4474,7 +5052,7 @@ export function mountOperationsRoutes(app: express.Application) {
           TASK_STATUS_SET.has(req.query.status))
           ? (req.query.status as OperationsTaskStatus | "active" | "due")
           : undefined;
-      const result = await listOperationsTasks({
+      const result = await listOperationsTasks(getWorkspaceId(req), {
         status,
         ...parsePagination(req),
       });
@@ -4498,13 +5076,17 @@ export function mountOperationsRoutes(app: express.Application) {
   router.post("/tasks", async (req, res) => {
     try {
       const input = parseOperationsTaskInput(req.body);
-      const task = await createOperationsTask(getActor(req), {
-        businessId: input.businessId as string,
-        contactId: input.contactId,
-        title: input.title as string,
-        notes: input.notes,
-        dueAt: input.dueAt as Date,
-      });
+      const task = await createOperationsTask(
+        getWorkspaceId(req),
+        getActor(req),
+        {
+          businessId: input.businessId as string,
+          contactId: input.contactId,
+          title: input.title as string,
+          notes: input.notes,
+          dueAt: input.dueAt as Date,
+        },
+      );
       if (task === "business_not_found") {
         return sendApiError(res, 404, "not_found", "Business not found");
       }
@@ -4530,6 +5112,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!taskId) return;
     try {
       const task = await updateOperationsTask(
+        getWorkspaceId(req),
         getActor(req),
         taskId,
         parseOperationsTaskInput(req.body, { partial: true }),
@@ -4553,7 +5136,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const taskId = getUuidParam(req, res, "taskId");
     if (!taskId) return;
     try {
-      const task = await completeOperationsTask(getActor(req), taskId);
+      const task = await completeOperationsTask(
+        getWorkspaceId(req),
+        getActor(req),
+        taskId,
+      );
       if (!task) return sendApiError(res, 404, "not_found", "Task not found");
       return res.json({ task: serializeObject(task) });
     } catch (err) {
@@ -4577,6 +5164,7 @@ export function mountOperationsRoutes(app: express.Application) {
         "snoozedUntil",
       );
       const task = await snoozeOperationsTask(
+        getWorkspaceId(req),
         getActor(req),
         taskId,
         snoozedUntil,
@@ -4600,7 +5188,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const taskId = getUuidParam(req, res, "taskId");
     if (!taskId) return;
     try {
-      const task = await cancelOperationsTask(getActor(req), taskId);
+      const task = await cancelOperationsTask(
+        getWorkspaceId(req),
+        getActor(req),
+        taskId,
+      );
       if (!task) return sendApiError(res, 404, "not_found", "Task not found");
       return res.json({ task: serializeObject(task) });
     } catch (err) {
@@ -4652,7 +5244,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsBusinesses({
+          await listOperationsBusinesses(getWorkspaceId(req), {
             ...parsePagination(req),
             search:
               typeof req.query.search === "string" ? req.query.search : null,
@@ -4679,6 +5271,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       const input = parseOperationsBusinessInput(req.body);
       const business = await createOperationsBusiness(
+        getWorkspaceId(req),
         getActor(req),
         input as OperationsBusinessInput & {
           primaryContact?: OperationsContactInput | null;
@@ -4705,7 +5298,10 @@ export function mountOperationsRoutes(app: express.Application) {
     const businessId = getUuidParam(req, res, "businessId");
     if (!businessId) return;
     try {
-      const detail = await getOperationsBusinessDetail(businessId);
+      const detail = await getOperationsBusinessDetail(
+        getWorkspaceId(req),
+        businessId,
+      );
       if (!detail)
         return sendApiError(res, 404, "not_found", "Business not found");
       return res.json({ business: serializeOperationsBusinessDetail(detail) });
@@ -4725,6 +5321,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId) return;
     try {
       const detail = await updateOperationsBusiness(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         parseOperationsBusinessInput(req.body, { partial: true }),
@@ -4751,7 +5348,7 @@ export function mountOperationsRoutes(app: express.Application) {
     try {
       return res.json(
         serializeObject(
-          await listOperationsCommunications({
+          await listOperationsCommunications(getWorkspaceId(req), {
             ...parseCommunicationListOptions(req),
             businessId,
           }),
@@ -4790,8 +5387,12 @@ export function mountOperationsRoutes(app: express.Application) {
         const manualPlainText = optionalTextField(record, "manualPlainText");
         const renderOptions = getCommunicationRenderOptions(record);
         const [template, context] = await Promise.all([
-          getOperationsCommunicationTemplate(templateId),
-          getOperationsCommunicationDraftContext(businessId, { contactId }),
+          getOperationsCommunicationTemplate(getWorkspaceId(req), templateId),
+          getOperationsCommunicationDraftContext(
+            getWorkspaceId(req),
+            businessId,
+            { contactId },
+          ),
         ]);
         if (!template)
           return sendApiError(res, 404, "not_found", "Template not found");
@@ -4865,6 +5466,7 @@ export function mountOperationsRoutes(app: express.Application) {
       const input = parseOperationsCommunicationInput(req.body);
       assertSentCommunicationMetadata(req.body as Record<string, unknown>);
       const communication = await createOperationsCommunication(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         input as OperationsCommunicationInput,
@@ -4901,9 +5503,14 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!businessId || !communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const communication = await updateOperationsCommunication(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           communicationId,
@@ -4953,7 +5560,11 @@ export function mountOperationsRoutes(app: express.Application) {
       const communicationId = getUuidParam(req, res, "communicationId");
       if (!businessId || !communicationId) return;
       try {
-        const existing = await getCommunicationOr404(res, communicationId);
+        const existing = await getCommunicationOr404(
+          res,
+          getWorkspaceId(req),
+          communicationId,
+        );
         if (!existing) return;
         const input = parseOperationsCommunicationInput(req.body, {
           partial: true,
@@ -4973,6 +5584,7 @@ export function mountOperationsRoutes(app: express.Application) {
               : null,
         });
         const communication = await markOperationsCommunicationSent(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           communicationId,
@@ -5022,6 +5634,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!businessId || !communicationId) return;
       try {
         const communication = await cancelOperationsCommunication(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           communicationId,
@@ -5031,6 +5644,8 @@ export function mountOperationsRoutes(app: express.Application) {
         }
         return res.json({ communication: serializeObject(communication) });
       } catch (err) {
+        const handled = handleValidationError(res, err);
+        if (handled) return handled;
         console.error("Operations cancel communication failed", err);
         return sendApiError(
           res,
@@ -5047,6 +5662,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId) return;
     try {
       const business = await setOperationsBusinessArchived(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         true,
@@ -5070,6 +5686,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId) return;
     try {
       const business = await setOperationsBusinessArchived(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         false,
@@ -5092,7 +5709,11 @@ export function mountOperationsRoutes(app: express.Application) {
     const businessId = getUuidParam(req, res, "businessId");
     if (!businessId) return;
     try {
-      const result = await deleteOperationsBusiness(getActor(req), businessId);
+      const result = await deleteOperationsBusiness(
+        getWorkspaceId(req),
+        getActor(req),
+        businessId,
+      );
       if (!result) {
         return sendApiError(res, 404, "not_found", "Business not found");
       }
@@ -5125,6 +5746,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId) return;
     try {
       const contact = await addOperationsContact(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         parseOperationsContactInput(req.body),
@@ -5153,6 +5775,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!businessId || !contactId) return;
       try {
         const contact = await updateOperationsContact(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           contactId,
@@ -5183,6 +5806,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!businessId || !contactId) return;
       try {
         const deleted = await deleteOperationsContact(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           contactId,
@@ -5223,6 +5847,7 @@ export function mountOperationsRoutes(app: express.Application) {
       try {
         const body = req.body && typeof req.body === "object" ? req.body : {};
         const contact = await setOperationsContactArchived(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           contactId,
@@ -5264,6 +5889,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!businessId || !contactId) return;
       try {
         const contact = await setOperationsContactArchived(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           contactId,
@@ -5293,6 +5919,7 @@ export function mountOperationsRoutes(app: express.Application) {
       if (!businessId || !contactId) return;
       try {
         const contact = await setPrimaryOperationsContact(
+          getWorkspaceId(req),
           getActor(req),
           businessId,
           contactId,
@@ -5322,6 +5949,7 @@ export function mountOperationsRoutes(app: express.Application) {
     }
     try {
       const result = await linkOperationsBusinessSite(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         siteId,
@@ -5358,6 +5986,7 @@ export function mountOperationsRoutes(app: express.Application) {
     if (!businessId || !siteId) return;
     try {
       const deleted = await unlinkOperationsBusinessSite(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         siteId,
@@ -5383,6 +6012,7 @@ export function mountOperationsRoutes(app: express.Application) {
     const noteBody = textField(body as Record<string, unknown>, "body");
     try {
       const note = await addOperationsBusinessNote(
+        getWorkspaceId(req),
         getActor(req),
         businessId,
         noteBody ?? "",

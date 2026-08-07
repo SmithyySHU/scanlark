@@ -3,6 +3,11 @@ import { ensureConnected } from "./client";
 import { createHash } from "node:crypto";
 import { formatIssuePresentation } from "./issuePresentation";
 import type { ScanIssue, ScanIssueSeverity } from "./scanIssues";
+import {
+  immutableArtifactError,
+  isHistoricalReportStatus,
+  staleRevisionError,
+} from "./operationsEvidence";
 
 export const OPERATIONS_REPORT_STATUSES = [
   "draft",
@@ -41,6 +46,11 @@ export const OPERATIONS_REPORT_COMPARISON_STATUSES = [
   "unable_to_compare",
 ] as const;
 
+// The DB adapter uses one PostgreSQL client for the application process. Keep
+// report revision transactions serialized so concurrent requests cannot
+// interleave BEGIN/COMMIT statements on that shared client.
+let reportRevisionQueue = Promise.resolve();
+
 export type OperationsReportStatus =
   (typeof OPERATIONS_REPORT_STATUSES)[number];
 export type OperationsReportType = (typeof OPERATIONS_REPORT_TYPES)[number];
@@ -76,6 +86,7 @@ export type OperationsReportRow = {
   status: OperationsReportStatus;
   report_type: OperationsReportType;
   version_number: number;
+  content_revision?: number;
   executive_summary: string | null;
   overall_summary: string | null;
   main_strengths: string | null;
@@ -262,6 +273,17 @@ export type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItemRow[];
   comparisonItems: OperationsReportComparisonItemRow[];
   activity: OperationsReportActivityRow[];
+  revisionHistory?: OperationsReportRevisionHistoryRow[];
+};
+
+export type OperationsReportRevisionHistoryRow = {
+  id: string;
+  supersedes_report_id: string | null;
+  version_number: number;
+  status: OperationsReportStatus;
+  title: string;
+  sent_at: Date | null;
+  created_at: Date;
 };
 
 export type OperationsReportCreateInput = {
@@ -280,6 +302,7 @@ export type OperationsReportCreateInput = {
 };
 
 export type OperationsReportUpdateInput = {
+  expectedRevision?: number;
   title?: string;
   status?: OperationsReportStatus;
   reportType?: OperationsReportType;
@@ -299,6 +322,7 @@ export type OperationsReportUpdateInput = {
 };
 
 export type OperationsReportFindingUpdateInput = {
+  expectedRevision?: number;
   clientPriority?: OperationsReportClientPriority;
   title?: string;
   clientExplanation?: string | null;
@@ -319,6 +343,7 @@ export type OperationsReportFindingUpdateInput = {
 };
 
 export type OperationsReportPositiveObservationUpdateInput = {
+  expectedRevision?: number;
   title?: string;
   description?: string | null;
   isIncluded?: boolean;
@@ -327,6 +352,7 @@ export type OperationsReportPositiveObservationUpdateInput = {
 };
 
 export type OperationsReportActionPlanItemUpdateInput = {
+  expectedRevision?: number;
   groupKey?: OperationsReportActionPlanGroup;
   title?: string;
   summary?: string | null;
@@ -350,6 +376,7 @@ export type OperationsReportReadinessIssue = {
 };
 
 export type OperationsReportFindingBulkInput = {
+  expectedRevision?: number;
   findingIds: string[];
   action:
     | "include"
@@ -1088,6 +1115,7 @@ function reportJoins() {
 }
 
 async function getReportRelationship(input: {
+  workspaceId: string;
   businessId: string;
   siteId: string;
   scanRunId: string;
@@ -1119,16 +1147,24 @@ async function getReportRelationship(input: {
        AND c.id = $4
        AND c.archived_at IS NULL
       WHERE b.id = $1
+        AND b.internal_workspace_id = $5
         AND s.id = $2
         AND r.id = $3
       LIMIT 1
     `,
-    [input.businessId, input.siteId, input.scanRunId, input.contactId ?? null],
+    [
+      input.businessId,
+      input.siteId,
+      input.scanRunId,
+      input.contactId ?? null,
+      input.workspaceId,
+    ],
   );
   return res.rows[0] ?? null;
 }
 
 async function getReportById(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportRow | null> {
   const client = await ensureConnected();
@@ -1137,102 +1173,255 @@ async function getReportById(
       SELECT ${reportSelect()}
       FROM operations_reports r
       ${reportJoins()}
-      WHERE r.id = $1
+      WHERE r.id = $2
+        AND b.internal_workspace_id = $1
       LIMIT 1
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows[0] ?? null;
 }
 
+export async function getOperationsReportRevisionHistory(
+  workspaceId: string,
+  reportId: string,
+): Promise<OperationsReportRevisionHistoryRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsReportRevisionHistoryRow>(
+    `
+      WITH RECURSIVE ancestors AS (
+        SELECT r.id, r.supersedes_report_id, r.version_number, r.status,
+               r.title, r.sent_at, r.created_at, r.business_id, r.site_id,
+               r.scan_run_id
+        FROM operations_reports r
+        JOIN operations_businesses b ON b.id = r.business_id
+        WHERE r.id = $2 AND b.internal_workspace_id = $1
+        UNION ALL
+        SELECT parent.id, parent.supersedes_report_id, parent.version_number,
+               parent.status, parent.title, parent.sent_at, parent.created_at,
+               parent.business_id, parent.site_id, parent.scan_run_id
+        FROM operations_reports parent
+        JOIN ancestors child ON child.supersedes_report_id = parent.id
+        JOIN operations_businesses b ON b.id = parent.business_id
+        WHERE b.internal_workspace_id = $1
+      ), descendants AS (
+        SELECT r.id, r.supersedes_report_id, r.version_number, r.status,
+               r.title, r.sent_at, r.created_at, r.business_id, r.site_id,
+               r.scan_run_id
+        FROM operations_reports r
+        JOIN operations_businesses b ON b.id = r.business_id
+        WHERE r.id = $2 AND b.internal_workspace_id = $1
+        UNION ALL
+        SELECT child.id, child.supersedes_report_id, child.version_number,
+               child.status, child.title, child.sent_at, child.created_at,
+               child.business_id, child.site_id, child.scan_run_id
+        FROM operations_reports child
+        JOIN descendants parent ON child.supersedes_report_id = parent.id
+        JOIN operations_businesses b ON b.id = child.business_id
+        WHERE b.internal_workspace_id = $1
+      )
+      SELECT id, supersedes_report_id, version_number, status, title,
+             sent_at, created_at
+      FROM (
+        SELECT * FROM ancestors
+        UNION
+        SELECT * FROM descendants
+      ) lineage
+      ORDER BY version_number ASC, created_at ASC
+    `,
+    [workspaceId, reportId],
+  );
+  return res.rows;
+}
+
+function assertReportContentMutable(
+  report: OperationsReportRow,
+  expectedRevision?: number,
+) {
+  if (isHistoricalReportStatus(report.status) || report.sent_at) {
+    throw immutableArtifactError("report");
+  }
+  if (
+    expectedRevision !== undefined &&
+    expectedRevision !== (report.content_revision ?? 1)
+  ) {
+    throw staleRevisionError("report");
+  }
+}
+
+function assertReportStatusTransition(
+  report: OperationsReportRow,
+  status: OperationsReportStatus,
+) {
+  if (isHistoricalReportStatus(report.status)) {
+    const order: OperationsReportStatus[] = [
+      "sent",
+      "client_replied",
+      "fixes_quoted",
+      "work_in_progress",
+      "completed",
+      "archived",
+    ];
+    const currentIndex = order.indexOf(report.status);
+    const nextIndex = order.indexOf(status);
+    if (nextIndex < currentIndex || nextIndex < 0 || status === "sent") {
+      throw immutableArtifactError("report");
+    }
+  }
+  if (
+    !isHistoricalReportStatus(report.status) &&
+    isHistoricalReportStatus(status) &&
+    status !== "archived"
+  ) {
+    throw new Error("report_sent_requires_finalization");
+  }
+}
+
+async function bumpReportContentRevision(
+  workspaceId: string,
+  reportId: string,
+) {
+  const client = await ensureConnected();
+  await client.query(
+    `UPDATE operations_reports
+     SET content_revision = content_revision + 1, updated_at = now()
+     WHERE id = $1 AND EXISTS (
+       SELECT 1 FROM operations_businesses b
+       WHERE b.id = operations_reports.business_id
+         AND b.internal_workspace_id = $2
+     )
+       AND status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived')`,
+    [reportId, workspaceId],
+  );
+}
+
+async function throwIfReportMutationRejected(
+  workspaceId: string,
+  reportId: string,
+  expectedRevision?: number,
+) {
+  const latest = await getReportById(workspaceId, reportId);
+  if (!latest) return;
+  if (isHistoricalReportStatus(latest.status) || latest.sent_at) {
+    throw immutableArtifactError("report");
+  }
+  if (
+    expectedRevision !== undefined &&
+    (latest.content_revision ?? 1) !== expectedRevision
+  ) {
+    throw staleRevisionError("report");
+  }
+}
+
 async function listFindings(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportFindingRow[]> {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportFindingRow>(
     `
-      SELECT *
-      FROM operations_report_findings
-      WHERE operations_report_id = $1
-      ORDER BY display_order ASC, created_at ASC
+      SELECT f.*
+      FROM operations_report_findings f
+      JOIN operations_reports r ON r.id = f.operations_report_id
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE f.operations_report_id = $2
+        AND b.internal_workspace_id = $1
+      ORDER BY f.display_order ASC, f.created_at ASC
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
 async function listFindingSources(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportFindingSourceRow[]> {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportFindingSourceRow>(
     `
-      SELECT *
-      FROM operations_report_finding_sources
-      WHERE operations_report_id = $1
-      ORDER BY report_finding_id ASC, display_order ASC, created_at ASC
+      SELECT s.*
+      FROM operations_report_finding_sources s
+      JOIN operations_reports r ON r.id = s.operations_report_id
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE s.operations_report_id = $2
+        AND b.internal_workspace_id = $1
+      ORDER BY s.report_finding_id ASC, s.display_order ASC, s.created_at ASC
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
 async function listComparisonItems(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportComparisonItemRow[]> {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportComparisonItemRow>(
     `
-      SELECT *
-      FROM operations_report_comparison_items
-      WHERE operations_report_id = $1
-      ORDER BY created_at ASC
+      SELECT i.*
+      FROM operations_report_comparison_items i
+      JOIN operations_reports r ON r.id = i.operations_report_id
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE i.operations_report_id = $2
+        AND b.internal_workspace_id = $1
+      ORDER BY i.created_at ASC
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
 async function listPositiveObservations(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportPositiveObservationRow[]> {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportPositiveObservationRow>(
     `
-      SELECT *
-      FROM operations_report_positive_observations
-      WHERE operations_report_id = $1
-      ORDER BY display_order ASC, created_at ASC
+      SELECT o.*
+      FROM operations_report_positive_observations o
+      JOIN operations_reports r ON r.id = o.operations_report_id
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE o.operations_report_id = $2
+        AND b.internal_workspace_id = $1
+      ORDER BY o.display_order ASC, o.created_at ASC
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
 async function listActionPlanItems(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportActionPlanItemRow[]> {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportActionPlanItemRow>(
     `
-      SELECT *
-      FROM operations_report_action_plan_items
-      WHERE operations_report_id = $1
+      SELECT i.*
+      FROM operations_report_action_plan_items i
+      JOIN operations_reports r ON r.id = i.operations_report_id
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE i.operations_report_id = $2
+        AND b.internal_workspace_id = $1
       ORDER BY
-        CASE group_key
+        CASE i.group_key
           WHEN 'address_now' THEN 1
           WHEN 'address_soon' THEN 2
           ELSE 3
         END,
-        display_order ASC,
-        created_at ASC
+        i.display_order ASC,
+        i.created_at ASC
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
 async function listReportActivity(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportActivityRow[]> {
   const client = await ensureConnected();
@@ -1240,20 +1429,35 @@ async function listReportActivity(
     `
       SELECT *
       FROM admin_audit_log
-      WHERE (target_type = 'operations_report' AND target_id = $1)
-         OR (
+      WHERE (
+          target_type = 'operations_report' AND target_id = $2::text
+        )
+        AND EXISTS (
+          SELECT 1 FROM operations_reports r
+          JOIN operations_businesses b ON b.id = r.business_id
+          WHERE r.id = $2::uuid AND b.internal_workspace_id = $1
+        )
+      OR (
            target_type IN ('operations_report_finding', 'operations_report_comparison')
-           AND metadata_json->>'reportId' = $1
+           AND metadata_json->>'reportId' = $2::text
+           AND EXISTS (
+             SELECT 1 FROM operations_reports r
+             JOIN operations_businesses b ON b.id = r.business_id
+             WHERE r.id = $2::uuid AND b.internal_workspace_id = $1
+           )
          )
       ORDER BY created_at DESC
       LIMIT 50
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows;
 }
 
-async function invalidateEditableReportRender(reportId: string) {
+async function invalidateEditableReportRender(
+  workspaceId: string,
+  reportId: string,
+) {
   const client = await ensureConnected();
   const invalidated = await client.query<{ id: string }>(
     `
@@ -1265,14 +1469,15 @@ async function invalidateEditableReportRender(reportId: string) {
           updated_at = now()
       WHERE id = $1
         AND status IN ('draft', 'needs_review')
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_reports.id AND b.internal_workspace_id = $2)
       RETURNING id
     `,
-    [reportId],
+    [reportId, workspaceId],
   );
   if (invalidated.rows[0]) {
     await client.query(
-      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_pdf_renders.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
   }
 }
@@ -1551,9 +1756,10 @@ async function buildRegroupCandidatesForReport(report: OperationsReportRow) {
 }
 
 export async function previewOperationsReportRegroup(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportRegroupPreview | null> {
-  const detail = await getOperationsReportDetail(reportId);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
   const candidates = await buildRegroupCandidatesForReport(detail.report);
   return buildRegroupPreviewFromCandidates(
@@ -1715,11 +1921,12 @@ async function insertGroupedCandidateFinding(
 
 async function rebuildActionPlanForGroupedFindings(
   client: Awaited<ReturnType<typeof ensureConnected>>,
+  workspaceId: string,
   reportId: string,
 ) {
-  await client.query(
-    `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
-    [reportId],
+  const updated = await client.query(
+    `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $2)`,
+    [reportId, workspaceId],
   );
   const findings = await client.query<
     Pick<
@@ -1734,12 +1941,13 @@ async function rebuildActionPlanForGroupedFindings(
     `
       SELECT id, client_priority, title, recommended_action, display_order
       FROM operations_report_findings
-      WHERE operations_report_id = $1
-        AND is_included = true
-        AND is_false_positive = false
+     WHERE operations_report_id = $1
+       AND is_included = true
+       AND is_false_positive = false
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $2)
       ORDER BY display_order ASC, created_at ASC
     `,
-    [reportId],
+    [reportId, workspaceId],
   );
   const groupCounts: Record<OperationsReportActionPlanGroup, number> = {
     address_now: 0,
@@ -1773,6 +1981,7 @@ async function rebuildActionPlanForGroupedFindings(
 }
 
 export async function regroupOperationsReportFindings(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   input: { confirm: boolean; previewHash: string },
@@ -1783,7 +1992,10 @@ export async function regroupOperationsReportFindings(
   | { stalePreview: true; preview: OperationsReportRegroupPreview }
 > {
   if (!input.confirm) throw new Error("regroup_confirmation_required");
-  const detail = await getOperationsReportDetail(reportId);
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
   const candidates = await buildRegroupCandidatesForReport(detail.report);
   const preview = buildRegroupPreviewFromCandidates(
@@ -1799,16 +2011,16 @@ export async function regroupOperationsReportFindings(
   await client.query("BEGIN");
   try {
     await client.query(
-      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_finding_sources WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_finding_sources WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_finding_sources.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_findings WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_findings WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     for (const [index, candidate] of candidates.entries()) {
       await insertGroupedCandidateFinding(
@@ -1819,7 +2031,7 @@ export async function regroupOperationsReportFindings(
         index,
       );
     }
-    await rebuildActionPlanForGroupedFindings(client, reportId);
+    await rebuildActionPlanForGroupedFindings(client, workspaceId, reportId);
     await client.query(
       `
         UPDATE operations_reports
@@ -1829,12 +2041,13 @@ export async function regroupOperationsReportFindings(
             last_pdf_generated_at = NULL,
             updated_at = now()
         WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $2)
       `,
-      [reportId],
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_pdf_renders WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_pdf_renders.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query("COMMIT");
   } catch (err) {
@@ -1851,11 +2064,15 @@ export async function regroupOperationsReportFindings(
       rawOccurrenceCount: preview.rawOccurrenceCount,
     },
   });
-  return getOperationsReportDetail(reportId) as Promise<OperationsReportDetail>;
+  return getOperationsReportDetail(
+    workspaceId,
+    reportId,
+  ) as Promise<OperationsReportDetail>;
 }
 
 async function insertDefaultReportReviewSections(
   client: Awaited<ReturnType<typeof ensureConnected>>,
+  workspaceId: string,
   reportId: string,
   scanRunId: string,
   siteUrl: string,
@@ -1939,14 +2156,15 @@ async function insertDefaultReportReviewSections(
     >
   >(
     `
-      SELECT id, client_priority, title, recommended_action, display_order, occurrence_count
-      FROM operations_report_findings
-      WHERE operations_report_id = $1
-        AND is_included = true
-        AND is_false_positive = false
+     SELECT id, client_priority, title, recommended_action, display_order, occurrence_count
+     FROM operations_report_findings
+     WHERE operations_report_id = $1
+       AND is_included = true
+       AND is_false_positive = false
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $2)
       ORDER BY display_order ASC, created_at ASC
     `,
-    [reportId],
+    [reportId, workspaceId],
   );
   const groupCounts: Record<OperationsReportActionPlanGroup, number> = {
     address_now: 0,
@@ -2004,7 +2222,7 @@ async function insertDefaultReportReviewSections(
       ),
     0,
   );
-  await client.query(
+  const updated = await client.query(
     `
       UPDATE operations_reports
       SET executive_summary = $2,
@@ -2014,6 +2232,7 @@ async function insertDefaultReportReviewSections(
           recommended_first_steps = $6,
           scope_limitations = $7
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b JOIN operations_reports r ON r.business_id = b.id WHERE r.id = operations_reports.id AND b.internal_workspace_id = $8)
     `,
     [
       reportId,
@@ -2027,11 +2246,13 @@ async function insertDefaultReportReviewSections(
         : "The main concerns are the included improvement items that could affect clarity, maintainability or visitor experience over time.",
       "Confirm the included findings, address the highest client priority first, and run a fresh check after changes are completed.",
       "This automated review covers publicly accessible pages reached during the selected check. Logged-in areas, forms and third-party systems may require separate manual testing.",
+      workspaceId,
     ],
   );
 }
 
 export async function createOperationsReport(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsReportCreateInput,
 ): Promise<
@@ -2044,6 +2265,7 @@ export async function createOperationsReport(
   const client = await ensureConnected();
   const title = requiredText(input.title, "report_title");
   const relationship = await getReportRelationship({
+    workspaceId,
     businessId: input.businessId,
     siteId: input.siteId,
     scanRunId: input.scanRunId,
@@ -2143,6 +2365,7 @@ export async function createOperationsReport(
     );
     await insertDefaultReportReviewSections(
       client,
+      workspaceId,
       report.id,
       input.scanRunId,
       relationship.site_url,
@@ -2161,6 +2384,7 @@ export async function createOperationsReport(
       },
     });
     return (await getOperationsReportDetail(
+      workspaceId,
       report.id,
     )) as OperationsReportDetail;
   } catch (err) {
@@ -2169,20 +2393,25 @@ export async function createOperationsReport(
   }
 }
 
-export async function listOperationsReportableScanRuns(input: {
-  businessId: string;
-  siteId: string;
-  limit: number;
-}) {
+export async function listOperationsReportableScanRuns(
+  workspaceId: string,
+  input: {
+    businessId: string;
+    siteId: string;
+    limit: number;
+  },
+) {
   const client = await ensureConnected();
   const linked = await client.query<{ id: string }>(
     `
       SELECT obs.site_id AS id
       FROM operations_business_sites obs
+      JOIN operations_businesses b ON b.id = obs.business_id
       WHERE obs.business_id = $1
         AND obs.site_id = $2
+        AND b.internal_workspace_id = $3
     `,
-    [input.businessId, input.siteId],
+    [input.businessId, input.siteId, workspaceId],
   );
   if (!linked.rows[0]) return null;
   const res = await client.query(
@@ -2215,11 +2444,12 @@ export async function listOperationsReportableScanRuns(input: {
 }
 
 export async function listOperationsReports(
+  workspaceId: string,
   params: OperationsReportListParams,
 ) {
   const client = await ensureConnected();
-  const filters: string[] = [];
-  const values: unknown[] = [];
+  const filters: string[] = ["b.internal_workspace_id = $1"];
+  const values: unknown[] = [workspaceId];
 
   if (params.archived === true) {
     filters.push(`r.archived_at IS NOT NULL`);
@@ -2305,8 +2535,11 @@ export async function listOperationsReports(
           COUNT(*) FILTER (WHERE status = 'sent' AND sent_at >= date_trunc('month', now()) AND archived_at IS NULL)::text AS sent_this_month,
           COUNT(*) FILTER (WHERE status IN ('sent', 'client_replied') AND archived_at IS NULL)::text AS awaiting_client_response,
           COUNT(*) FILTER (WHERE status = 'completed' AND archived_at IS NULL)::text AS completed
-        FROM operations_reports
+        FROM operations_reports r
+        JOIN operations_businesses b ON b.id = r.business_id
+        WHERE b.internal_workspace_id = $1
       `,
+      [workspaceId],
     ),
   ]);
 
@@ -2331,9 +2564,10 @@ export async function listOperationsReports(
 }
 
 export async function getOperationsReportDetail(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportDetail | null> {
-  const report = await getReportById(reportId);
+  const report = await getReportById(workspaceId, reportId);
   if (!report) return null;
   const [
     findings,
@@ -2343,12 +2577,12 @@ export async function getOperationsReportDetail(
     comparisonItems,
     activity,
   ] = await Promise.all([
-    listFindings(reportId),
-    listFindingSources(reportId),
-    listPositiveObservations(reportId),
-    listActionPlanItems(reportId),
-    listComparisonItems(reportId),
-    listReportActivity(reportId),
+    listFindings(workspaceId, reportId),
+    listFindingSources(workspaceId, reportId),
+    listPositiveObservations(workspaceId, reportId),
+    listActionPlanItems(workspaceId, reportId),
+    listComparisonItems(workspaceId, reportId),
+    listReportActivity(workspaceId, reportId),
   ]);
   return {
     report,
@@ -2358,21 +2592,30 @@ export async function getOperationsReportDetail(
     actionPlanItems,
     comparisonItems,
     activity,
+    revisionHistory: await getOperationsReportRevisionHistory(
+      workspaceId,
+      reportId,
+    ),
   };
 }
 
 export async function updateOperationsReport(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   input: OperationsReportUpdateInput,
 ): Promise<OperationsReportDetail | null | "contact_not_found"> {
-  const existing = await getReportById(reportId);
+  const existing = await getReportById(workspaceId, reportId);
   if (!existing) return null;
+  assertReportContentMutable(existing, input.expectedRevision);
+  if (input.status !== undefined) {
+    assertReportStatusTransition(existing, input.status);
+  }
   if (input.preparedContactId) {
     const client = await ensureConnected();
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
-      [input.preparedContactId, existing.business_id],
+      `SELECT c.id FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3 AND c.archived_at IS NULL`,
+      [input.preparedContactId, existing.business_id, workspaceId],
     );
     if (!contact.rows[0]) return "contact_not_found";
   }
@@ -2384,7 +2627,7 @@ export async function updateOperationsReport(
           ...existing.display_settings_json,
           ...input.displaySettings,
         });
-  await client.query(
+  const updatedReport = await client.query(
     `
       UPDATE operations_reports
       SET title = COALESCE($2, title),
@@ -2403,12 +2646,15 @@ export async function updateOperationsReport(
           valid_until = CASE WHEN $24::boolean THEN $25 ELSE valid_until END,
           no_major_findings_waived = COALESCE($26, no_major_findings_waived),
           display_settings_json = $27,
+          content_revision = content_revision + 1,
           frozen_render_json = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_render_json END,
           frozen_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_at END,
           last_preview_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_preview_generated_at END,
           last_pdf_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_pdf_generated_at END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_reports.id AND b.internal_workspace_id = $28 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
+        AND ($29::integer IS NULL OR content_revision = $29)
     `,
     [
       reportId,
@@ -2440,24 +2686,44 @@ export async function updateOperationsReport(
       input.validUntil ?? null,
       input.noMajorFindingsWaived,
       settings,
+      workspaceId,
+      input.expectedRevision ?? null,
     ],
   );
-  await invalidateEditableReportRender(reportId);
+  if (!updatedReport.rowCount) {
+    const latest = await getReportById(workspaceId, reportId);
+    if (
+      latest &&
+      input.expectedRevision !== undefined &&
+      (latest.content_revision ?? 1) !== input.expectedRevision
+    ) {
+      throw staleRevisionError("report");
+    }
+    if (latest && isHistoricalReportStatus(latest.status)) {
+      throw immutableArtifactError("report");
+    }
+    return null;
+  }
+  await invalidateEditableReportRender(workspaceId, reportId);
   await recordAdminAuditLog(actor, {
     action: "operations_report_updated",
     targetType: "operations_report",
     targetId: reportId,
     metadata: { fields: Object.keys(input) },
   });
-  return getOperationsReportDetail(reportId);
+  return getOperationsReportDetail(workspaceId, reportId);
 }
 
 export async function updateOperationsReportFinding(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   findingId: string,
   input: OperationsReportFindingUpdateInput,
 ): Promise<OperationsReportFindingRow | null> {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report, input.expectedRevision);
   const client = await ensureConnected();
   const res = await client.query<OperationsReportFindingRow>(
     `
@@ -2482,6 +2748,7 @@ export async function updateOperationsReportFinding(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $32 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     [
@@ -2518,11 +2785,20 @@ export async function updateOperationsReportFinding(
       input.comparisonStatus ?? null,
       input.affectedUrl !== undefined,
       textValue(input.affectedUrl),
+      workspaceId,
     ],
   );
   const finding = res.rows[0] ?? null;
+  if (!finding) {
+    await throwIfReportMutationRejected(
+      workspaceId,
+      reportId,
+      input.expectedRevision,
+    );
+  }
   if (finding) {
-    await invalidateEditableReportRender(reportId);
+    await bumpReportContentRevision(workspaceId, reportId);
+    await invalidateEditableReportRender(workspaceId, reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_finding_updated",
       targetType: "operations_report_finding",
@@ -2534,11 +2810,15 @@ export async function updateOperationsReportFinding(
 }
 
 export async function updateOperationsReportPositiveObservation(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   observationId: string,
   input: OperationsReportPositiveObservationUpdateInput,
 ): Promise<OperationsReportPositiveObservationRow | null> {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report, input.expectedRevision);
   const client = await ensureConnected();
   const res = await client.query<OperationsReportPositiveObservationRow>(
     `
@@ -2551,6 +2831,7 @@ export async function updateOperationsReportPositiveObservation(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_positive_observations.operations_report_id AND b.internal_workspace_id = $10 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     [
@@ -2565,11 +2846,20 @@ export async function updateOperationsReportPositiveObservation(
       input.reviewedAt !== undefined,
       input.reviewedAt ?? null,
       input.displayOrder,
+      workspaceId,
     ],
   );
   const observation = res.rows[0] ?? null;
+  if (!observation) {
+    await throwIfReportMutationRejected(
+      workspaceId,
+      reportId,
+      input.expectedRevision,
+    );
+  }
   if (observation) {
-    await invalidateEditableReportRender(reportId);
+    await bumpReportContentRevision(workspaceId, reportId);
+    await invalidateEditableReportRender(workspaceId, reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_positive_observation_updated",
       targetType: "operations_report",
@@ -2581,11 +2871,15 @@ export async function updateOperationsReportPositiveObservation(
 }
 
 export async function updateOperationsReportActionPlanItem(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   itemId: string,
   input: OperationsReportActionPlanItemUpdateInput,
 ): Promise<OperationsReportActionPlanItemRow | null> {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report, input.expectedRevision);
   const client = await ensureConnected();
   const res = await client.query<OperationsReportActionPlanItemRow>(
     `
@@ -2599,6 +2893,7 @@ export async function updateOperationsReportActionPlanItem(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $11 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     [
@@ -2614,11 +2909,20 @@ export async function updateOperationsReportActionPlanItem(
       input.reviewedAt !== undefined,
       input.reviewedAt ?? null,
       input.displayOrder,
+      workspaceId,
     ],
   );
   const item = res.rows[0] ?? null;
+  if (!item) {
+    await throwIfReportMutationRejected(
+      workspaceId,
+      reportId,
+      input.expectedRevision,
+    );
+  }
   if (item) {
-    await invalidateEditableReportRender(reportId);
+    await bumpReportContentRevision(workspaceId, reportId);
+    await invalidateEditableReportRender(workspaceId, reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_action_plan_item_updated",
       targetType: "operations_report",
@@ -2630,14 +2934,29 @@ export async function updateOperationsReportActionPlanItem(
 }
 
 export async function bulkUpdateOperationsReportFindings(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   input: OperationsReportFindingBulkInput,
 ): Promise<OperationsReportFindingRow[]> {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return [];
+  assertReportContentMutable(report, input.expectedRevision);
   if (input.findingIds.length === 0) return [];
   const client = await ensureConnected();
   let setClause = "";
   const values: unknown[] = [reportId, input.findingIds];
+  const valid = await client.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+     FROM operations_report_findings f
+     JOIN operations_reports r ON r.id = f.operations_report_id
+     JOIN operations_businesses b ON b.id = r.business_id
+     WHERE f.operations_report_id = $1 AND f.id = ANY($2::uuid[]) AND b.internal_workspace_id = $3`,
+    [reportId, input.findingIds, workspaceId],
+  );
+  if (Number(valid.rows[0]?.count ?? 0) !== new Set(input.findingIds).size) {
+    return [];
+  }
   if (input.action === "include" || input.action === "restore") {
     setClause = "is_included = true, is_false_positive = false";
   } else if (input.action === "exclude") {
@@ -2648,6 +2967,7 @@ export async function bulkUpdateOperationsReportFindings(
   } else {
     setClause = "reviewed_at = now()";
   }
+  values.push(workspaceId);
   const res = await client.query<OperationsReportFindingRow>(
     `
       UPDATE operations_report_findings
@@ -2655,11 +2975,22 @@ export async function bulkUpdateOperationsReportFindings(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = ANY($2::uuid[])
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $3 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     values,
   );
-  if (res.rows.length > 0) await invalidateEditableReportRender(reportId);
+  if (res.rows.length === 0) {
+    await throwIfReportMutationRejected(
+      workspaceId,
+      reportId,
+      input.expectedRevision,
+    );
+  }
+  if (res.rows.length > 0) {
+    await bumpReportContentRevision(workspaceId, reportId);
+    await invalidateEditableReportRender(workspaceId, reportId);
+  }
   await recordAdminAuditLog(actor, {
     action: "operations_report_findings_bulk_updated",
     targetType: "operations_report",
@@ -2674,13 +3005,48 @@ export async function bulkUpdateOperationsReportFindings(
 }
 
 export async function reorderOperationsReportFindings(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   orderedFindingIds: string[],
 ) {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report);
   const client = await ensureConnected();
   try {
     await client.query("BEGIN");
+    const locked = await client.query<OperationsReportRow>(
+      `SELECT r.*
+       FROM operations_reports r
+       JOIN operations_businesses b ON b.id = r.business_id
+       WHERE r.id = $2 AND b.internal_workspace_id = $1
+       FOR UPDATE OF r`,
+      [workspaceId, reportId],
+    );
+    if (!locked.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (
+      isHistoricalReportStatus(locked.rows[0].status) ||
+      locked.rows[0].sent_at
+    ) {
+      await client.query("ROLLBACK");
+      throw immutableArtifactError("report");
+    }
+    const valid = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM operations_report_findings f
+       JOIN operations_reports r ON r.id = f.operations_report_id
+       JOIN operations_businesses b ON b.id = r.business_id
+       WHERE f.operations_report_id = $1 AND f.id = ANY($2::uuid[]) AND b.internal_workspace_id = $3`,
+      [reportId, orderedFindingIds, workspaceId],
+    );
+    if (Number(valid.rows[0]?.count ?? 0) !== new Set(orderedFindingIds).size) {
+      await client.query("ROLLBACK");
+      return null;
+    }
     let index = 0;
     for (const id of orderedFindingIds) {
       await client.query(
@@ -2690,19 +3056,21 @@ export async function reorderOperationsReportFindings(
               updated_at = now()
           WHERE operations_report_id = $1
             AND id = $2
+            AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $4 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
         `,
-        [reportId, id, index++],
+        [reportId, id, index++, workspaceId],
       );
     }
     await client.query("COMMIT");
-    await invalidateEditableReportRender(reportId);
+    await bumpReportContentRevision(workspaceId, reportId);
+    await invalidateEditableReportRender(workspaceId, reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_findings_reordered",
       targetType: "operations_report",
       targetId: reportId,
       metadata: { count: orderedFindingIds.length },
     });
-    return listFindings(reportId);
+    return listFindings(workspaceId, reportId);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -3038,14 +3406,18 @@ export function buildOperationsClientReportPayload(
   };
 }
 
-export async function getOperationsReportPreview(reportId: string) {
-  const detail = await getOperationsReportDetail(reportId);
+export async function getOperationsReportPreview(
+  workspaceId: string,
+  reportId: string,
+) {
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
   const client = await ensureConnected();
   const previewGeneratedAt = new Date();
   await client.query(
-    `UPDATE operations_reports SET last_preview_generated_at = $2 WHERE id = $1`,
-    [reportId, previewGeneratedAt],
+    `UPDATE operations_reports SET last_preview_generated_at = $2
+     WHERE id = $1 AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $3)`,
+    [reportId, previewGeneratedAt, workspaceId],
   );
   detail.report.last_preview_generated_at = previewGeneratedAt;
   if (isCurrentClientReportPayload(detail.report.frozen_render_json)) {
@@ -3081,13 +3453,20 @@ export async function getOperationsReportPreview(reportId: string) {
 }
 
 export async function freezeOperationsReportRender(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   action: string,
   renderedPayload?: OperationsClientReportPayload,
 ) {
-  const detail = await getOperationsReportDetail(reportId);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
+  if (isHistoricalReportStatus(detail.report.status) || detail.report.sent_at) {
+    if (isCurrentClientReportPayload(detail.report.frozen_render_json)) {
+      return detail.report.frozen_render_json;
+    }
+    throw immutableArtifactError("report");
+  }
   const payload =
     renderedPayload ??
     buildOperationsClientReportPayload(
@@ -3106,8 +3485,13 @@ export async function freezeOperationsReportRender(
           last_pdf_generated_at = CASE WHEN $3 = 'operations_report_pdf_generated' THEN now() ELSE last_pdf_generated_at END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (
+          SELECT 1 FROM operations_businesses b
+          WHERE b.id = operations_reports.business_id
+            AND b.internal_workspace_id = $4
+        )
     `,
-    [reportId, payload, action],
+    [reportId, payload, action, workspaceId],
   );
   await recordAdminAuditLog(actor, {
     action,
@@ -3119,6 +3503,7 @@ export async function freezeOperationsReportRender(
 }
 
 export async function saveOperationsReportPdfRender(
+  workspaceId: string,
   reportId: string,
   filename: string,
   pdfBytes: Buffer,
@@ -3129,6 +3514,13 @@ export async function saveOperationsReportPdfRender(
     generationSource?: "system" | "actor";
   } = {},
 ) {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  if (isHistoricalReportStatus(report.status) || report.sent_at) {
+    const existing = await getOperationsReportPdfRender(workspaceId, reportId);
+    if (existing) return existing;
+    throw immutableArtifactError("report");
+  }
   const pdfSha256 = createHash("sha256").update(pdfBytes).digest("hex");
   const sourceSnapshotSha256 =
     metadata.sourceSnapshotSha256?.trim().toLowerCase() ?? pdfSha256;
@@ -3152,7 +3544,12 @@ export async function saveOperationsReportPdfRender(
           generation_source,
           generated_at
         )
-        VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7, $8, $9, now())
+        SELECT $1, $2, $3, 'application/pdf', $4, $5, $6, $7, $8, $9, now()
+        WHERE EXISTS (
+          SELECT 1 FROM operations_reports r
+          JOIN operations_businesses b ON b.id = r.business_id
+          WHERE r.id = $1 AND b.internal_workspace_id = $10
+        )
         ON CONFLICT (operations_report_id, source_snapshot_sha256) DO NOTHING
         RETURNING *
       )
@@ -3175,33 +3572,45 @@ export async function saveOperationsReportPdfRender(
       sourceSnapshotSha256,
       metadata.generatedByUserId ?? null,
       metadata.generationSource ?? "actor",
+      workspaceId,
     ],
   );
   return res.rows[0];
 }
 
-export async function getOperationsReportPdfRender(reportId: string) {
+export async function getOperationsReportPdfRender(
+  workspaceId: string,
+  reportId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsReportPdfRenderRow>(
     `
       SELECT *
       FROM operations_report_pdf_renders
-      WHERE operations_report_id = $1
+      WHERE operations_report_id = $2
+        AND EXISTS (
+          SELECT 1 FROM operations_reports r
+          JOIN operations_businesses b ON b.id = r.business_id
+          WHERE r.id = operations_report_pdf_renders.operations_report_id
+            AND b.internal_workspace_id = $1
+        )
       ORDER BY generated_at DESC, id DESC
       LIMIT 1
     `,
-    [reportId],
+    [workspaceId, reportId],
   );
   return res.rows[0] ?? null;
 }
 
 export async function markOperationsReportStatus(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   status: OperationsReportStatus,
 ) {
-  const detail = await getOperationsReportDetail(reportId);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
+  assertReportStatusTransition(detail.report, status);
   if (status === "ready_to_send") {
     const issues = getOperationsReportReadinessIssues(
       detail.report,
@@ -3213,6 +3622,7 @@ export async function markOperationsReportStatus(
     if (issues.length > 0) return { readinessIssues: issues };
     if (!isCurrentClientReportPayload(detail.report.frozen_render_json)) {
       await freezeOperationsReportRender(
+        workspaceId,
         actor,
         reportId,
         "operations_report_ready_render_frozen",
@@ -3229,8 +3639,13 @@ export async function markOperationsReportStatus(
           archived_at = CASE WHEN $2 = 'archived' THEN now() ELSE archived_at END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (
+          SELECT 1 FROM operations_businesses b
+          WHERE b.id = operations_reports.business_id
+            AND b.internal_workspace_id = $4
+        )
     `,
-    [reportId, status, completedAt],
+    [reportId, status, completedAt, workspaceId],
   );
   await recordAdminAuditLog(actor, {
     action: `operations_report_status_${status}`,
@@ -3238,14 +3653,20 @@ export async function markOperationsReportStatus(
     targetId: reportId,
     metadata: {},
   });
-  return getOperationsReportDetail(reportId);
+  return getOperationsReportDetail(workspaceId, reportId);
 }
 
 export async function setOperationsReportArchived(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   archived: boolean,
 ) {
+  const current = await getReportById(workspaceId, reportId);
+  if (!current) return null;
+  if (!archived && isHistoricalReportStatus(current.status)) {
+    throw immutableArtifactError("report");
+  }
   const client = await ensureConnected();
   const res = await client.query<OperationsReportRow>(
     `
@@ -3254,9 +3675,10 @@ export async function setOperationsReportArchived(
           archived_at = CASE WHEN $2 THEN now() ELSE NULL END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $3)
       RETURNING *
     `,
-    [reportId, archived],
+    [reportId, archived, workspaceId],
   );
   const report = res.rows[0];
   if (!report) return null;
@@ -3268,36 +3690,37 @@ export async function setOperationsReportArchived(
     targetId: reportId,
     metadata: {},
   });
-  return getOperationsReportDetail(reportId);
+  return getOperationsReportDetail(workspaceId, reportId);
 }
 
 export async function getOperationsReportDeleteEligibility(
+  workspaceId: string,
   reportId: string,
 ): Promise<OperationsReportDeleteEligibility | null> {
-  const report = await getReportById(reportId);
+  const report = await getReportById(workspaceId, reportId);
   if (!report) return null;
   const client = await ensureConnected();
   const [quotes, workOrders, serviceUsage, serviceActivity, communications] =
     await Promise.all([
       client.query<CountRow>(
-        `SELECT COUNT(*)::text AS count FROM operations_quotes WHERE operations_report_id = $1`,
-        [reportId],
+        `SELECT COUNT(*)::text AS count FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.operations_report_id = $1 AND b.internal_workspace_id = $2`,
+        [reportId, workspaceId],
       ),
       client.query<CountRow>(
-        `SELECT COUNT(*)::text AS count FROM operations_work_orders WHERE operations_report_id = $1`,
-        [reportId],
+        `SELECT COUNT(*)::text AS count FROM operations_work_orders w JOIN operations_businesses b ON b.id = w.business_id WHERE w.operations_report_id = $1 AND b.internal_workspace_id = $2`,
+        [reportId, workspaceId],
       ),
       client.query<CountRow>(
-        `SELECT COUNT(*)::text AS count FROM operations_client_service_usage WHERE operations_report_id = $1`,
-        [reportId],
+        `SELECT COUNT(*)::text AS count FROM operations_client_service_usage u JOIN operations_client_services s ON s.id = u.client_service_id JOIN operations_businesses b ON b.id = s.business_id WHERE u.operations_report_id = $1 AND b.internal_workspace_id = $2`,
+        [reportId, workspaceId],
       ),
       client.query<CountRow>(
-        `SELECT COUNT(*)::text AS count FROM operations_client_service_activity WHERE related_report_id = $1`,
-        [reportId],
+        `SELECT COUNT(*)::text AS count FROM operations_client_service_activity a JOIN operations_client_services s ON s.id = a.client_service_id JOIN operations_businesses b ON b.id = s.business_id WHERE a.related_report_id = $1 AND b.internal_workspace_id = $2`,
+        [reportId, workspaceId],
       ),
       client.query<CountRow>(
-        `SELECT COUNT(*)::text AS count FROM operations_communications WHERE operations_report_id = $1`,
-        [reportId],
+        `SELECT COUNT(*)::text AS count FROM operations_communications c JOIN operations_businesses b ON b.id = c.business_id WHERE c.operations_report_id = $1 AND b.internal_workspace_id = $2`,
+        [reportId, workspaceId],
       ),
     ]);
 
@@ -3349,10 +3772,23 @@ export async function getOperationsReportDeleteEligibility(
 }
 
 export async function deleteOperationsReport(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
 ): Promise<OperationsReportRow | null | OperationsReportDeleteEligibility> {
-  const eligibility = await getOperationsReportDeleteEligibility(reportId);
+  const current = await getReportById(workspaceId, reportId);
+  if (!current) return null;
+  if (
+    isHistoricalReportStatus(current.status) ||
+    current.sent_at ||
+    current.frozen_at
+  ) {
+    throw immutableArtifactError("report");
+  }
+  const eligibility = await getOperationsReportDeleteEligibility(
+    workspaceId,
+    reportId,
+  );
   if (!eligibility) return null;
   if (!eligibility.allowed) return eligibility;
 
@@ -3360,24 +3796,24 @@ export async function deleteOperationsReport(
   try {
     await client.query("BEGIN");
     await client.query(
-      `DELETE FROM operations_report_comparison_items WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_comparison_items WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_comparison_items.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_action_plan_items WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_positive_observations WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_positive_observations WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_positive_observations.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     await client.query(
-      `DELETE FROM operations_report_findings WHERE operations_report_id = $1`,
-      [reportId],
+      `DELETE FROM operations_report_findings WHERE operations_report_id = $1 AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_findings.operations_report_id AND b.internal_workspace_id = $2)`,
+      [reportId, workspaceId],
     );
     const res = await client.query<OperationsReportRow>(
-      `DELETE FROM operations_reports WHERE id = $1 RETURNING *`,
-      [reportId],
+      `DELETE FROM operations_reports WHERE id = $1 AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $2) RETURNING *`,
+      [reportId, workspaceId],
     );
     await client.query("COMMIT");
     const report = res.rows[0] ?? null;
@@ -3401,12 +3837,13 @@ export async function deleteOperationsReport(
 }
 
 export async function duplicateOperationsReport(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
 ) {
-  const detail = await getOperationsReportDetail(reportId);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
-  const created = await createOperationsReport(actor, {
+  const created = await createOperationsReport(workspaceId, actor, {
     businessId: detail.report.business_id,
     siteId: detail.report.site_id,
     scanRunId: detail.report.scan_run_id,
@@ -3421,7 +3858,293 @@ export async function duplicateOperationsReport(
   return typeof created === "string" ? null : created;
 }
 
+async function createRevisedOperationsReportUnlocked(
+  workspaceId: string,
+  actor: AdminActor,
+  sourceReportId: string,
+  options: { expectedRevision?: number; reason?: string | null } = {},
+): Promise<
+  | OperationsReportDetail
+  | "report_not_found"
+  | "report_not_eligible"
+  | "report_already_superseded"
+  | "stale_revision"
+  | "business_site_scan_invalid"
+  | "scan_not_reportable"
+> {
+  const client = await ensureConnected();
+  try {
+    await client.query("BEGIN");
+    const sourceResult = await client.query<OperationsReportRow>(
+      `
+        SELECT r.*
+        FROM operations_reports r
+        JOIN operations_businesses b ON b.id = r.business_id
+        WHERE r.id = $2 AND b.internal_workspace_id = $1
+        FOR UPDATE OF r
+      `,
+      [workspaceId, sourceReportId],
+    );
+    const source = sourceResult.rows[0];
+    if (!source) {
+      await client.query("ROLLBACK");
+      return "report_not_found";
+    }
+    if (!isHistoricalReportStatus(source.status)) {
+      await client.query("ROLLBACK");
+      return "report_not_eligible";
+    }
+    if (
+      options.expectedRevision !== undefined &&
+      (source.content_revision ?? 1) !== options.expectedRevision
+    ) {
+      await client.query("ROLLBACK");
+      return "stale_revision";
+    }
+    const existingChild = await client.query<{ id: string }>(
+      `SELECT id FROM operations_reports WHERE supersedes_report_id = $1 LIMIT 1`,
+      [sourceReportId],
+    );
+    if (existingChild.rows[0]) {
+      await client.query("ROLLBACK");
+      return "report_already_superseded";
+    }
+
+    const relationship = await getReportRelationship({
+      workspaceId,
+      businessId: source.business_id,
+      siteId: source.site_id,
+      scanRunId: source.scan_run_id,
+      contactId: source.prepared_contact_id,
+    });
+    if (!relationship) {
+      await client.query("ROLLBACK");
+      return "business_site_scan_invalid";
+    }
+    if (relationship.scan_status !== "completed" || !relationship.finished_at) {
+      await client.query("ROLLBACK");
+      return "scan_not_reportable";
+    }
+
+    // Lock the complete lineage key before allocating the next version. The
+    // existing unique index remains the final database-side guard.
+    await client.query(
+      `
+        SELECT id
+        FROM operations_reports
+        WHERE business_id = $1 AND site_id = $2 AND scan_run_id = $3
+        FOR UPDATE
+      `,
+      [source.business_id, source.site_id, source.scan_run_id],
+    );
+    const versionResult = await client.query<{ version: number }>(
+      `
+        SELECT COALESCE(MAX(version_number), 0)::int + 1 AS version
+        FROM operations_reports
+        WHERE business_id = $1 AND site_id = $2 AND scan_run_id = $3
+      `,
+      [source.business_id, source.site_id, source.scan_run_id],
+    );
+    const version = versionResult.rows[0]?.version ?? source.version_number + 1;
+    const reportResult = await client.query<OperationsReportRow>(
+      `
+        INSERT INTO operations_reports (
+          business_id, site_id, scan_run_id, prepared_contact_id,
+          supersedes_report_id, comparison_report_id, title, status,
+          report_type, version_number, executive_summary, overall_summary,
+          main_strengths, main_concerns, recommended_first_steps,
+          scope_limitations, prepared_for, prepared_by, cover_date,
+          valid_until, no_major_findings_waived, display_settings_json,
+          created_by_user_id
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, NULL, $6, 'draft', $7, $8, $9, $10,
+          $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+        )
+        RETURNING *
+      `,
+      [
+        source.business_id,
+        source.site_id,
+        source.scan_run_id,
+        source.prepared_contact_id,
+        source.id,
+        source.title,
+        source.report_type,
+        version,
+        source.executive_summary,
+        source.overall_summary,
+        source.main_strengths,
+        source.main_concerns,
+        source.recommended_first_steps,
+        source.scope_limitations,
+        source.prepared_for,
+        source.prepared_by,
+        source.cover_date,
+        source.valid_until,
+        source.no_major_findings_waived,
+        source.display_settings_json,
+        actor.id,
+      ],
+    );
+    const revision = reportResult.rows[0];
+    await client.query(
+      `CREATE TEMP TABLE report_revision_finding_map (old_id uuid PRIMARY KEY, new_id uuid NOT NULL) ON COMMIT DROP`,
+    );
+    await client.query(
+      `
+        INSERT INTO report_revision_finding_map (old_id, new_id)
+        SELECT id, gen_random_uuid()
+        FROM operations_report_findings
+        WHERE operations_report_id = $1
+      `,
+      [source.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_findings AS revised (
+          id, operations_report_id, source_issue_id, source_link_id,
+          source_type, source_fingerprint, category, original_severity,
+          client_priority, title, technical_summary, client_explanation,
+          why_it_matters, recommended_action, affected_url, evidence_json,
+          is_included, is_false_positive, internal_note, display_order,
+          estimated_effort, comparison_status, client_evidence,
+          affected_url_note, false_positive_reason, review_note, reviewed_at,
+          group_key, group_label, source_issue_count, occurrence_count,
+          affected_page_count, affected_resource_count,
+          representative_examples_json, requires_merge_review, regrouped_at
+        )
+        SELECT map.new_id, $2, f.source_issue_id, f.source_link_id,
+          f.source_type, f.source_fingerprint, f.category, f.original_severity,
+          f.client_priority, f.title, f.technical_summary, f.client_explanation,
+          f.why_it_matters, f.recommended_action, f.affected_url, f.evidence_json,
+          f.is_included, f.is_false_positive, f.internal_note, f.display_order,
+          f.estimated_effort, f.comparison_status, f.client_evidence,
+          f.affected_url_note, f.false_positive_reason, f.review_note, f.reviewed_at,
+          f.group_key, f.group_label, f.source_issue_count, f.occurrence_count,
+          f.affected_page_count, f.affected_resource_count,
+          f.representative_examples_json, f.requires_merge_review, f.regrouped_at
+        FROM operations_report_findings f
+        JOIN report_revision_finding_map map ON map.old_id = f.id
+        WHERE f.operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_finding_sources (
+          operations_report_id, report_finding_id, source_issue_id,
+          source_link_id, source_kind, affected_page_url,
+          affected_resource_url, outcome_key, evidence_json, display_order,
+          reviewed_for_client
+        )
+        SELECT $2, map.new_id, s.source_issue_id, s.source_link_id,
+          s.source_kind, s.affected_page_url, s.affected_resource_url,
+          s.outcome_key, s.evidence_json, s.display_order, s.reviewed_for_client
+        FROM operations_report_finding_sources s
+        JOIN report_revision_finding_map map ON map.old_id = s.report_finding_id
+        WHERE s.operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_positive_observations (
+          operations_report_id, title, description, source_key, is_included,
+          reviewed_at, display_order
+        )
+        SELECT $2, title, description, source_key, is_included, reviewed_at,
+          display_order
+        FROM operations_report_positive_observations
+        WHERE operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_action_plan_items (
+          operations_report_id, report_finding_id, group_key, title, summary,
+          is_included, display_order
+        )
+        SELECT $2, map.new_id, a.group_key, a.title, a.summary, a.is_included,
+          a.display_order
+        FROM operations_report_action_plan_items a
+        LEFT JOIN report_revision_finding_map map ON map.old_id = a.report_finding_id
+        WHERE a.operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_comparison_items (
+          operations_report_id, original_finding_id, current_finding_id,
+          source_fingerprint, comparison_status, summary, manual_note,
+          is_manually_overridden
+        )
+        SELECT $2, original_map.new_id, current_map.new_id,
+          c.source_fingerprint, c.comparison_status, c.summary, c.manual_note,
+          c.is_manually_overridden
+        FROM operations_report_comparison_items c
+        LEFT JOIN report_revision_finding_map original_map ON original_map.old_id = c.original_finding_id
+        LEFT JOIN report_revision_finding_map current_map ON current_map.old_id = c.current_finding_id
+        WHERE c.operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query("COMMIT");
+    await recordAdminAuditLog(actor, {
+      action: "report_revision_created",
+      targetType: "operations_report",
+      targetId: revision.id,
+      metadata: {
+        sourceReportId: source.id,
+        sourceVersion: source.version_number,
+        newVersion: version,
+        reason: textValue(options.reason),
+      },
+    });
+    return getOperationsReportDetail(
+      workspaceId,
+      revision.id,
+    ) as Promise<OperationsReportDetail>;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (
+      error instanceof Error &&
+      error.message.includes("operations_reports_scan_version_idx")
+    ) {
+      return "report_already_superseded";
+    }
+    throw error;
+  }
+}
+
+export async function createRevisedOperationsReport(
+  workspaceId: string,
+  actor: AdminActor,
+  sourceReportId: string,
+  options: { expectedRevision?: number; reason?: string | null } = {},
+) {
+  const previous = reportRevisionQueue;
+  let release!: () => void;
+  reportRevisionQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await createRevisedOperationsReportUnlocked(
+      workspaceId,
+      actor,
+      sourceReportId,
+      options,
+    );
+  } finally {
+    release();
+  }
+}
+
 export async function recordOperationsReportSent(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   input: {
@@ -3431,31 +4154,53 @@ export async function recordOperationsReportSent(
     updatePipelineStage?: boolean;
   },
 ) {
-  const detail = await getOperationsReportDetail(reportId);
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
   if (input.contactId) {
     const contact =
       detail.report.prepared_contact_id === input.contactId
         ? true
         : (await ensureConnected()).query<{ id: string }>(
-            `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
-            [input.contactId, detail.report.business_id],
+            `SELECT c.id FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3 AND c.archived_at IS NULL`,
+            [input.contactId, detail.report.business_id, workspaceId],
           );
     if (contact !== true && !(await contact).rows[0])
       return "contact_not_found";
   }
-  const payload = isCurrentClientReportPayload(detail.report.frozen_render_json)
-    ? detail.report.frozen_render_json
-    : buildOperationsClientReportPayload(
-        detail.report,
-        detail.findings,
-        detail.positiveObservations,
-        detail.actionPlanItems,
-        detail.comparisonItems,
-      );
   const client = await ensureConnected();
   try {
     await client.query("BEGIN");
+    const locked = await client.query<OperationsReportRow>(
+      `SELECT * FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = $1 AND b.internal_workspace_id = $2 FOR UPDATE OF r`,
+      [reportId, workspaceId],
+    );
+    if (!locked.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (
+      isHistoricalReportStatus(locked.rows[0].status) ||
+      locked.rows[0].sent_at
+    ) {
+      await client.query("ROLLBACK");
+      throw immutableArtifactError("report");
+    }
+    const lockedDetail = await getOperationsReportDetail(workspaceId, reportId);
+    if (!lockedDetail) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    const payload = isCurrentClientReportPayload(
+      lockedDetail.report.frozen_render_json,
+    )
+      ? lockedDetail.report.frozen_render_json
+      : buildOperationsClientReportPayload(
+          lockedDetail.report,
+          lockedDetail.findings,
+          lockedDetail.positiveObservations,
+          lockedDetail.actionPlanItems,
+          lockedDetail.comparisonItems,
+        );
     const communication = await client.query<{ id: string }>(
       `
         INSERT INTO operations_communications (
@@ -3516,6 +4261,7 @@ export async function recordOperationsReportSent(
       `
         UPDATE operations_reports
         SET status = 'sent',
+            content_revision = content_revision + 1,
             sent_at = now(),
             follow_up_at = $2,
             delivery_communication_id = $3,
@@ -3524,6 +4270,8 @@ export async function recordOperationsReportSent(
             frozen_at = now(),
             updated_at = now()
         WHERE id = $1
+          AND status IN ('draft', 'needs_review', 'ready_to_send')
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $6)
       `,
       [
         reportId,
@@ -3531,6 +4279,7 @@ export async function recordOperationsReportSent(
         communication.rows[0].id,
         taskId,
         payload,
+        workspaceId,
       ],
     );
     await client.query(
@@ -3540,12 +4289,14 @@ export async function recordOperationsReportSent(
             next_follow_up_at = COALESCE($2, next_follow_up_at),
             pipeline_stage = CASE WHEN $3 THEN 'report_sent' ELSE pipeline_stage END,
             updated_at = now()
-        WHERE id = $1
+       WHERE id = $1
+            AND internal_workspace_id = $4
       `,
       [
         detail.report.business_id,
         input.followUpAt ?? null,
         input.updatePipelineStage === true,
+        workspaceId,
       ],
     );
     await client.query("COMMIT");
@@ -3559,7 +4310,7 @@ export async function recordOperationsReportSent(
         followUpScheduled: Boolean(input.followUpAt),
       },
     });
-    return getOperationsReportDetail(reportId);
+    return getOperationsReportDetail(workspaceId, reportId);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -3567,14 +4318,15 @@ export async function recordOperationsReportSent(
 }
 
 export async function createOperationsReportRetest(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   scanRunId: string,
   reportType: OperationsReportType = "post_fix_retest",
 ) {
-  const original = await getOperationsReportDetail(reportId);
+  const original = await getOperationsReportDetail(workspaceId, reportId);
   if (!original) return null;
-  const created = await createOperationsReport(actor, {
+  const created = await createOperationsReport(workspaceId, actor, {
     businessId: original.report.business_id,
     siteId: original.report.site_id,
     scanRunId,
@@ -3657,7 +4409,7 @@ export async function createOperationsReportRetest(
       targetId: created.report.id,
       metadata: { originalReportId: reportId, scanRunId },
     });
-    return getOperationsReportDetail(created.report.id);
+    return getOperationsReportDetail(workspaceId, created.report.id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -3665,6 +4417,7 @@ export async function createOperationsReportRetest(
 }
 
 export async function updateOperationsReportComparisonItem(
+  workspaceId: string,
   actor: AdminActor,
   reportId: string,
   comparisonItemId: string,
@@ -3674,6 +4427,9 @@ export async function updateOperationsReportComparisonItem(
     manualNote?: string | null;
   },
 ) {
+  const report = await getReportById(workspaceId, reportId);
+  if (!report) return null;
+  assertReportContentMutable(report);
   const client = await ensureConnected();
   const res = await client.query<OperationsReportComparisonItemRow>(
     `
@@ -3685,6 +4441,7 @@ export async function updateOperationsReportComparisonItem(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_comparison_items.operations_report_id AND b.internal_workspace_id = $8 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     [
@@ -3695,10 +4452,15 @@ export async function updateOperationsReportComparisonItem(
       textValue(input.summary),
       input.manualNote !== undefined,
       textValue(input.manualNote),
+      workspaceId,
     ],
   );
   const item = res.rows[0] ?? null;
+  if (!item) {
+    await throwIfReportMutationRejected(workspaceId, reportId);
+  }
   if (item) {
+    await bumpReportContentRevision(workspaceId, reportId);
     await recordAdminAuditLog(actor, {
       action: "operations_report_comparison_updated",
       targetType: "operations_report_comparison",
@@ -3709,7 +4471,7 @@ export async function updateOperationsReportComparisonItem(
   return item;
 }
 
-export async function getOperationsReportCountsForSummary() {
+export async function getOperationsReportCountsForSummary(workspaceId: string) {
   const client = await ensureConnected();
   const res = await client.query<{
     needs_review: string;
@@ -3728,8 +4490,11 @@ export async function getOperationsReportCountsForSummary() {
             AND status IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress')
             AND archived_at IS NULL
         )::text AS follow_up_due
-      FROM operations_reports
+      FROM operations_reports r
+      JOIN operations_businesses b ON b.id = r.business_id
+      WHERE b.internal_workspace_id = $1
     `,
+    [workspaceId],
   );
   const row = res.rows[0];
   return {

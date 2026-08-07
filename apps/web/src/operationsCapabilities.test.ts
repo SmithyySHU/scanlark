@@ -7,8 +7,10 @@ test("Email navigation is hidden when the server flag is disabled", () => {
   assert.equal(
     canShowOperationsEmailNavigation({
       canAccessOperations: true,
+      canMutateOperations: true,
       canUseOperationsEmail: true,
       operationsEmailEnabled: false,
+      workspaceSelectionRequired: false,
     }),
     false,
   );
@@ -18,8 +20,10 @@ test("Email navigation is hidden from a viewer", () => {
   assert.equal(
     canShowOperationsEmailNavigation({
       canAccessOperations: true,
+      canMutateOperations: false,
       canUseOperationsEmail: false,
       operationsEmailEnabled: true,
+      workspaceSelectionRequired: false,
     }),
     false,
   );
@@ -29,8 +33,10 @@ test("Email navigation is visible to an authorised member when enabled", () => {
   assert.equal(
     canShowOperationsEmailNavigation({
       canAccessOperations: true,
+      canMutateOperations: true,
       canUseOperationsEmail: true,
       operationsEmailEnabled: true,
+      workspaceSelectionRequired: false,
     }),
     true,
   );

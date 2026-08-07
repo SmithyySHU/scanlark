@@ -140,7 +140,9 @@ function reportHref(scanRunId: string) {
   return `/report?scanRunId=${encodeURIComponent(scanRunId)}`;
 }
 
-export async function getOperationsSummary(): Promise<OperationsSummary> {
+export async function getOperationsSummary(
+  workspaceId: string,
+): Promise<OperationsSummary> {
   const client = await ensureConnected();
   const [
     downSites,
@@ -167,10 +169,14 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
         FROM uptime_incidents i
         JOIN site_uptime_settings s ON s.id = i.settings_id
         JOIN sites site ON site.id = s.site_id
+        JOIN operations_business_sites obs ON obs.site_id = site.id
+        JOIN operations_businesses b ON b.id = obs.business_id
         WHERE i.status = 'open'
+          AND b.internal_workspace_id = $1
         ORDER BY i.started_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<FailedScanRow>(
       `
@@ -182,10 +188,14 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                r.updated_at
         FROM scan_runs r
         JOIN sites s ON s.id = r.site_id
+        JOIN operations_business_sites obs ON obs.site_id = s.id
+        JOIN operations_businesses b ON b.id = obs.business_id
         WHERE r.status = 'failed'
+          AND b.internal_workspace_id = $1
         ORDER BY r.updated_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<HighPrioritySiteRow>(
       `
@@ -195,7 +205,10 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                  r.site_id,
                  r.finished_at
           FROM scan_runs r
+          JOIN operations_business_sites obs ON obs.site_id = r.site_id
+          JOIN operations_businesses b ON b.id = obs.business_id
           WHERE r.status = 'completed'
+            AND b.internal_workspace_id = $1
           ORDER BY r.site_id, r.finished_at DESC NULLS LAST, r.started_at DESC
         )
         SELECT lc.site_id,
@@ -214,6 +227,7 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
         ORDER BY critical_count DESC, high_count DESC, lc.finished_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<CompletedScanRow>(
       `
@@ -224,11 +238,15 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                r.finished_at
         FROM scan_runs r
         JOIN sites s ON s.id = r.site_id
+        JOIN operations_business_sites obs ON obs.site_id = s.id
+        JOIN operations_businesses b ON b.id = obs.business_id
         WHERE r.status = 'completed'
+          AND b.internal_workspace_id = $1
           AND r.finished_at IS NOT NULL
         ORDER BY r.finished_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<FailedScanRow>(
       `
@@ -240,10 +258,14 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                r.updated_at
         FROM scan_runs r
         JOIN sites s ON s.id = r.site_id
+        JOIN operations_business_sites obs ON obs.site_id = s.id
+        JOIN operations_businesses b ON b.id = obs.business_id
         WHERE r.status = 'failed'
+          AND b.internal_workspace_id = $1
         ORDER BY r.updated_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<SharedReportRow>(
       `
@@ -255,20 +277,28 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                rs.created_at
         FROM report_shares rs
         JOIN sites s ON s.id = rs.site_id
+        JOIN operations_business_sites obs ON obs.site_id = s.id
+        JOIN operations_businesses b ON b.id = obs.business_id
+        WHERE b.internal_workspace_id = $1
         ORDER BY rs.created_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<SiteAddedRow>(
       `
-        SELECT id AS site_id,
-               url AS site_url,
-               site_display_name,
-               created_at
-        FROM sites
-        ORDER BY created_at DESC
+        SELECT s.id AS site_id,
+               s.url AS site_url,
+               s.site_display_name,
+               s.created_at
+        FROM sites s
+        JOIN operations_business_sites obs ON obs.site_id = s.id
+        JOIN operations_businesses b ON b.id = obs.business_id
+        WHERE b.internal_workspace_id = $1
+        ORDER BY s.created_at DESC
         LIMIT 5
       `,
+      [workspaceId],
     ),
     client.query<CountRow>(
       `
@@ -277,7 +307,10 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
                  r.id,
                  r.site_id
           FROM scan_runs r
+          JOIN operations_business_sites obs ON obs.site_id = r.site_id
+          JOIN operations_businesses b ON b.id = obs.business_id
           WHERE r.status = 'completed'
+            AND b.internal_workspace_id = $1
           ORDER BY r.site_id, r.finished_at DESC NULLS LAST, r.started_at DESC
         )
         SELECT COUNT(DISTINCT lc.site_id)::text AS count
@@ -286,11 +319,12 @@ export async function getOperationsSummary(): Promise<OperationsSummary> {
         WHERE si.status = 'open'
           AND si.severity IN ('critical', 'high')
       `,
+      [workspaceId],
     ),
-    getOperationsBusinessCounts(),
-    getOperationsReportCountsForSummary(),
-    getOperationsCommercialCounts(),
-    getOperationsManagedServiceCounts(),
+    getOperationsBusinessCounts(workspaceId),
+    getOperationsReportCountsForSummary(workspaceId),
+    getOperationsCommercialCounts(workspaceId),
+    getOperationsManagedServiceCounts(workspaceId),
   ]);
 
   const monitoringAttention: OperationsMonitoringAttentionItem[] = [

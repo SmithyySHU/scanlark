@@ -65,8 +65,20 @@ Use this checklist for local clean setup and pre-alpha release validation.
 - [ ] Private/internal URLs are rejected by crawler safety checks.
 - [ ] Raw stack traces are not shown in user-facing UI.
 - [ ] Production-like mode has no insecure secret fallbacks.
+- [ ] CI provisions a disposable PostgreSQL database, applies migrations, and
+      runs all workspace tests.
+- [ ] Before applying migration 054 to an existing database, its preflight has
+      been recorded and all blocking historical-evidence findings resolved.
 
 ## Current Audit Triage
+
+### Current development-data migration gate (2026-08-07)
+
+- Batch A preflight requires reviewed ownership handling for multiple active
+  memberships and catalog rows without a creator-derived workspace.
+- Batch B preflight reports two blocking report revision-lineage findings.
+- These findings do not block source validation, commit, or push. Resolve them
+  before applying migrations 050–054 to the development database.
 
 ### P0 Alpha Blockers
 
@@ -74,7 +86,6 @@ Use this checklist for local clean setup and pre-alpha release validation.
 
 ### P1 Should Fix Before Alpha
 
-- Add an automated fresh-database migration smoke test.
 - Add at least one API/web integration smoke test for add-site -> scan -> report.
 - Decide on production auth provider or explicitly gate alpha behind trusted
   users while `DEV_BYPASS_AUTH` remains disabled.

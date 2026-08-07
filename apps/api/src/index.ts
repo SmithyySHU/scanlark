@@ -3216,7 +3216,17 @@ app.post("/sites", async (req, res) => {
 
     startSiteAvatarRefresh(userId, site.id);
     if (operationsBusinessId) {
+      const operationsWorkspaceId = req.operationsContext?.workspace.id;
+      if (!operationsWorkspaceId) {
+        return sendApiError(
+          res,
+          403,
+          "operations_workspace_required",
+          "An Operations workspace is required to link this site",
+        );
+      }
       const linkResult = await linkOperationsBusinessSite(
+        operationsWorkspaceId,
         { id: userId, email: req.user!.email },
         operationsBusinessId,
         site.id,

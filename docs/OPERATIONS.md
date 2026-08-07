@@ -88,7 +88,7 @@ Email:
 - `EMAIL_TEST_TO`: optional override for test-alert endpoint.
 
 Deliverability setup for SPF, DKIM, DMARC, and IONOS-specific notes lives in
-`docs/EMAIL_DELIVERABILITY.md`.
+`docs/EMAIL.md`.
 
 Report shares:
 
@@ -112,6 +112,11 @@ not build tooling that assumes one file per number.
 
 Migrations are idempotent where practical, but a fresh alpha database should be
 created and migrated from scratch before release.
+
+Before applying migration `054_operations_historical_evidence_guards.sql` to an
+existing database, run `scripts/batch-b-evidence-preflight.sql` and record its
+result. Known historical-data findings do not block a source commit or push;
+they must be resolved before applying migration 054 to that database.
 
 ## Worker Operations
 

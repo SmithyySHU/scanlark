@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 export function useOperationsReportDraft<T extends { updated_at?: string }>(
   value: T,
+  readOnly = false,
 ) {
   const [draft, setDraft] = useState(value);
   const [dirty, setDirty] = useState(false);
@@ -12,6 +13,7 @@ export function useOperationsReportDraft<T extends { updated_at?: string }>(
   }, [value, value.updated_at]);
 
   function updateDraft(patch: Partial<T>) {
+    if (readOnly) return;
     setDraft((prev) => ({ ...prev, ...patch }));
     setDirty(true);
   }
@@ -21,7 +23,7 @@ export function useOperationsReportDraft<T extends { updated_at?: string }>(
 
 export function useOptionalOperationsReportDraft<
   T extends { updated_at?: string },
->(value: T | undefined) {
+>(value: T | undefined, readOnly = false) {
   const [draft, setDraft] = useState<T | undefined>(value);
   const [dirty, setDirty] = useState(false);
 
@@ -31,6 +33,7 @@ export function useOptionalOperationsReportDraft<
   }, [value, value?.updated_at]);
 
   function updateDraft(patch: Partial<T>) {
+    if (readOnly) return;
     setDraft((prev) => (prev ? { ...prev, ...patch } : prev));
     setDirty(true);
   }

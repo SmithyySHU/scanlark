@@ -1,5 +1,10 @@
 import { ensureConnected } from "./client";
 import type { OperationsCommunicationRow } from "./operationsCommunications";
+import type { OperationsQuoteStatus } from "./operationsQuotesWork";
+import {
+  immutableArtifactError,
+  isHistoricalQuoteStatus,
+} from "./operationsEvidence";
 
 export const OPERATIONS_EMAIL_MESSAGE_STATUSES = [
   "draft",
@@ -2919,6 +2924,7 @@ export type OperationsQuotePdfRenderRow = {
 };
 
 export async function saveOperationsQuotePdfRender(input: {
+  workspaceId: string;
   quoteId: string;
   quoteRevision: number;
   filename: string;
@@ -2939,6 +2945,21 @@ export async function saveOperationsQuotePdfRender(input: {
     throw new Error("pdf_source_snapshot_sha256_invalid");
   }
   const client = await ensureConnected();
+  const quoteState = await client.query<{ status: string }>(
+    `SELECT q.status FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $1 AND b.internal_workspace_id = $2`,
+    [input.quoteId, input.workspaceId],
+  );
+  if (!quoteState.rows[0]) throw new Error("quote_not_found");
+  if (
+    isHistoricalQuoteStatus(quoteState.rows[0].status as OperationsQuoteStatus)
+  ) {
+    const existing = await client.query<OperationsQuotePdfRenderRow>(
+      `SELECT * FROM operations_quote_pdf_renders WHERE operations_quote_id = $1 AND quote_revision = $2 AND source_snapshot_sha256 = $3 LIMIT 1`,
+      [input.quoteId, input.quoteRevision, sourceSnapshotSha256],
+    );
+    if (existing.rows[0]) return existing.rows[0];
+    throw immutableArtifactError("quote");
+  }
   const res = await client.query<OperationsQuotePdfRenderRow>(
     `
       WITH inserted AS (
@@ -2955,7 +2976,8 @@ export async function saveOperationsQuotePdfRender(input: {
           source_updated_at,
           source_snapshot_json
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb
+        WHERE EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $1 AND b.internal_workspace_id = $12)
         ON CONFLICT (operations_quote_id, quote_revision) DO NOTHING
         RETURNING *
       )
@@ -2965,6 +2987,7 @@ export async function saveOperationsQuotePdfRender(input: {
       FROM operations_quote_pdf_renders existing
       WHERE existing.operations_quote_id = $1
         AND existing.quote_revision = $2
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = existing.operations_quote_id AND b.internal_workspace_id = $12)
         AND NOT EXISTS (SELECT 1 FROM inserted)
       LIMIT 1
     `,
@@ -2980,12 +3003,14 @@ export async function saveOperationsQuotePdfRender(input: {
       sourceSnapshotSha256,
       input.sourceUpdatedAt ?? new Date(),
       JSON.stringify(input.sourceSnapshotJson ?? {}),
+      input.workspaceId,
     ],
   );
   return res.rows[0];
 }
 
 export async function getOperationsEmailQuotePdfRender(
+  workspaceId: string,
   quoteId: string,
   sourceSnapshotSha256: string,
 ) {
@@ -2994,12 +3019,13 @@ export async function getOperationsEmailQuotePdfRender(
     `
       SELECT *
       FROM operations_quote_pdf_renders
-      WHERE operations_quote_id = $1
-        AND source_snapshot_sha256 = $2
+      WHERE operations_quote_id = $2
+        AND source_snapshot_sha256 = $3
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_pdf_renders.operations_quote_id AND b.internal_workspace_id = $1)
       ORDER BY generated_at DESC, id DESC
       LIMIT 1
     `,
-    [quoteId, sourceSnapshotSha256],
+    [workspaceId, quoteId, sourceSnapshotSha256],
   );
   return res.rows[0] ?? null;
 }
@@ -3018,14 +3044,28 @@ export async function saveOperationsQuotePdfRenderAtNextRevision(
   }
   if (input.pdfBytes.length === 0) throw new Error("pdf_bytes_required");
   const client = await ensureConnected();
+  const quoteState = await client.query<{ status: string }>(
+    `SELECT q.status FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $1 AND b.internal_workspace_id = $2`,
+    [input.quoteId, input.workspaceId],
+  );
+  if (!quoteState.rows[0]) throw new Error("quote_not_found");
+  if (
+    isHistoricalQuoteStatus(quoteState.rows[0].status as OperationsQuoteStatus)
+  ) {
+    throw immutableArtifactError("quote");
+  }
   const res = await client.query<OperationsQuotePdfRenderRow>(
     `
       WITH lock AS MATERIALIZED (
         SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
       ), existing AS MATERIALIZED (
         SELECT render.*
-        FROM operations_quote_pdf_renders render, lock
+        FROM operations_quote_pdf_renders render
+        JOIN operations_quotes q ON q.id = render.operations_quote_id
+        JOIN operations_businesses b ON b.id = q.business_id
+        CROSS JOIN lock
         WHERE render.operations_quote_id = $1::uuid
+          AND b.internal_workspace_id = $11
           AND render.source_snapshot_sha256 = $8
         LIMIT 1
       ), inserted AS (
@@ -3035,7 +3075,7 @@ export async function saveOperationsQuotePdfRenderAtNextRevision(
           source_snapshot_sha256, source_updated_at, source_snapshot_json
         )
         SELECT $1::uuid,
-               COALESCE((SELECT max(quote_revision) + 1 FROM operations_quote_pdf_renders WHERE operations_quote_id = $1::uuid), 1),
+               COALESCE((SELECT max(quote_revision) + 1 FROM operations_quote_pdf_renders render2 JOIN operations_quotes q2 ON q2.id = render2.operations_quote_id JOIN operations_businesses b2 ON b2.id = q2.business_id WHERE render2.operations_quote_id = $1::uuid AND b2.internal_workspace_id = $11), 1),
                $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb
         FROM lock
         WHERE NOT EXISTS (SELECT 1 FROM existing)
@@ -3057,12 +3097,14 @@ export async function saveOperationsQuotePdfRenderAtNextRevision(
       sourceSnapshotSha256,
       input.sourceUpdatedAt ?? new Date(),
       JSON.stringify(input.sourceSnapshotJson ?? {}),
+      input.workspaceId,
     ],
   );
   return res.rows[0];
 }
 
 export async function getOperationsQuotePdfRender(
+  workspaceId: string,
   quoteId: string,
   quoteRevision: number,
 ) {
@@ -3070,9 +3112,10 @@ export async function getOperationsQuotePdfRender(
   const res = await client.query<OperationsQuotePdfRenderRow>(
     `
       SELECT * FROM operations_quote_pdf_renders
-      WHERE operations_quote_id = $1 AND quote_revision = $2
+      WHERE operations_quote_id = $2 AND quote_revision = $3
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_pdf_renders.operations_quote_id AND b.internal_workspace_id = $1)
     `,
-    [quoteId, quoteRevision],
+    [workspaceId, quoteId, quoteRevision],
   );
   return res.rows[0] ?? null;
 }

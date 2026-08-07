@@ -17,8 +17,8 @@ notifications, share links, and known limitations, see
 For local auth, either set `DEV_BYPASS_AUTH=true` and `DEMO_USER_EMAIL`, or set
 a 32+ character `SESSION_SECRET` and use the normal auth flow.
 
-For the feature-flagged Operations Email workspace and its role requirements,
-see [OPERATIONS_EMAIL_SMTP.md](OPERATIONS_EMAIL_SMTP.md#local-enablement-and-test-workflow).
+For Operations Email delivery controls and role requirements, see
+[EMAIL.md](EMAIL.md).
 
 ## Install
 
@@ -38,6 +38,14 @@ done
 
 Do not assume the numeric prefix is unique. The repo currently has duplicate
 `015_*` and `023_*` prefixes, and every file matters.
+
+For a disposable loopback test database, use the guarded migration runner:
+
+```bash
+NODE_ENV=test DATABASE_URL='<disposable-loopback-url>' bash scripts/run-migrations.sh
+```
+
+It rejects production, remote, and non-disposable database names.
 
 ## Run Services
 
@@ -118,16 +126,33 @@ Base API URL defaults to `http://localhost:3001`.
 Run the full alpha gate before handing off work:
 
 ```bash
-npm run typecheck
-npm run -w @scanlark/db typecheck
-npm run -w @scanlark/crawler typecheck
-npm run -w @scanlark/api typecheck
-npm run -w @scanlark/worker typecheck
-npm run -w @scanlark/web typecheck
-npm run -w @scanlark/web build
+npm --workspaces run typecheck --if-present
+npm --workspaces run test --if-present
+npm --workspaces run build --if-present
 npm run format:check
 git diff --check
 ```
+
+With `NODE_ENV=test` and a freshly migrated disposable database, run the
+purpose-named contracts as needed:
+
+```bash
+npm run test:migrations-replay
+npm run test:workspace-isolation
+npm run test:historical-evidence
+npm run test:historical-evidence-closure
+```
+
+`migration 054` is source-safe to commit once these tests pass. Its data
+preflight remains a deployment gate: record known development findings, but
+resolve them only before applying that migration to the affected database.
+
+## Onboarding behaviour
+
+The first-run wizard is implemented in `apps/web/src/app.tsx`. It appears for
+users without sites or scan history and stores completion locally under an
+`onboarding_completed:<userId>` key. The Help menu can reset it; the sample-site
+path must still use the normal scan flow.
 
 The web build currently emits a chunk-size warning because most UI is in one
 large SPA bundle; this is not a build failure.

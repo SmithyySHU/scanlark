@@ -796,6 +796,7 @@ async function recordStatusChange(
 }
 
 async function validateServiceRelationships(input: {
+  workspaceId: string;
   businessId: string;
   contactId?: string | null;
   servicePlanId?: string | null;
@@ -804,67 +805,76 @@ async function validateServiceRelationships(input: {
 }) {
   const client = await ensureConnected();
   const business = await client.query<{ id: string }>(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [input.businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [input.businessId, input.workspaceId],
   );
   if (!business.rows[0]) return "business_not_found" as const;
   if (input.contactId) {
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
-      [input.contactId, input.businessId],
+      `SELECT c.id FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3 AND c.archived_at IS NULL`,
+      [input.contactId, input.businessId, input.workspaceId],
     );
     if (!contact.rows[0]) return "contact_not_found" as const;
   }
   if (input.servicePlanId) {
     const plan = await client.query<{ id: string }>(
-      `SELECT id FROM operations_service_plan_templates WHERE id = $1`,
-      [input.servicePlanId],
+      `SELECT id FROM operations_service_plan_templates WHERE id = $1 AND internal_workspace_id = $2`,
+      [input.servicePlanId, input.workspaceId],
     );
     if (!plan.rows[0]) return "service_plan_not_found" as const;
   }
   if (input.sourceQuoteId) {
     const quote = await client.query<{ id: string }>(
-      `SELECT id FROM operations_quotes WHERE id = $1 AND business_id = $2`,
-      [input.sourceQuoteId, input.businessId],
+      `SELECT q.id FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $1 AND q.business_id = $2 AND b.internal_workspace_id = $3`,
+      [input.sourceQuoteId, input.businessId, input.workspaceId],
     );
     if (!quote.rows[0]) return "quote_not_found" as const;
   }
   if (input.sourceWorkOrderId) {
     const work = await client.query<{ id: string }>(
-      `SELECT id FROM operations_work_orders WHERE id = $1 AND business_id = $2`,
-      [input.sourceWorkOrderId, input.businessId],
+      `SELECT w.id FROM operations_work_orders w JOIN operations_businesses b ON b.id = w.business_id WHERE w.id = $1 AND w.business_id = $2 AND b.internal_workspace_id = $3`,
+      [input.sourceWorkOrderId, input.businessId, input.workspaceId],
     );
     if (!work.rows[0]) return "work_order_not_found" as const;
   }
   return "ok" as const;
 }
 
-async function siteBelongsToBusiness(businessId: string, siteId: string) {
+async function siteBelongsToBusiness(
+  workspaceId: string,
+  businessId: string,
+  siteId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<{ id: string }>(
     `
       SELECT s.id
       FROM sites s
-      JOIN operations_business_sites obs ON obs.site_id = s.id
+     JOIN operations_business_sites obs ON obs.site_id = s.id
+      JOIN operations_businesses b ON b.id = obs.business_id
       WHERE obs.business_id = $1
-        AND s.id = $2
+       AND s.id = $2
+        AND b.internal_workspace_id = $3
       LIMIT 1
     `,
-    [businessId, siteId],
+    [businessId, siteId, workspaceId],
   );
   return Boolean(res.rows[0]);
 }
 
-export async function listOperationsServicePlans(options: {
-  activeOnly?: boolean;
-  includeArchived?: boolean;
-  search?: string | null;
-  limit: number;
-  offset: number;
-}) {
+export async function listOperationsServicePlans(
+  workspaceId: string,
+  options: {
+    activeOnly?: boolean;
+    includeArchived?: boolean;
+    search?: string | null;
+    limit: number;
+    offset: number;
+  },
+) {
   const client = await ensureConnected();
-  const where: string[] = [];
-  const values: unknown[] = [];
+  const where: string[] = ["p.internal_workspace_id = $1"];
+  const values: unknown[] = [workspaceId];
   if (options.activeOnly) where.push("p.is_active = true");
   if (!options.includeArchived) where.push("p.archived_at IS NULL");
   if (options.search) {
@@ -902,16 +912,20 @@ export async function listOperationsServicePlans(options: {
   };
 }
 
-export async function getOperationsServicePlan(planId: string) {
+export async function getOperationsServicePlan(
+  workspaceId: string,
+  planId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsServicePlanRow>(
-    `SELECT * FROM operations_service_plan_templates WHERE id = $1`,
-    [planId],
+    `SELECT * FROM operations_service_plan_templates WHERE id = $1 AND internal_workspace_id = $2`,
+    [planId, workspaceId],
   );
   return res.rows[0] ?? null;
 }
 
 export async function createOperationsServicePlan(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsServicePlanInput,
 ) {
@@ -922,6 +936,7 @@ export async function createOperationsServicePlan(
   const res = await client.query<OperationsServicePlanRow>(
     `
       INSERT INTO operations_service_plan_templates (
+        internal_workspace_id,
         name, code, description, plan_type, default_currency,
         default_price_minor, default_billing_cadence, default_scan_frequency,
         default_report_frequency, default_review_frequency,
@@ -931,10 +946,11 @@ export async function createOperationsServicePlan(
         scope_summary, included_scope, excluded_scope, is_active,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING *
     `,
     [
+      workspaceId,
       name,
       code,
       textValue(input.description),
@@ -970,11 +986,12 @@ export async function createOperationsServicePlan(
 }
 
 export async function updateOperationsServicePlan(
+  workspaceId: string,
   actor: AdminActor,
   planId: string,
   input: Partial<OperationsServicePlanInput>,
 ) {
-  const current = await getOperationsServicePlan(planId);
+  const current = await getOperationsServicePlan(workspaceId, planId);
   if (!current) return null;
   const client = await ensureConnected();
   const res = await client.query<OperationsServicePlanRow>(
@@ -1003,7 +1020,7 @@ export async function updateOperationsServicePlan(
           excluded_scope = $22,
           is_active = $23,
           updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $24
       RETURNING *
     `,
     [
@@ -1058,6 +1075,7 @@ export async function updateOperationsServicePlan(
         ? textValue(input.excludedScope)
         : current.excluded_scope,
       "isActive" in input ? input.isActive !== false : current.is_active,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -1070,12 +1088,13 @@ export async function updateOperationsServicePlan(
 }
 
 export async function duplicateOperationsServicePlan(
+  workspaceId: string,
   actor: AdminActor,
   planId: string,
 ) {
-  const current = await getOperationsServicePlan(planId);
+  const current = await getOperationsServicePlan(workspaceId, planId);
   if (!current) return null;
-  return createOperationsServicePlan(actor, {
+  return createOperationsServicePlan(workspaceId, actor, {
     name: `${current.name} copy`,
     code: `${current.code}_copy_${Date.now()}`,
     description: current.description,
@@ -1101,6 +1120,7 @@ export async function duplicateOperationsServicePlan(
 }
 
 export async function setOperationsServicePlanArchived(
+  workspaceId: string,
   actor: AdminActor,
   planId: string,
   archived: boolean,
@@ -1112,10 +1132,10 @@ export async function setOperationsServicePlanArchived(
       SET archived_at = CASE WHEN $2 THEN now() ELSE NULL END,
           is_active = CASE WHEN $2 THEN false ELSE is_active END,
           updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $3
       RETURNING *
     `,
-    [planId, archived],
+    [planId, archived, workspaceId],
   );
   if (!res.rows[0]) return null;
   await recordAdminAuditLog(actor, {
@@ -1129,18 +1149,25 @@ export async function setOperationsServicePlanArchived(
   return res.rows[0];
 }
 
-async function copyPlanDefaults(planId: string | null | undefined) {
+async function copyPlanDefaults(
+  workspaceId: string,
+  planId: string | null | undefined,
+) {
   if (!planId) return null;
-  return getOperationsServicePlan(planId);
+  return getOperationsServicePlan(workspaceId, planId);
 }
 
 export async function createOperationsClientService(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsClientServiceInput,
 ) {
-  const validation = await validateServiceRelationships(input);
+  const validation = await validateServiceRelationships({
+    workspaceId,
+    ...input,
+  });
   if (validation !== "ok") return validation;
-  const plan = await copyPlanDefaults(input.servicePlanId);
+  const plan = await copyPlanDefaults(workspaceId, input.servicePlanId);
   const config = getOperationsServiceConfig();
   const serviceNumber = await nextDocumentNumber(
     "client_service",
@@ -1186,7 +1213,8 @@ export async function createOperationsClientService(
           scope_summary, included_scope, excluded_scope, custom_terms,
           internal_notes, created_by_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35)
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35
+        WHERE EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = $1 AND b.internal_workspace_id = $36)
         RETURNING *
       `,
       [
@@ -1241,11 +1269,14 @@ export async function createOperationsClientService(
         textValue(input.customTerms),
         textValue(input.internalNotes),
         actor.id,
+        workspaceId,
       ],
     );
     const service = res.rows[0];
     for (const siteId of input.siteIds ?? []) {
-      if (!(await siteBelongsToBusiness(input.businessId, siteId))) {
+      if (
+        !(await siteBelongsToBusiness(workspaceId, input.businessId, siteId))
+      ) {
         await client.query("ROLLBACK");
         return "site_not_linked_to_business" as const;
       }
@@ -1262,13 +1293,14 @@ export async function createOperationsClientService(
           )
           VALUES ($1, $2, NOT EXISTS (
             SELECT 1 FROM operations_client_service_sites
-            WHERE client_service_id = $1 AND removed_at IS NULL
+         WHERE client_service_id = $1 AND removed_at IS NULL
+           AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_sites.client_service_id AND b.internal_workspace_id = $4)
           ), true, $3, NULL, NULL)
           ON CONFLICT (client_service_id, site_id)
           WHERE removed_at IS NULL
           DO NOTHING
         `,
-        [service.id, siteId, service.includes_uptime_monitoring],
+        [service.id, siteId, service.includes_uptime_monitoring, workspaceId],
       );
     }
     await client.query("COMMIT");
@@ -1287,30 +1319,33 @@ export async function createOperationsClientService(
         sourceQuoteId: input.sourceQuoteId ?? null,
       },
     });
-    return getOperationsClientServiceDetail(service.id);
+    return getOperationsClientServiceDetail(workspaceId, service.id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   }
 }
 
-export async function listOperationsClientServices(options: {
-  businessId?: string | null;
-  status?: OperationsClientServiceStatus | null;
-  planType?: OperationsServicePlanType | null;
-  billingCadence?: OperationsServiceBillingCadence | null;
-  search?: string | null;
-  reportsDue?: boolean;
-  reviewsDue?: boolean;
-  renewalsApproaching?: boolean;
-  siteAttention?: boolean;
-  includeEnded?: boolean;
-  limit: number;
-  offset: number;
-}) {
+export async function listOperationsClientServices(
+  workspaceId: string,
+  options: {
+    businessId?: string | null;
+    status?: OperationsClientServiceStatus | null;
+    planType?: OperationsServicePlanType | null;
+    billingCadence?: OperationsServiceBillingCadence | null;
+    search?: string | null;
+    reportsDue?: boolean;
+    reviewsDue?: boolean;
+    renewalsApproaching?: boolean;
+    siteAttention?: boolean;
+    includeEnded?: boolean;
+    limit: number;
+    offset: number;
+  },
+) {
   const client = await ensureConnected();
-  const where: string[] = [];
-  const values: unknown[] = [];
+  const where: string[] = ["b.internal_workspace_id = $1"];
+  const values: unknown[] = [workspaceId];
   if (!options.includeEnded) {
     where.push(`s.archived_at IS NULL`);
   }
@@ -1484,7 +1519,10 @@ export function getServiceActivationIssues(
   return issues;
 }
 
-export async function getOperationsClientServiceDetail(serviceId: string) {
+export async function getOperationsClientServiceDetail(
+  workspaceId: string,
+  serviceId: string,
+) {
   const client = await ensureConnected();
   const serviceRes = await client.query<OperationsClientServiceRow>(
     `
@@ -1500,9 +1538,10 @@ export async function getOperationsClientServiceDetail(serviceId: string) {
       JOIN operations_businesses b ON b.id = s.business_id
       LEFT JOIN operations_contacts c ON c.id = s.contact_id
       LEFT JOIN operations_service_plan_templates p ON p.id = s.service_plan_id
-      WHERE s.id = $1
+      WHERE s.id = $2
+        AND b.internal_workspace_id = $1
     `,
-    [serviceId],
+    [workspaceId, serviceId],
   );
   const service = serviceRes.rows[0];
   if (!service) return null;
@@ -1545,49 +1584,59 @@ export async function getOperationsClientServiceDetail(serviceId: string) {
           WHERE ui.site_id = s.id AND ui.status = 'open'
         ) incident_counts ON TRUE
         WHERE css.client_service_id = $1
+          AND EXISTS (
+            SELECT 1 FROM operations_client_services scoped_s
+            JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id
+            WHERE scoped_s.id = css.client_service_id
+              AND scoped_b.internal_workspace_id = $2
+          )
         ORDER BY css.removed_at NULLS FIRST, css.is_primary DESC, s.url ASC
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<OperationsClientServiceUsageRow>(
         `
         SELECT *
         FROM operations_client_service_usage
         WHERE client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_service_usage.client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY occurred_at DESC
         LIMIT 100
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<OperationsClientServiceActivityRow>(
         `
         SELECT *
         FROM operations_client_service_activity
         WHERE client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_service_activity.client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY occurred_at DESC
         LIMIT 100
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<OperationsClientServiceReviewRow>(
         `
         SELECT *
         FROM operations_client_service_reviews
         WHERE client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_service_reviews.client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY review_started_at DESC
         LIMIT 20
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<OperationsClientServiceIncidentRow>(
         `
         SELECT *
         FROM operations_client_service_incidents
         WHERE client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_service_incidents.client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY detected_at DESC
         LIMIT 50
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<{
         id: string;
@@ -1604,10 +1653,11 @@ export async function getOperationsClientServiceDetail(serviceId: string) {
         FROM operations_reports r
         JOIN sites s ON s.id = r.site_id
         WHERE r.client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = r.client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY r.updated_at DESC
         LIMIT 50
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
       client.query<{
         id: string;
@@ -1620,13 +1670,17 @@ export async function getOperationsClientServiceDetail(serviceId: string) {
         SELECT id, title, due_at, status, source_key
         FROM operations_tasks
         WHERE source_client_service_id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_tasks.source_client_service_id AND scoped_b.internal_workspace_id = $2)
         ORDER BY status ASC, due_at ASC
         LIMIT 50
       `,
-        [serviceId],
+        [serviceId, workspaceId],
       ),
     ]);
-  const allowance = await getOperationsServiceAllowanceSummary(serviceId);
+  const allowance = await getOperationsServiceAllowanceSummary(
+    workspaceId,
+    serviceId,
+  );
   return {
     service,
     sites: sites.rows,
@@ -1642,13 +1696,15 @@ export async function getOperationsClientServiceDetail(serviceId: string) {
 }
 
 export async function updateOperationsClientService(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: OperationsClientServiceUpdateInput,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const valid = await validateServiceRelationships({
+    workspaceId,
     businessId: detail.service.business_id,
     contactId:
       "contactId" in input ? input.contactId : detail.service.contact_id,
@@ -1673,7 +1729,7 @@ export async function updateOperationsClientService(
   const client = await ensureConnected();
   const res = await client.query<OperationsClientServiceRow>(
     `
-      UPDATE operations_client_services
+       UPDATE operations_client_services
       SET contact_id = $2,
           service_plan_id = $3,
           source_quote_id = $4,
@@ -1706,7 +1762,8 @@ export async function updateOperationsClientService(
           custom_terms = $31,
           internal_notes = $32,
           updated_at = now()
-      WHERE id = $1
+       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_services.id AND scoped_b.internal_workspace_id = $33)
       RETURNING *
     `,
     [
@@ -1786,6 +1843,7 @@ export async function updateOperationsClientService(
       "internalNotes" in input
         ? textValue(input.internalNotes)
         : current.internal_notes,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -1794,31 +1852,32 @@ export async function updateOperationsClientService(
     targetId: serviceId,
     metadata: { fields: Object.keys(input) },
   });
-  return getOperationsClientServiceDetail(res.rows[0].id);
+  return getOperationsClientServiceDetail(workspaceId, res.rows[0].id);
 }
 
 export async function getOperationsClientServiceArchiveEligibility(
+  workspaceId: string,
   serviceId: string,
 ): Promise<OperationsClientServiceArchiveEligibility | null> {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const client = await ensureConnected();
   const [usage, activities, reports, tasks] = await Promise.all([
     client.query<CountRow>(
-      `SELECT COUNT(*)::text AS count FROM operations_client_service_usage WHERE client_service_id = $1`,
-      [serviceId],
+      `SELECT COUNT(*)::text AS count FROM operations_client_service_usage u WHERE u.client_service_id = $1 AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = u.client_service_id AND b.internal_workspace_id = $2)`,
+      [serviceId, workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*)::text AS count FROM operations_client_service_activity WHERE client_service_id = $1 AND activity_type <> 'service_created'`,
-      [serviceId],
+      `SELECT COUNT(*)::text AS count FROM operations_client_service_activity a WHERE a.client_service_id = $1 AND a.activity_type <> 'service_created' AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = a.client_service_id AND b.internal_workspace_id = $2)`,
+      [serviceId, workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*)::text AS count FROM operations_reports WHERE client_service_id = $1`,
-      [serviceId],
+      `SELECT COUNT(*)::text AS count FROM operations_reports r WHERE r.client_service_id = $1 AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = r.business_id AND b.internal_workspace_id = $2)`,
+      [serviceId, workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*)::text AS count FROM operations_tasks WHERE source_client_service_id = $1`,
-      [serviceId],
+      `SELECT COUNT(*)::text AS count FROM operations_tasks t WHERE t.source_client_service_id = $1 AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = t.business_id AND b.internal_workspace_id = $2)`,
+      [serviceId, workspaceId],
     ),
   ]);
   const reasons: string[] = [];
@@ -1858,6 +1917,7 @@ export async function getOperationsClientServiceArchiveEligibility(
 }
 
 export async function setOperationsClientServiceArchived(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   archived: boolean,
@@ -1867,8 +1927,10 @@ export async function setOperationsClientServiceArchived(
   | null
 > {
   if (archived) {
-    const eligibility =
-      await getOperationsClientServiceArchiveEligibility(serviceId);
+    const eligibility = await getOperationsClientServiceArchiveEligibility(
+      workspaceId,
+      serviceId,
+    );
     if (!eligibility) return null;
     if (!eligibility.allowed) return eligibility;
   }
@@ -1879,10 +1941,11 @@ export async function setOperationsClientServiceArchived(
       SET archived_at = CASE WHEN $2 THEN now() ELSE NULL END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_services.id AND scoped_b.internal_workspace_id = $3)
         AND status = 'draft'
       RETURNING *
     `,
-    [serviceId, archived],
+    [serviceId, archived, workspaceId],
   );
   const service = res.rows[0] ?? null;
   if (!service) return null;
@@ -1900,10 +1963,11 @@ export async function setOperationsClientServiceArchived(
     targetId: serviceId,
     metadata: { businessId: service.business_id },
   });
-  return getOperationsClientServiceDetail(serviceId);
+  return getOperationsClientServiceDetail(workspaceId, serviceId);
 }
 
 async function configureServiceSchedules(
+  workspaceId: string,
   actor: AdminActor,
   detail: OperationsClientServiceDetail,
 ) {
@@ -1928,9 +1992,10 @@ async function configureServiceSchedules(
                schedule_day_of_week, schedule_day_of_month, next_scheduled_at,
                last_scheduled_at
         FROM sites
-        WHERE id = $1
+        WHERE id = $1 AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_client_services.business_id AND b.internal_workspace_id = $6)
+          AND EXISTS (SELECT 1 FROM operations_client_service_sites css JOIN operations_client_services scoped_s ON scoped_s.id = css.client_service_id JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE css.site_id = sites.id AND scoped_s.id = $2 AND scoped_b.internal_workspace_id = $3)
       `,
-      [site.site_id],
+      [site.site_id, detail.service.id, workspaceId],
     );
     const row = current.rows[0];
     if (!row) continue;
@@ -1965,17 +2030,25 @@ async function configureServiceSchedules(
         SET schedule_enabled = true,
             schedule_frequency = $2,
             next_scheduled_at = $3
-        WHERE id = $1
-      `,
-      [site.site_id, scheduleFrequency, nextScheduledAt],
+     WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_client_service_sites css JOIN operations_client_services s ON s.id = css.client_service_id JOIN operations_businesses b ON b.id = s.business_id WHERE css.site_id = sites.id AND css.client_service_id = $4 AND b.internal_workspace_id = $5)
+     `,
+      [
+        site.site_id,
+        scheduleFrequency,
+        nextScheduledAt,
+        detail.service.id,
+        workspaceId,
+      ],
     );
     await client.query(
       `
-        UPDATE operations_client_service_sites
-        SET schedule_managed_by_service = true,
-            previous_schedule_json = COALESCE(previous_schedule_json, $2::jsonb),
-            updated_at = now()
-        WHERE id = $1
+       UPDATE operations_client_service_sites
+       SET schedule_managed_by_service = true,
+           previous_schedule_json = COALESCE(previous_schedule_json, $2::jsonb),
+           updated_at = now()
+       WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = operations_client_service_sites.client_service_id AND scoped_s.id = $3 AND scoped_b.internal_workspace_id = $4)
       `,
       [
         site.id,
@@ -1988,12 +2061,17 @@ async function configureServiceSchedules(
           nextScheduledAt: row.next_scheduled_at?.toISOString() ?? null,
           lastScheduledAt: row.last_scheduled_at?.toISOString() ?? null,
         }),
+        detail.service.id,
+        workspaceId,
       ],
     );
   }
 }
 
-async function pauseServiceOwnedSchedules(serviceId: string) {
+async function pauseServiceOwnedSchedules(
+  workspaceId: string,
+  serviceId: string,
+) {
   const client = await ensureConnected();
   await client.query(
     `
@@ -2004,13 +2082,15 @@ async function pauseServiceOwnedSchedules(serviceId: string) {
       WHERE css.site_id = s.id
         AND css.client_service_id = $1
         AND css.removed_at IS NULL
-        AND css.schedule_managed_by_service = true
-    `,
-    [serviceId],
+       AND css.schedule_managed_by_service = true
+        AND EXISTS (SELECT 1 FROM operations_client_services scoped_s JOIN operations_businesses scoped_b ON scoped_b.id = scoped_s.business_id WHERE scoped_s.id = css.client_service_id AND scoped_s.id = $2 AND scoped_b.internal_workspace_id = $3)
+   `,
+    [serviceId, serviceId, workspaceId],
   );
 }
 
 async function updateServiceStatus(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   status: OperationsClientServiceStatus,
@@ -2025,7 +2105,7 @@ async function updateServiceStatus(
     updatePipelineStage?: boolean;
   } = {},
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   if (status === "active" || status === "pending_start") {
     const issues = getServiceActivationIssues(detail.service, detail.sites);
@@ -2057,8 +2137,9 @@ async function updateServiceStatus(
             cancelled_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE cancelled_at END,
             ended_at = CASE WHEN $2 IN ('cancelled', 'completed', 'expired') THEN COALESCE(ended_at, now()) ELSE ended_at END,
             updated_at = now()
-        WHERE id = $1
-        RETURNING *
+       WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_client_services.business_id AND b.internal_workspace_id = $6)
+       RETURNING *
       `,
       [
         serviceId,
@@ -2066,6 +2147,7 @@ async function updateServiceStatus(
         options.agreedAt ?? null,
         options.plannedResumeAt ?? null,
         options.requestedEndDate ?? null,
+        workspaceId,
       ],
     );
     if (options.updateBusinessRelationship) {
@@ -2076,20 +2158,28 @@ async function updateServiceStatus(
               pipeline_stage = CASE WHEN $2 THEN 'ongoing_client' ELSE pipeline_stage END,
               updated_at = now()
           WHERE id = $1
+            AND internal_workspace_id = $3
         `,
-        [detail.service.business_id, options.updatePipelineStage === true],
+        [
+          detail.service.business_id,
+          options.updatePipelineStage === true,
+          workspaceId,
+        ],
       );
     }
     await client.query("COMMIT");
     if (["active", "pending_start"].includes(status)) {
-      const updated = await getOperationsClientServiceDetail(serviceId);
+      const updated = await getOperationsClientServiceDetail(
+        workspaceId,
+        serviceId,
+      );
       if (updated) {
-        await configureServiceSchedules(actor, updated);
-        await generateOperationsServiceTasks(actor, serviceId);
+        await configureServiceSchedules(workspaceId, actor, updated);
+        await generateOperationsServiceTasks(workspaceId, actor, serviceId);
       }
     }
     if (["paused", "cancelled", "completed", "expired"].includes(status)) {
-      await pauseServiceOwnedSchedules(serviceId);
+      await pauseServiceOwnedSchedules(workspaceId, serviceId);
     }
     await addActivity(actor, {
       clientServiceId: serviceId,
@@ -2104,7 +2194,7 @@ async function updateServiceStatus(
       targetId: serviceId,
       metadata: { previousStatus: detail.service.status },
     });
-    return getOperationsClientServiceDetail(res.rows[0].id);
+    return getOperationsClientServiceDetail(workspaceId, res.rows[0].id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -2112,12 +2202,14 @@ async function updateServiceStatus(
 }
 
 export const proposeOperationsClientService = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: { reason?: string | null } = {},
-) => updateServiceStatus(actor, serviceId, "proposed", input);
+) => updateServiceStatus(workspaceId, actor, serviceId, "proposed", input);
 
 export const activateOperationsClientService = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: {
@@ -2126,36 +2218,48 @@ export const activateOperationsClientService = (
     updateBusinessRelationship?: boolean;
     updatePipelineStage?: boolean;
   },
-) => updateServiceStatus(actor, serviceId, "active", input);
+) => updateServiceStatus(workspaceId, actor, serviceId, "active", input);
 
 export const pauseOperationsClientService = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: { reason?: string | null; plannedResumeAt?: Date | null },
-) => updateServiceStatus(actor, serviceId, "paused", input);
+) => updateServiceStatus(workspaceId, actor, serviceId, "paused", input);
 
 export const resumeOperationsClientService = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
 ) =>
-  updateServiceStatus(actor, serviceId, "active", {
+  updateServiceStatus(workspaceId, actor, serviceId, "active", {
     agreedAt: new Date(),
     acceptanceMethod: "resume",
   });
 
 export const requestOperationsClientServiceCancellation = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: { reason?: string | null; requestedEndDate?: Date | null },
-) => updateServiceStatus(actor, serviceId, "cancellation_pending", input);
+) =>
+  updateServiceStatus(
+    workspaceId,
+    actor,
+    serviceId,
+    "cancellation_pending",
+    input,
+  );
 
 export const cancelOperationsClientService = (
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: { reason?: string | null },
-) => updateServiceStatus(actor, serviceId, "cancelled", input);
+) => updateServiceStatus(workspaceId, actor, serviceId, "cancelled", input);
 
 export async function renewOperationsClientService(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: {
@@ -2164,10 +2268,15 @@ export async function renewOperationsClientService(
     reason?: string | null;
   },
 ) {
-  const updated = await updateOperationsClientService(actor, serviceId, {
-    renewalDate: input.renewalDate ?? null,
-    nextReviewAt: input.nextReviewAt ?? null,
-  });
+  const updated = await updateOperationsClientService(
+    workspaceId,
+    actor,
+    serviceId,
+    {
+      renewalDate: input.renewalDate ?? null,
+      nextReviewAt: input.nextReviewAt ?? null,
+    },
+  );
   if (updated && typeof updated !== "string") {
     await addActivity(actor, {
       clientServiceId: serviceId,
@@ -2181,6 +2290,7 @@ export async function renewOperationsClientService(
 }
 
 export async function changeOperationsClientServicePlan(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: {
@@ -2191,10 +2301,13 @@ export async function changeOperationsClientServicePlan(
     clientAgreed?: boolean;
   },
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   if (input.servicePlanId) {
-    const plan = await getOperationsServicePlan(input.servicePlanId);
+    const plan = await getOperationsServicePlan(
+      workspaceId,
+      input.servicePlanId,
+    );
     if (!plan) return "service_plan_not_found" as const;
   }
   const client = await ensureConnected();
@@ -2234,9 +2347,14 @@ export async function changeOperationsClientServicePlan(
       actor.id,
     ],
   );
-  const updated = await updateOperationsClientService(actor, serviceId, {
-    servicePlanId: input.servicePlanId ?? detail.service.service_plan_id,
-  });
+  const updated = await updateOperationsClientService(
+    workspaceId,
+    actor,
+    serviceId,
+    {
+      servicePlanId: input.servicePlanId ?? detail.service.service_plan_id,
+    },
+  );
   await addActivity(actor, {
     clientServiceId: serviceId,
     businessId: detail.service.business_id,
@@ -2248,11 +2366,12 @@ export async function changeOperationsClientServicePlan(
 }
 
 export async function markOperationsServiceReviewComplete(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: OperationsClientServiceReviewInput,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const client = await ensureConnected();
   const review = await client.query<OperationsClientServiceReviewRow>(
@@ -2265,7 +2384,8 @@ export async function markOperationsServiceReviewComplete(
         renewal_recommendation, next_review_at, internal_notes,
         created_by_user_id
       )
-      VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      SELECT $1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+      WHERE EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = $1 AND s.business_id = $2 AND b.internal_workspace_id = $17)
       RETURNING *
     `,
     [
@@ -2285,6 +2405,7 @@ export async function markOperationsServiceReviewComplete(
       input.nextReviewAt ?? null,
       textValue(input.internalNotes),
       actor.id,
+      workspaceId,
     ],
   );
   if (input.nextReviewAt) {
@@ -2294,9 +2415,10 @@ export async function markOperationsServiceReviewComplete(
         SET next_review_at = $2,
             status = CASE WHEN status = 'review_due' THEN 'active' ELSE status END,
             updated_at = now()
-        WHERE id = $1
-      `,
-      [serviceId, input.nextReviewAt],
+       WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_client_services.business_id AND b.internal_workspace_id = $3)
+     `,
+      [serviceId, input.nextReviewAt, workspaceId],
     );
   }
   await addActivity(actor, {
@@ -2310,14 +2432,19 @@ export async function markOperationsServiceReviewComplete(
 }
 
 export async function addOperationsClientServiceSite(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: OperationsClientServiceSiteInput,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   if (
-    !(await siteBelongsToBusiness(detail.service.business_id, input.siteId))
+    !(await siteBelongsToBusiness(
+      workspaceId,
+      detail.service.business_id,
+      input.siteId,
+    ))
   ) {
     return "site_not_linked_to_business" as const;
   }
@@ -2329,9 +2456,10 @@ export async function addOperationsClientServiceSite(
         `
           UPDATE operations_client_service_sites
           SET is_primary = false
-          WHERE client_service_id = $1 AND removed_at IS NULL
+         WHERE client_service_id = $1 AND removed_at IS NULL
+            AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_sites.client_service_id AND b.internal_workspace_id = $2)
         `,
-        [serviceId],
+        [serviceId, workspaceId],
       );
     }
     const res = await client.query<OperationsClientServiceSiteRow>(
@@ -2374,12 +2502,13 @@ export async function addOperationsClientServiceSite(
 }
 
 export async function updateOperationsClientServiceSite(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   siteId: string,
   input: Partial<OperationsClientServiceSiteInput>,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const existing = detail.sites.find(
     (site) => site.site_id === siteId && !site.removed_at,
@@ -2388,8 +2517,8 @@ export async function updateOperationsClientServiceSite(
   const client = await ensureConnected();
   if (input.isPrimary) {
     await client.query(
-      `UPDATE operations_client_service_sites SET is_primary = false WHERE client_service_id = $1 AND removed_at IS NULL`,
-      [serviceId],
+      `UPDATE operations_client_service_sites SET is_primary = false WHERE client_service_id = $1 AND removed_at IS NULL AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_sites.client_service_id AND b.internal_workspace_id = $2)`,
+      [serviceId, workspaceId],
     );
   }
   const res = await client.query<OperationsClientServiceSiteRow>(
@@ -2402,9 +2531,10 @@ export async function updateOperationsClientServiceSite(
           report_frequency_override = $7,
           notes = $8,
           updated_at = now()
-      WHERE client_service_id = $1
-        AND site_id = $2
-        AND removed_at IS NULL
+     WHERE client_service_id = $1
+       AND site_id = $2
+       AND removed_at IS NULL
+        AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_sites.client_service_id AND b.internal_workspace_id = $9)
       RETURNING *
     `,
     [
@@ -2424,6 +2554,7 @@ export async function updateOperationsClientServiceSite(
         ? (input.reportFrequencyOverride ?? null)
         : existing.report_frequency_override,
       "notes" in input ? textValue(input.notes) : existing.notes,
+      workspaceId,
     ],
   );
   await addActivity(actor, {
@@ -2437,12 +2568,13 @@ export async function updateOperationsClientServiceSite(
 }
 
 export async function removeOperationsClientServiceSite(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   siteId: string,
   reason?: string | null,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const client = await ensureConnected();
   const res = await client.query<OperationsClientServiceSiteRow>(
@@ -2452,12 +2584,13 @@ export async function removeOperationsClientServiceSite(
           monitoring_enabled = false,
           uptime_monitoring_enabled = false,
           updated_at = now()
-      WHERE client_service_id = $1
-        AND site_id = $2
-        AND removed_at IS NULL
-      RETURNING *
+     WHERE client_service_id = $1
+       AND site_id = $2
+       AND removed_at IS NULL
+        AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_sites.client_service_id AND b.internal_workspace_id = $3)
+     RETURNING *
     `,
-    [serviceId, siteId],
+    [serviceId, siteId, workspaceId],
   );
   if (!res.rows[0]) return null;
   await addActivity(actor, {
@@ -2471,27 +2604,34 @@ export async function removeOperationsClientServiceSite(
   return res.rows[0];
 }
 
-export async function listOperationsClientServiceUsage(serviceId: string) {
+export async function listOperationsClientServiceUsage(
+  workspaceId: string,
+  serviceId: string,
+) {
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
+  if (!detail) return [];
   const client = await ensureConnected();
   const res = await client.query<OperationsClientServiceUsageRow>(
     `
       SELECT *
       FROM operations_client_service_usage
       WHERE client_service_id = $1
+        AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_usage.client_service_id AND b.internal_workspace_id = $2)
       ORDER BY occurred_at DESC
       LIMIT 200
     `,
-    [serviceId],
+    [serviceId, workspaceId],
   );
   return res.rows;
 }
 
 export async function createOperationsClientServiceUsage(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: OperationsClientServiceUsageInput,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const occurredAt = input.occurredAt ?? new Date();
   const period =
@@ -2508,7 +2648,8 @@ export async function createOperationsClientServiceUsage(
         is_out_of_scope, outside_scope_reason, internal_notes,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+      WHERE EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = $1 AND s.business_id = $2 AND b.internal_workspace_id = $17)
       RETURNING *
     `,
     [
@@ -2528,6 +2669,7 @@ export async function createOperationsClientServiceUsage(
       textValue(input.outsideScopeReason),
       textValue(input.internalNotes),
       actor.id,
+      workspaceId,
     ],
   );
   await addActivity(actor, {
@@ -2548,12 +2690,13 @@ export async function createOperationsClientServiceUsage(
 }
 
 export async function updateOperationsClientServiceUsage(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   usageId: string,
   input: Partial<OperationsClientServiceUsageInput>,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const current = detail.usage.find((item) => item.id === usageId);
   if (!current) return null;
@@ -2573,6 +2716,7 @@ export async function updateOperationsClientServiceUsage(
           internal_notes = $12,
           updated_at = now()
       WHERE client_service_id = $1 AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_usage.client_service_id AND b.internal_workspace_id = $13)
       RETURNING *
     `,
     [
@@ -2600,6 +2744,7 @@ export async function updateOperationsClientServiceUsage(
       "internalNotes" in input
         ? textValue(input.internalNotes)
         : current.internal_notes,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -2612,20 +2757,22 @@ export async function updateOperationsClientServiceUsage(
 }
 
 export async function deleteOperationsClientServiceUsage(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   usageId: string,
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const client = await ensureConnected();
   const res = await client.query<OperationsClientServiceUsageRow>(
     `
       DELETE FROM operations_client_service_usage
       WHERE client_service_id = $1 AND id = $2
+        AND EXISTS (SELECT 1 FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = operations_client_service_usage.client_service_id AND b.internal_workspace_id = $3)
       RETURNING *
     `,
-    [serviceId, usageId],
+    [serviceId, usageId, workspaceId],
   );
   if (!res.rows[0]) return null;
   await recordAdminAuditLog(actor, {
@@ -2638,13 +2785,14 @@ export async function deleteOperationsClientServiceUsage(
 }
 
 export async function getOperationsServiceAllowanceSummary(
+  workspaceId: string,
   serviceId: string,
   occurredAt: Date = new Date(),
 ) {
   const client = await ensureConnected();
   const serviceRes = await client.query<OperationsClientServiceRow>(
-    `SELECT * FROM operations_client_services WHERE id = $1`,
-    [serviceId],
+    `SELECT s.* FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = $2 AND b.internal_workspace_id = $1`,
+    [workspaceId, serviceId],
   );
   const service = serviceRes.rows[0];
   if (!service) throw new Error("service_not_found");
@@ -2709,11 +2857,12 @@ export function buildServiceTaskKeys(
 }
 
 export async function generateOperationsServiceTasks(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   now: Date = new Date(),
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   if (
     !["active", "pending_start", "review_due"].includes(detail.service.status)
@@ -2809,8 +2958,11 @@ export async function generateOperationsServiceTasks(
   return { createdOrUpdated: count, skipped: false };
 }
 
-export async function getOperationsServiceSchedule(serviceId: string) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+export async function getOperationsServiceSchedule(
+  workspaceId: string,
+  serviceId: string,
+) {
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   return {
     serviceId,
@@ -2831,6 +2983,7 @@ export async function getOperationsServiceSchedule(serviceId: string) {
 }
 
 export async function createOperationsServiceMonthlyReport(
+  workspaceId: string,
   actor: AdminActor,
   serviceId: string,
   input: {
@@ -2840,7 +2993,7 @@ export async function createOperationsServiceMonthlyReport(
     periodEnd?: Date | null;
   },
 ) {
-  const detail = await getOperationsClientServiceDetail(serviceId);
+  const detail = await getOperationsClientServiceDetail(workspaceId, serviceId);
   if (!detail) return null;
   const activeSites = detail.sites.filter((site) => !site.removed_at);
   const selectedSite = input.siteId
@@ -2852,17 +3005,18 @@ export async function createOperationsServiceMonthlyReport(
     `
       SELECT id
       FROM scan_runs
-      WHERE site_id = $1
+     WHERE site_id = $1
+        AND EXISTS (SELECT 1 FROM operations_client_service_sites css JOIN operations_client_services s ON s.id = css.client_service_id JOIN operations_businesses b ON b.id = s.business_id WHERE css.site_id = scan_runs.site_id AND css.client_service_id = $2 AND b.internal_workspace_id = $3)
         AND status = 'completed'
         AND finished_at IS NOT NULL
       ORDER BY finished_at DESC
       LIMIT 1
     `,
-    [selectedSite.site_id],
+    [selectedSite.site_id, serviceId, workspaceId],
   );
   const scanRunId = latestScan.rows[0]?.id;
   if (!scanRunId) return "completed_scan_required" as const;
-  const report = await createOperationsReport(actor, {
+  const report = await createOperationsReport(workspaceId, actor, {
     businessId: detail.service.business_id,
     siteId: selectedSite.site_id,
     scanRunId,
@@ -2877,21 +3031,23 @@ export async function createOperationsServiceMonthlyReport(
   if (typeof report === "string") return report;
   await client.query(
     `
-      UPDATE operations_reports
-      SET client_service_id = $2,
-          overall_summary = COALESCE(overall_summary, $3),
-          scope_limitations = COALESCE(scope_limitations, $4),
-          updated_at = now()
-      WHERE id = $1
+     UPDATE operations_reports
+     SET client_service_id = $2,
+         overall_summary = COALESCE(overall_summary, $3),
+         scope_limitations = COALESCE(scope_limitations, $4),
+         updated_at = now()
+     WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $5)
     `,
     [
       report.report.id,
       serviceId,
       "Monthly monitoring report draft created from the managed-service workspace. Review before sending.",
       "This report covers reviewed website monitoring information for the selected service period. It is not a security audit, legal compliance report or automated notice of every scanner finding.",
+      workspaceId,
     ],
   );
-  await createOperationsClientServiceUsage(actor, serviceId, {
+  await createOperationsClientServiceUsage(workspaceId, actor, serviceId, {
     operationsReportId: report.report.id,
     usageType: "report",
     description: "Monthly monitoring report created.",
@@ -2910,7 +3066,9 @@ export async function createOperationsServiceMonthlyReport(
   return report;
 }
 
-export async function getOperationsManagedServiceCounts(): Promise<OperationsManagedServiceCounts> {
+export async function getOperationsManagedServiceCounts(
+  workspaceId: string,
+): Promise<OperationsManagedServiceCounts> {
   const client = await ensureConnected();
   const [
     active,
@@ -2925,20 +3083,25 @@ export async function getOperationsManagedServiceCounts(): Promise<OperationsMan
     clientActions,
   ] = await Promise.all([
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status IN ('active', 'review_due', 'pending_start')`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status IN ('active', 'review_due', 'pending_start')`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status IN ('active', 'review_due') AND next_report_at IS NOT NULL AND next_report_at <= now()`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status IN ('active', 'review_due') AND s.next_report_at IS NOT NULL AND s.next_report_at <= now()`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status IN ('active', 'review_due') AND next_review_at IS NOT NULL AND next_review_at <= now()`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status IN ('active', 'review_due') AND s.next_review_at IS NOT NULL AND s.next_review_at <= now()`,
+      [workspaceId],
     ),
     client.query<CountRow>(
       `
         SELECT COUNT(DISTINCT css.site_id) AS count
         FROM operations_client_service_sites css
         JOIN operations_client_services s ON s.id = css.client_service_id
-        WHERE css.removed_at IS NULL
+        JOIN operations_businesses b ON b.id = s.business_id
+        WHERE b.internal_workspace_id = $1
+          AND css.removed_at IS NULL
           AND s.status IN ('active', 'review_due')
           AND (
             EXISTS (
@@ -2963,24 +3126,31 @@ export async function getOperationsManagedServiceCounts(): Promise<OperationsMan
             )
           )
       `,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status = 'paused'`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status = 'paused'`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status IN ('active', 'review_due', 'paused') AND renewal_reminder_at IS NOT NULL AND renewal_reminder_at <= now()`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status IN ('active', 'review_due', 'paused') AND s.renewal_reminder_at IS NOT NULL AND s.renewal_reminder_at <= now()`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_services WHERE status = 'cancellation_pending'`,
+      `SELECT COUNT(*) AS count FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND s.status = 'cancellation_pending'`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_client_service_incidents WHERE review_state IN ('new', 'reviewing', 'confirmed')`,
+      `SELECT COUNT(*) AS count FROM operations_client_service_incidents i JOIN operations_client_services s ON s.id = i.client_service_id JOIN operations_businesses b ON b.id = s.business_id WHERE b.internal_workspace_id = $1 AND i.review_state IN ('new', 'reviewing', 'confirmed')`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_reports WHERE client_service_id IS NOT NULL AND report_type = 'monthly_monitoring' AND status = 'ready_to_send'`,
+      `SELECT COUNT(*) AS count FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE b.internal_workspace_id = $1 AND r.client_service_id IS NOT NULL AND r.report_type = 'monthly_monitoring' AND r.status = 'ready_to_send'`,
+      [workspaceId],
     ),
     client.query<CountRow>(
-      `SELECT COUNT(*) AS count FROM operations_tasks WHERE source_client_service_id IS NOT NULL AND status IN ('open', 'snoozed') AND title ILIKE '%client%'`,
+      `SELECT COUNT(*) AS count FROM operations_tasks t JOIN operations_businesses b ON b.id = t.business_id WHERE b.internal_workspace_id = $1 AND t.source_client_service_id IS NOT NULL AND t.status IN ('open', 'snoozed') AND t.title ILIKE '%client%'`,
+      [workspaceId],
     ),
   ]);
   return {

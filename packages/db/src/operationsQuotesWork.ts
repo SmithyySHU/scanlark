@@ -1,5 +1,11 @@
 import { recordAdminAuditLog, type AdminActor } from "./admin";
 import { ensureConnected } from "./client";
+import { randomUUID } from "node:crypto";
+import {
+  immutableArtifactError,
+  isHistoricalQuoteStatus,
+  staleRevisionError,
+} from "./operationsEvidence";
 
 export const OPERATIONS_QUOTE_STATUSES = [
   "draft",
@@ -71,6 +77,11 @@ export const OPERATIONS_RETEST_STATUSES = [
   "unable_to_verify",
 ] as const;
 
+// The DB adapter uses one PostgreSQL client for the application process. Keep
+// quote revision transactions serialized on that client so concurrent requests
+// cannot interleave BEGIN/COMMIT statements.
+let quoteRevisionQueue = Promise.resolve();
+
 export type OperationsQuoteStatus = (typeof OPERATIONS_QUOTE_STATUSES)[number];
 export type OperationsQuoteItemType =
   (typeof OPERATIONS_QUOTE_ITEM_TYPES)[number];
@@ -99,7 +110,11 @@ export type OperationsQuoteRow = {
   business_id: string;
   contact_id: string | null;
   operations_report_id: string | null;
+  revision_series_id?: string;
+  revision_number?: number;
+  supersedes_quote_id?: string | null;
   quote_number: string;
+  content_revision?: number;
   title: string;
   status: OperationsQuoteStatus;
   currency: string;
@@ -281,6 +296,19 @@ export type OperationsQuoteDetail = {
   statusHistory: OperationsQuoteStatusHistoryRow[];
   readinessIssues: string[];
   linkedWorkOrder: OperationsWorkOrderRow | null;
+  revisionHistory?: OperationsQuoteRevisionHistoryRow[];
+};
+
+export type OperationsQuoteRevisionHistoryRow = {
+  id: string;
+  quote_number: string;
+  revision_series_id: string;
+  revision_number: number;
+  supersedes_quote_id: string | null;
+  status: OperationsQuoteStatus;
+  title: string;
+  sent_at: Date | null;
+  created_at: Date;
 };
 
 export type OperationsWorkOrderDetail = {
@@ -291,6 +319,7 @@ export type OperationsWorkOrderDetail = {
 };
 
 export type OperationsQuoteItemInput = {
+  expectedRevision?: number;
   reportFindingId?: string | null;
   title: string;
   description?: string | null;
@@ -329,9 +358,10 @@ export type OperationsQuoteInput = {
 
 export type OperationsQuoteUpdateInput = Partial<
   Omit<OperationsQuoteInput, "businessId" | "items" | "accessRequirements">
->;
+> & { expectedRevision?: number };
 
 export type OperationsAccessRequirementInput = {
+  expectedRevision?: number;
   description: string;
   status?: OperationsAccessRequirementStatus;
   requestedAt?: Date | null;
@@ -540,6 +570,7 @@ async function nextDocumentNumber(
 }
 
 async function insertQuoteStatusHistory(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   previousStatus: OperationsQuoteStatus | null,
@@ -563,6 +594,7 @@ async function insertQuoteStatusHistory(
 }
 
 async function validateQuoteRelationships(input: {
+  workspaceId: string;
   businessId: string;
   contactId?: string | null;
   operationsReportId?: string | null;
@@ -570,23 +602,23 @@ async function validateQuoteRelationships(input: {
 }) {
   const client = await ensureConnected();
   const business = await client.query<{ id: string }>(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [input.businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [input.businessId, input.workspaceId],
   );
   if (!business.rows[0]) return "business_not_found" as const;
 
   if (input.contactId) {
     const contact = await client.query<{ id: string }>(
-      `SELECT id FROM operations_contacts WHERE id = $1 AND business_id = $2`,
-      [input.contactId, input.businessId],
+      `SELECT c.id FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3`,
+      [input.contactId, input.businessId, input.workspaceId],
     );
     if (!contact.rows[0]) return "contact_not_found" as const;
   }
 
   if (input.operationsReportId) {
     const report = await client.query<{ id: string }>(
-      `SELECT id FROM operations_reports WHERE id = $1 AND business_id = $2`,
-      [input.operationsReportId, input.businessId],
+      `SELECT r.id FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = $1 AND r.business_id = $2 AND b.internal_workspace_id = $3`,
+      [input.operationsReportId, input.businessId, input.workspaceId],
     );
     if (!report.rows[0]) return "report_not_found" as const;
   }
@@ -599,12 +631,14 @@ async function validateQuoteRelationships(input: {
         JOIN operations_reports r ON r.id = f.operations_report_id
         WHERE f.id = ANY($1::uuid[])
           AND r.business_id = $2
+          AND r.internal_workspace_id = $4
           AND ($3::uuid IS NULL OR r.id = $3::uuid)
       `,
       [
         input.reportFindingIds,
         input.businessId,
         input.operationsReportId ?? null,
+        input.workspaceId,
       ],
     );
     if (findings.rows.length !== new Set(input.reportFindingIds).size) {
@@ -615,16 +649,16 @@ async function validateQuoteRelationships(input: {
   return "ok" as const;
 }
 
-async function refreshQuoteTotals(quoteId: string) {
+async function refreshQuoteTotals(workspaceId: string, quoteId: string) {
   const client = await ensureConnected();
   const quote = await client.query<Pick<OperationsQuoteRow, "discount_minor">>(
-    `SELECT discount_minor FROM operations_quotes WHERE id = $1`,
-    [quoteId],
+    `SELECT q.discount_minor FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $2 AND b.internal_workspace_id = $1`,
+    [workspaceId, quoteId],
   );
   if (!quote.rows[0]) return null;
   const items = await client.query<OperationsQuoteItemRow>(
-    `SELECT * FROM operations_quote_items WHERE quote_id = $1`,
-    [quoteId],
+    `SELECT qi.* FROM operations_quote_items qi JOIN operations_quotes q ON q.id = qi.quote_id JOIN operations_businesses b ON b.id = q.business_id WHERE qi.quote_id = $2 AND b.internal_workspace_id = $1`,
+    [workspaceId, quoteId],
   );
   const config = getOperationsCommercialConfig();
   const totals = calculateQuoteTotals(
@@ -645,7 +679,9 @@ async function refreshQuoteTotals(quoteId: string) {
           tax_minor = $4,
           total_minor = $5,
           updated_at = now()
-      WHERE id = $1
+       WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_quotes.business_id AND b.internal_workspace_id = $6)
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quotes.id AND b.internal_workspace_id = $6)
     `,
     [
       quoteId,
@@ -653,31 +689,75 @@ async function refreshQuoteTotals(quoteId: string) {
       totals.discountMinor,
       totals.taxMinor,
       totals.totalMinor,
+      workspaceId,
     ],
   );
   return totals;
 }
 
 function immutableQuoteStatus(status: OperationsQuoteStatus) {
-  return [
-    "accepted",
-    "declined",
-    "expired",
-    "cancelled",
-    "converted_to_work",
-  ].includes(status);
+  return isHistoricalQuoteStatus(status);
 }
 
-async function getQuoteForUpdate(quoteId: string) {
+function assertQuoteContentMutable(
+  quote: OperationsQuoteRow,
+  expectedRevision?: number,
+) {
+  if (immutableQuoteStatus(quote.status) || quote.sent_at) {
+    throw immutableArtifactError("quote");
+  }
+  if (
+    expectedRevision !== undefined &&
+    expectedRevision !== (quote.content_revision ?? 1)
+  ) {
+    throw staleRevisionError("quote");
+  }
+}
+
+async function bumpQuoteContentRevision(workspaceId: string, quoteId: string) {
+  const client = await ensureConnected();
+  await client.query(
+    `UPDATE operations_quotes
+     SET content_revision = content_revision + 1, updated_at = now()
+     WHERE id = $1
+       AND status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work')
+       AND EXISTS (
+         SELECT 1 FROM operations_businesses b
+         WHERE b.id = operations_quotes.business_id
+           AND b.internal_workspace_id = $2
+       )`,
+    [quoteId, workspaceId],
+  );
+}
+
+async function throwIfQuoteMutationRejected(
+  workspaceId: string,
+  quoteId: string,
+  expectedRevision?: number,
+) {
+  const latest = await getQuoteForUpdate(workspaceId, quoteId);
+  if (!latest) return;
+  if (immutableQuoteStatus(latest.status) || latest.sent_at) {
+    throw immutableArtifactError("quote");
+  }
+  if (
+    expectedRevision !== undefined &&
+    (latest.content_revision ?? 1) !== expectedRevision
+  ) {
+    throw staleRevisionError("quote");
+  }
+}
+
+async function getQuoteForUpdate(workspaceId: string, quoteId: string) {
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteRow>(
-    `SELECT * FROM operations_quotes WHERE id = $1 FOR UPDATE`,
-    [quoteId],
+    `SELECT q.* FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $2 AND b.internal_workspace_id = $1 FOR UPDATE OF q`,
+    [workspaceId, quoteId],
   );
   return res.rows[0] ?? null;
 }
 
-async function listQuoteItems(quoteId: string) {
+async function listQuoteItems(workspaceId: string, quoteId: string) {
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteItemRow>(
     `
@@ -687,24 +767,29 @@ async function listQuoteItems(quoteId: string) {
              f.affected_url
       FROM operations_quote_items qi
       LEFT JOIN operations_report_findings f ON f.id = qi.report_finding_id
-      WHERE qi.quote_id = $1
+      WHERE qi.quote_id = $2
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = qi.quote_id AND b.internal_workspace_id = $1)
       ORDER BY qi.display_order ASC, qi.created_at ASC
     `,
-    [quoteId],
+    [workspaceId, quoteId],
   );
   return res.rows;
 }
 
-async function listQuoteAccessRequirements(quoteId: string) {
+async function listQuoteAccessRequirements(
+  workspaceId: string,
+  quoteId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteAccessRequirementRow>(
     `
       SELECT *
       FROM operations_quote_access_requirements
-      WHERE quote_id = $1
+      WHERE quote_id = $2
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_access_requirements.quote_id AND b.internal_workspace_id = $1)
       ORDER BY display_order ASC, created_at ASC
     `,
-    [quoteId],
+    [workspaceId, quoteId],
   );
   return res.rows;
 }
@@ -729,6 +814,7 @@ function mapQuoteItemInput(input: OperationsQuoteItemInput) {
 }
 
 export async function createOperationsQuote(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsQuoteInput,
 ) {
@@ -738,6 +824,7 @@ export async function createOperationsQuote(
     .map((item) => item.reportFindingId)
     .filter((id): id is string => Boolean(id));
   const relationships = await validateQuoteRelationships({
+    workspaceId,
     businessId: input.businessId,
     contactId: input.contactId,
     operationsReportId: input.operationsReportId,
@@ -766,6 +853,7 @@ export async function createOperationsQuote(
     input.discountMinor ?? 0,
     config,
   );
+  const revisionSeriesId = randomUUID();
 
   try {
     await client.query("BEGIN");
@@ -775,6 +863,8 @@ export async function createOperationsQuote(
           business_id,
           contact_id,
           operations_report_id,
+          revision_series_id,
+          revision_number,
           quote_number,
           title,
           currency,
@@ -796,17 +886,18 @@ export async function createOperationsQuote(
           internal_notes,
           created_by_user_id
         )
-        VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        SELECT
+          $1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10,
           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-          $21, $22, $23
-        )
+          $21, $22, $23, $24
+        WHERE EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = $1 AND b.internal_workspace_id = $25)
         RETURNING *
       `,
       [
         input.businessId,
         input.contactId ?? null,
         input.operationsReportId ?? null,
+        revisionSeriesId,
         quoteNumber,
         input.title.trim(),
         (input.currency ?? config.defaultCurrency).toUpperCase(),
@@ -827,6 +918,7 @@ export async function createOperationsQuote(
         textValue(input.accessRequirementsSummary),
         textValue(input.internalNotes),
         actor.id,
+        workspaceId,
       ],
     );
     const quote = quoteRes.rows[0];
@@ -908,7 +1000,14 @@ export async function createOperationsQuote(
       );
     }
 
-    await insertQuoteStatusHistory(actor, quote.id, null, "draft", "created");
+    await insertQuoteStatusHistory(
+      workspaceId,
+      actor,
+      quote.id,
+      null,
+      "draft",
+      "created",
+    );
     await recordAdminAuditLog(actor, {
       action: "operations_quote_created",
       targetType: "operations_quote",
@@ -920,26 +1019,272 @@ export async function createOperationsQuote(
       },
     });
     await client.query("COMMIT");
-    await refreshQuoteTotals(quote.id);
-    return getOperationsQuoteDetail(quote.id);
+    await refreshQuoteTotals(workspaceId, quote.id);
+    return getOperationsQuoteDetail(workspaceId, quote.id);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   }
 }
 
-export async function listOperationsQuotes(options: {
-  businessId?: string | null;
-  operationsReportId?: string | null;
-  status?: OperationsQuoteStatus | null;
-  search?: string | null;
-  archived?: boolean | null;
-  limit: number;
-  offset: number;
-}) {
+async function createRevisedOperationsQuoteUnlocked(
+  workspaceId: string,
+  actor: AdminActor,
+  sourceQuoteId: string,
+  options: { expectedRevision?: number; reason?: string | null } = {},
+): Promise<
+  | OperationsQuoteDetail
+  | "quote_not_found"
+  | "quote_not_eligible"
+  | "quote_revision_not_latest"
+  | "stale_revision"
+> {
   const client = await ensureConnected();
-  const where: string[] = [];
-  const params: unknown[] = [];
+  try {
+    await client.query("BEGIN");
+    const sourceResult = await client.query<OperationsQuoteRow>(
+      `
+        SELECT q.*
+        FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE q.id = $2 AND b.internal_workspace_id = $1
+        FOR UPDATE OF q
+      `,
+      [workspaceId, sourceQuoteId],
+    );
+    const source = sourceResult.rows[0];
+    if (!source) {
+      await client.query("ROLLBACK");
+      return "quote_not_found";
+    }
+    if (!immutableQuoteStatus(source.status)) {
+      await client.query("ROLLBACK");
+      return "quote_not_eligible";
+    }
+    if (
+      options.expectedRevision !== undefined &&
+      (source.content_revision ?? 1) !== options.expectedRevision
+    ) {
+      await client.query("ROLLBACK");
+      return "stale_revision";
+    }
+    const seriesResult = await client.query<OperationsQuoteRow>(
+      `
+        SELECT q.*
+        FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE q.revision_series_id = $1
+          AND b.internal_workspace_id = $2
+        ORDER BY q.revision_number DESC
+        FOR UPDATE OF q
+      `,
+      [source.revision_series_id ?? source.id, workspaceId],
+    );
+    const latest = seriesResult.rows[0];
+    if (!latest || latest.id !== source.id) {
+      await client.query("ROLLBACK");
+      return "quote_revision_not_latest";
+    }
+    const items = await client.query<OperationsQuoteItemRow>(
+      `SELECT * FROM operations_quote_items WHERE quote_id = $1 ORDER BY display_order ASC, created_at ASC`,
+      [source.id],
+    );
+    const accessRequirements =
+      await client.query<OperationsQuoteAccessRequirementRow>(
+        `SELECT * FROM operations_quote_access_requirements WHERE quote_id = $1 ORDER BY display_order ASC, created_at ASC`,
+        [source.id],
+      );
+    const config = getOperationsCommercialConfig();
+    const totals = calculateQuoteTotals(
+      items.rows.map((item) => ({
+        quantity: item.quantity,
+        unitPriceMinor: item.unit_price_minor,
+        isOptional: item.is_optional,
+        isSelected: item.is_selected,
+      })),
+      source.discount_minor,
+      config,
+    );
+    const quoteNumber = await nextDocumentNumber("quote", config.quotePrefix);
+    const revisionNumber = (latest.revision_number ?? 1) + 1;
+    const quoteResult = await client.query<OperationsQuoteRow>(
+      `
+        INSERT INTO operations_quotes (
+          business_id, contact_id, operations_report_id, revision_series_id,
+          revision_number, supersedes_quote_id, quote_number, title, status,
+          currency, subtotal_minor, discount_minor, tax_minor, total_minor,
+          valid_until, estimated_start_date, estimated_completion_date,
+          estimated_duration_text, payment_terms, scope_summary, included_scope,
+          excluded_scope, assumptions, client_responsibilities,
+          access_requirements_summary, internal_notes, created_by_user_id
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11,
+          $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+          $24, $25, $26
+        WHERE EXISTS (
+          SELECT 1 FROM operations_businesses b
+          WHERE b.id = $1 AND b.internal_workspace_id = $27
+        )
+        RETURNING *
+      `,
+      [
+        source.business_id,
+        source.contact_id,
+        source.operations_report_id,
+        source.revision_series_id ?? source.id,
+        revisionNumber,
+        source.id,
+        quoteNumber,
+        source.title,
+        source.currency,
+        totals.subtotalMinor,
+        totals.discountMinor,
+        totals.taxMinor,
+        totals.totalMinor,
+        source.valid_until,
+        source.estimated_start_date,
+        source.estimated_completion_date,
+        source.estimated_duration_text,
+        source.payment_terms,
+        source.scope_summary,
+        source.included_scope,
+        source.excluded_scope,
+        source.assumptions,
+        source.client_responsibilities,
+        source.access_requirements_summary,
+        source.internal_notes,
+        actor.id,
+        workspaceId,
+      ],
+    );
+    const revision = quoteResult.rows[0];
+    if (!revision) throw new Error("quote_revision_insert_failed");
+    for (const item of items.rows) {
+      await client.query(
+        `
+          INSERT INTO operations_quote_items (
+            quote_id, report_finding_id, title, description, quantity,
+            unit_price_minor, line_total_minor, item_type, is_optional,
+            is_selected, display_order, estimated_effort, internal_notes
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `,
+        [
+          revision.id,
+          item.report_finding_id,
+          item.title,
+          item.description,
+          item.quantity,
+          item.unit_price_minor,
+          item.quantity * item.unit_price_minor,
+          item.item_type,
+          item.is_optional,
+          item.is_selected,
+          item.display_order,
+          item.estimated_effort,
+          item.internal_notes,
+        ],
+      );
+    }
+    for (const requirement of accessRequirements.rows) {
+      await client.query(
+        `
+          INSERT INTO operations_quote_access_requirements (
+            quote_id, description, status, requested_at, received_at,
+            secure_storage_reference, notes, display_order
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          revision.id,
+          requirement.description,
+          requirement.status,
+          requirement.requested_at,
+          requirement.received_at,
+          requirement.secure_storage_reference,
+          requirement.notes,
+          requirement.display_order,
+        ],
+      );
+    }
+    await insertQuoteStatusHistory(
+      workspaceId,
+      actor,
+      revision.id,
+      null,
+      "draft",
+      "revision_created",
+    );
+    await client.query("COMMIT");
+    await recordAdminAuditLog(actor, {
+      action: "quote_revision_created",
+      targetType: "operations_quote",
+      targetId: revision.id,
+      metadata: {
+        sourceQuoteId: source.id,
+        sourceQuoteNumber: source.quote_number,
+        newQuoteNumber: revision.quote_number,
+        revisionSeriesId: revision.revision_series_id,
+        sourceRevisionNumber: source.revision_number ?? 1,
+        newRevisionNumber: revision.revision_number,
+        reason: textValue(options.reason),
+      },
+    });
+    return getOperationsQuoteDetail(
+      workspaceId,
+      revision.id,
+    ) as Promise<OperationsQuoteDetail>;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (
+      error instanceof Error &&
+      error.message.includes("operations_quotes_revision_series_number_idx")
+    ) {
+      return "quote_revision_not_latest";
+    }
+    throw error;
+  }
+}
+
+export async function createRevisedOperationsQuote(
+  workspaceId: string,
+  actor: AdminActor,
+  sourceQuoteId: string,
+  options: { expectedRevision?: number; reason?: string | null } = {},
+) {
+  const previous = quoteRevisionQueue;
+  let release!: () => void;
+  quoteRevisionQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await createRevisedOperationsQuoteUnlocked(
+      workspaceId,
+      actor,
+      sourceQuoteId,
+      options,
+    );
+  } finally {
+    release();
+  }
+}
+
+export async function listOperationsQuotes(
+  workspaceId: string,
+  options: {
+    businessId?: string | null;
+    operationsReportId?: string | null;
+    status?: OperationsQuoteStatus | null;
+    search?: string | null;
+    archived?: boolean | null;
+    limit: number;
+    offset: number;
+  },
+) {
+  const client = await ensureConnected();
+  const where: string[] = ["b.internal_workspace_id = $1"];
+  const params: unknown[] = [workspaceId];
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("?", `$${params.length}`));
@@ -1014,8 +1359,11 @@ export async function listOperationsQuotes(options: {
           COUNT(*) FILTER (WHERE status = 'sent')::text AS sent,
           COUNT(*) FILTER (WHERE status = 'accepted')::text AS accepted,
           COUNT(*) FILTER (WHERE status = 'converted_to_work')::text AS converted_to_work
-        FROM operations_quotes
+        FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE b.internal_workspace_id = $1
       `,
+      [workspaceId],
     ),
   ]);
   const summaryRow = summary.rows[0];
@@ -1037,7 +1385,35 @@ export async function listOperationsQuotes(options: {
   };
 }
 
+export async function getOperationsQuoteRevisionHistory(
+  workspaceId: string,
+  quoteId: string,
+): Promise<OperationsQuoteRevisionHistoryRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<OperationsQuoteRevisionHistoryRow>(
+    `
+      SELECT q.id, q.quote_number, q.revision_series_id, q.revision_number,
+             q.supersedes_quote_id, q.status, q.title, q.sent_at, q.created_at
+      FROM operations_quotes q
+      JOIN operations_businesses b ON b.id = q.business_id
+      WHERE q.revision_series_id = (
+        SELECT source.revision_series_id
+        FROM operations_quotes source
+        JOIN operations_businesses source_business
+          ON source_business.id = source.business_id
+        WHERE source.id = $2
+          AND source_business.internal_workspace_id = $1
+      )
+        AND b.internal_workspace_id = $1
+      ORDER BY q.revision_number ASC
+    `,
+    [workspaceId, quoteId],
+  );
+  return res.rows;
+}
+
 export async function getOperationsQuoteDetail(
+  workspaceId: string,
   quoteId: string,
 ): Promise<OperationsQuoteDetail | null> {
   const client = await ensureConnected();
@@ -1056,26 +1432,29 @@ export async function getOperationsQuoteDetail(
       LEFT JOIN operations_contacts c ON c.id = q.contact_id
       LEFT JOIN operations_reports r ON r.id = q.operations_report_id
       LEFT JOIN sites s ON s.id = r.site_id
-      WHERE q.id = $1
+      WHERE q.id = $2
+        AND b.internal_workspace_id = $1
     `,
-    [quoteId],
+    [workspaceId, quoteId],
   );
   if (!quote.rows[0]) return null;
-  const [items, accessRequirements, history, workOrder] = await Promise.all([
-    listQuoteItems(quoteId),
-    listQuoteAccessRequirements(quoteId),
-    client.query<OperationsQuoteStatusHistoryRow>(
-      `
+  const [items, accessRequirements, history, workOrder, revisionHistory] =
+    await Promise.all([
+      listQuoteItems(workspaceId, quoteId),
+      listQuoteAccessRequirements(workspaceId, quoteId),
+      client.query<OperationsQuoteStatusHistoryRow>(
+        `
         SELECT h.*, u.email AS admin_email
         FROM operations_quote_status_history h
         LEFT JOIN users u ON u.id = h.changed_by_user_id
-        WHERE h.quote_id = $1
+        WHERE h.quote_id = $2
+          AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = h.quote_id AND b.internal_workspace_id = $1)
         ORDER BY h.created_at DESC
       `,
-      [quoteId],
-    ),
-    client.query<OperationsWorkOrderRow>(
-      `
+        [workspaceId, quoteId],
+      ),
+      client.query<OperationsWorkOrderRow>(
+        `
         SELECT wo.*,
                b.name AS business_name,
                q.quote_number,
@@ -1083,13 +1462,15 @@ export async function getOperationsQuoteDetail(
         FROM operations_work_orders wo
         JOIN operations_businesses b ON b.id = wo.business_id
         JOIN operations_quotes q ON q.id = wo.quote_id
-        WHERE wo.quote_id = $1
+        WHERE wo.quote_id = $2
+          AND b.internal_workspace_id = $1
         ORDER BY wo.created_at DESC
         LIMIT 1
       `,
-      [quoteId],
-    ),
-  ]);
+        [workspaceId, quoteId],
+      ),
+      getOperationsQuoteRevisionHistory(workspaceId, quoteId),
+    ]);
   const detail = {
     quote: quote.rows[0],
     items,
@@ -1101,6 +1482,7 @@ export async function getOperationsQuoteDetail(
       accessRequirements,
     ),
     linkedWorkOrder: workOrder.rows[0] ?? null,
+    revisionHistory,
   };
   return detail;
 }
@@ -1243,8 +1625,11 @@ export function buildOperationsQuotePreviewPayload(
   };
 }
 
-export async function getOperationsQuotePreview(quoteId: string) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+export async function getOperationsQuotePreview(
+  workspaceId: string,
+  quoteId: string,
+) {
+  const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
   return {
     payload: buildOperationsQuotePreviewPayload(detail.quote, detail.items),
@@ -1253,12 +1638,17 @@ export async function getOperationsQuotePreview(quoteId: string) {
 }
 
 export async function freezeOperationsQuoteRender(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   action = "operations_quote_render_frozen",
 ) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+  const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
+  if (isHistoricalQuoteStatus(detail.quote.status)) {
+    if (detail.quote.frozen_render_json) return detail.quote.frozen_render_json;
+    throw immutableArtifactError("quote");
+  }
   const payload = buildOperationsQuotePreviewPayload(
     detail.quote,
     detail.items,
@@ -1272,8 +1662,9 @@ export async function freezeOperationsQuoteRender(
           last_pdf_generated_at = CASE WHEN $3 = 'operations_quote_pdf_generated' THEN now() ELSE last_pdf_generated_at END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quotes.id AND b.internal_workspace_id = $4)
     `,
-    [quoteId, JSON.stringify(payload), action],
+    [quoteId, JSON.stringify(payload), action, workspaceId],
   );
   await recordAdminAuditLog(actor, {
     action,
@@ -1285,15 +1676,17 @@ export async function freezeOperationsQuoteRender(
 }
 
 export async function updateOperationsQuote(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: OperationsQuoteUpdateInput,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current, input.expectedRevision);
   if (input.contactId) {
     const validation = await validateQuoteRelationships({
+      workspaceId,
       businessId: current.business_id,
       contactId: input.contactId,
       operationsReportId:
@@ -1342,39 +1735,60 @@ export async function updateOperationsQuote(
     );
   if (input.internalNotes !== undefined)
     set("internal_notes", textValue(input.internalNotes));
-  if (fields.length === 0) return getOperationsQuoteDetail(quoteId);
+  if (fields.length === 0)
+    return getOperationsQuoteDetail(workspaceId, quoteId);
   values.push(quoteId);
   const res = await client.query<OperationsQuoteRow>(
     `
       UPDATE operations_quotes
       SET ${fields.join(", ")},
+          content_revision = content_revision + 1,
           frozen_render_json = NULL,
           frozen_at = NULL,
           updated_at = now()
       WHERE id = $${values.length}
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quotes.id AND b.internal_workspace_id = $${values.length + 1} AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work'))
+        AND ($${values.length + 2}::integer IS NULL OR content_revision = $${values.length + 2})
       RETURNING *
     `,
-    values,
+    [...values, workspaceId, input.expectedRevision ?? null],
   );
-  await refreshQuoteTotals(quoteId);
+  if (!res.rowCount) {
+    const latest = await getQuoteForUpdate(workspaceId, quoteId);
+    if (
+      latest &&
+      input.expectedRevision !== undefined &&
+      (latest.content_revision ?? 1) !== input.expectedRevision
+    ) {
+      throw staleRevisionError("quote");
+    }
+    if (latest && immutableQuoteStatus(latest.status)) {
+      throw immutableArtifactError("quote");
+    }
+    return null;
+  }
+  await refreshQuoteTotals(workspaceId, quoteId);
+  await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_updated",
     targetType: "operations_quote",
     targetId: quoteId,
     metadata: { fields: Object.keys(input) },
   });
-  return res.rows[0] ? getOperationsQuoteDetail(quoteId) : null;
+  return res.rows[0] ? getOperationsQuoteDetail(workspaceId, quoteId) : null;
 }
 
 export async function addOperationsQuoteItem(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: OperationsQuoteItemInput,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current);
   const validation = await validateQuoteRelationships({
+    workspaceId,
     businessId: current.business_id,
     operationsReportId: current.operations_report_id,
     reportFindingIds: input.reportFindingId ? [input.reportFindingId] : [],
@@ -1399,7 +1813,14 @@ export async function addOperationsQuoteItem(
         estimated_effort,
         internal_notes
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+      WHERE EXISTS (
+        SELECT 1 FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE q.id = $1
+          AND b.internal_workspace_id = $14
+          AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work')
+      )
       RETURNING *
     `,
     [
@@ -1416,9 +1837,14 @@ export async function addOperationsQuoteItem(
       item.displayOrder,
       item.estimatedEffort,
       item.internalNotes,
+      workspaceId,
     ],
   );
-  await refreshQuoteTotals(quoteId);
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(workspaceId, quoteId);
+  }
+  await refreshQuoteTotals(workspaceId, quoteId);
+  await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_item_added",
     targetType: "operations_quote_item",
@@ -1429,18 +1855,19 @@ export async function addOperationsQuoteItem(
 }
 
 export async function updateOperationsQuoteItem(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   itemId: string,
   input: Partial<OperationsQuoteItemInput>,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current, input.expectedRevision);
   const client = await ensureConnected();
   const existing = await client.query<OperationsQuoteItemRow>(
-    `SELECT * FROM operations_quote_items WHERE id = $1 AND quote_id = $2`,
-    [itemId, quoteId],
+    `SELECT qi.* FROM operations_quote_items qi JOIN operations_quotes q ON q.id = qi.quote_id JOIN operations_businesses b ON b.id = q.business_id WHERE qi.id = $2 AND qi.quote_id = $3 AND b.internal_workspace_id = $1`,
+    [workspaceId, itemId, quoteId],
   );
   if (!existing.rows[0]) return null;
   const merged = mapQuoteItemInput({
@@ -1485,6 +1912,7 @@ export async function updateOperationsQuoteItem(
           internal_notes = $14,
           updated_at = now()
       WHERE id = $1 AND quote_id = $2
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_items.quote_id AND b.internal_workspace_id = $15 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work'))
       RETURNING *
     `,
     [
@@ -1502,9 +1930,17 @@ export async function updateOperationsQuoteItem(
       merged.displayOrder,
       merged.estimatedEffort,
       merged.internalNotes,
+      workspaceId,
     ],
   );
-  await refreshQuoteTotals(quoteId);
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(
+      workspaceId,
+      quoteId,
+      input.expectedRevision,
+    );
+  }
+  await refreshQuoteTotals(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_item_updated",
     targetType: "operations_quote_item",
@@ -1515,20 +1951,25 @@ export async function updateOperationsQuoteItem(
 }
 
 export async function deleteOperationsQuoteItem(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   itemId: string,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current);
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteItemRow>(
-    `DELETE FROM operations_quote_items WHERE id = $1 AND quote_id = $2 RETURNING *`,
-    [itemId, quoteId],
+    `DELETE FROM operations_quote_items WHERE id = $1 AND quote_id = $2 AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_items.quote_id AND b.internal_workspace_id = $3 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work')) RETURNING *`,
+    [itemId, quoteId, workspaceId],
   );
-  if (!res.rows[0]) return null;
-  await refreshQuoteTotals(quoteId);
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(workspaceId, quoteId);
+    return null;
+  }
+  await refreshQuoteTotals(workspaceId, quoteId);
+  await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_item_deleted",
     targetType: "operations_quote_item",
@@ -1539,20 +1980,49 @@ export async function deleteOperationsQuoteItem(
 }
 
 export async function reorderOperationsQuoteItems(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   itemIds: string[],
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current);
   const client = await ensureConnected();
   await client.query("BEGIN");
   try {
+    const locked = await client.query<OperationsQuoteRow>(
+      `SELECT q.*
+       FROM operations_quotes q
+       JOIN operations_businesses b ON b.id = q.business_id
+       WHERE q.id = $2 AND b.internal_workspace_id = $1
+       FOR UPDATE OF q`,
+      [workspaceId, quoteId],
+    );
+    if (!locked.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (immutableQuoteStatus(locked.rows[0].status)) {
+      await client.query("ROLLBACK");
+      throw immutableArtifactError("quote");
+    }
+    const valid = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM operations_quote_items qi
+       JOIN operations_quotes q ON q.id = qi.quote_id
+       JOIN operations_businesses b ON b.id = q.business_id
+       WHERE qi.quote_id = $1 AND qi.id = ANY($2::uuid[]) AND b.internal_workspace_id = $3 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work')`,
+      [quoteId, itemIds, workspaceId],
+    );
+    if (Number(valid.rows[0]?.count ?? 0) !== new Set(itemIds).size) {
+      await client.query("ROLLBACK");
+      return null;
+    }
     for (let index = 0; index < itemIds.length; index += 1) {
       await client.query(
-        `UPDATE operations_quote_items SET display_order = $3, updated_at = now() WHERE id = $1 AND quote_id = $2`,
-        [itemIds[index], quoteId, index],
+        `UPDATE operations_quote_items SET display_order = $3, updated_at = now() WHERE id = $1 AND quote_id = $2 AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_items.quote_id AND b.internal_workspace_id = $4 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work'))`,
+        [itemIds[index], quoteId, index, workspaceId],
       );
     }
     await recordAdminAuditLog(actor, {
@@ -1562,7 +2032,8 @@ export async function reorderOperationsQuoteItems(
       metadata: { count: itemIds.length },
     });
     await client.query("COMMIT");
-    return listQuoteItems(quoteId);
+    await bumpQuoteContentRevision(workspaceId, quoteId);
+    return listQuoteItems(workspaceId, quoteId);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -1570,13 +2041,14 @@ export async function reorderOperationsQuoteItems(
 }
 
 export async function addOperationsQuoteAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: OperationsAccessRequirementInput,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current);
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteAccessRequirementRow>(
     `
@@ -1590,7 +2062,14 @@ export async function addOperationsQuoteAccessRequirement(
         notes,
         display_order
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      SELECT $1, $2, $3, $4, $5, $6, $7, $8
+      WHERE EXISTS (
+        SELECT 1 FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE q.id = $1
+          AND b.internal_workspace_id = $9
+          AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work')
+      )
       RETURNING *
     `,
     [
@@ -1602,8 +2081,17 @@ export async function addOperationsQuoteAccessRequirement(
       textValue(input.secureStorageReference),
       textValue(input.notes),
       input.displayOrder ?? 0,
+      workspaceId,
     ],
   );
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(
+      workspaceId,
+      quoteId,
+      input.expectedRevision,
+    );
+  }
+  await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_access_requirement_added",
     targetType: "operations_quote",
@@ -1614,18 +2102,22 @@ export async function addOperationsQuoteAccessRequirement(
 }
 
 export async function updateOperationsQuoteAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   requirementId: string,
   input: Partial<OperationsAccessRequirementInput>,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current, input.expectedRevision);
   const client = await ensureConnected();
   const existing = await client.query<OperationsQuoteAccessRequirementRow>(
-    `SELECT * FROM operations_quote_access_requirements WHERE id = $1 AND quote_id = $2`,
-    [requirementId, quoteId],
+    `SELECT r.* FROM operations_quote_access_requirements r
+     JOIN operations_quotes q ON q.id = r.quote_id
+     JOIN operations_businesses b ON b.id = q.business_id
+     WHERE r.id = $1 AND r.quote_id = $2 AND b.internal_workspace_id = $3`,
+    [requirementId, quoteId, workspaceId],
   );
   if (!existing.rows[0]) return null;
   const row = existing.rows[0];
@@ -1641,6 +2133,7 @@ export async function updateOperationsQuoteAccessRequirement(
           display_order = $9,
           updated_at = now()
       WHERE id = $1 AND quote_id = $2
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_access_requirements.quote_id AND b.internal_workspace_id = $10 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work'))
       RETURNING *
     `,
     [
@@ -1655,8 +2148,17 @@ export async function updateOperationsQuoteAccessRequirement(
         : row.secure_storage_reference,
       input.notes !== undefined ? textValue(input.notes) : row.notes,
       input.displayOrder ?? row.display_order,
+      workspaceId,
     ],
   );
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(
+      workspaceId,
+      quoteId,
+      input.expectedRevision,
+    );
+  }
+  if (res.rows[0]) await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_access_requirement_updated",
     targetType: "operations_quote",
@@ -1667,19 +2169,27 @@ export async function updateOperationsQuoteAccessRequirement(
 }
 
 export async function deleteOperationsQuoteAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   requirementId: string,
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
-  if (immutableQuoteStatus(current.status)) return "quote_locked" as const;
+  assertQuoteContentMutable(current);
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteAccessRequirementRow>(
-    `DELETE FROM operations_quote_access_requirements WHERE id = $1 AND quote_id = $2 RETURNING *`,
-    [requirementId, quoteId],
+    `DELETE FROM operations_quote_access_requirements
+     WHERE id = $1 AND quote_id = $2
+       AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quote_access_requirements.quote_id AND b.internal_workspace_id = $3 AND q.status NOT IN ('sent', 'accepted', 'declined', 'expired', 'cancelled', 'converted_to_work'))
+     RETURNING *`,
+    [requirementId, quoteId, workspaceId],
   );
-  if (!res.rows[0]) return null;
+  if (!res.rows[0]) {
+    await throwIfQuoteMutationRejected(workspaceId, quoteId);
+    return null;
+  }
+  await bumpQuoteContentRevision(workspaceId, quoteId);
   await recordAdminAuditLog(actor, {
     action: "operations_quote_access_requirement_deleted",
     targetType: "operations_quote",
@@ -1690,6 +2200,7 @@ export async function deleteOperationsQuoteAccessRequirement(
 }
 
 async function setQuoteStatus(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   status: OperationsQuoteStatus,
@@ -1703,16 +2214,31 @@ async function setQuoteStatus(
     freeze?: boolean;
   } = {},
 ) {
-  const current = await getQuoteForUpdate(quoteId);
+  const current = await getQuoteForUpdate(workspaceId, quoteId);
   if (!current) return null;
+  if (isHistoricalQuoteStatus(current.status)) {
+    const allowed =
+      current.status === "sent"
+        ? new Set<OperationsQuoteStatus>([
+            "sent",
+            "accepted",
+            "declined",
+            "expired",
+            "cancelled",
+          ])
+        : current.status === "accepted"
+          ? new Set<OperationsQuoteStatus>(["accepted", "converted_to_work"])
+          : new Set<OperationsQuoteStatus>([current.status]);
+    if (!allowed.has(status)) throw immutableArtifactError("quote");
+  }
   if (
     current.status === "converted_to_work" &&
     status !== "converted_to_work"
   ) {
-    return "quote_locked" as const;
+    throw immutableArtifactError("quote");
   }
   if (status === "ready_to_send") {
-    const detail = await getOperationsQuoteDetail(quoteId);
+    const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
     if (!detail) return null;
     if (detail.readinessIssues.length > 0) {
       return { readinessIssues: detail.readinessIssues };
@@ -1723,6 +2249,7 @@ async function setQuoteStatus(
     ["ready_to_send", "sent", "accepted"].includes(status)
   ) {
     await freezeOperationsQuoteRender(
+      workspaceId,
       actor,
       quoteId,
       "operations_quote_render_frozen",
@@ -1733,6 +2260,7 @@ async function setQuoteStatus(
     `
       UPDATE operations_quotes
       SET status = $2,
+          content_revision = content_revision + CASE WHEN $2 = 'sent' AND status <> 'sent' THEN 1 ELSE 0 END,
           sent_at = COALESCE($3, sent_at),
           accepted_at = COALESCE($4, accepted_at),
           declined_at = COALESCE($5, declined_at),
@@ -1740,6 +2268,7 @@ async function setQuoteStatus(
           cancelled_at = COALESCE($7, cancelled_at),
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = operations_quotes.id AND b.internal_workspace_id = $8)
       RETURNING *
     `,
     [
@@ -1750,9 +2279,11 @@ async function setQuoteStatus(
       options.declinedAt ?? null,
       options.expiredAt ?? null,
       options.cancelledAt ?? null,
+      workspaceId,
     ],
   );
   await insertQuoteStatusHistory(
+    workspaceId,
     actor,
     quoteId,
     current.status,
@@ -1765,39 +2296,45 @@ async function setQuoteStatus(
     targetId: quoteId,
     metadata: {},
   });
-  return res.rows[0] ? getOperationsQuoteDetail(quoteId) : null;
+  return res.rows[0] ? getOperationsQuoteDetail(workspaceId, quoteId) : null;
 }
 
 export async function markOperationsQuoteReady(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
 ) {
-  return setQuoteStatus(actor, quoteId, "ready_to_send", { freeze: true });
+  return setQuoteStatus(workspaceId, actor, quoteId, "ready_to_send", {
+    freeze: true,
+  });
 }
 
 export async function cancelOperationsQuote(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   reason?: string | null,
 ) {
-  return setQuoteStatus(actor, quoteId, "cancelled", {
+  return setQuoteStatus(workspaceId, actor, quoteId, "cancelled", {
     reason,
     cancelledAt: new Date(),
   });
 }
 
 export async function markOperationsQuoteExpired(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   reason?: string | null,
 ) {
-  return setQuoteStatus(actor, quoteId, "expired", {
+  return setQuoteStatus(workspaceId, actor, quoteId, "expired", {
     reason,
     expiredAt: new Date(),
   });
 }
 
 export async function recordOperationsQuoteSent(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: {
@@ -1808,11 +2345,15 @@ export async function recordOperationsQuoteSent(
     updatePipelineStage?: boolean;
   },
 ) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+  let detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
+  if (isHistoricalQuoteStatus(detail.quote.status)) {
+    throw immutableArtifactError("quote");
+  }
   const contactId = input.contactId ?? detail.quote.contact_id;
   if (contactId) {
     const validation = await validateQuoteRelationships({
+      workspaceId,
       businessId: detail.quote.business_id,
       contactId,
     });
@@ -1821,6 +2362,29 @@ export async function recordOperationsQuoteSent(
   const client = await ensureConnected();
   try {
     await client.query("BEGIN");
+    const locked = await client.query<OperationsQuoteRow>(
+      `
+        SELECT q.*
+        FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE q.id = $2 AND b.internal_workspace_id = $1
+        FOR UPDATE OF q
+      `,
+      [workspaceId, quoteId],
+    );
+    if (!locked.rows[0]) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (isHistoricalQuoteStatus(locked.rows[0].status)) {
+      await client.query("ROLLBACK");
+      throw immutableArtifactError("quote");
+    }
+    detail = await getOperationsQuoteDetail(workspaceId, quoteId);
+    if (!detail) {
+      await client.query("ROLLBACK");
+      return null;
+    }
     const comm = await client.query<{ id: string }>(
       `
         INSERT INTO operations_communications (
@@ -1897,8 +2461,14 @@ export async function recordOperationsQuoteSent(
         SET delivery_communication_id = $2,
             follow_up_task_id = COALESCE($3, follow_up_task_id)
         WHERE id = $1
+          AND status IN ('draft', 'needs_review', 'ready_to_send')
+          AND EXISTS (
+            SELECT 1 FROM operations_businesses b
+            WHERE b.id = operations_quotes.business_id
+              AND b.internal_workspace_id = $4
+          )
       `,
-      [quoteId, comm.rows[0]?.id ?? null, taskId],
+      [quoteId, comm.rows[0]?.id ?? null, taskId, workspaceId],
     );
     await client.query(
       `
@@ -1907,25 +2477,62 @@ export async function recordOperationsQuoteSent(
             pipeline_stage = CASE WHEN $3 THEN 'quote_sent' ELSE pipeline_stage END,
             updated_at = now()
         WHERE id = $1
+          AND internal_workspace_id = $4
       `,
       [
         detail.quote.business_id,
         input.sentAt ?? new Date(),
         input.updatePipelineStage === true,
+        workspaceId,
       ],
+    );
+    await freezeOperationsQuoteRender(
+      workspaceId,
+      actor,
+      quoteId,
+      "operations_quote_render_frozen",
+    );
+    await client.query(
+      `
+        UPDATE operations_quotes
+        SET status = 'sent',
+            content_revision = content_revision + 1,
+            sent_at = COALESCE(sent_at, $2),
+            updated_at = now()
+        WHERE id = $1
+          AND status IN ('draft', 'needs_review', 'ready_to_send')
+          AND EXISTS (
+            SELECT 1 FROM operations_businesses b
+            WHERE b.id = operations_quotes.business_id
+              AND b.internal_workspace_id = $3
+          )
+      `,
+      [quoteId, input.sentAt ?? new Date(), workspaceId],
+    );
+    await insertQuoteStatusHistory(
+      workspaceId,
+      actor,
+      quoteId,
+      locked.rows[0].status,
+      "sent",
+      `Recorded sent by ${input.deliveryMethod}`,
     );
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   }
-  return setQuoteStatus(actor, quoteId, "sent", {
-    sentAt: input.sentAt ?? new Date(),
-    freeze: true,
+  await recordAdminAuditLog(actor, {
+    action: "operations_quote_status_sent",
+    targetType: "operations_quote",
+    targetId: quoteId,
+    metadata: { deliveryMethod: input.deliveryMethod },
   });
+  return getOperationsQuoteDetail(workspaceId, quoteId);
 }
 
 export async function recordOperationsQuoteAccepted(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: {
@@ -1938,7 +2545,7 @@ export async function recordOperationsQuoteAccepted(
     summary?: string | null;
   },
 ) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+  const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
   if (
     input.totalMinorConfirmed !== detail.quote.total_minor ||
@@ -1947,7 +2554,7 @@ export async function recordOperationsQuoteAccepted(
   ) {
     return "acceptance_confirmation_required" as const;
   }
-  return setQuoteStatus(actor, quoteId, "accepted", {
+  return setQuoteStatus(workspaceId, actor, quoteId, "accepted", {
     acceptedAt: input.acceptedAt,
     reason: input.summary ?? input.acceptanceMethod,
     freeze: true,
@@ -1955,23 +2562,25 @@ export async function recordOperationsQuoteAccepted(
 }
 
 export async function recordOperationsQuoteDeclined(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
   input: { declinedAt?: Date | null; reason?: string | null },
 ) {
-  return setQuoteStatus(actor, quoteId, "declined", {
+  return setQuoteStatus(workspaceId, actor, quoteId, "declined", {
     declinedAt: input.declinedAt ?? new Date(),
     reason: input.reason,
   });
 }
 
 export async function duplicateOperationsQuote(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
 ) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+  const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
-  return createOperationsQuote(actor, {
+  return createOperationsQuote(workspaceId, actor, {
     businessId: detail.quote.business_id,
     contactId: detail.quote.contact_id,
     operationsReportId: detail.quote.operations_report_id,
@@ -2015,20 +2624,26 @@ export async function duplicateOperationsQuote(
   });
 }
 
-export async function listOperationsQuoteServiceItems(activeOnly = false) {
+export async function listOperationsQuoteServiceItems(
+  workspaceId: string,
+  activeOnly = false,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsQuoteServiceItemRow>(
     `
       SELECT *
       FROM operations_quote_service_items
-      ${activeOnly ? "WHERE is_active = true" : ""}
+      WHERE internal_workspace_id = $1
+      ${activeOnly ? "AND is_active = true" : ""}
       ORDER BY is_active DESC, item_type ASC, title ASC
     `,
+    [workspaceId],
   );
   return res.rows;
 }
 
 export async function createOperationsQuoteServiceItem(
+  workspaceId: string,
   actor: AdminActor,
   input: {
     title: string;
@@ -2043,6 +2658,7 @@ export async function createOperationsQuoteServiceItem(
   const res = await client.query<OperationsQuoteServiceItemRow>(
     `
       INSERT INTO operations_quote_service_items (
+        internal_workspace_id,
         title,
         description,
         suggested_price_minor,
@@ -2051,10 +2667,11 @@ export async function createOperationsQuoteServiceItem(
         is_active,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
     `,
     [
+      workspaceId,
       input.title.trim(),
       textValue(input.description),
       input.suggestedPriceMinor ?? 0,
@@ -2074,6 +2691,7 @@ export async function createOperationsQuoteServiceItem(
 }
 
 export async function updateOperationsQuoteServiceItem(
+  workspaceId: string,
   actor: AdminActor,
   serviceItemId: string,
   input: Partial<{
@@ -2087,8 +2705,8 @@ export async function updateOperationsQuoteServiceItem(
 ) {
   const client = await ensureConnected();
   const existing = await client.query<OperationsQuoteServiceItemRow>(
-    `SELECT * FROM operations_quote_service_items WHERE id = $1`,
-    [serviceItemId],
+    `SELECT * FROM operations_quote_service_items WHERE id = $1 AND internal_workspace_id = $2`,
+    [serviceItemId, workspaceId],
   );
   if (!existing.rows[0]) return null;
   const row = existing.rows[0];
@@ -2102,7 +2720,7 @@ export async function updateOperationsQuoteServiceItem(
           item_type = $6,
           is_active = $7,
           updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $8
       RETURNING *
     `,
     [
@@ -2117,6 +2735,7 @@ export async function updateOperationsQuoteServiceItem(
         : row.suggested_effort,
       input.itemType ?? row.item_type,
       input.isActive ?? row.is_active,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -2129,13 +2748,14 @@ export async function updateOperationsQuoteServiceItem(
 }
 
 export async function convertOperationsQuoteToWorkOrder(
+  workspaceId: string,
   actor: AdminActor,
   quoteId: string,
 ) {
-  const detail = await getOperationsQuoteDetail(quoteId);
+  const detail = await getOperationsQuoteDetail(workspaceId, quoteId);
   if (!detail) return null;
   if (detail.linkedWorkOrder) {
-    return getOperationsWorkOrderDetail(detail.linkedWorkOrder.id);
+    return getOperationsWorkOrderDetail(workspaceId, detail.linkedWorkOrder.id);
   }
   if (detail.quote.status !== "accepted") return "quote_not_accepted" as const;
   const selectedItems = detail.items.filter(
@@ -2255,23 +2875,26 @@ export async function convertOperationsQuoteToWorkOrder(
       `
         UPDATE operations_quotes
         SET status = 'converted_to_work',
-            converted_work_order_id = $2,
-            updated_at = now()
-        WHERE id = $1
+       converted_work_order_id = $2,
+           updated_at = now()
+       WHERE id = $1
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_quotes.business_id AND b.internal_workspace_id = $3)
       `,
-      [quoteId, workOrder.id],
+      [quoteId, workOrder.id, workspaceId],
     );
     await client.query(
       `
         UPDATE operations_reports
         SET status = 'work_in_progress',
             updated_at = now()
-        WHERE id = $1
-          AND status IN ('sent', 'client_replied', 'fixes_quoted')
+       WHERE id = $1
+         AND status IN ('sent', 'client_replied', 'fixes_quoted')
+          AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $2)
       `,
-      [detail.quote.operations_report_id],
+      [detail.quote.operations_report_id, workspaceId],
     );
     await insertQuoteStatusHistory(
+      workspaceId,
       actor,
       quoteId,
       "accepted",
@@ -2285,7 +2908,7 @@ export async function convertOperationsQuoteToWorkOrder(
       metadata: { workOrderId: workOrder.id },
     });
     await client.query("COMMIT");
-    return getOperationsWorkOrderDetail(workOrder.id);
+    return getOperationsWorkOrderDetail(workspaceId, workOrder.id);
   } catch (err) {
     await client.query("ROLLBACK");
     if ((err as { code?: string }).code === "23505") {
@@ -2299,20 +2922,23 @@ export async function convertOperationsQuoteToWorkOrder(
   }
 }
 
-export async function listOperationsWorkOrders(options: {
-  businessId?: string | null;
-  operationsReportId?: string | null;
-  quoteId?: string | null;
-  status?: OperationsWorkOrderStatus | null;
-  priority?: OperationsWorkOrderPriority | null;
-  search?: string | null;
-  overdue?: boolean;
-  limit: number;
-  offset: number;
-}) {
+export async function listOperationsWorkOrders(
+  workspaceId: string,
+  options: {
+    businessId?: string | null;
+    operationsReportId?: string | null;
+    quoteId?: string | null;
+    status?: OperationsWorkOrderStatus | null;
+    priority?: OperationsWorkOrderPriority | null;
+    search?: string | null;
+    overdue?: boolean;
+    limit: number;
+    offset: number;
+  },
+) {
   const client = await ensureConnected();
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const where: string[] = ["b.internal_workspace_id = $1"];
+  const params: unknown[] = [workspaceId];
   const add = (clause: string, value: unknown) => {
     params.push(value);
     where.push(clause.replace("?", `$${params.length}`));
@@ -2402,8 +3028,11 @@ export async function listOperationsWorkOrders(options: {
           COUNT(*) FILTER (WHERE status = 'blocked')::text AS blocked,
           COUNT(*) FILTER (WHERE status = 'ready_for_testing')::text AS ready_for_testing,
           COUNT(*) FILTER (WHERE status = 'completed' AND completed_at >= date_trunc('month', now()))::text AS completed_this_month
-        FROM operations_work_orders
+        FROM operations_work_orders wo
+        JOIN operations_businesses b ON b.id = wo.business_id
+        WHERE b.internal_workspace_id = $1
       `,
+      [workspaceId],
     ),
   ]);
   const summaryRow = summary.rows[0];
@@ -2429,31 +3058,36 @@ export async function listOperationsWorkOrders(options: {
   };
 }
 
-async function listWorkItems(workOrderId: string) {
+async function listWorkItems(workspaceId: string, workOrderId: string) {
   const client = await ensureConnected();
   const res = await client.query<OperationsWorkItemRow>(
     `
       SELECT wi.*, f.title AS finding_title
       FROM operations_work_items wi
       LEFT JOIN operations_report_findings f ON f.id = wi.report_finding_id
-      WHERE wi.work_order_id = $1
+      WHERE wi.work_order_id = $2
+        AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = wi.work_order_id AND b.internal_workspace_id = $1)
       ORDER BY wi.display_order ASC, wi.created_at ASC
     `,
-    [workOrderId],
+    [workspaceId, workOrderId],
   );
   return res.rows;
 }
 
-async function listWorkAccessRequirements(workOrderId: string) {
+async function listWorkAccessRequirements(
+  workspaceId: string,
+  workOrderId: string,
+) {
   const client = await ensureConnected();
   const res = await client.query<OperationsWorkOrderAccessRequirementRow>(
     `
       SELECT *
       FROM operations_work_order_access_requirements
-      WHERE work_order_id = $1
+      WHERE work_order_id = $2
+        AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_order_access_requirements.work_order_id AND b.internal_workspace_id = $1)
       ORDER BY display_order ASC, created_at ASC
     `,
-    [workOrderId],
+    [workspaceId, workOrderId],
   );
   return res.rows;
 }
@@ -2498,6 +3132,7 @@ export function getWorkCompletionIssues(
 }
 
 export async function getOperationsWorkOrderDetail(
+  workspaceId: string,
   workOrderId: string,
 ): Promise<OperationsWorkOrderDetail | null> {
   const client = await ensureConnected();
@@ -2516,14 +3151,15 @@ export async function getOperationsWorkOrderDetail(
       JOIN operations_quotes q ON q.id = wo.quote_id
       LEFT JOIN operations_contacts c ON c.id = wo.contact_id
       LEFT JOIN operations_reports r ON r.id = wo.operations_report_id
-      WHERE wo.id = $1
+      WHERE wo.id = $2
+        AND b.internal_workspace_id = $1
     `,
-    [workOrderId],
+    [workspaceId, workOrderId],
   );
   if (!work.rows[0]) return null;
   const [items, accessRequirements] = await Promise.all([
-    listWorkItems(workOrderId),
-    listWorkAccessRequirements(workOrderId),
+    listWorkItems(workspaceId, workOrderId),
+    listWorkAccessRequirements(workspaceId, workOrderId),
   ]);
   return {
     workOrder: work.rows[0],
@@ -2538,14 +3174,15 @@ export async function getOperationsWorkOrderDetail(
 }
 
 export async function updateOperationsWorkOrder(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   input: OperationsWorkOrderUpdateInput,
 ) {
   const client = await ensureConnected();
   const existing = await client.query<OperationsWorkOrderRow>(
-    `SELECT * FROM operations_work_orders WHERE id = $1`,
-    [workOrderId],
+    `SELECT wo.* FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = $2 AND b.internal_workspace_id = $1`,
+    [workspaceId, workOrderId],
   );
   if (!existing.rows[0]) return null;
   const row = existing.rows[0];
@@ -2565,6 +3202,7 @@ export async function updateOperationsWorkOrder(
           completed_at = CASE WHEN $3 = 'completed' THEN COALESCE(completed_at, now()) ELSE completed_at END,
           updated_at = now()
       WHERE id = $1
+        AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_orders.id AND b.internal_workspace_id = $11)
       RETURNING *
     `,
     [
@@ -2590,6 +3228,7 @@ export async function updateOperationsWorkOrder(
       input.internalNotes !== undefined
         ? textValue(input.internalNotes)
         : row.internal_notes,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -2598,15 +3237,18 @@ export async function updateOperationsWorkOrder(
     targetId: workOrderId,
     metadata: { fields: Object.keys(input) },
   });
-  return res.rows[0] ? getOperationsWorkOrderDetail(workOrderId) : null;
+  return res.rows[0]
+    ? getOperationsWorkOrderDetail(workspaceId, workOrderId)
+    : null;
 }
 
 export async function completeOperationsWorkOrder(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   completionSummary: string,
 ) {
-  const detail = await getOperationsWorkOrderDetail(workOrderId);
+  const detail = await getOperationsWorkOrderDetail(workspaceId, workOrderId);
   if (!detail) return null;
   const merged = {
     ...detail.workOrder,
@@ -2618,18 +3260,19 @@ export async function completeOperationsWorkOrder(
     detail.accessRequirements,
   );
   if (issues.length > 0) return { completionIssues: issues };
-  return updateOperationsWorkOrder(actor, workOrderId, {
+  return updateOperationsWorkOrder(workspaceId, actor, workOrderId, {
     status: "completed",
     completionSummary,
   });
 }
 
 export async function addOperationsWorkItem(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   input: OperationsWorkItemInput,
 ) {
-  const detail = await getOperationsWorkOrderDetail(workOrderId);
+  const detail = await getOperationsWorkOrderDetail(workspaceId, workOrderId);
   if (!detail) return null;
   const client = await ensureConnected();
   const res = await client.query<OperationsWorkItemRow>(
@@ -2672,6 +3315,7 @@ export async function addOperationsWorkItem(
 }
 
 export async function updateOperationsWorkItem(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   itemId: string,
@@ -2679,8 +3323,8 @@ export async function updateOperationsWorkItem(
 ) {
   const client = await ensureConnected();
   const existing = await client.query<OperationsWorkItemRow>(
-    `SELECT * FROM operations_work_items WHERE id = $1 AND work_order_id = $2`,
-    [itemId, workOrderId],
+    `SELECT wi.* FROM operations_work_items wi JOIN operations_work_orders wo ON wo.id = wi.work_order_id JOIN operations_businesses b ON b.id = wo.business_id WHERE wi.id = $2 AND wi.work_order_id = $3 AND b.internal_workspace_id = $1`,
+    [workspaceId, itemId, workOrderId],
   );
   if (!existing.rows[0]) return null;
   const row = existing.rows[0];
@@ -2701,6 +3345,7 @@ export async function updateOperationsWorkItem(
           internal_notes = $11,
           updated_at = now()
       WHERE id = $1 AND work_order_id = $2
+        AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_items.work_order_id AND b.internal_workspace_id = $12)
       RETURNING *
     `,
     [
@@ -2723,6 +3368,7 @@ export async function updateOperationsWorkItem(
       input.internalNotes !== undefined
         ? textValue(input.internalNotes)
         : row.internal_notes,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -2735,6 +3381,7 @@ export async function updateOperationsWorkItem(
 }
 
 export async function reorderOperationsWorkItems(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   itemIds: string[],
@@ -2742,10 +3389,22 @@ export async function reorderOperationsWorkItems(
   const client = await ensureConnected();
   await client.query("BEGIN");
   try {
+    const valid = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM operations_work_items wi
+       JOIN operations_work_orders wo ON wo.id = wi.work_order_id
+       JOIN operations_businesses b ON b.id = wo.business_id
+       WHERE wi.work_order_id = $1 AND wi.id = ANY($2::uuid[]) AND b.internal_workspace_id = $3`,
+      [workOrderId, itemIds, workspaceId],
+    );
+    if (Number(valid.rows[0]?.count ?? 0) !== new Set(itemIds).size) {
+      await client.query("ROLLBACK");
+      return null;
+    }
     for (let index = 0; index < itemIds.length; index += 1) {
       await client.query(
-        `UPDATE operations_work_items SET display_order = $3, updated_at = now() WHERE id = $1 AND work_order_id = $2`,
-        [itemIds[index], workOrderId, index],
+        `UPDATE operations_work_items SET display_order = $3, updated_at = now() WHERE id = $1 AND work_order_id = $2 AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_items.work_order_id AND b.internal_workspace_id = $4)`,
+        [itemIds[index], workOrderId, index, workspaceId],
       );
     }
     await recordAdminAuditLog(actor, {
@@ -2755,7 +3414,7 @@ export async function reorderOperationsWorkItems(
       metadata: { count: itemIds.length },
     });
     await client.query("COMMIT");
-    return listWorkItems(workOrderId);
+    return listWorkItems(workspaceId, workOrderId);
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -2763,11 +3422,12 @@ export async function reorderOperationsWorkItems(
 }
 
 export async function addOperationsWorkOrderAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   input: OperationsAccessRequirementInput,
 ) {
-  const detail = await getOperationsWorkOrderDetail(workOrderId);
+  const detail = await getOperationsWorkOrderDetail(workspaceId, workOrderId);
   if (!detail) return null;
   const client = await ensureConnected();
   const res = await client.query<OperationsWorkOrderAccessRequirementRow>(
@@ -2806,6 +3466,7 @@ export async function addOperationsWorkOrderAccessRequirement(
 }
 
 export async function updateOperationsWorkOrderAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   requirementId: string,
@@ -2813,8 +3474,11 @@ export async function updateOperationsWorkOrderAccessRequirement(
 ) {
   const client = await ensureConnected();
   const existing = await client.query<OperationsWorkOrderAccessRequirementRow>(
-    `SELECT * FROM operations_work_order_access_requirements WHERE id = $1 AND work_order_id = $2`,
-    [requirementId, workOrderId],
+    `SELECT ar.* FROM operations_work_order_access_requirements ar
+     JOIN operations_work_orders wo ON wo.id = ar.work_order_id
+     JOIN operations_businesses b ON b.id = wo.business_id
+     WHERE ar.id = $1 AND ar.work_order_id = $2 AND b.internal_workspace_id = $3`,
+    [requirementId, workOrderId, workspaceId],
   );
   if (!existing.rows[0]) return null;
   const row = existing.rows[0];
@@ -2830,6 +3494,7 @@ export async function updateOperationsWorkOrderAccessRequirement(
           display_order = $9,
           updated_at = now()
       WHERE id = $1 AND work_order_id = $2
+        AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_order_access_requirements.work_order_id AND b.internal_workspace_id = $10)
       RETURNING *
     `,
     [
@@ -2844,6 +3509,7 @@ export async function updateOperationsWorkOrderAccessRequirement(
         : row.secure_storage_reference,
       input.notes !== undefined ? textValue(input.notes) : row.notes,
       input.displayOrder ?? row.display_order,
+      workspaceId,
     ],
   );
   await recordAdminAuditLog(actor, {
@@ -2856,14 +3522,18 @@ export async function updateOperationsWorkOrderAccessRequirement(
 }
 
 export async function deleteOperationsWorkOrderAccessRequirement(
+  workspaceId: string,
   actor: AdminActor,
   workOrderId: string,
   requirementId: string,
 ) {
   const client = await ensureConnected();
   const res = await client.query<OperationsWorkOrderAccessRequirementRow>(
-    `DELETE FROM operations_work_order_access_requirements WHERE id = $1 AND work_order_id = $2 RETURNING *`,
-    [requirementId, workOrderId],
+    `DELETE FROM operations_work_order_access_requirements
+     WHERE id = $1 AND work_order_id = $2
+       AND EXISTS (SELECT 1 FROM operations_work_orders wo JOIN operations_businesses b ON b.id = wo.business_id WHERE wo.id = operations_work_order_access_requirements.work_order_id AND b.internal_workspace_id = $3)
+     RETURNING *`,
+    [requirementId, workOrderId, workspaceId],
   );
   if (!res.rows[0]) return null;
   await recordAdminAuditLog(actor, {
@@ -2875,7 +3545,9 @@ export async function deleteOperationsWorkOrderAccessRequirement(
   return res.rows[0];
 }
 
-export async function getOperationsCommercialCounts(): Promise<OperationsCommercialCounts> {
+export async function getOperationsCommercialCounts(
+  workspaceId: string,
+): Promise<OperationsCommercialCounts> {
   const client = await ensureConnected();
   const [quotes, workItems, workOrders] = await Promise.all([
     client.query<{
@@ -2894,15 +3566,22 @@ export async function getOperationsCommercialCounts(): Promise<OperationsCommerc
               AND valid_until <= CURRENT_DATE + INTERVAL '7 days'
           )::text AS expiring_soon,
           COUNT(*) FILTER (WHERE status = 'accepted' AND converted_work_order_id IS NULL)::text AS accepted_awaiting_conversion
-        FROM operations_quotes
+        FROM operations_quotes q
+        JOIN operations_businesses b ON b.id = q.business_id
+        WHERE b.internal_workspace_id = $1
       `,
+      [workspaceId],
     ),
     client.query<CountRow>(
       `
         SELECT COUNT(*)::text AS count
-        FROM operations_work_items
-        WHERE status NOT IN ('completed', 'cancelled')
+        FROM operations_work_items i
+        JOIN operations_work_orders w ON w.id = i.work_order_id
+        JOIN operations_businesses b ON b.id = w.business_id
+        WHERE b.internal_workspace_id = $1
+          AND i.status NOT IN ('completed', 'cancelled')
       `,
+      [workspaceId],
     ),
     client.query<{
       awaiting_access: string;
@@ -2914,8 +3593,11 @@ export async function getOperationsCommercialCounts(): Promise<OperationsCommerc
           COUNT(*) FILTER (WHERE status = 'awaiting_access')::text AS awaiting_access,
           COUNT(*) FILTER (WHERE status = 'blocked')::text AS blocked,
           COUNT(*) FILTER (WHERE status = 'ready_for_testing')::text AS ready_for_testing
-        FROM operations_work_orders
+        FROM operations_work_orders w
+        JOIN operations_businesses b ON b.id = w.business_id
+        WHERE b.internal_workspace_id = $1
       `,
+      [workspaceId],
     ),
   ]);
   const quoteRow = quotes.rows[0];

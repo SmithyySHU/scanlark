@@ -31,9 +31,13 @@ services:
         condition: service_healthy
     command: >
       sh -c 'set -eu;
+      psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS scanlark_schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())";
       for f in /migrations/*.sql; do
+        filename=$$(basename "$$f");
+        if psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -Atc "SELECT 1 FROM scanlark_schema_migrations WHERE filename = '''$$filename'''" | grep -q 1; then echo "Skipping $$f (already applied)"; continue; fi;
         echo "Applying $$f";
-        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f";
+        psql "$$DATABASE_URL" --single-transaction -v ON_ERROR_STOP=1 -f "$$f";
+        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO scanlark_schema_migrations(filename) VALUES ('''$$filename''') ON CONFLICT (filename) DO NOTHING";
       done'
     networks:
       - scanlark_private

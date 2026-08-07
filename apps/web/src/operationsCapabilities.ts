@@ -1,7 +1,9 @@
 export type OperationsCapabilities = {
   canAccessOperations: boolean;
+  canMutateOperations: boolean;
   canUseOperationsEmail: boolean;
   operationsEmailEnabled: boolean;
+  workspaceSelectionRequired: boolean;
 };
 
 export function canShowOperationsEmailNavigation(

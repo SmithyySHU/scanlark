@@ -88,6 +88,36 @@ export async function getInternalWorkspaceByCode(
   return res.rows[0] ?? null;
 }
 
+export async function getInternalWorkspaceById(
+  id: string,
+): Promise<InternalWorkspaceRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<InternalWorkspaceRow>(
+    `
+      SELECT id, name, code, created_at, updated_at
+      FROM internal_workspaces
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [id],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function listInternalWorkspaces(): Promise<
+  InternalWorkspaceRow[]
+> {
+  const client = await ensureConnected();
+  const res = await client.query<InternalWorkspaceRow>(
+    `
+      SELECT id, name, code, created_at, updated_at
+      FROM internal_workspaces
+      ORDER BY name ASC, id ASC
+    `,
+  );
+  return res.rows;
+}
+
 export async function getUserInternalWorkspaceMemberships(
   userId: string,
 ): Promise<InternalWorkspaceMembershipRow[]> {

@@ -31,6 +31,7 @@ export type OperationsRelationshipType =
 
 export type OperationsBusinessRow = {
   id: string;
+  internal_workspace_id: string;
   name: string;
   pipeline_stage: OperationsPipelineStage;
   relationship_type: OperationsRelationshipType;
@@ -254,9 +255,12 @@ function searchPattern(value: string) {
   return `%${value.trim().toLowerCase()}%`;
 }
 
-function buildBusinessFilters(params: OperationsBusinessListParams) {
-  const filters: string[] = [];
-  const values: unknown[] = [];
+function buildBusinessFilters(
+  workspaceId: string,
+  params: OperationsBusinessListParams,
+) {
+  const filters: string[] = ["b.internal_workspace_id = $1"];
+  const values: unknown[] = [workspaceId];
 
   if (params.archived === true) {
     filters.push("b.is_archived = true");
@@ -363,10 +367,11 @@ function sortClause(sort: OperationsBusinessListParams["sort"]) {
 }
 
 export async function listOperationsBusinesses(
+  workspaceId: string,
   params: OperationsBusinessListParams,
 ) {
   const client = await ensureConnected();
-  const filters = buildBusinessFilters(params);
+  const filters = buildBusinessFilters(workspaceId, params);
   const pageValues = [...filters.values, params.limit, params.offset];
   const limitPlaceholder = `$${pageValues.length - 1}`;
   const offsetPlaceholder = `$${pageValues.length}`;
@@ -404,12 +409,13 @@ export async function listOperationsBusinesses(
 }
 
 export async function getOperationsBusinessDetail(
+  workspaceId: string,
   businessId: string,
 ): Promise<OperationsBusinessDetail | null> {
   const client = await ensureConnected();
   const businessRes = await client.query<OperationsBusinessRow>(
-    `SELECT * FROM operations_businesses WHERE id = $1`,
-    [businessId],
+    `SELECT * FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [businessId, workspaceId],
   );
   const business = businessRes.rows[0];
   if (!business) return null;
@@ -558,6 +564,7 @@ export async function getOperationsBusinessDetail(
 }
 
 export async function createOperationsBusiness(
+  workspaceId: string,
   actor: AdminActor,
   input: OperationsBusinessInput & {
     primaryContact?: OperationsContactInput | null;
@@ -573,6 +580,7 @@ export async function createOperationsBusiness(
     const res = await client.query<OperationsBusinessRow>(
       `
         INSERT INTO operations_businesses (
+          internal_workspace_id,
           name,
           pipeline_stage,
           relationship_type,
@@ -587,10 +595,11 @@ export async function createOperationsBusiness(
           next_action,
           created_by_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING *
       `,
       [
+        workspaceId,
         values.name,
         values.pipelineStage ?? "discovered",
         values.relationshipType ?? "prospect",
@@ -680,7 +689,7 @@ export async function createOperationsBusiness(
       },
     });
 
-    const detail = await getOperationsBusinessDetail(business.id);
+    const detail = await getOperationsBusinessDetail(workspaceId, business.id);
     if (!detail) throw new Error("business_not_found");
     return detail;
   } catch (err) {
@@ -690,6 +699,7 @@ export async function createOperationsBusiness(
 }
 
 export async function updateOperationsBusiness(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   input: Partial<OperationsBusinessInput> & {
@@ -697,7 +707,7 @@ export async function updateOperationsBusiness(
     clearNextFollowUp?: boolean;
   },
 ): Promise<OperationsBusinessDetail | null> {
-  const existing = await getOperationsBusinessDetail(businessId);
+  const existing = await getOperationsBusinessDetail(workspaceId, businessId);
   if (!existing) return null;
 
   const values = mapBusinessInput(input);
@@ -791,10 +801,11 @@ export async function updateOperationsBusiness(
     });
   }
 
-  return getOperationsBusinessDetail(businessId);
+  return getOperationsBusinessDetail(workspaceId, businessId);
 }
 
 export async function setOperationsBusinessArchived(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   archived: boolean,
@@ -805,10 +816,10 @@ export async function setOperationsBusinessArchived(
       UPDATE operations_businesses
       SET is_archived = $2,
           updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND internal_workspace_id = $3
       RETURNING *
     `,
-    [businessId, archived],
+    [businessId, archived, workspaceId],
   );
   const business = res.rows[0] ?? null;
   if (business) {
@@ -825,12 +836,13 @@ export async function setOperationsBusinessArchived(
 }
 
 export async function getOperationsBusinessDeleteEligibility(
+  workspaceId: string,
   businessId: string,
 ): Promise<OperationsDeleteEligibility | null> {
   const client = await ensureConnected();
   const exists = await client.query<{ id: string }>(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [businessId, workspaceId],
   );
   if (!exists.rows[0]) return null;
 
@@ -941,17 +953,21 @@ export async function getOperationsBusinessDeleteEligibility(
 }
 
 export async function deleteOperationsBusiness(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
 ): Promise<OperationsBusinessRow | null | OperationsDeleteEligibility> {
-  const eligibility = await getOperationsBusinessDeleteEligibility(businessId);
+  const eligibility = await getOperationsBusinessDeleteEligibility(
+    workspaceId,
+    businessId,
+  );
   if (!eligibility) return null;
   if (!eligibility.allowed) return eligibility;
 
   const client = await ensureConnected();
   const res = await client.query<OperationsBusinessRow>(
-    `DELETE FROM operations_businesses WHERE id = $1 RETURNING *`,
-    [businessId],
+    `DELETE FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2 RETURNING *`,
+    [businessId, workspaceId],
   );
   const business = res.rows[0] ?? null;
   if (business) {
@@ -966,12 +982,13 @@ export async function deleteOperationsBusiness(
 }
 
 export async function addOperationsContact(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   input: OperationsContactInput,
 ): Promise<OperationsContactRow | null> {
   const client = await ensureConnected();
-  const business = await getOperationsBusinessDetail(businessId);
+  const business = await getOperationsBusinessDetail(workspaceId, businessId);
   if (!business) return null;
   const contact = contactValues(input);
   try {
@@ -1033,6 +1050,7 @@ export async function addOperationsContact(
 }
 
 export async function updateOperationsContact(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   contactId: string,
@@ -1040,8 +1058,8 @@ export async function updateOperationsContact(
 ): Promise<OperationsContactRow | null> {
   const client = await ensureConnected();
   const existing = await client.query<OperationsContactRow>(
-    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
-    [contactId, businessId],
+    `SELECT c.* FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3`,
+    [contactId, businessId, workspaceId],
   );
   if (!existing.rows[0]) return null;
   if (input.isPrimary === true && existing.rows[0].archived_at) return null;
@@ -1113,6 +1131,7 @@ export async function updateOperationsContact(
 }
 
 export async function setOperationsContactArchived(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   contactId: string,
@@ -1123,8 +1142,8 @@ export async function setOperationsContactArchived(
 > {
   const client = await ensureConnected();
   const existing = await client.query<OperationsContactRow>(
-    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
-    [contactId, businessId],
+    `SELECT c.* FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3`,
+    [contactId, businessId, workspaceId],
   );
   const contact = existing.rows[0];
   if (!contact) return null;
@@ -1140,9 +1159,10 @@ export async function setOperationsContactArchived(
           updated_at = now()
       WHERE id = $1
         AND business_id = $2
+        AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_contacts.business_id AND b.internal_workspace_id = $4)
       RETURNING *
     `,
-    [contactId, businessId, archived],
+    [contactId, businessId, archived, workspaceId],
   );
   const updated = res.rows[0] ?? null;
   if (updated) {
@@ -1163,14 +1183,15 @@ export async function setOperationsContactArchived(
 }
 
 export async function deleteOperationsContact(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   contactId: string,
 ): Promise<boolean | OperationsDeleteEligibility | null> {
   const client = await ensureConnected();
   const existing = await client.query<OperationsContactRow>(
-    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2`,
-    [contactId, businessId],
+    `SELECT c.* FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3`,
+    [contactId, businessId, workspaceId],
   );
   const contact = existing.rows[0];
   if (!contact) return null;
@@ -1265,14 +1286,15 @@ export async function deleteOperationsContact(
 }
 
 export async function setPrimaryOperationsContact(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   contactId: string,
 ): Promise<OperationsContactRow | null> {
   const client = await ensureConnected();
   const existing = await client.query<OperationsContactRow>(
-    `SELECT * FROM operations_contacts WHERE id = $1 AND business_id = $2 AND archived_at IS NULL`,
-    [contactId, businessId],
+    `SELECT c.* FROM operations_contacts c JOIN operations_businesses b ON b.id = c.business_id WHERE c.id = $1 AND c.business_id = $2 AND b.internal_workspace_id = $3 AND c.archived_at IS NULL`,
+    [contactId, businessId, workspaceId],
   );
   if (!existing.rows[0]) return null;
   try {
@@ -1310,14 +1332,15 @@ export async function setPrimaryOperationsContact(
 }
 
 export async function linkOperationsBusinessSite(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   siteId: string,
 ): Promise<"linked" | "business_not_found" | "site_not_found" | "duplicate"> {
   const client = await ensureConnected();
   const business = await client.query(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [businessId, workspaceId],
   );
   if (!business.rows[0]) return "business_not_found";
   const site = await client.query(`SELECT id FROM sites WHERE id = $1`, [
@@ -1354,6 +1377,7 @@ export async function linkOperationsBusinessSite(
 }
 
 export async function unlinkOperationsBusinessSite(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   siteId: string,
@@ -1383,6 +1407,7 @@ export async function unlinkOperationsBusinessSite(
 }
 
 export async function addOperationsBusinessNote(
+  workspaceId: string,
   actor: AdminActor,
   businessId: string,
   body: string,
@@ -1391,8 +1416,8 @@ export async function addOperationsBusinessNote(
   if (!note) throw new Error("note_body_required");
   const client = await ensureConnected();
   const business = await client.query(
-    `SELECT id FROM operations_businesses WHERE id = $1`,
-    [businessId],
+    `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
+    [businessId, workspaceId],
   );
   if (!business.rows[0]) return null;
   const res = await client.query<OperationsBusinessNoteRow>(
@@ -1421,8 +1446,8 @@ export async function addOperationsBusinessNote(
   return res.rows[0];
 }
 
-export async function listOperationsPipeline() {
-  const list = await listOperationsBusinesses({
+export async function listOperationsPipeline(workspaceId: string) {
+  const list = await listOperationsBusinesses(workspaceId, {
     archived: false,
     sort: "next_follow_up",
     limit: 500,
@@ -1446,13 +1471,29 @@ export async function listOperationsPipeline() {
   };
 }
 
-export async function listOperationsAvailableSites(options: {
-  search?: string | null;
-  limit: number;
-}) {
+export async function listOperationsAvailableSites(
+  workspaceId: string,
+  actorUserId: string,
+  options: {
+    search?: string | null;
+    limit: number;
+  },
+) {
   const client = await ensureConnected();
-  const values: unknown[] = [];
-  const filters = ["s.disabled_at IS NULL"];
+  const values: unknown[] = [workspaceId, actorUserId];
+  const filters = [
+    "s.disabled_at IS NULL",
+    `(s.user_id = $2 OR EXISTS (
+      SELECT 1 FROM operations_business_sites obs
+      JOIN operations_businesses b ON b.id = obs.business_id
+      WHERE obs.site_id = s.id AND b.internal_workspace_id = $1
+    ))`,
+    `NOT EXISTS (
+      SELECT 1 FROM operations_business_sites obs
+      JOIN operations_businesses b ON b.id = obs.business_id
+      WHERE obs.site_id = s.id AND b.internal_workspace_id <> $1
+    )`,
+  ];
   if (options.search?.trim()) {
     values.push(searchPattern(options.search));
     filters.push(`(
@@ -1486,18 +1527,20 @@ export async function listOperationsAvailableSites(options: {
   return res.rows;
 }
 
-export async function getOperationsBusinessCounts() {
+export async function getOperationsBusinessCounts(workspaceId: string) {
   const client = await ensureConnected();
   const [taskCounts, prospectsAwaitingContact] = await Promise.all([
-    getOperationsTaskCounts(),
+    getOperationsTaskCounts(workspaceId),
     client.query<CountRow>(
       `
         SELECT COUNT(*)::text AS count
         FROM operations_businesses
-        WHERE is_archived = false
+        WHERE internal_workspace_id = $1
+          AND is_archived = false
           AND relationship_type = 'prospect'
           AND pipeline_stage IN ('discovered', 'researched', 'ready_to_contact')
       `,
+      [workspaceId],
     ),
   ]);
   return {

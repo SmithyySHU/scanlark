@@ -14,6 +14,10 @@
     "demo:latest-scan": "npm run -w @scanlark/db demo:latest-scan",
     "demo:site-history": "npm run -w @scanlark/db demo:site-history --",
     "scan:once": "npm run -w @scanlark/crawler scan:once --",
+    "test:migrations-replay": "node scripts/test/migrations-replay.mjs",
+    "test:workspace-isolation": "node scripts/test/workspace-isolation-contract.mjs",
+    "test:historical-evidence": "node scripts/test/historical-evidence-contract.mjs",
+    "test:historical-evidence-closure": "node --import tsx scripts/test/historical-evidence-closure.mjs",
     "typecheck": "tsc -p packages/crawler && tsc -p packages/db",
     "format": "prettier . --write",
     "format:check": "prettier . --check"
