@@ -1,5 +1,8 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { URL } from "node:url";
+import pg from "pg";
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) throw new Error("DATABASE_URL is required");
@@ -18,4 +21,24 @@ execFileSync("bash", ["scripts/run-migrations.sh"], {
   stdio: "inherit",
   env: { ...env, MIGRATIONS_DIR: migrationDir },
 });
-console.log("Migration replay passed with per-file transaction semantics.");
+
+const expected = readdirSync(migrationDir)
+  .filter((filename) => filename.endsWith(".sql"))
+  .sort();
+const client = new pg.Client({ connectionString: url.toString() });
+await client.connect();
+try {
+  const result = await client.query(
+    "SELECT filename FROM scanlark_schema_migrations ORDER BY filename",
+  );
+  assert.deepEqual(
+    result.rows.map((row) => row.filename),
+    expected,
+    "migration ledger must store every filename as an exact value",
+  );
+} finally {
+  await client.end();
+}
+console.log(
+  "Migration replay passed with transaction semantics and exact ledger filenames.",
+);

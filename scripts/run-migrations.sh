@@ -16,11 +16,12 @@ mapfile -t migrations < <(find "${MIGRATIONS_DIR}" -maxdepth 1 -type f -name '*.
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c 'CREATE TABLE IF NOT EXISTS scanlark_schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())'
 for migration in "${migrations[@]}"; do
   filename="$(basename "${migration}")"
-  if psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -Atc "SELECT 1 FROM scanlark_schema_migrations WHERE filename = '$filename'" | grep -q 1; then
+  applied="$(printf '%s\n' "SELECT 1 FROM scanlark_schema_migrations WHERE filename = :'filename';" | psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -v filename="${filename}" -At)"
+  if [[ "${applied}" == "1" ]]; then
     echo "Skipping ${migration} (already applied)"
     continue
   fi
   echo "Applying ${migration}"
   psql "${DATABASE_URL}" --single-transaction -v ON_ERROR_STOP=1 -f "${migration}"
-  psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "INSERT INTO scanlark_schema_migrations(filename) VALUES ('$filename') ON CONFLICT (filename) DO NOTHING"
+  printf '%s\n' "INSERT INTO scanlark_schema_migrations(filename) VALUES (:'filename') ON CONFLICT (filename) DO NOTHING;" | psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -v filename="${filename}"
 done

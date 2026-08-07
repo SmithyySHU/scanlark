@@ -64,3 +64,9 @@ test("every exported Operations data function is classified and workspace-bound"
     );
   }
 });
+
+test("repository inventory remains test-only and outside the runtime DB barrel", () => {
+  const root = dirname(new URL(import.meta.url).pathname);
+  const barrel = readFileSync(join(root, "index.ts"), "utf8");
+  assert.doesNotMatch(barrel, /operationsRepositoryInventory/);
+});

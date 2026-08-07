@@ -716,11 +716,6 @@ export {
   canLinkOperationsSite,
 } from "./operationsScope";
 export type { OperationsResourceKind } from "./operationsScope";
-export {
-  operationsRepositoryInventory,
-  classifyOperationsRepositoryExport,
-  documentedGlobalOperationsRepositoryExports,
-} from "./operationsRepositoryInventory";
 export type {
   InternalWorkspaceMembershipRow,
   InternalWorkspaceRole,
