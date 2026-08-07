@@ -24,6 +24,7 @@ import {
   verifyOperationsEmailTransport,
   type OperationsEmailTransport,
 } from "./operationsEmailTransport";
+import type { WorkerTickResult } from "./workerSupervisor";
 
 const UNCERTAIN_WARNING =
   "This message may already have been accepted by the mail provider. It will not be sent again automatically. Check the Connor mailbox and recipient outcome before preparing another communication.";
@@ -47,21 +48,6 @@ function logDeliveryEvent(input: {
       elapsedMs: Date.now() - input.startedAt,
     }),
   );
-}
-
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
 }
 
 export async function processOneOperationsEmailDelivery(input: {
@@ -446,34 +432,60 @@ export async function processOneOperationsEmailDelivery(input: {
   }
 }
 
-export async function runOperationsEmailSmtpWorker(input: {
+export type OperationsEmailSmtpTickState = {
+  workspaceId: string | null;
+  lastReadinessCheck: number;
+  lastRiskRecovery: number;
+  smtpUsable: boolean;
+};
+
+export function createOperationsEmailSmtpTickState(): OperationsEmailSmtpTickState {
+  return {
+    workspaceId: null,
+    lastReadinessCheck: 0,
+    lastRiskRecovery: 0,
+    smtpUsable: false,
+  };
+}
+
+export async function tickOperationsEmailSmtp(input: {
   workerId: string;
   config: OperationsEmailSmtpConfig;
-  transport: OperationsEmailTransport;
-  signal: AbortSignal;
-}) {
-  const workspace = await getInternalWorkspaceByCode(
-    SCANLARK_OPERATIONS_WORKSPACE_CODE,
-  );
-  if (!workspace) return;
-  let lastReadinessCheck = 0;
-  let lastRiskRecovery = 0;
-  let smtpUsable = false;
+  transport: OperationsEmailTransport | null;
+  state: OperationsEmailSmtpTickState;
+  signal?: AbortSignal;
+}): Promise<WorkerTickResult> {
+  if (input.signal?.aborted) return { kind: "idle" };
+  const transport = input.transport;
+  if (!input.config.configured || !transport)
+    return { kind: "disabled", safeReason: "smtp_configuration_unavailable" };
+  if (!input.state.workspaceId) {
+    const workspace = await getInternalWorkspaceByCode(
+      SCANLARK_OPERATIONS_WORKSPACE_CODE,
+    );
+    if (!workspace)
+      return {
+        kind: "disabled",
+        safeReason: "operations_workspace_unavailable",
+      };
+    input.state.workspaceId = workspace.id;
+  }
+  const workspaceId = input.state.workspaceId;
   const checkReadiness = async () => {
-    const result = await verifyOperationsEmailTransport(input.transport);
+    const result = await verifyOperationsEmailTransport(transport);
     await setOperationsEmailSmtpReadiness({
-      workspaceId: workspace.id,
+      workspaceId,
       status: result.status,
       workerId: input.workerId,
       safeErrorCode: result.safeErrorCode,
     });
     await recordOperationsEmailSystemAudit({
-      workspaceId: workspace.id,
+      workspaceId,
       action: "operations.email.smtp_readiness_checked",
       metadata: { status: result.status },
     });
-    lastReadinessCheck = Date.now();
-    smtpUsable = result.status === "verified";
+    input.state.lastReadinessCheck = Date.now();
+    input.state.smtpUsable = result.status === "verified";
   };
   const recoverRiskLeases = async () => {
     const recovered = await markExpiredOperationsEmailRiskLeasesUncertain({
@@ -492,39 +504,48 @@ export async function runOperationsEmailSmtpWorker(input: {
         },
       });
     }
-    lastRiskRecovery = Date.now();
+    input.state.lastRiskRecovery = Date.now();
   };
-  try {
+  if (input.state.lastReadinessCheck === 0) {
     await checkReadiness();
+  } else if (
+    Date.now() - input.state.lastReadinessCheck >=
+    input.config.readinessIntervalMs
+  ) {
+    await checkReadiness();
+  }
+  if (input.state.lastRiskRecovery === 0) {
     await recoverRiskLeases();
-  } catch {
-    console.error(
-      `[operations-email ${input.workerId}] startup unavailable error=isolated_startup_failure`,
-    );
+  } else if (
+    Date.now() - input.state.lastRiskRecovery >=
+    Math.min(input.config.workerLeaseSeconds * 1000, 30_000)
+  ) {
+    await recoverRiskLeases();
   }
-  while (!input.signal.aborted) {
-    try {
-      if (Date.now() - lastReadinessCheck >= input.config.readinessIntervalMs) {
-        await checkReadiness();
-      }
-      if (
-        Date.now() - lastRiskRecovery >=
-        Math.min(input.config.workerLeaseSeconds * 1000, 30_000)
-      ) {
-        await recoverRiskLeases();
-      }
-      if (!smtpUsable) {
-        await sleep(input.config.workerPollMs, input.signal);
-        continue;
-      }
-      const didWork = await processOneOperationsEmailDelivery(input);
-      if (!didWork) await sleep(input.config.workerPollMs, input.signal);
-    } catch {
-      console.error(
-        `[operations-email ${input.workerId}] iteration unavailable error=isolated_iteration_failure`,
-      );
-      await sleep(input.config.workerPollMs, input.signal);
-    }
-  }
-  input.transport.close();
+  if (!input.state.smtpUsable) return { kind: "idle" };
+  const didWork = await processOneOperationsEmailDelivery({
+    workerId: input.workerId,
+    config: input.config,
+    transport,
+  });
+  return didWork ? { kind: "worked" } : { kind: "idle" };
+}
+
+export function closeOperationsEmailSmtpTransport(
+  transport: Pick<OperationsEmailTransport, "close"> | null,
+) {
+  transport?.close();
+}
+
+/** @deprecated C3 production startup uses tickOperationsEmailSmtp. */
+export async function runOperationsEmailSmtpWorker(input: {
+  workerId: string;
+  config: OperationsEmailSmtpConfig;
+  transport: OperationsEmailTransport;
+  signal: AbortSignal;
+}) {
+  return tickOperationsEmailSmtp({
+    ...input,
+    state: createOperationsEmailSmtpTickState(),
+  });
 }

@@ -1,35 +1,31 @@
 import dotenv from "dotenv";
 import * as os from "node:os";
 import {
-  cancelScanJob,
-  claimDueUptimeMonitors,
-  claimNextScanJob,
-  completeScanJob,
-  createScanRun,
-  enqueueScheduledScanIfDue,
-  extendScanJobLease,
-  failScanJob,
-  getDueSites,
-  getJobForScanRun,
-  getScanRunById,
-  getSiteById,
+  closeConnection,
   getOperationsEmailSmtpConfig,
   getOperationsEmailImapConfig,
   isOperationsEmailModuleEnabled,
-  recoverStaleQueuedScanJobs,
-  recordUptimeCheck,
-  requeueExpiredScanJobs,
-  setScanRunStatus,
-  setScanJobRunId,
-  type UptimeCheckInput,
-  type UptimeSettingsRow,
 } from "@scanlark/db";
-import { checkUptime } from "../../../packages/crawler/src/checkUptime";
-import { runScanForSite } from "../../../packages/crawler/src/scanService";
+import {
+  classifyCoreLoopFailure,
+  tickReaper,
+  tickScanWorker,
+  tickScheduler,
+  tickUptime,
+  type CoreLoopTickOptions,
+} from "./coreLoopTicks";
 import { createOperationsEmailTransport } from "./operationsEmailTransport";
-import { runOperationsEmailSmtpWorker } from "./operationsEmailWorker";
-import { runOperationsEmailCrmFinalisationWorker } from "./operationsEmailFinalisation";
-import { runOperationsEmailSentCopyWorker } from "./operationsEmailSentCopy";
+import {
+  closeOperationsEmailSmtpTransport,
+  createOperationsEmailSmtpTickState,
+  tickOperationsEmailSmtp,
+} from "./operationsEmailWorker";
+import {
+  FINALISATION_POLL_MS,
+  tickOperationsEmailCrmFinalisation,
+} from "./operationsEmailFinalisation";
+import { tickOperationsEmailSentCopy } from "./operationsEmailSentCopy";
+import { createWorkerRuntimeFoundation } from "./workerRuntime";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
@@ -44,156 +40,35 @@ const UPTIME_TICK_MS = parsePositiveIntEnv("UPTIME_TICK_MS", 60000);
 const UPTIME_BATCH_SIZE = parsePositiveIntEnv("UPTIME_BATCH_SIZE", 25);
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
-const operationsEmailAbortController = new AbortController();
+const coreRuntime = createWorkerRuntimeFoundation();
+coreRuntime.registerCleanup("database", closeConnection);
+
+function requestShutdown(signal: "SIGTERM" | "SIGINT") {
+  void coreRuntime
+    .shutdown(signal)
+    .then((result) => {
+      process.exitCode = result.exitCode;
+      // The only hard exit in the worker runtime is the centrally owned grace
+      // timeout. Normal shutdown has no timers or clients left and exits
+      // naturally with code 0.
+      if (result.state === "forced_timeout") process.exit(result.exitCode);
+    })
+    .catch(() => {
+      // The runtime contains cleanup failures, but preserve a non-zero outcome
+      // should an unexpected bootstrap-level shutdown error escape.
+      process.exitCode = 1;
+    });
+}
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => requestShutdown(signal));
+}
 
 function parsePositiveIntEnv(name: string, fallback: number) {
   const raw = process.env[name];
   if (!raw) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function logJobEvent(
-  event: string,
-  job: { id: string; site_id: string; scan_run_id: string | null },
-  details?: string,
-) {
-  const suffix = details ? ` ${details}` : "";
-  console.log(
-    `[worker ${workerId}] ${event} job=${job.id} site=${job.site_id} run=${job.scan_run_id ?? "none"}${suffix}`,
-  );
-}
-
-async function processJob() {
-  const job = await claimNextScanJob({
-    workerId,
-    leaseSeconds: CLAIM_LEASE_SECONDS,
-  });
-  if (!job) return false;
-
-  logJobEvent("claimed", job, `attempts=${job.attempts}/${job.max_attempts}`);
-
-  let scanRunId = job.scan_run_id;
-  let run = scanRunId ? await getScanRunById(scanRunId) : null;
-  if (!run) {
-    const site = await getSiteById(job.site_id);
-    if (!site) {
-      const failedJob = await failScanJob(job.id, "site_not_found");
-      if (failedJob) {
-        logJobEvent("failed", failedJob, "error=site_not_found");
-      }
-      return true;
-    }
-    scanRunId = await createScanRun(site.id, site.url, {
-      triggerType: "scheduled",
-    });
-    await setScanJobRunId(job.id, scanRunId);
-    run = await getScanRunById(scanRunId);
-  }
-
-  if (!run) {
-    const failedJob = await failScanJob(job.id, "scan_run_not_found");
-    if (failedJob) {
-      logJobEvent("failed", failedJob, "error=scan_run_not_found");
-    }
-    return true;
-  }
-
-  await setScanRunStatus(run.id, "in_progress", {
-    errorMessage: null,
-    clearFinishedAt: true,
-  });
-  logJobEvent("started", { ...job, scan_run_id: run.id });
-
-  const leaseHeartbeat = setInterval(() => {
-    void extendScanJobLease(job.id, {
-      leaseSeconds: CLAIM_LEASE_SECONDS,
-    }).catch((err) => {
-      console.warn(
-        `[worker ${workerId}] lease heartbeat failed job=${job.id}`,
-        err,
-      );
-    });
-  }, LEASE_HEARTBEAT_MS);
-
-  try {
-    await runScanForSite(run.site_id, run.start_url, run.id);
-    const updatedRun = await getScanRunById(run.id);
-    if (updatedRun?.status === "cancelled") {
-      await cancelScanJob(job.id);
-      logJobEvent("cancelled", { ...job, scan_run_id: run.id });
-      return true;
-    }
-    if (updatedRun?.status === "failed") {
-      const errorMessage = updatedRun.error_message ?? "scan_failed";
-      const exhausted = job.attempts >= job.max_attempts;
-      const failedJob = await failScanJob(job.id, errorMessage);
-      if (failedJob) {
-        logJobEvent(
-          exhausted ? "failed" : "requeued",
-          { ...failedJob, scan_run_id: run.id },
-          `error=${errorMessage}`,
-        );
-      }
-      if (exhausted) {
-        await setScanRunStatus(run.id, "failed", {
-          errorMessage,
-          setFinishedAt: true,
-        });
-        await notifyScanRun(run.id);
-      } else {
-        await setScanRunStatus(run.id, "queued", {
-          errorMessage,
-          clearFinishedAt: true,
-        });
-      }
-      return true;
-    }
-    const completedJob = await completeScanJob(job.id);
-    if (completedJob) {
-      logJobEvent("completed", { ...completedJob, scan_run_id: run.id });
-    }
-    await notifyScanRun(run.id);
-    return true;
-  } catch (err: unknown) {
-    const errorMessage =
-      err instanceof Error ? err.message : "scan_failed_unexpected";
-    const exhausted = job.attempts >= job.max_attempts;
-    const failedJob = await failScanJob(job.id, errorMessage);
-    if (failedJob) {
-      logJobEvent(
-        exhausted ? "failed" : "requeued",
-        { ...failedJob, scan_run_id: run.id },
-        `error=${errorMessage}`,
-      );
-    }
-    if (exhausted) {
-      await setScanRunStatus(run.id, "failed", {
-        errorMessage,
-        setFinishedAt: true,
-      });
-      await notifyScanRun(run.id);
-    } else {
-      await setScanRunStatus(run.id, "queued", {
-        errorMessage,
-        clearFinishedAt: true,
-      });
-    }
-    return true;
-  } finally {
-    clearInterval(leaseHeartbeat);
-    const latestJob = await getJobForScanRun(run.id);
-    if (latestJob?.status === "cancelled") {
-      await setScanRunStatus(run.id, "cancelled", {
-        errorMessage: latestJob.last_error ?? null,
-        setFinishedAt: true,
-      });
-    }
-  }
 }
 
 async function notifyScanRun(scanRunId: string) {
@@ -217,168 +92,49 @@ async function notifyScanRun(scanRunId: string) {
   }
 }
 
-async function runLoop() {
-  console.log(`[worker ${workerId}] started`);
-  while (true) {
-    const didWork = await processJob();
-    if (!didWork) {
-      await sleep(IDLE_WAIT_MS);
-    }
-  }
-}
+const coreTickOptions: CoreLoopTickOptions = {
+  workerId,
+  claimLeaseSeconds: CLAIM_LEASE_SECONDS,
+  leaseHeartbeatMs: LEASE_HEARTBEAT_MS,
+  staleQueuedJobMinutes: STALE_QUEUED_JOB_MINUTES,
+  uptimeBatchSize: UPTIME_BATCH_SIZE,
+  notifyScanRun,
+  log: console.log,
+  warn: console.warn,
+};
 
-async function reapLoop() {
-  console.log(`[reaper ${workerId}] started`);
-  while (true) {
-    const recovered = await requeueExpiredScanJobs();
-    for (const job of recovered) {
-      logJobEvent(
-        "abandoned-recovered",
-        job,
-        `attempts=${job.attempts}/${job.max_attempts}`,
-      );
-    }
-    const staleQueued = await recoverStaleQueuedScanJobs({
-      olderThanMinutes: STALE_QUEUED_JOB_MINUTES,
-    });
-    for (const job of staleQueued) {
-      logJobEvent("stale-queued-recovered", job);
-    }
-    await sleep(REAPER_TICK_MS);
-  }
-}
-
-async function schedulerTick() {
-  const now = new Date();
-  const dueSites = await getDueSites(25);
-  let enqueued = 0;
-  let skipped = 0;
-
-  for (const site of dueSites) {
-    const result = await enqueueScheduledScanIfDue(site.id, now);
-    if (result.created) {
-      enqueued += 1;
-      console.log(
-        `[scheduler] enqueued site=${site.id} run=${result.scanRunId} next=${result.nextScheduledAt?.toISOString() ?? "none"}`,
-      );
-      continue;
-    }
-
-    skipped += 1;
-    console.log(
-      `[scheduler] skipped site=${site.id} reason=${result.reason}${result.active?.scanRunId ? ` activeRun=${result.active.scanRunId}` : ""}${result.active?.jobId ? ` activeJob=${result.active.jobId}` : ""}`,
-    );
-  }
-
-  console.log(
-    `[scheduler] due=${dueSites.length} enqueued=${enqueued} skipped=${skipped}`,
-  );
-}
-
-async function runSchedulerLoop() {
-  console.log(`[scheduler ${workerId}] started`);
-  while (true) {
-    try {
-      await schedulerTick();
-    } catch (err) {
-      console.error(`[scheduler ${workerId}] error`, err);
-    }
-    await sleep(SCHEDULE_TICK_MS);
-  }
-}
-
-function getErrorMessage(err: unknown, fallback: string) {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
-function buildFailedUptimeCheck(
-  monitor: UptimeSettingsRow,
-  err: unknown,
-): UptimeCheckInput {
-  const message = getErrorMessage(err, "uptime_check_failed");
-  return {
-    checkedUrl: monitor.check_url,
-    status: "down",
-    statusCode: null,
-    responseTimeMs: null,
-    redirectCount: 0,
-    errorCode: "worker_exception",
-    errorMessage: message.slice(0, 500),
-  };
-}
-
-async function processUptimeMonitor(monitor: UptimeSettingsRow) {
-  console.log(
-    `[uptime ${workerId}] checking settings=${monitor.id} site=${monitor.site_id} url=${monitor.check_url}`,
-  );
-
-  try {
-    const result = await checkUptime(monitor.check_url);
-    const recorded = await recordUptimeCheck(monitor.id, result);
-    console.log(
-      `[uptime ${workerId}] recorded settings=${monitor.id} site=${monitor.site_id} check=${recorded.check.id} status=${recorded.check.status} statusCode=${recorded.check.status_code ?? "none"} responseMs=${recorded.check.response_time_ms ?? "none"} next=${monitor.next_check_at?.toISOString() ?? "none"}`,
-    );
-  } catch (err) {
-    console.warn(
-      `[uptime ${workerId}] check failed settings=${monitor.id} site=${monitor.site_id}`,
-      err,
-    );
-    try {
-      const recorded = await recordUptimeCheck(
-        monitor.id,
-        buildFailedUptimeCheck(monitor, err),
-      );
-      console.log(
-        `[uptime ${workerId}] recorded failure settings=${monitor.id} site=${monitor.site_id} check=${recorded.check.id}`,
-      );
-    } catch (recordErr) {
+function startCoreLoop(
+  name: "scan" | "scheduler" | "reaper" | "uptime",
+  idleDelayMs: number,
+  tick: (signal: AbortSignal) => ReturnType<typeof tickScanWorker>,
+) {
+  void coreRuntime
+    .runLoop({
+      name,
+      idleDelayMs,
+      tick: ({ signal }) => tick(signal),
+      classifyFailure: classifyCoreLoopFailure,
+    })
+    .catch((error) => {
       console.error(
-        `[uptime ${workerId}] failed to record uptime failure settings=${monitor.id} site=${monitor.site_id}`,
-        recordErr,
+        `[${name} ${workerId}] supervisor terminated`,
+        error instanceof Error ? error.name : "unknown",
       );
-    }
-  }
+    });
 }
 
-async function uptimeTick() {
-  const monitors = await claimDueUptimeMonitors(UPTIME_BATCH_SIZE);
-  console.log(`[uptime ${workerId}] due=${monitors.length}`);
-
-  for (const monitor of monitors) {
-    await processUptimeMonitor(monitor);
-  }
-}
-
-async function runUptimeLoop() {
-  console.log(
-    `[uptime ${workerId}] started tickMs=${UPTIME_TICK_MS} batch=${UPTIME_BATCH_SIZE}`,
-  );
-  while (true) {
-    try {
-      await uptimeTick();
-    } catch (err) {
-      console.error(`[uptime ${workerId}] tick error`, err);
-    }
-    await sleep(UPTIME_TICK_MS);
-  }
-}
-
-runLoop().catch((err) => {
-  console.error(`[worker ${workerId}] fatal`, err);
-  process.exit(1);
-});
-
-reapLoop().catch((err) => {
-  console.error(`[reaper ${workerId}] fatal`, err);
-});
-
-runSchedulerLoop().catch((err) => {
-  console.error(`[scheduler ${workerId}] fatal`, err);
-});
-
-runUptimeLoop().catch((err) => {
-  console.error(`[uptime ${workerId}] fatal`, err);
-});
+startCoreLoop("scan", IDLE_WAIT_MS, (signal) =>
+  tickScanWorker(coreTickOptions, signal),
+);
+startCoreLoop("scheduler", SCHEDULE_TICK_MS, (signal) =>
+  tickScheduler(coreTickOptions, signal),
+);
+startCoreLoop("reaper", REAPER_TICK_MS, (signal) =>
+  tickReaper(coreTickOptions, signal),
+);
+startCoreLoop("uptime", UPTIME_TICK_MS, (signal) =>
+  tickUptime(coreTickOptions, signal),
+);
 
 const operationsEmailSmtpConfig = getOperationsEmailSmtpConfig();
 const operationsEmailImapConfig = getOperationsEmailImapConfig();
@@ -386,73 +142,65 @@ const operationsEmailModuleEnabled = isOperationsEmailModuleEnabled(
   process.env,
 );
 
+function startEmailLoop(
+  name: "email-smtp" | "email-crm-finalisation" | "email-sent-copy",
+  idleDelayMs: number,
+  tick: (signal: AbortSignal) => ReturnType<typeof tickOperationsEmailSmtp>,
+) {
+  void coreRuntime
+    .runLoop({
+      name,
+      idleDelayMs,
+      tick: ({ signal }) => tick(signal),
+      classifyFailure: classifyCoreLoopFailure,
+    })
+    .catch((error) => {
+      console.error(
+        `[${name} ${workerId}] supervisor terminated`,
+        error instanceof Error ? error.name : "unknown",
+      );
+    });
+}
+
 if (operationsEmailModuleEnabled) {
-  runOperationsEmailCrmFinalisationWorker({
-    workerId: `operations-email-crm-${workerId}`,
-    signal: operationsEmailAbortController.signal,
-  }).catch((err) => {
-    console.error(
-      `[operations-email-crm ${workerId}] isolated loop failure`,
-      err instanceof Error ? err.name : "unknown",
-    );
-  });
-  console.log(
-    `[operations-email-crm ${workerId}] CRM finalisation worker started`,
+  const smtpTransport = operationsEmailSmtpConfig.configured
+    ? createOperationsEmailTransport(operationsEmailSmtpConfig)
+    : null;
+  coreRuntime.registerCleanup("smtp", () =>
+    closeOperationsEmailSmtpTransport(smtpTransport),
   );
-}
-
-if (operationsEmailModuleEnabled && operationsEmailSmtpConfig.configured) {
-  const transport = createOperationsEmailTransport(operationsEmailSmtpConfig);
-  runOperationsEmailSmtpWorker({
-    workerId: `operations-email-${workerId}`,
-    config: operationsEmailSmtpConfig,
-    transport,
-    signal: operationsEmailAbortController.signal,
-  }).catch((err) => {
-    console.error(
-      `[operations-email ${workerId}] worker unavailable error=isolated_loop_failure`,
-      err instanceof Error ? err.name : "unknown",
-    );
-  });
-  console.log(`[operations-email ${workerId}] SMTP queue worker started`);
+  const smtpState = createOperationsEmailSmtpTickState();
+  startEmailLoop(
+    "email-smtp",
+    operationsEmailSmtpConfig.workerPollMs,
+    (signal) =>
+      tickOperationsEmailSmtp({
+        workerId: `operations-email-${workerId}`,
+        config: operationsEmailSmtpConfig,
+        transport: smtpTransport,
+        state: smtpState,
+        signal,
+      }),
+  );
+  startEmailLoop("email-crm-finalisation", FINALISATION_POLL_MS, (signal) =>
+    tickOperationsEmailCrmFinalisation({
+      workerId: `operations-email-crm-${workerId}`,
+      signal,
+    }),
+  );
+  startEmailLoop(
+    "email-sent-copy",
+    operationsEmailImapConfig.workerPollMs,
+    (signal) =>
+      tickOperationsEmailSentCopy({
+        workerId: `operations-email-imap-${workerId}`,
+        config: operationsEmailImapConfig,
+        signal,
+      }),
+  );
+  console.log(`[operations-email ${workerId}] supervised Email loops started`);
 } else {
   console.log(
-    `[operations-email ${workerId}] SMTP queue worker inactive reason=${operationsEmailModuleEnabled ? "smtp_configuration_unavailable" : "module_disabled"}`,
+    `[operations-email ${workerId}] Email loops inactive reason=module_disabled`,
   );
-}
-
-if (operationsEmailModuleEnabled && operationsEmailImapConfig.configured) {
-  runOperationsEmailSentCopyWorker({
-    workerId: `operations-email-imap-${workerId}`,
-    config: operationsEmailImapConfig,
-    signal: operationsEmailAbortController.signal,
-  }).catch((err) => {
-    console.error(
-      `[operations-email-imap ${workerId}] isolated loop failure`,
-      err instanceof Error ? err.name : "unknown",
-    );
-  });
-  console.log(
-    `[operations-email-imap ${workerId}] IONOS Sent-copy worker started`,
-  );
-} else {
-  console.log(
-    `[operations-email-imap ${workerId}] Sent-copy worker inactive reason=${operationsEmailModuleEnabled ? "imap_configuration_unavailable" : "module_disabled"}`,
-  );
-}
-
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.once(signal, () => {
-    operationsEmailAbortController.abort();
-    setTimeout(
-      () => process.exit(0),
-      Math.min(
-        60_000,
-        Math.max(
-          operationsEmailSmtpConfig.socketTimeoutMs,
-          operationsEmailImapConfig.socketTimeoutMs,
-        ) + 5_000,
-      ),
-    ).unref();
-  });
 }

@@ -16,6 +16,7 @@ import {
   setOperationsEmailImapReadiness,
   type OperationsEmailImapConfig,
 } from "@scanlark/db";
+import type { WorkerTickResult } from "./workerSupervisor";
 
 export type OperationsEmailImapClient = {
   connect(): Promise<void>;
@@ -136,21 +137,6 @@ function safeError(error: unknown, retry: boolean) {
   if (error instanceof Error && error.message.includes("mailbox"))
     return "The IONOS Sent folder could not be identified. Correct the configuration, then retry saving the sent copy.";
   return "The email was sent, but its IONOS Sent-folder copy requires manual investigation.";
-}
-
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
 }
 
 export async function processOneOperationsEmailSentCopy(input: {
@@ -408,24 +394,23 @@ export async function processOneOperationsEmailSentCopy(input: {
   return true;
 }
 
+export async function tickOperationsEmailSentCopy(input: {
+  workerId: string;
+  config: OperationsEmailImapConfig;
+  signal?: AbortSignal;
+}): Promise<WorkerTickResult> {
+  if (input.signal?.aborted) return { kind: "idle" };
+  if (!input.config.configured)
+    return { kind: "disabled", safeReason: "imap_configuration_unavailable" };
+  const processed = await processOneOperationsEmailSentCopy(input);
+  return processed ? { kind: "worked" } : { kind: "idle" };
+}
+
+/** @deprecated C3 production startup uses tickOperationsEmailSentCopy. */
 export async function runOperationsEmailSentCopyWorker(input: {
   workerId: string;
   config: OperationsEmailImapConfig;
   signal: AbortSignal;
 }) {
-  while (!input.signal.aborted) {
-    try {
-      const processed = await processOneOperationsEmailSentCopy(input);
-      if (!processed) await sleep(input.config.workerPollMs, input.signal);
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          scope: "operations_email_sent_copy",
-          event: "isolated_iteration_failure",
-          errorCode: error instanceof Error ? error.name : "unknown",
-        }),
-      );
-      await sleep(input.config.workerPollMs, input.signal);
-    }
-  }
+  return tickOperationsEmailSentCopy(input);
 }

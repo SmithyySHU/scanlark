@@ -133,6 +133,23 @@ The worker starts four loops:
 - scheduler loop: creates scan jobs for due site schedules.
 - uptime loop: claims due uptime monitors and records availability checks.
 
+`WORKER_SHUTDOWN_GRACE_MS` defaults to `30000` and accepts an explicitly set
+integer from `5000` through `120000`. SIGTERM and SIGINT use one shared,
+idempotent shutdown path: it stops new claims, aborts polling/backoff waits,
+allows already claimed work up to that grace period, waits for all supervisors,
+then closes the SMTP transport and database connection. A normal shutdown exits
+naturally with code `0`; a grace timeout logs only unresolved loop names, makes
+best-effort cleanup, and terminates centrally with code `1`.
+
+An active scan retains its ordinary lease while it finishes in grace; if the
+worker is forced out, the existing lease-expiry reaper recovers it. SMTP is not
+closed until an in-flight tick settles. A transmission that is unresolved after
+the existing risk marker remains `delivery_uncertain`, rather than becoming
+safely retryable. CRM finalisation and Sent-copy recovery remain independent
+and idempotent after restart. The secret-free loop-health registry is persisted
+best effort (healthy heartbeats at most once every 30 seconds); persistence
+failure never changes work or delivery behaviour and never delays shutdown.
+
 Useful log markers:
 
 - `[worker ...] claimed|started|completed|failed|requeued`

@@ -4,25 +4,11 @@ import {
   markOperationsEmailCrmFinalisationFailed,
   recordOperationsEmailSystemAudit,
 } from "@scanlark/db";
+import type { WorkerTickResult } from "./workerSupervisor";
 
-const FINALISATION_POLL_MS = 2_000;
+export const FINALISATION_POLL_MS = 2_000;
 const FINALISATION_LEASE_SECONDS = 60;
 const FINALISATION_MAX_ATTEMPTS = 5;
-
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-}
 
 export async function processOneOperationsEmailCrmFinalisation(input: {
   workerId: string;
@@ -133,24 +119,19 @@ export async function processOneOperationsEmailCrmFinalisation(input: {
   return true;
 }
 
+export async function tickOperationsEmailCrmFinalisation(input: {
+  workerId: string;
+  signal?: AbortSignal;
+}): Promise<WorkerTickResult> {
+  if (input.signal?.aborted) return { kind: "idle" };
+  const processed = await processOneOperationsEmailCrmFinalisation(input);
+  return processed ? { kind: "worked" } : { kind: "idle" };
+}
+
+/** @deprecated C3 production startup uses tickOperationsEmailCrmFinalisation. */
 export async function runOperationsEmailCrmFinalisationWorker(input: {
   workerId: string;
   signal: AbortSignal;
 }) {
-  while (!input.signal.aborted) {
-    try {
-      const processed = await processOneOperationsEmailCrmFinalisation(input);
-      if (!processed) await sleep(FINALISATION_POLL_MS, input.signal);
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          scope: "operations_email_crm_finalisation",
-          event: "isolated_iteration_failure",
-          workerId: input.workerId,
-          errorCode: error instanceof Error ? error.name : "unknown",
-        }),
-      );
-      await sleep(FINALISATION_POLL_MS, input.signal);
-    }
-  }
+  return tickOperationsEmailCrmFinalisation(input);
 }

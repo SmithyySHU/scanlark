@@ -153,6 +153,17 @@ export type {
 export { formatIssuePresentation } from "./issuePresentation";
 export type { IssuePresentation } from "./issuePresentation";
 
+export {
+  listWorkerLoopHealth,
+  markWorkerLoopHealthStopped,
+  upsertWorkerLoopHealth,
+} from "./workerLoopHealth";
+export type {
+  WorkerLoopHealthMode,
+  WorkerLoopHealthRow,
+  WorkerLoopHealthWriteInput,
+} from "./workerLoopHealth";
+
 export { upsertScanPageCheck } from "./scanPageChecks";
 export type { ScanPageCheckInput, ScanPageCheckRow } from "./scanPageChecks";
 
@@ -740,3 +751,4 @@ export * from "./operationsEmailImapConfig";
 export * from "./operationsEmailFinalisation";
 
 export { SCAN_EVENT_CHANNEL } from "./events";
+export { closeConnection } from "./client";
