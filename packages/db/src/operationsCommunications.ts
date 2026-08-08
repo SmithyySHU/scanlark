@@ -797,9 +797,9 @@ export async function getOperationsCommunicationDraftContext(
     `
       SELECT id, name, website_url, general_email
       FROM operations_businesses
-      WHERE id = $1 AND internal_workspace_id = $3
+      WHERE id = $1 AND internal_workspace_id = $2
     `,
-    [businessId, null, workspaceId],
+    [businessId, workspaceId],
   );
   const business = businessRes.rows[0];
   if (!business) return null;

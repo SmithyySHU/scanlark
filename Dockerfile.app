@@ -10,6 +10,13 @@ COPY packages/db/package.json packages/db/package.json
 COPY packages/crawler/package.json packages/crawler/package.json
 RUN npm ci --include=dev
 
+# Debian's Chromium is deterministic at image build time and is resolved by
+# operationsReportPdf.ts at /usr/bin/chromium. Do not rely on a VPS-side
+# Playwright browser download.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY tsconfig.base.json tsconfig.json ./
 COPY apps/api ./apps/api
 COPY apps/worker ./apps/worker

@@ -10,6 +10,7 @@ import {
   listOperationsBusinesses,
   updateOperationsBusiness,
 } from "./operationsCrm";
+import { getOperationsCommunicationDraftContext } from "./operationsCommunications";
 import { canAccessOperationsResource } from "./operationsScope";
 
 const db = new Client({ connectionString: DATABASE_URL });
@@ -101,6 +102,24 @@ test("business creation persists the authoritative workspace", async () => {
   });
   businessA = detail.business.id;
   assert.equal(detail.business.internal_workspace_id, workspaceA);
+});
+
+test("communication draft context binds its optional contact placeholder and workspace", async () => {
+  if (!statefulAuditEnabled) return;
+
+  const context = await getOperationsCommunicationDraftContext(
+    workspaceA,
+    businessA,
+  );
+  assert.equal(context?.business.id, businessA);
+  assert.equal(context?.contact, null);
+
+  // A known business ID in another workspace must be indistinguishable from
+  // a missing business, and must never reach the contact/site lookups.
+  assert.equal(
+    await getOperationsCommunicationDraftContext(workspaceA, businessB),
+    null,
+  );
 });
 
 test("business lists and direct resource checks are workspace isolated", async () => {

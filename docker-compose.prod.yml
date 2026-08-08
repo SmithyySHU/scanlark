@@ -24,22 +24,19 @@ services:
       - tools
     env_file:
       - ${SCANLARK_ENV_FILE:-.env.production}
+    environment:
+      MIGRATIONS_DIR: /migrations
+      # This one-off, private Compose service is the only production caller of
+      # the guarded runner. All other invocations stay loopback/disposable-only.
+      ALLOW_NON_DISPOSABLE_MIGRATIONS: "1"
+      ALLOW_PRODUCTION_MIGRATIONS: "1"
     volumes:
       - ./packages/db/migrations:/migrations:ro
+      - ./scripts/run-migrations.sh:/usr/local/bin/run-migrations:ro
     depends_on:
       postgres:
         condition: service_healthy
-    command: >
-      sh -c 'set -eu;
-      psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS scanlark_schema_migrations (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())";
-      for f in /migrations/*.sql; do
-        filename=$$(basename "$$f");
-        applied=$$(printf "%s\n" "SELECT 1 FROM scanlark_schema_migrations WHERE filename = :'filename';" | psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -v filename="$$filename" -At);
-        if [ "$$applied" = "1" ]; then echo "Skipping $$f (already applied)"; continue; fi;
-        echo "Applying $$f";
-        psql "$$DATABASE_URL" --single-transaction -v ON_ERROR_STOP=1 -f "$$f";
-        printf "%s\n" "INSERT INTO scanlark_schema_migrations(filename) VALUES (:'filename') ON CONFLICT (filename) DO NOTHING;" | psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -v filename="$$filename";
-      done'
+    command: ["sh", "/usr/local/bin/run-migrations"]
     networks:
       - scanlark_private
 
