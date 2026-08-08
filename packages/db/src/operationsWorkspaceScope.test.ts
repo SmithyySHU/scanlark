@@ -9,6 +9,7 @@ import {
   getOperationsReportPreview,
   isOperationsReportApprovalCurrent,
   updateOperationsReportActionPlanItem,
+  updateOperationsReportFinding,
 } from "./operationsReports";
 import {
   createOperationsBusiness,
@@ -194,12 +195,65 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
     [reportA, finding.rows[0].id],
   );
 
+  const excluded = await updateOperationsReportFinding(
+    workspaceA,
+    actor,
+    reportA,
+    finding.rows[0].id,
+    {
+      clientEvidence: "Unsaved client evidence saved with the exclusion.",
+      isIncluded: false,
+      isFalsePositive: false,
+      expectedRevision: 1,
+    },
+  );
+  assert.equal(excluded?.is_included, false);
+  assert.equal(excluded?.is_false_positive, false);
+  assert.equal(
+    excluded?.client_evidence,
+    "Unsaved client evidence saved with the exclusion.",
+  );
+
+  const restored = await updateOperationsReportFinding(
+    workspaceA,
+    actor,
+    reportA,
+    finding.rows[0].id,
+    { isIncluded: true, isFalsePositive: false, expectedRevision: 2 },
+  );
+  assert.equal(restored?.is_included, true);
+  assert.equal(restored?.is_false_positive, false);
+
+  const falsePositive = await updateOperationsReportFinding(
+    workspaceA,
+    actor,
+    reportA,
+    finding.rows[0].id,
+    { isIncluded: false, isFalsePositive: true, expectedRevision: 3 },
+  );
+  assert.equal(falsePositive?.is_included, false);
+  assert.equal(falsePositive?.is_false_positive, true);
+
+  const reviewed = await updateOperationsReportFinding(
+    workspaceA,
+    actor,
+    reportA,
+    finding.rows[0].id,
+    {
+      isIncluded: true,
+      isFalsePositive: false,
+      reviewedAt: new Date(),
+      expectedRevision: 4,
+    },
+  );
+  assert.ok(reviewed?.reviewed_at);
+
   const saved = await updateOperationsReportActionPlanItem(
     workspaceA,
     actor,
     reportA,
     action.rows[0].id,
-    { title: "Saved action title", expectedRevision: 1 },
+    { title: "Saved action title", expectedRevision: 5 },
   );
   assert.equal(saved?.title, "Saved action title");
   assert.equal(
@@ -215,7 +269,7 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
 
   await getOperationsReportPreview(workspaceA, reportA);
 
-  const approved = await approveOperationsReport(workspaceA, actor, reportA, 2);
+  const approved = await approveOperationsReport(workspaceA, actor, reportA, 6);
   assert.ok(approved && !("readinessIssues" in approved));
   if (!approved || "readinessIssues" in approved) return;
   assert.equal(isOperationsReportApprovalCurrent(approved.report), true);
@@ -230,7 +284,7 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
     actor,
     reportA,
     action.rows[0].id,
-    { summary: "A client-visible amendment.", expectedRevision: 2 },
+    { summary: "A client-visible amendment.", expectedRevision: 6 },
   );
   const current = await db.query<{
     content_revision: number;
@@ -239,8 +293,8 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
     `SELECT content_revision, approved_content_revision FROM operations_reports WHERE id = $1`,
     [reportA],
   );
-  assert.equal(current.rows[0].content_revision, 3);
-  assert.equal(current.rows[0].approved_content_revision, 2);
+  assert.equal(current.rows[0].content_revision, 7);
+  assert.equal(current.rows[0].approved_content_revision, 6);
 });
 
 test("business lists and direct resource checks are workspace isolated", async () => {

@@ -19,3 +19,15 @@ test("mobile finding focus trap does not rerun for controlled draft edits", () =
     /onBack=\{\(\) => setFindingDetailOpen\(false\)\}/,
   );
 });
+
+test("finding lifecycle actions save draft content in the same revision-bound request", () => {
+  assert.match(
+    source,
+    /const saveWithFindingPatch = async \(input: Record<string, unknown>\) => \{\s*await onSave\(\{ findingPatch: input \}\);/,
+  );
+  assert.match(source, /\.\.\.options\?\.findingPatch,/);
+  assert.doesNotMatch(
+    source,
+    /await onSave\(\);\s*await onPatchFinding\(finding\.id,/,
+  );
+});

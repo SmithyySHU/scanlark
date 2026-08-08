@@ -459,6 +459,7 @@ export function OperationsReportWorkspace({
   async function saveFindingAndContinue(options?: {
     nextId?: string;
     markReviewed?: boolean;
+    findingPatch?: Record<string, unknown>;
   }) {
     if (!findingDraft.draft) return;
     setFindingSaveState("saving");
@@ -478,6 +479,7 @@ export function OperationsReportWorkspace({
         reviewNote: findingDraft.draft.review_note,
         estimatedEffort: findingDraft.draft.estimated_effort,
         displayOrder: findingDraft.draft.display_order,
+        ...options?.findingPatch,
         ...(options?.markReviewed
           ? { reviewedAt: new Date().toISOString() }
           : {}),
@@ -1281,7 +1283,6 @@ export function OperationsReportWorkspace({
                   onChange={findingDraft.updateDraft}
                   onSave={saveFindingAndContinue}
                   onBack={closeFindingDetail}
-                  onPatchFinding={onPatchFinding}
                 />
               );
             })()}
@@ -1514,7 +1515,6 @@ function FindingEditor({
   onChange,
   onSave,
   onBack,
-  onPatchFinding,
 }: {
   finding: OperationsReportFinding;
   sources: OperationsReportFindingSource[];
@@ -1529,12 +1529,9 @@ function FindingEditor({
   onSave: (options?: {
     nextId?: string;
     markReviewed?: boolean;
+    findingPatch?: Record<string, unknown>;
   }) => Promise<void>;
   onBack: () => void;
-  onPatchFinding: (
-    findingId: string,
-    input: Record<string, unknown>,
-  ) => Promise<void>;
 }) {
   const editorRef = useRef<HTMLElement | null>(null);
   const missing = missingFindingReadinessFields(finding);
@@ -1555,9 +1552,8 @@ function FindingEditor({
     });
   };
 
-  const saveThenPatch = async (input: Record<string, unknown>) => {
-    await onSave();
-    await onPatchFinding(finding.id, input);
+  const saveWithFindingPatch = async (input: Record<string, unknown>) => {
+    await onSave({ findingPatch: input });
   };
 
   const exampleText = (
@@ -1588,7 +1584,7 @@ function FindingEditor({
       if (isEditing) return;
       if (event.key.toLowerCase() === "e") {
         event.preventDefault();
-        void saveThenPatch({ isIncluded: false });
+        void saveWithFindingPatch({ isIncluded: false });
       } else if (event.key.toLowerCase() === "r") {
         event.preventDefault();
         void onSave({ markReviewed: true });
@@ -1607,14 +1603,7 @@ function FindingEditor({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [
-    finding.id,
-    nextIncomplete,
-    onPatchFinding,
-    onSave,
-    previousIncomplete,
-    reviewedNextId,
-  ]);
+  }, [finding.id, nextIncomplete, onSave, previousIncomplete, reviewedNextId]);
 
   useEffect(() => {
     if (!trapFocus || !window.matchMedia("(max-width: 980px)").matches) {
@@ -1671,7 +1660,7 @@ function FindingEditor({
           className="ops-button"
           disabled={saveState === "saving" || finding.is_included}
           onClick={() =>
-            void saveThenPatch({
+            void saveWithFindingPatch({
               isIncluded: true,
               isFalsePositive: false,
             })
@@ -1685,7 +1674,7 @@ function FindingEditor({
           onClick={() =>
             window.confirm(
               "Exclude this finding from the client report? Technical source issues and evidence will be preserved, and linked action-plan output for this finding will be hidden from the client report.",
-            ) && void saveThenPatch({ isIncluded: false })
+            ) && void saveWithFindingPatch({ isIncluded: false })
           }
         >
           Exclude from client report
@@ -1697,7 +1686,7 @@ function FindingEditor({
             window.confirm(
               "Mark this finding as a false positive for this client report? Technical source records will be preserved.",
             ) &&
-            void saveThenPatch({
+            void saveWithFindingPatch({
               isIncluded: false,
               isFalsePositive: true,
             })
@@ -1780,7 +1769,7 @@ function FindingEditor({
               type="checkbox"
               checked={finding.is_included && !finding.is_false_positive}
               onChange={(event) =>
-                void saveThenPatch({
+                void saveWithFindingPatch({
                   isIncluded: event.target.checked,
                   isFalsePositive: false,
                 })
