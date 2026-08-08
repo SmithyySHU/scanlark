@@ -9952,6 +9952,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           onApplyRegroup={applyReportRegroup}
           onPatchObservation={patchPositiveObservation}
           onPatchActionPlanItem={patchActionPlanItem}
+          onApprove={() =>
+            runReportAction("approve", {
+              expectedRevision: report.content_revision,
+            })
+          }
           onMarkReady={() => runReportAction("mark-ready")}
           onRecordSent={recordReportSent}
           onGeneratePdf={generateReportPdf}
@@ -12937,6 +12942,38 @@ const operationsStyles = `
     overflow-wrap: anywhere;
     color: var(--text-muted);
     font-size: 12px;
+  }
+  .ops-report-action-context {
+    display: grid;
+    gap: 7px;
+    padding: 11px;
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent-soft) 48%, transparent);
+  }
+  .ops-report-action-context > div:first-child {
+    display: grid;
+    gap: 2px;
+  }
+  .ops-report-action-context p,
+  .ops-report-action-context li {
+    overflow-wrap: anywhere;
+  }
+  .ops-report-action-context ul {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 18px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .ops-report-approval {
+    display: grid;
+    gap: 7px;
+  }
+  .ops-report-approval h3,
+  .ops-report-approval p {
+    margin: 0;
   }
   .ops-report-finding-editor input,
   .ops-report-finding-editor textarea,

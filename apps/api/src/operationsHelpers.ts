@@ -2168,6 +2168,15 @@ export function parseOperationsReportUpdateInput(
   return parsed;
 }
 
+export function parseOperationsReportApprovalInput(body: unknown) {
+  const input = body && typeof body === "object" ? body : {};
+  return {
+    expectedRevision: optionalExpectedRevision(
+      input as Record<string, unknown>,
+    ),
+  };
+}
+
 export function parseOperationsReportFindingUpdateInput(
   body: unknown,
 ): OperationsReportFindingUpdateInput {

@@ -23,6 +23,7 @@ import {
   parseOperationsAccessRequirementInput,
   parseOperationsReportCreateInput,
   parseOperationsReportActionPlanItemUpdateInput,
+  parseOperationsReportApprovalInput,
   parseOperationsReportFindingBulkInput,
   parseOperationsReportFindingUpdateInput,
   parseOperationsReportPositiveObservationUpdateInput,
@@ -936,6 +937,12 @@ test("operations report creation validation requires safe report relationships a
 });
 
 test("operations report editing validation rejects unsafe client copy and invalid priorities", () => {
+  assert.deepEqual(
+    parseOperationsReportApprovalInput({ expectedRevision: 3 }),
+    {
+      expectedRevision: 3,
+    },
+  );
   const reportPatch = parseOperationsReportUpdateInput({
     status: "needs_review",
     executiveSummary: "Reviewed summary for the client.",
@@ -1491,10 +1498,12 @@ test("operations client report payload excludes internal-only finding data", () 
       (issue) => issue.code === "positive_observation_unreviewed",
     ),
   );
-  assert(
+  assert.equal(
     incompleteIssues.some(
       (issue) => issue.code === "action_plan_item_unreviewed",
     ),
+    false,
+    "generated linked actions inherit review readiness from their finding",
   );
   assert(
     incompleteIssues.some((issue) => issue.code === "unresolved_placeholder"),

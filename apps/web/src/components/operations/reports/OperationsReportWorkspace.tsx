@@ -89,6 +89,21 @@ function firstExampleText(finding: OperationsReportFinding) {
   );
 }
 
+function exampleTextForAction(finding: OperationsReportFinding, index: number) {
+  const example = finding.representative_examples_json[index];
+  if (!example) return "";
+  return [
+    example.affectedPageUrl ? `Page: ${example.affectedPageUrl}` : null,
+    example.affectedResourceUrl
+      ? `Resource: ${example.affectedResourceUrl}`
+      : null,
+    example.result,
+    example.note,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function actionPlanLabel(value: string) {
   if (value === "address_now") return "Address now";
   if (value === "address_soon") return "Address soon";
@@ -125,6 +140,7 @@ type Props = {
     itemId: string,
     input: Record<string, unknown>,
   ) => Promise<void>;
+  onApprove: () => Promise<void>;
   onMarkReady: () => Promise<void>;
   onRecordSent: () => Promise<void>;
   onGeneratePdf: (mode: "draft" | "final") => Promise<void>;
@@ -148,6 +164,7 @@ export function OperationsReportWorkspace({
   onApplyRegroup,
   onPatchObservation,
   onPatchActionPlanItem,
+  onApprove,
   onMarkReady,
   onRecordSent,
   onGeneratePdf,
@@ -238,6 +255,14 @@ export function OperationsReportWorkspace({
   );
   const previewStale =
     reportDraft.dirty || findingDraft.dirty || dirtyChildKeys.size > 0;
+  const approvalCurrent =
+    Boolean(
+      detail.report.approved_at &&
+      detail.report.approved_by_user_id &&
+      detail.report.approved_content_revision != null,
+    ) &&
+    detail.report.approved_content_revision ===
+      (detail.report.content_revision ?? 1);
   const clientOutputFrozen =
     Boolean(detail.report.frozen_at) &&
     !["draft", "needs_review"].includes(detail.report.status);
@@ -261,7 +286,9 @@ export function OperationsReportWorkspace({
     ? "Save your changes before generating a PDF."
     : pdfBlockingIssues.length > 0
       ? `${pdfBlockingIssues.length} readiness item${pdfBlockingIssues.length === 1 ? "" : "s"} block final PDF generation.`
-      : "";
+      : !approvalCurrent
+        ? "Approve the current report preview before generating the final PDF."
+        : "";
   const includedFindingIds = new Set(
     detail.findings
       .filter((finding) => finding.is_included && !finding.is_false_positive)
@@ -352,6 +379,21 @@ export function OperationsReportWorkspace({
       setFindingDetailOpen(true);
     },
     [findingDraft],
+  );
+
+  const closeFindingDetail = useCallback(() => {
+    setFindingDetailOpen(false);
+  }, []);
+
+  const openActionPlanFinding = useCallback(
+    (findingId: string) => {
+      setTab("findings");
+      setFilter("all");
+      setCategory("");
+      setSearch("");
+      selectFinding(findingId);
+    },
+    [selectFinding],
   );
 
   function switchTab(nextTab: ReportTab) {
@@ -584,7 +626,11 @@ export function OperationsReportWorkspace({
             <>
               <button
                 className="ops-button"
-                disabled={pdfBlockingIssues.length > 0 || previewStale}
+                disabled={
+                  pdfBlockingIssues.length > 0 ||
+                  previewStale ||
+                  !approvalCurrent
+                }
                 onClick={() => void onGeneratePdf("final")}
               >
                 Generate final PDF
@@ -594,7 +640,8 @@ export function OperationsReportWorkspace({
                 disabled={
                   detail.report.status === "ready_to_send" ||
                   readinessIssues.length > 0 ||
-                  previewStale
+                  previewStale ||
+                  !approvalCurrent
                 }
                 onClick={() => void onMarkReady()}
               >
@@ -1233,7 +1280,7 @@ export function OperationsReportWorkspace({
                   trapFocus={findingDetailOpen}
                   onChange={findingDraft.updateDraft}
                   onSave={saveFindingAndContinue}
-                  onBack={() => setFindingDetailOpen(false)}
+                  onBack={closeFindingDetail}
                   onPatchFinding={onPatchFinding}
                 />
               );
@@ -1245,8 +1292,10 @@ export function OperationsReportWorkspace({
         <section className="ops-two-column">
           <ReportActionPlan
             items={visibleActionPlanItems}
+            findings={detail.findings}
             onPatch={onPatchActionPlanItem}
             onDirty={setChildDirty}
+            onOpenFinding={openActionPlanFinding}
           />
           <ReportPositiveObservations
             observations={detail.positiveObservations}
@@ -1276,6 +1325,54 @@ export function OperationsReportWorkspace({
               </button>
             </div>
           </div>
+          <section className="ops-empty-card ops-report-approval">
+            <h3>Report approval</h3>
+            {approvalCurrent ? (
+              <p>
+                <strong>Approved</strong>
+                {detail.report.approved_by_email
+                  ? ` by ${detail.report.approved_by_email}`
+                  : ""}
+                {detail.report.approved_at
+                  ? ` · ${formatOperationsDateTime(detail.report.approved_at)}`
+                  : ""}
+              </p>
+            ) : detail.report.approved_at ? (
+              <>
+                <p>
+                  <strong>Changes made since approval — review again</strong>
+                </p>
+                <p className="ops-muted">
+                  Client-visible content changed after approval. Review this
+                  preview and approve the current version again.
+                </p>
+              </>
+            ) : (
+              <>
+                <p>
+                  <strong>Not approved</strong>
+                </p>
+                <p className="ops-muted">
+                  Review this client preview, then approve this exact report
+                  version before generating the final PDF.
+                </p>
+              </>
+            )}
+            {!artifactReadOnly && !previewStale && !approvalCurrent && (
+              <button
+                className="ops-button ops-button--primary"
+                disabled={pdfBlockingIssues.length > 0}
+                onClick={() => void onApprove()}
+              >
+                Approve report for final PDF
+              </button>
+            )}
+            {!approvalCurrent && pdfBlockingIssues.length > 0 && (
+              <small className="ops-muted">
+                Complete the remaining report review items before approval.
+              </small>
+            )}
+          </section>
           <ReportClientPreview
             payload={preview}
             stale={previewStale}
@@ -1550,7 +1647,7 @@ function FindingEditor({
     };
     editor.addEventListener("keydown", handleTrap);
     return () => editor.removeEventListener("keydown", handleTrap);
-  }, [onBack, trapFocus]);
+  }, [finding.id, onBack, trapFocus]);
 
   return (
     <aside
@@ -1922,12 +2019,16 @@ function FindingEditor({
 
 function ReportActionPlan({
   items,
+  findings,
   onPatch,
   onDirty,
+  onOpenFinding,
 }: {
   items: OperationsReportActionPlanItem[];
+  findings: OperationsReportFinding[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
   onDirty: (key: string, dirty: boolean) => void;
+  onOpenFinding: (findingId: string) => void;
 }) {
   const groups: OperationsReportActionPlanGroup[] = [
     "address_now",
@@ -1946,9 +2047,17 @@ function ReportActionPlan({
               <ActionPlanItemEditor
                 key={item.id}
                 item={item}
+                finding={
+                  item.report_finding_id
+                    ? (findings.find(
+                        (finding) => finding.id === item.report_finding_id,
+                      ) ?? null)
+                    : null
+                }
                 groups={groups}
                 onPatch={onPatch}
                 onDirty={onDirty}
+                onOpenFinding={onOpenFinding}
               />
             ))}
         </section>
@@ -1959,14 +2068,18 @@ function ReportActionPlan({
 
 function ActionPlanItemEditor({
   item,
+  finding,
   groups,
   onPatch,
   onDirty,
+  onOpenFinding,
 }: {
   item: OperationsReportActionPlanItem;
+  finding: OperationsReportFinding | null;
   groups: OperationsReportActionPlanGroup[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
   onDirty: (key: string, dirty: boolean) => void;
+  onOpenFinding: (findingId: string) => void;
 }) {
   const draft = useOperationsReportDraft(item);
   const dirtyKey = `action-${item.id}`;
@@ -1986,8 +2099,7 @@ function ActionPlanItemEditor({
       summary: draft.draft.summary,
       groupKey: draft.draft.group_key,
       isIncluded: draft.draft.is_included,
-      reviewedAt: draft.draft.reviewed_at,
-      displayOrder: draft.draft.display_order,
+      ...(finding ? {} : { reviewedAt: draft.draft.reviewed_at }),
     });
     draft.setDirty(false);
     onDirty(dirtyKey, false);
@@ -1995,6 +2107,44 @@ function ActionPlanItemEditor({
 
   return (
     <article className="ops-list-card ops-form">
+      {finding && (
+        <div className="ops-report-action-context">
+          <div>
+            <small>Linked finding</small>
+            <strong>{finding.title}</strong>
+          </div>
+          <span className="ops-status-pill">
+            {priorityLabel(finding.client_priority)}
+          </span>
+          <p>
+            {finding.affected_url ??
+              finding.affected_url_note ??
+              "No affected URL recorded"}
+          </p>
+          <small>
+            {finding.occurrence_count} occurrences ·{" "}
+            {finding.affected_page_count} pages ·{" "}
+            {finding.affected_resource_count} resources
+          </small>
+          {finding.representative_examples_json.length > 0 && (
+            <ul>
+              {finding.representative_examples_json
+                .slice(0, 3)
+                .map((example, index) => (
+                  <li key={`${finding.id}-example-${index}`}>
+                    {exampleTextForAction(finding, index)}
+                  </li>
+                ))}
+            </ul>
+          )}
+          <button
+            className="ops-button"
+            onClick={() => onOpenFinding(finding.id)}
+          >
+            View finding
+          </button>
+        </div>
+      )}
       <div className="ops-inline-actions">
         <label className="ops-checkbox">
           <input
@@ -2004,20 +2154,22 @@ function ActionPlanItemEditor({
           />
           Include
         </label>
-        <label className="ops-checkbox">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.draft.reviewed_at)}
-            onChange={(event) =>
-              update({
-                reviewed_at: event.target.checked
-                  ? new Date().toISOString()
-                  : null,
-              })
-            }
-          />
-          Reviewed
-        </label>
+        {!finding && (
+          <label className="ops-checkbox">
+            <input
+              type="checkbox"
+              checked={Boolean(draft.draft.reviewed_at)}
+              onChange={(event) =>
+                update({
+                  reviewed_at: event.target.checked
+                    ? new Date().toISOString()
+                    : null,
+                })
+              }
+            />
+            Reviewed
+          </label>
+        )}
       </div>
       <label>
         Action
@@ -2051,17 +2203,6 @@ function ActionPlanItemEditor({
               </option>
             ))}
           </select>
-        </label>
-        <label>
-          Order
-          <input
-            type="number"
-            min="0"
-            value={draft.draft.display_order}
-            onChange={(event) =>
-              update({ display_order: Number(event.target.value) || 0 })
-            }
-          />
         </label>
       </div>
       <button

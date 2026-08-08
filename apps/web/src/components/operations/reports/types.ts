@@ -59,6 +59,11 @@ export type OperationsReportRow = {
   status: OperationsReportStatus;
   report_type: OperationsReportType;
   version_number: number;
+  content_revision?: number;
+  approved_at?: string | null;
+  approved_by_user_id?: string | null;
+  approved_by_email?: string | null;
+  approved_content_revision?: number | null;
   supersedes_report_id?: string | null;
   executive_summary: string | null;
   overall_summary: string | null;

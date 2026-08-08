@@ -87,6 +87,10 @@ export type OperationsReportRow = {
   report_type: OperationsReportType;
   version_number: number;
   content_revision?: number;
+  approved_at?: Date | null;
+  approved_by_user_id?: string | null;
+  approved_by_email?: string | null;
+  approved_content_revision?: number | null;
   executive_summary: string | null;
   overall_summary: string | null;
   main_strengths: string | null;
@@ -374,6 +378,10 @@ export type OperationsReportReadinessIssue = {
   section: OperationsReportReadinessSection;
   findingId?: string;
 };
+
+export type OperationsReportApprovalResult =
+  | OperationsReportDetail
+  | { readinessIssues: OperationsReportReadinessIssue[] };
 
 export type OperationsReportFindingBulkInput = {
   expectedRevision?: number;
@@ -1060,6 +1068,7 @@ function reportSelect() {
     c.first_name AS contact_first_name,
     c.last_name AS contact_last_name,
     c.email AS contact_email,
+    approved_by.email AS approved_by_email,
     COALESCE(finding_counts.included_findings, 0)::int AS included_findings,
     COALESCE(finding_counts.excluded_findings, 0)::int AS excluded_findings,
     COALESCE(finding_counts.incomplete_findings, 0)::int AS incomplete_findings,
@@ -1076,6 +1085,7 @@ function reportJoins() {
     JOIN sites s ON s.id = r.site_id
     JOIN scan_runs sr ON sr.id = r.scan_run_id
     LEFT JOIN operations_contacts c ON c.id = r.prepared_contact_id
+    LEFT JOIN users approved_by ON approved_by.id = r.approved_by_user_id
     LEFT JOIN LATERAL (
       SELECT
         COUNT(*) FILTER (WHERE si.severity = 'critical' AND si.status = 'open')::int AS critical_count,
@@ -1277,6 +1287,23 @@ function assertReportStatusTransition(
   }
 }
 
+export function isOperationsReportApprovalCurrent(
+  report: Pick<
+    OperationsReportRow,
+    | "approved_at"
+    | "approved_by_user_id"
+    | "approved_content_revision"
+    | "content_revision"
+  >,
+) {
+  return Boolean(
+    report.approved_at &&
+    report.approved_by_user_id &&
+    report.approved_content_revision != null &&
+    report.approved_content_revision === (report.content_revision ?? 1),
+  );
+}
+
 async function bumpReportContentRevision(
   workspaceId: string,
   reportId: string,
@@ -1468,7 +1495,7 @@ async function invalidateEditableReportRender(
           last_pdf_generated_at = NULL,
           updated_at = now()
       WHERE id = $1
-        AND status IN ('draft', 'needs_review')
+        AND status IN ('draft', 'needs_review', 'ready_to_send')
         AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_reports.id AND b.internal_workspace_id = $2)
       RETURNING id
     `,
@@ -2647,10 +2674,10 @@ export async function updateOperationsReport(
           no_major_findings_waived = COALESCE($26, no_major_findings_waived),
           display_settings_json = $27,
           content_revision = content_revision + 1,
-          frozen_render_json = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_render_json END,
-          frozen_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE frozen_at END,
-          last_preview_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_preview_generated_at END,
-          last_pdf_generated_at = CASE WHEN status IN ('draft', 'needs_review') THEN NULL ELSE last_pdf_generated_at END,
+          frozen_render_json = CASE WHEN status IN ('draft', 'needs_review', 'ready_to_send') THEN NULL ELSE frozen_render_json END,
+          frozen_at = CASE WHEN status IN ('draft', 'needs_review', 'ready_to_send') THEN NULL ELSE frozen_at END,
+          last_preview_generated_at = CASE WHEN status IN ('draft', 'needs_review', 'ready_to_send') THEN NULL ELSE last_preview_generated_at END,
+          last_pdf_generated_at = CASE WHEN status IN ('draft', 'needs_review', 'ready_to_send') THEN NULL ELSE last_pdf_generated_at END,
           updated_at = now()
       WHERE id = $1
         AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_reports.id AND b.internal_workspace_id = $28 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
@@ -3189,7 +3216,10 @@ export function getOperationsReportReadinessIssues(
       action.report_finding_id == null ||
       includedFindingIds.has(action.report_finding_id),
   )) {
-    if (!item.reviewed_at) {
+    // Generated actions inherit client-review readiness from their linked
+    // finding. The finding itself remains subject to every readiness check
+    // above, so a second checkbox would add no evidence or protection.
+    if (item.report_finding_id == null && !item.reviewed_at) {
       add(
         "action_plan_item_unreviewed",
         `Review the action-plan item "${item.title}".`,
@@ -3602,6 +3632,58 @@ export async function getOperationsReportPdfRender(
   return res.rows[0] ?? null;
 }
 
+export async function approveOperationsReport(
+  workspaceId: string,
+  actor: AdminActor,
+  reportId: string,
+  expectedRevision?: number,
+): Promise<OperationsReportApprovalResult | null> {
+  const detail = await getOperationsReportDetail(workspaceId, reportId);
+  if (!detail) return null;
+  assertReportContentMutable(detail.report, expectedRevision);
+  const readinessIssues = getOperationsReportReadinessIssues(
+    detail.report,
+    detail.findings,
+    detail.positiveObservations,
+    detail.actionPlanItems,
+    { requirePreview: true, requirePdf: false },
+  );
+  if (readinessIssues.length > 0) return { readinessIssues };
+
+  const revision = detail.report.content_revision ?? 1;
+  const client = await ensureConnected();
+  const updated = await client.query<OperationsReportRow>(
+    `
+      UPDATE operations_reports
+      SET approved_at = now(),
+          approved_by_user_id = $2,
+          approved_content_revision = content_revision,
+          updated_at = now()
+      WHERE id = $1
+        AND content_revision = $3
+        AND status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived')
+        AND EXISTS (
+          SELECT 1 FROM operations_businesses b
+          WHERE b.id = operations_reports.business_id
+            AND b.internal_workspace_id = $4
+        )
+      RETURNING *
+    `,
+    [reportId, actor.id, revision, workspaceId],
+  );
+  if (!updated.rows[0]) {
+    await throwIfReportMutationRejected(workspaceId, reportId, revision);
+    throw staleRevisionError("report");
+  }
+  await recordAdminAuditLog(actor, {
+    action: "operations_report_approved",
+    targetType: "operations_report",
+    targetId: reportId,
+    metadata: { contentRevision: revision },
+  });
+  return getOperationsReportDetail(workspaceId, reportId);
+}
+
 export async function markOperationsReportStatus(
   workspaceId: string,
   actor: AdminActor,
@@ -3620,6 +3702,18 @@ export async function markOperationsReportStatus(
       { requirePreview: true, requirePdf: true },
     );
     if (issues.length > 0) return { readinessIssues: issues };
+    if (!isOperationsReportApprovalCurrent(detail.report)) {
+      return {
+        readinessIssues: [
+          {
+            code: "report_approval_required",
+            message:
+              "Review the current client preview and approve the report before marking it ready.",
+            section: "preview",
+          },
+        ],
+      };
+    }
     if (!isCurrentClientReportPayload(detail.report.frozen_render_json)) {
       await freezeOperationsReportRender(
         workspaceId,

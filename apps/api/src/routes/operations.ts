@@ -10,6 +10,7 @@ import {
   addOperationsWorkItem,
   addOperationsWorkOrderAccessRequirement,
   activateOperationsClientService,
+  approveOperationsReport,
   cancelOperationsCommunication,
   cancelOperationsClientService,
   cancelOperationsQuote,
@@ -189,6 +190,7 @@ import {
   parseOperationsQuoteStatus,
   parseOperationsQuoteUpdateInput,
   parseOperationsReportClientPriority,
+  parseOperationsReportApprovalInput,
   parseOperationsReportActionPlanItemUpdateInput,
   parseOperationsReportComparisonStatus,
   parseOperationsReportComparisonUpdateInput,
@@ -4131,6 +4133,43 @@ export function mountOperationsRoutes(app: express.Application) {
     }
   });
 
+  router.post("/reports/:reportId/approve", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const input = parseOperationsReportApprovalInput(req.body);
+      const result = await approveOperationsReport(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+        input.expectedRevision,
+      );
+      if (!result) {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      if ("readinessIssues" in result) {
+        return sendApiError(
+          res,
+          400,
+          "report_not_ready_for_approval",
+          "Complete the report review and open the current preview before approval.",
+          { readinessIssues: result.readinessIssues },
+        );
+      }
+      return res.json({ report: serializeObject(result) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report approval failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_approval_failed",
+        "Failed to approve the report",
+      );
+    }
+  });
+
   router.post("/reports/:reportId/generate-pdf", async (req, res) => {
     const reportId = getUuidParam(req, res, "reportId");
     if (!reportId) return;
@@ -4142,6 +4181,35 @@ export function mountOperationsRoutes(app: express.Application) {
       );
       if (!preview)
         return sendApiError(res, 404, "not_found", "Report not found");
+      const currentReport =
+        mode === "final"
+          ? await getOperationsReportDetail(getWorkspaceId(req), reportId)
+          : null;
+      if (
+        mode === "final" &&
+        (!currentReport ||
+          !currentReport.report.approved_at ||
+          !currentReport.report.approved_by_user_id ||
+          currentReport.report.approved_content_revision !==
+            (currentReport.report.content_revision ?? 1))
+      ) {
+        return sendApiError(
+          res,
+          400,
+          "report_approval_required",
+          "Review the current preview and approve the report before generating the final PDF.",
+          {
+            readinessIssues: [
+              {
+                code: "report_approval_required",
+                message:
+                  "Approve the current report version before generating the final PDF.",
+                section: "preview",
+              },
+            ],
+          },
+        );
+      }
       if (preview.frozen && mode === "final") {
         const storedPdf = await getOperationsReportPdfRender(
           getWorkspaceId(req),

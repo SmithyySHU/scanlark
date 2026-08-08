@@ -340,6 +340,7 @@ export type {
 export {
   buildOperationsClientReportPayload,
   bulkUpdateOperationsReportFindings,
+  approveOperationsReport,
   createOperationsReport,
   createRevisedOperationsReport,
   createOperationsReportRetest,
@@ -353,6 +354,7 @@ export {
   getOperationsReportPreview,
   getOperationsReportPdfRender,
   getOperationsReportReadinessIssues,
+  isOperationsReportApprovalCurrent,
   listOperationsReportableScanRuns,
   listOperationsReports,
   markOperationsReportStatus,
@@ -377,6 +379,7 @@ export type {
   OperationsReportActionPlanGroup,
   OperationsReportActionPlanItemRow,
   OperationsReportActionPlanItemUpdateInput,
+  OperationsReportApprovalResult,
   OperationsReportClientPriority,
   OperationsReportComparisonItemRow,
   OperationsReportComparisonStatus,
