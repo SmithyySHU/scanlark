@@ -124,6 +124,10 @@ type Props = {
   readinessIssues: OperationsReportReadinessIssue[];
   regroupPreview: OperationsReportRegroupPreview | null;
   actionError: string | null;
+  actionPlanPatchRecovery: {
+    staleItemId: string;
+    replacementItemId: string | null;
+  } | null;
   onPatchReport: (input: Record<string, unknown>) => Promise<void>;
   onPatchFinding: (
     findingId: string,
@@ -157,6 +161,7 @@ export function OperationsReportWorkspace({
   readinessIssues,
   regroupPreview,
   actionError,
+  actionPlanPatchRecovery,
   onPatchReport,
   onPatchFinding,
   onBulkFindings,
@@ -299,9 +304,18 @@ export function OperationsReportWorkspace({
       item.report_finding_id == null ||
       includedFindingIds.has(item.report_finding_id),
   );
+  const visibleActionPlanItemsWithRecovery = visibleActionPlanItems.filter(
+    (item) =>
+      !actionPlanPatchRecovery ||
+      item.id !== actionPlanPatchRecovery.staleItemId,
+  );
   const estimatedMainPages = Math.max(
     5,
-    Math.ceil(2 + includedCount * 0.55 + visibleActionPlanItems.length * 0.15),
+    Math.ceil(
+      2 +
+        includedCount * 0.55 +
+        visibleActionPlanItemsWithRecovery.length * 0.15,
+    ),
   );
   const readinessSections = useMemo(() => {
     const sectionLabels: Record<
@@ -548,6 +562,11 @@ export function OperationsReportWorkspace({
       return next;
     });
   }
+
+  useEffect(() => {
+    if (!actionPlanPatchRecovery) return;
+    setChildDirty(`action-${actionPlanPatchRecovery.staleItemId}`, false);
+  }, [actionPlanPatchRecovery]);
 
   function openReadinessIssue(issue: OperationsReportReadinessIssue) {
     setTab(issue.section);
@@ -1292,7 +1311,7 @@ export function OperationsReportWorkspace({
       {tab === "action_plan" && (
         <section className="ops-two-column">
           <ReportActionPlan
-            items={visibleActionPlanItems}
+            items={visibleActionPlanItemsWithRecovery}
             findings={detail.findings}
             onPatch={onPatchActionPlanItem}
             onDirty={setChildDirty}

@@ -297,6 +297,181 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
   assert.equal(current.rows[0].approved_content_revision, 6);
 });
 
+test("stale action-plan IDs cannot mutate current report content", async () => {
+  if (!statefulAuditEnabled) return;
+  const site = await db.query<{ id: string }>(
+    `INSERT INTO sites (url, user_id) VALUES ($1, $2) RETURNING id`,
+    [`https://action-plan-${key}.test`, actor.id],
+  );
+  const scan = await db.query<{ id: string }>(
+    `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
+    [site.rows[0].id, `https://action-plan-${key}.test`],
+  );
+  const report = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_reports (
+        business_id, site_id, scan_run_id, title, created_by_user_id,
+        executive_summary, overall_summary, main_strengths, main_concerns,
+        recommended_first_steps, scope_limitations, last_preview_generated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, $6, $6, $6, now())
+      RETURNING id
+    `,
+    [
+      businessA,
+      site.rows[0].id,
+      scan.rows[0].id,
+      "Action-plan stale-ID regression",
+      actor.id,
+      "Regression summary text.",
+    ],
+  );
+  const reportId = report.rows[0].id;
+  const reportRevisionRows = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  const reportRevision = reportRevisionRows.rows[0]!.content_revision;
+  const finding = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_findings (
+        operations_report_id, source_type, category, original_severity,
+        client_priority, title, client_explanation, why_it_matters,
+        recommended_action, affected_url, reviewed_at
+      ) VALUES ($1, 'manual', 'manual', 'medium', 'important', $2, $3, $3, $3, $4, now())
+      RETURNING id
+    `,
+    [
+      reportId,
+      "Regression finding",
+      "Client-facing finding text.",
+      `https://action-plan-${key}.test/page`,
+    ],
+  );
+  const legacyAction = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, report_finding_id, group_key, title
+      ) VALUES ($1, $2, 'address_soon', 'Legacy regression action') RETURNING id
+    `,
+    [reportId, finding.rows[0].id],
+  );
+  await db.query(
+    `DELETE FROM operations_report_action_plan_items WHERE id = $1`,
+    [legacyAction.rows[0].id],
+  );
+  const replacement = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, report_finding_id, group_key, title
+      ) VALUES ($1, $2, 'address_soon', 'Replacement regression action') RETURNING id
+    `,
+    [reportId, finding.rows[0].id],
+  );
+
+  assert.equal(
+    await updateOperationsReportActionPlanItem(
+      workspaceA,
+      actor,
+      reportId,
+      legacyAction.rows[0].id,
+      { title: "Attempted stale update", expectedRevision: reportRevision },
+    ),
+    null,
+  );
+
+  const surviving = await db.query<{ id: string; title: string }>(
+    `SELECT id, title FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+    [reportId],
+  );
+  assert.equal(surviving.rows.length, 1);
+  assert.equal(surviving.rows[0]!.id, replacement.rows[0]!.id);
+  assert.equal(surviving.rows[0]!.title, "Replacement regression action");
+
+  const repaired = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    replacement.rows[0]!.id,
+    {
+      title: "Replacement action after refresh",
+      expectedRevision: reportRevision,
+    },
+  );
+  assert.equal(repaired?.title, "Replacement action after refresh");
+
+  const otherSite = await db.query<{ id: string }>(
+    `INSERT INTO sites (url, user_id) VALUES ($1, $2) RETURNING id`,
+    [`https://action-plan-other-${key}.test`, actor.id],
+  );
+  const otherScan = await db.query<{ id: string }>(
+    `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
+    [otherSite.rows[0].id, `https://action-plan-other-${key}.test`],
+  );
+  const otherReport = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_reports (
+        business_id, site_id, scan_run_id, title, created_by_user_id,
+        executive_summary, overall_summary, main_strengths, main_concerns,
+        recommended_first_steps, scope_limitations, last_preview_generated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, $6, $6, $6, now())
+      RETURNING id
+    `,
+    [
+      businessA,
+      otherSite.rows[0].id,
+      otherScan.rows[0].id,
+      "Action-plan wrong-report regression",
+      actor.id,
+      "Other report summary text.",
+    ],
+  );
+  const otherFinding = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_findings (
+        operations_report_id, source_type, category, original_severity,
+        client_priority, title, client_explanation, why_it_matters,
+        recommended_action, affected_url, reviewed_at
+      ) VALUES ($1, 'manual', 'manual', 'medium', 'important', $2, $3, $3, $3, $4, now())
+      RETURNING id
+    `,
+    [
+      otherReport.rows[0].id,
+      "Wrong-report finding",
+      "Separate finding text.",
+      `https://action-plan-other-${key}.test/page`,
+    ],
+  );
+  const otherAction = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, report_finding_id, group_key, title
+      ) VALUES ($1, $2, 'address_soon', 'Wrong-report action') RETURNING id
+    `,
+    [otherReport.rows[0].id, otherFinding.rows[0].id],
+  );
+
+  assert.equal(
+    await updateOperationsReportActionPlanItem(
+      workspaceA,
+      actor,
+      reportId,
+      otherAction.rows[0].id,
+      {
+        title: "Wrong report mutation attempt",
+        expectedRevision: reportRevision,
+      },
+    ),
+    null,
+  );
+
+  await db.query(`DELETE FROM operations_reports WHERE id = $1`, [reportId]);
+  await db.query(`DELETE FROM sites WHERE id = $1`, [site.rows[0].id]);
+  await db.query(`DELETE FROM operations_reports WHERE id = $1`, [
+    otherReport.rows[0].id,
+  ]);
+  await db.query(`DELETE FROM sites WHERE id = $1`, [otherSite.rows[0].id]);
+});
+
 test("business lists and direct resource checks are workspace isolated", async () => {
   if (!statefulAuditEnabled) return;
   const listA = await listOperationsBusinesses(workspaceA, {

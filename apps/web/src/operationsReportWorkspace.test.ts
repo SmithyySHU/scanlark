@@ -31,3 +31,27 @@ test("finding lifecycle actions save draft content in the same revision-bound re
     /await onSave\(\);\s*await onPatchFinding\(finding\.id,/,
   );
 });
+
+test("action-plan stale recovery hides stale row and clears stale dirty key", () => {
+  assert.match(
+    source,
+    /actionPlanPatchRecovery: \{\s*staleItemId: string;\s*replacementItemId: string \| null;\s*\} \| null/,
+  );
+  assert.match(
+    source,
+    /const visibleActionPlanItemsWithRecovery = visibleActionPlanItems\.filter\(/,
+  );
+  assert.match(source, /item.id !== actionPlanPatchRecovery\.staleItemId/);
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{\s*if \(!actionPlanPatchRecovery\) return;\s*setChildDirty\(/,
+  );
+  assert.match(
+    source,
+    /`action-\$\{actionPlanPatchRecovery\.staleItemId\}`, false\);/,
+  );
+});
+
+test("action plan row list uses recovery-filtered items", () => {
+  assert.match(source, /items={visibleActionPlanItemsWithRecovery}/);
+});

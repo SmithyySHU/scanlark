@@ -669,6 +669,11 @@ type OperationsReportActionPlanItem = {
   updated_at: string;
 };
 
+type ActionPlanPatchRecovery = {
+  staleItemId: string;
+  replacementItemId: string | null;
+};
+
 type OperationsReportDisplaySettings = {
   displayLogo: boolean;
   displayScanlarkContact: boolean;
@@ -2435,6 +2440,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [templateForm, setTemplateForm] =
     useState<TemplateFormState>(emptyTemplateForm);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionPlanPatchRecovery, setActionPlanPatchRecovery] =
+    useState<ActionPlanPatchRecovery | null>(null);
 
   const activeFilter =
     (searchParams.get("filter") as BusinessListFilter | null) ?? "active";
@@ -2686,25 +2693,35 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [apiBase, apiFetch, searchParams]);
 
+  const loadReportDetailData =
+    useCallback(async (): Promise<OperationsReportDetail | null> => {
+      if (!operationsReportId) return null;
+      setReportDetailLoading(true);
+      try {
+        const res = await apiFetch(
+          `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+        const data = (await res.json()) as { report: OperationsReportDetail };
+        return data.report;
+      } catch (err) {
+        console.warn("Failed to load operations report", err);
+        return null;
+      } finally {
+        setReportDetailLoading(false);
+      }
+    }, [apiBase, apiFetch, operationsReportId]);
+
   const loadReportDetail = useCallback(async () => {
-    if (!operationsReportId) return;
-    setReportDetailLoading(true);
-    try {
-      const res = await apiFetch(
-        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const data = (await res.json()) as { report: OperationsReportDetail };
-      setReportDetail(data.report);
-      setReportRegroupPreview(null);
-    } catch (err) {
-      console.warn("Failed to load operations report", err);
+    const report = await loadReportDetailData();
+    if (!report) {
       setReportDetail(null);
-    } finally {
-      setReportDetailLoading(false);
+      return;
     }
-  }, [apiBase, apiFetch, operationsReportId]);
+    setReportDetail(report);
+    setReportRegroupPreview(null);
+  }, [loadReportDetailData]);
 
   const loadReportPreview = useCallback(async () => {
     if (!operationsReportId) return;
@@ -2726,6 +2743,51 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       setReportReadinessIssues([]);
     }
   }, [apiBase, apiFetch, operationsReportId]);
+
+  useEffect(() => {
+    if (!actionPlanPatchRecovery) return;
+    if (!reportDetail) return;
+    const staleItem = reportDetail.actionPlanItems.find(
+      (item) => item.id === actionPlanPatchRecovery.staleItemId,
+    );
+    if (
+      !staleItem &&
+      (actionPlanPatchRecovery.replacementItemId == null ||
+        reportDetail.actionPlanItems.some(
+          (item) => item.id === actionPlanPatchRecovery.replacementItemId,
+        ))
+    ) {
+      setActionPlanPatchRecovery(null);
+    }
+  }, [actionPlanPatchRecovery, reportDetail]);
+
+  const actionPlanPatchRecoveryResult = useCallback(
+    (
+      staleItemId: string,
+      refreshedReport: OperationsReportDetail,
+    ): ActionPlanPatchRecovery => {
+      const staleItem = reportDetail?.actionPlanItems.find(
+        (item) => item.id === staleItemId,
+      );
+      if (!staleItem) return { staleItemId, replacementItemId: null };
+      const candidates = refreshedReport.actionPlanItems.filter(
+        (item) =>
+          item.id !== staleItem.id &&
+          item.report_finding_id != null &&
+          staleItem.report_finding_id != null &&
+          item.report_finding_id === staleItem.report_finding_id &&
+          item.group_key === staleItem.group_key,
+      );
+      if (candidates.length === 1) {
+        return {
+          staleItemId,
+          replacementItemId: candidates[0]!.id,
+        };
+      }
+      return { staleItemId, replacementItemId: null };
+    },
+    [reportDetail],
+  );
 
   const loadReportableScans = useCallback(
     async (businessIdValue: string, siteIdValue: string) => {
@@ -3999,6 +4061,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     input: Record<string, unknown>,
   ) {
     if (!operationsReportId) return;
+    setActionError(null);
+    setActionPlanPatchRecovery(null);
     const res = await apiFetch(
       `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(itemId)}`,
       {
@@ -4012,9 +4076,32 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       },
     );
     if (!res.ok) {
-      throw new Error(
-        await apiErrorMessage(res, "Failed to update action plan item"),
+      if (res.status === 404) {
+        const refreshedReport = await loadReportDetailData();
+        setReportDetail(refreshedReport);
+        setReportRegroupPreview(null);
+        await loadReportPreview();
+        const recovery = refreshedReport
+          ? actionPlanPatchRecoveryResult(itemId, refreshedReport)
+          : { staleItemId: itemId, replacementItemId: null };
+        setActionPlanPatchRecovery(recovery);
+        if (recovery.replacementItemId) {
+          setActionError(
+            "Action plan item was regenerated and remapped to the current persisted item. Please continue editing the current item.",
+          );
+        } else {
+          setActionError(
+            "Action plan item no longer matches this report. The report has been refreshed; please choose the current item and try again.",
+          );
+        }
+        return;
+      }
+      const message = await apiErrorMessage(
+        res,
+        "Failed to update action plan item",
       );
+      setActionError(message);
+      throw new Error(message);
     }
     await Promise.all([loadReportDetail(), loadReportPreview()]);
   }
@@ -9970,6 +10057,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               title: `Fixes from ${report.title}`,
             })
           }
+          actionPlanPatchRecovery={actionPlanPatchRecovery}
         />
         {renderQuoteCreateModal()}
       </>
