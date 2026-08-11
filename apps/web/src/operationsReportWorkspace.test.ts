@@ -118,3 +118,33 @@ test("browser unload guard follows all report dirty state and report identity", 
   );
   assert.doesNotMatch(source, /event\.returnValue = ""/);
 });
+
+test("report finalisation clearly separates review, approval, PDF, and delivery", () => {
+  assert.match(source, /<span>Review<\/span>/);
+  assert.match(source, /<span>Approval<\/span>/);
+  assert.match(source, /<span>Final PDF<\/span>/);
+  assert.match(source, /<span>Ready to send<\/span>/);
+  assert.match(source, /"Review complete — ready for approval\."/);
+  assert.match(source, /"Approved — final PDF required\."/);
+  assert.match(source, /Generate final PDF and mark ready/);
+  assert.match(source, /Report review: \{readinessIssues\.length\} item/);
+  assert.match(
+    source,
+    /const reviewComplete = preview !== null && readinessIssues\.length === 0/,
+  );
+  assert.doesNotMatch(source, /Report readiness: \{counts\.needs_editing\}/);
+});
+
+test("ready and historical reports do not present normal editable content", () => {
+  assert.match(
+    source,
+    /const artifactReadOnly = readOnly \|\| historicalReport \|\| readyToSendReport/,
+  );
+  assert.match(source, /This report is historical and cannot be edited\./);
+  assert.match(source, /Reopen for editing/);
+  assert.match(source, /onReopenForReview/);
+  assert.match(
+    source,
+    /approved_content_revision[^]*?` · revision \$\{detail\.report\.approved_content_revision\}`/,
+  );
+});

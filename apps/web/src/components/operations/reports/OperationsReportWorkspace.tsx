@@ -191,7 +191,7 @@ type Props = {
     input: ActionPlanBatchSaveInput,
   ) => Promise<OperationsReportDetail>;
   onApprove: () => Promise<void>;
-  onMarkReady: () => Promise<void>;
+  onReopenForReview: () => Promise<void>;
   onRecordSent: () => Promise<void>;
   onGeneratePdf: (mode: "draft" | "final") => Promise<void>;
   onArchive: () => Promise<void>;
@@ -215,7 +215,7 @@ export function OperationsReportWorkspace({
   onApplyRegroup,
   onSaveActionPlan,
   onApprove,
-  onMarkReady,
+  onReopenForReview,
   onRecordSent,
   onGeneratePdf,
   onArchive,
@@ -231,7 +231,8 @@ export function OperationsReportWorkspace({
     "completed",
     "archived",
   ].includes(detail.report.status);
-  const artifactReadOnly = readOnly || historicalReport;
+  const readyToSendReport = detail.report.status === "ready_to_send";
+  const artifactReadOnly = readOnly || historicalReport || readyToSendReport;
   const initialFindingFilter: ReportFindingFilter = detail.findings.some(
     (finding) => findingIsIncluded(finding) && !isFindingReady(finding),
   )
@@ -335,6 +336,13 @@ export function OperationsReportWorkspace({
     ) &&
     detail.report.approved_content_revision ===
       (detail.report.content_revision ?? 1);
+  const reviewComplete = preview !== null && readinessIssues.length === 0;
+  const finalPdfCurrent = Boolean(
+    approvalCurrent &&
+    detail.report.last_pdf_generated_at &&
+    detail.report.frozen_at,
+  );
+  const deliveryReady = readyToSendReport || Boolean(detail.report.sent_at);
   const clientOutputFrozen =
     Boolean(detail.report.frozen_at) &&
     !["draft", "needs_review"].includes(detail.report.status);
@@ -347,9 +355,7 @@ export function OperationsReportWorkspace({
         finding.client_priority === priority.value,
     ).length,
   }));
-  const pdfBlockingIssues = readinessIssues.filter(
-    (issue) => issue.code !== "pdf_not_generated",
-  );
+  const pdfBlockingIssues = readinessIssues;
   const editableDraftReport =
     !clientOutputFrozen &&
     (detail.report.status === "draft" ||
@@ -361,6 +367,21 @@ export function OperationsReportWorkspace({
       : !approvalCurrent
         ? "Approve the current report preview before generating the final PDF."
         : "";
+  const finalisationMessage = historicalReport
+    ? detail.report.sent_at
+      ? "Sent — this historical report is read-only."
+      : "Historical — this report is read-only."
+    : !reviewComplete
+      ? `Review required — resolve ${readinessIssues.length} remaining item${readinessIssues.length === 1 ? "" : "s"}.`
+      : !approvalCurrent
+        ? detail.report.approved_at
+          ? "Changes were made after approval — approve the current revision again."
+          : "Review complete — ready for approval."
+        : !finalPdfCurrent
+          ? "Approved — final PDF required."
+          : deliveryReady
+            ? "Ready to send."
+            : "Final PDF current — completing finalisation.";
   const includedFindingIds = new Set(
     detail.findings
       .filter((finding) => finding.is_included && !finding.is_false_positive)
@@ -813,7 +834,7 @@ export function OperationsReportWorkspace({
 
   return (
     <div
-      className={`ops-report-workspace${artifactReadOnly ? " ops-report-workspace--read-only" : ""}`}
+      className={`ops-report-workspace${readOnly || historicalReport ? " ops-report-workspace--read-only" : readyToSendReport ? " ops-report-workspace--content-locked" : ""}`}
       aria-readonly={artifactReadOnly}
       onChangeCapture={blockReadOnlyEditorChange}
       onSubmitCapture={(event) => {
@@ -851,38 +872,31 @@ export function OperationsReportWorkspace({
             <button
               className="ops-button"
               disabled={previewStale}
+              title="Download a review copy. This does not approve or finalise the report."
               onClick={() => void onGeneratePdf("draft")}
             >
               Generate draft PDF
             </button>
           )}
-          {!artifactReadOnly && (
+          {!readOnly && !historicalReport && (
             <>
+              {!readyToSendReport && (
+                <button
+                  className="ops-button"
+                  disabled={
+                    pdfBlockingIssues.length > 0 ||
+                    previewStale ||
+                    !approvalCurrent
+                  }
+                  title="Generate the approved client artifact and mark the report ready to send."
+                  onClick={() => void onGeneratePdf("final")}
+                >
+                  Generate final PDF and mark ready
+                </button>
+              )}
               <button
                 className="ops-button"
-                disabled={
-                  pdfBlockingIssues.length > 0 ||
-                  previewStale ||
-                  !approvalCurrent
-                }
-                onClick={() => void onGeneratePdf("final")}
-              >
-                Generate final PDF
-              </button>
-              <button
-                className="ops-button"
-                disabled={
-                  detail.report.status === "ready_to_send" ||
-                  readinessIssues.length > 0 ||
-                  previewStale ||
-                  !approvalCurrent
-                }
-                onClick={() => void onMarkReady()}
-              >
-                Mark ready
-              </button>
-              <button
-                className="ops-button"
+                disabled={!readyToSendReport}
                 onClick={() => void onRecordSent()}
               >
                 Record sent
@@ -895,6 +909,44 @@ export function OperationsReportWorkspace({
         </div>
       </section>
       {actionError && <div className="ops-error">{actionError}</div>}
+      <section
+        className="ops-report-finalisation"
+        aria-label="Finalisation status"
+      >
+        <div className={reviewComplete ? "complete" : "active"}>
+          <span>Review</span>
+          <strong>{reviewComplete ? "Complete" : "Required"}</strong>
+        </div>
+        <div
+          className={
+            approvalCurrent ? "complete" : reviewComplete ? "active" : "pending"
+          }
+        >
+          <span>Approval</span>
+          <strong>{approvalCurrent ? "Approved" : "Required"}</strong>
+        </div>
+        <div
+          className={
+            finalPdfCurrent
+              ? "complete"
+              : approvalCurrent
+                ? "active"
+                : "pending"
+          }
+        >
+          <span>Final PDF</span>
+          <strong>{finalPdfCurrent ? "Current" : "Required"}</strong>
+        </div>
+        <div
+          className={
+            deliveryReady ? "complete" : finalPdfCurrent ? "active" : "pending"
+          }
+        >
+          <span>Ready to send</span>
+          <strong>{deliveryReady ? "Ready" : "Pending"}</strong>
+        </div>
+        <p>{finalisationMessage}</p>
+      </section>
       {pdfUnavailableReason && (
         <div className="ops-warning">
           {pdfUnavailableReason}
@@ -903,16 +955,32 @@ export function OperationsReportWorkspace({
             : ""}
         </div>
       )}
-      {(clientOutputFrozen || historicalReport) && (
+      {historicalReport && (
         <div className="ops-warning">
-          This report is frozen because it has been sent to the client.
-          {historicalReport && !readOnly && (
+          This report is historical and cannot be edited.
+          {!readOnly && (
             <button
               className="ops-button ops-button--primary"
               type="button"
               onClick={() => void onCreateRevision()}
             >
               Create revised report
+            </button>
+          )}
+        </div>
+      )}
+      {readyToSendReport && !historicalReport && (
+        <div className="ops-warning">
+          This report is ready to send and locked against edits. Reopen it for
+          review to change client-visible content; the current approval and PDF
+          will no longer be treated as final.
+          {!readOnly && (
+            <button
+              className="ops-button"
+              type="button"
+              onClick={() => void onReopenForReview()}
+            >
+              Reopen for editing
             </button>
           )}
         </div>
@@ -961,12 +1029,12 @@ export function OperationsReportWorkspace({
         <section className="ops-readiness-summary">
           <div className="ops-readiness-summary__header">
             <strong>
-              Report readiness: {counts.needs_editing} finding
-              {counts.needs_editing === 1 ? "" : "s"} need review
+              Report review: {readinessIssues.length} item
+              {readinessIssues.length === 1 ? "" : "s"} remaining
             </strong>
             <span>
-              {readinessIssues.length} grouped issue
-              {readinessIssues.length === 1 ? "" : "s"}
+              {counts.needs_editing} finding
+              {counts.needs_editing === 1 ? "" : "s"} still need editing
             </span>
           </div>
           {readinessSections.map((section) => (
@@ -1593,6 +1661,9 @@ export function OperationsReportWorkspace({
                   : ""}
                 {detail.report.approved_at
                   ? ` · ${formatOperationsDateTime(detail.report.approved_at)}`
+                  : ""}
+                {detail.report.approved_content_revision != null
+                  ? ` · revision ${detail.report.approved_content_revision}`
                   : ""}
               </p>
             ) : detail.report.approved_at ? (

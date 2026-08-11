@@ -400,6 +400,7 @@ export type {
   OperationsReportPdfRenderRow,
   OperationsReportRow,
   OperationsReportReadinessIssue,
+  OperationsReportReadinessStage,
   OperationsReportReadinessSection,
   OperationsReportRevisionHistoryRow,
   OperationsReportRegroupPreview,

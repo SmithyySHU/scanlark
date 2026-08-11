@@ -1473,7 +1473,7 @@ test("operations client report payload excludes internal-only finding data", () 
       findings,
       observations,
       actionPlanItems,
-      { requirePreview: true, requirePdf: true },
+      "finalisation",
     ),
     [],
   );
@@ -1490,7 +1490,7 @@ test("operations client report payload excludes internal-only finding data", () 
     ],
     observations.map((item) => ({ ...item, reviewed_at: null })),
     actionPlanItems.map((item) => ({ ...item, reviewed_at: null })),
-    { requirePreview: true, requirePdf: true },
+    "finalisation",
   );
   assert(incompleteIssues.some((issue) => issue.code === "finding_incomplete"));
   assert(

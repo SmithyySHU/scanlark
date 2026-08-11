@@ -2705,10 +2705,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     }
   }, [apiBase, apiFetch, searchParams]);
 
-  const loadReportDetailData =
-    useCallback(async (): Promise<OperationsReportDetail | null> => {
+  const loadReportDetailData = useCallback(
+    async (showLoading = true): Promise<OperationsReportDetail | null> => {
       if (!operationsReportId) return null;
-      setReportDetailLoading(true);
+      if (showLoading) setReportDetailLoading(true);
       try {
         const res = await apiFetch(
           `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}`,
@@ -2721,19 +2721,24 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         console.warn("Failed to load operations report", err);
         return null;
       } finally {
-        setReportDetailLoading(false);
+        if (showLoading) setReportDetailLoading(false);
       }
-    }, [apiBase, apiFetch, operationsReportId]);
+    },
+    [apiBase, apiFetch, operationsReportId],
+  );
 
-  const loadReportDetail = useCallback(async () => {
-    const report = await loadReportDetailData();
-    if (!report) {
-      setReportDetail(null);
-      return;
-    }
-    setReportDetail(report);
-    setReportRegroupPreview(null);
-  }, [loadReportDetailData]);
+  const loadReportDetail = useCallback(
+    async (showLoading = true) => {
+      const report = await loadReportDetailData(showLoading);
+      if (!report) {
+        setReportDetail(null);
+        return;
+      }
+      setReportDetail(report);
+      setReportRegroupPreview(null);
+    },
+    [loadReportDetailData],
+  );
 
   const loadReportPreview = useCallback(async () => {
     if (!operationsReportId) return;
@@ -3950,7 +3955,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       } | null;
       throw new Error(data?.message ?? "Failed to update report");
     }
-    await Promise.all([loadReportDetail(), loadReportPreview(), loadSummary()]);
+    await Promise.all([
+      loadReportDetail(false),
+      loadReportPreview(),
+      loadSummary(),
+    ]);
   }
 
   async function patchFinding(
@@ -3990,7 +3999,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           }
         : prev,
     );
-    await Promise.all([loadReportDetail(), loadReportPreview()]);
+    await Promise.all([loadReportDetail(false), loadReportPreview()]);
   }
 
   async function bulkPatchReportFindings(input: Record<string, unknown>) {
@@ -4010,7 +4019,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (!res.ok) {
       throw new Error(await apiErrorMessage(res, "Failed to update findings"));
     }
-    await Promise.all([loadReportDetail(), loadReportPreview()]);
+    await Promise.all([loadReportDetail(false), loadReportPreview()]);
   }
 
   async function previewReportRegroup() {
@@ -4060,7 +4069,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       }
       setReportRegroupPreview(null);
       await Promise.all([
-        loadReportDetail(),
+        loadReportDetail(false),
         loadReportPreview(),
         loadReports(),
         loadSummary(),
@@ -4094,7 +4103,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         await apiErrorMessage(res, "Failed to update positive observation"),
       );
     }
-    await Promise.all([loadReportDetail(), loadReportPreview()]);
+    await Promise.all([loadReportDetail(false), loadReportPreview()]);
   }
 
   async function saveReportActionPlan(input: {
@@ -4166,7 +4175,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       );
 
     const refreshActionPlanState = async () => {
-      const refreshedReport = await loadReportDetailData();
+      const refreshedReport = await loadReportDetailData(false);
       if (!refreshedReport) {
         return {
           restored: false,
@@ -4234,7 +4243,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       actionPlanPatchRecoveryRef.current = refreshed.recovery;
       return;
     }
-    await Promise.all([loadReportDetail(), loadReportPreview()]);
+    await Promise.all([loadReportDetail(false), loadReportPreview()]);
   }
 
   async function runReportAction(endpoint: string, body?: unknown) {
@@ -4259,7 +4268,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         throw new Error(data?.message ?? "Report action failed");
       }
       await Promise.all([
-        loadReportDetail(),
+        loadReportDetail(false),
         loadReportPreview(),
         loadReports(),
         loadSummary(),
@@ -4369,9 +4378,10 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       link.remove();
       URL.revokeObjectURL(url);
       await Promise.all([
-        loadReportDetail(),
+        loadReportDetail(false),
         loadReportPreview(),
         loadReports(),
+        loadSummary(),
       ]);
     } catch (err) {
       setActionError(
@@ -10174,7 +10184,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               expectedRevision: report.content_revision,
             })
           }
-          onMarkReady={() => runReportAction("mark-ready")}
+          onReopenForReview={() => runReportAction("mark-needs-review")}
           onRecordSent={recordReportSent}
           onGeneratePdf={generateReportPdf}
           onArchive={() => runReportAction("archive")}
@@ -12152,14 +12162,26 @@ const operationsStyles = `
   .ops-report-workspace--read-only .ops-form > .ops-inline-actions {
     display: none;
   }
+  .ops-report-workspace--content-locked .ops-report-editor-toolbar,
+  .ops-report-workspace--content-locked .ops-report-bulkbar,
+  .ops-report-workspace--content-locked .ops-regroup-preview .ops-button,
+  .ops-report-workspace--content-locked .ops-report-finding-editor .ops-button,
+  .ops-report-workspace--content-locked .ops-form > .ops-inline-actions {
+    display: none;
+  }
   .ops-report-workspace--read-only input:not([readonly]),
   .ops-report-workspace--read-only textarea,
-  .ops-report-workspace--read-only select {
+  .ops-report-workspace--read-only select,
+  .ops-report-workspace--content-locked input:not([readonly]),
+  .ops-report-workspace--content-locked textarea,
+  .ops-report-workspace--content-locked select {
     cursor: not-allowed;
     opacity: 0.78;
   }
   .ops-report-workspace--read-only .ops-report-filterbar input,
-  .ops-report-workspace--read-only .ops-report-filterbar select {
+  .ops-report-workspace--read-only .ops-report-filterbar select,
+  .ops-report-workspace--content-locked .ops-report-filterbar input,
+  .ops-report-workspace--content-locked .ops-report-filterbar select {
     cursor: auto;
     opacity: 1;
   }
@@ -12920,6 +12942,38 @@ const operationsStyles = `
     background: var(--panel);
     padding: 10px;
   }
+  .ops-report-finalisation {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 10px;
+  }
+  .ops-report-finalisation > div {
+    display: grid;
+    gap: 3px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px;
+  }
+  .ops-report-finalisation > div span,
+  .ops-report-finalisation > div.pending strong {
+    color: var(--text-muted);
+  }
+  .ops-report-finalisation > div.complete {
+    border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  }
+  .ops-report-finalisation > div.active {
+    border-color: var(--accent);
+  }
+  .ops-report-finalisation p {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
   .ops-readiness-summary__header,
   .ops-readiness-summary summary,
   .ops-readiness-summary__body,
@@ -13225,6 +13279,9 @@ const operationsStyles = `
     max-width: none;
   }
   @media (max-width: 980px) {
+    .ops-report-finalisation {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
     .ops-topbar,
 	    .ops-shell,
 	    .ops-two-column,
@@ -13291,6 +13348,9 @@ const operationsStyles = `
     }
     .ops-account {
       justify-content: flex-start;
+    }
+    .ops-report-finalisation {
+      grid-template-columns: 1fr;
     }
   }
   @media print {

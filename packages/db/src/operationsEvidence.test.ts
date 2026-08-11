@@ -113,9 +113,13 @@ test("linked action-plan items inherit readiness from their reviewed finding", (
   } as OperationsReportActionPlanItemRow;
 
   assert.equal(
-    getOperationsReportReadinessIssues(report, [finding], [], [linkedAction], {
-      requirePreview: true,
-    }).some((issue) => issue.code === "action_plan_item_unreviewed"),
+    getOperationsReportReadinessIssues(
+      report,
+      [finding],
+      [],
+      [linkedAction],
+      "approval",
+    ).some((issue) => issue.code === "action_plan_item_unreviewed"),
     false,
   );
   assert.equal(
@@ -124,9 +128,43 @@ test("linked action-plan items inherit readiness from their reviewed finding", (
       [finding],
       [],
       [standaloneAction],
-      { requirePreview: true },
+      "approval",
     ).some((issue) => issue.code === "action_plan_item_unreviewed"),
     true,
+  );
+});
+
+test("report readiness stages do not require a final PDF before approval", () => {
+  const report = {
+    ...readyReport(),
+    last_preview_generated_at: null,
+    last_pdf_generated_at: null,
+  } as OperationsReportRow;
+  const finding = readyFinding();
+
+  assert.deepEqual(
+    getOperationsReportReadinessIssues(report, [finding], [], [], "review"),
+    [],
+  );
+  assert.deepEqual(
+    getOperationsReportReadinessIssues(
+      report,
+      [finding],
+      [],
+      [],
+      "approval",
+    ).map((issue) => issue.code),
+    ["preview_not_generated"],
+  );
+  assert.deepEqual(
+    getOperationsReportReadinessIssues(
+      { ...report, last_preview_generated_at: new Date() },
+      [finding],
+      [],
+      [],
+      "finalisation",
+    ).map((issue) => issue.code),
+    ["pdf_not_generated"],
   );
 });
 

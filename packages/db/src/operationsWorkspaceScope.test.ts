@@ -6,8 +6,14 @@ import { closeConnection } from "./client";
 import { DATABASE_URL } from "./env";
 import {
   approveOperationsReport,
+  createOperationsReport,
+  freezeOperationsReportRender,
   getOperationsReportPreview,
   isOperationsReportApprovalCurrent,
+  markOperationsReportStatus,
+  recordOperationsReportSent,
+  saveOperationsReportPdfRender,
+  updateOperationsReport,
   updateOperationsReportActionPlanBatch,
   updateOperationsReportActionPlanItem,
   updateOperationsReportFinding,
@@ -150,26 +156,29 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
     `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
     [siteA, `https://approval-${key}.test`],
   );
-  const report = await db.query<{ id: string }>(
-    `
-      INSERT INTO operations_reports (
-        business_id, site_id, scan_run_id, title, created_by_user_id,
-        executive_summary, overall_summary, main_strengths, main_concerns,
-        recommended_first_steps, scope_limitations, last_preview_generated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $6, $6, $6, $6, $6, now())
-      RETURNING id
-    `,
-    [
-      businessA,
-      siteA,
-      scan.rows[0].id,
-      "Approval regression report",
-      actor.id,
-      "Reviewed client wording.",
-    ],
+  await db.query(
+    `INSERT INTO operations_business_sites (business_id, site_id, created_by_user_id)
+     VALUES ($1, $2, $3)`,
+    [businessA, siteA, actor.id],
   );
-  reportA = report.rows[0].id;
+  const createdReport = await createOperationsReport(workspaceA, actor, {
+    businessId: businessA,
+    siteId: siteA,
+    scanRunId: scan.rows[0].id,
+    reportType: "initial_health_check",
+    title: "Approval regression report",
+  });
+  if (typeof createdReport === "string") {
+    assert.fail(`report creation failed: ${createdReport}`);
+  }
+  reportA = createdReport.report.id;
+  assert.equal(createdReport.report.status, "needs_review");
+  await db.query(
+    `UPDATE operations_report_positive_observations
+     SET reviewed_at = now()
+     WHERE operations_report_id = $1`,
+    [reportA],
+  );
   const finding = await db.query<{ id: string }>(
     `
       INSERT INTO operations_report_findings (
@@ -280,6 +289,28 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
     "Saved action title",
   );
 
+  const internalNote = await updateOperationsReportFinding(
+    workspaceA,
+    actor,
+    reportA,
+    finding.rows[0].id,
+    {
+      internalNote: "Internal follow-up context only.",
+      expectedRevision: 6,
+    },
+  );
+  assert.equal(internalNote?.internal_note, "Internal follow-up context only.");
+  const afterInternalNote = await db.query<{
+    content_revision: number;
+    approved_content_revision: number | null;
+  }>(
+    `SELECT content_revision, approved_content_revision
+     FROM operations_reports WHERE id = $1`,
+    [reportA],
+  );
+  assert.equal(afterInternalNote.rows[0].content_revision, 6);
+  assert.equal(afterInternalNote.rows[0].approved_content_revision, 6);
+
   await updateOperationsReportActionPlanItem(
     workspaceA,
     actor,
@@ -296,6 +327,129 @@ test("linked action save and approval are workspace-scoped and revision-bound", 
   );
   assert.equal(current.rows[0].content_revision, 7);
   assert.equal(current.rows[0].approved_content_revision, 6);
+});
+
+test("report finalisation requires approval and PDF and reopens safely", async () => {
+  if (!statefulAuditEnabled) return;
+
+  await getOperationsReportPreview(workspaceA, reportA);
+  const approved = await approveOperationsReport(workspaceA, actor, reportA, 7);
+  assert.ok(approved && !("readinessIssues" in approved));
+
+  const prematureSend = await recordOperationsReportSent(
+    workspaceA,
+    actor,
+    reportA,
+    { deliveryMethod: "email_attachment" },
+  );
+  if (!prematureSend || typeof prematureSend === "string") {
+    assert.fail("premature report delivery should return readiness issues");
+  }
+  assert.ok(
+    "readinessIssues" in prematureSend &&
+      prematureSend.readinessIssues.some(
+        (issue) => issue.code === "report_ready_to_send_required",
+      ),
+  );
+
+  await freezeOperationsReportRender(
+    workspaceA,
+    actor,
+    reportA,
+    "operations_report_pdf_generated",
+  );
+  await saveOperationsReportPdfRender(
+    workspaceA,
+    reportA,
+    "final-report.pdf",
+    Buffer.from("first approved final PDF"),
+    { generatedByUserId: actor.id },
+  );
+  const ready = await markOperationsReportStatus(
+    workspaceA,
+    actor,
+    reportA,
+    "ready_to_send",
+  );
+  assert.ok(ready && !("readinessIssues" in ready));
+  if (!ready || "readinessIssues" in ready) return;
+  assert.equal(ready.report.status, "ready_to_send");
+
+  await assert.rejects(
+    updateOperationsReport(workspaceA, actor, reportA, {
+      mainConcerns: "A silent ready-to-send edit must not persist.",
+      expectedRevision: 7,
+    }),
+    /report_ready_requires_reopen/,
+  );
+  assert.equal(
+    await markOperationsReportStatus(
+      workspaceB,
+      actor,
+      reportA,
+      "needs_review",
+    ),
+    null,
+  );
+
+  const reopened = await markOperationsReportStatus(
+    workspaceA,
+    actor,
+    reportA,
+    "needs_review",
+  );
+  assert.ok(reopened && !("readinessIssues" in reopened));
+  if (!reopened || "readinessIssues" in reopened) return;
+  assert.equal(reopened.report.status, "needs_review");
+  assert.equal(reopened.report.content_revision, 8);
+  assert.equal(isOperationsReportApprovalCurrent(reopened.report), false);
+  assert.equal(reopened.report.last_pdf_generated_at, null);
+  assert.equal(reopened.report.frozen_render_json, null);
+
+  const edited = await updateOperationsReport(workspaceA, actor, reportA, {
+    mainConcerns: "Updated reviewed concern after explicit reopening.",
+    expectedRevision: 8,
+  });
+  if (!edited || edited === "contact_not_found") {
+    assert.fail("reopened report edit should succeed");
+  }
+  assert.equal(edited.report.content_revision, 9);
+  assert.equal(edited.report.approved_content_revision, 7);
+
+  await getOperationsReportPreview(workspaceA, reportA);
+  const reapproved = await approveOperationsReport(
+    workspaceA,
+    actor,
+    reportA,
+    9,
+  );
+  assert.ok(reapproved && !("readinessIssues" in reapproved));
+  await freezeOperationsReportRender(
+    workspaceA,
+    actor,
+    reportA,
+    "operations_report_pdf_generated",
+  );
+  await saveOperationsReportPdfRender(
+    workspaceA,
+    reportA,
+    "reapproved-final-report.pdf",
+    Buffer.from("second approved final PDF"),
+    { generatedByUserId: actor.id },
+  );
+  const readyAgain = await markOperationsReportStatus(
+    workspaceA,
+    actor,
+    reportA,
+    "ready_to_send",
+  );
+  assert.ok(readyAgain && !("readinessIssues" in readyAgain));
+  assert.equal(
+    readyAgain && !("readinessIssues" in readyAgain)
+      ? readyAgain.report.status
+      : null,
+    "ready_to_send",
+  );
 });
 
 test("stale action-plan IDs cannot mutate current report content", async () => {

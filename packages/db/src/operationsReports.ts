@@ -55,6 +55,10 @@ let reportRevisionQueue = Promise.resolve();
 
 export type OperationsReportStatus =
   (typeof OPERATIONS_REPORT_STATUSES)[number];
+export type OperationsReportReadinessStage =
+  | "review"
+  | "approval"
+  | "finalisation";
 export type OperationsReportType = (typeof OPERATIONS_REPORT_TYPES)[number];
 export type OperationsReportClientPriority =
   (typeof OPERATIONS_REPORT_CLIENT_PRIORITIES)[number];
@@ -1267,6 +1271,24 @@ function assertReportContentMutable(
   if (isHistoricalReportStatus(report.status) || report.sent_at) {
     throw immutableArtifactError("report");
   }
+  if (report.status === "ready_to_send") {
+    throw new Error("report_ready_requires_reopen");
+  }
+  if (
+    expectedRevision !== undefined &&
+    expectedRevision !== (report.content_revision ?? 1)
+  ) {
+    throw staleRevisionError("report");
+  }
+}
+
+function assertReportInternalMetadataMutable(
+  report: OperationsReportRow,
+  expectedRevision?: number,
+) {
+  if (isHistoricalReportStatus(report.status) || report.sent_at) {
+    throw immutableArtifactError("report");
+  }
   if (
     expectedRevision !== undefined &&
     expectedRevision !== (report.content_revision ?? 1)
@@ -1327,7 +1349,9 @@ async function bumpReportContentRevision(
   const client = await ensureConnected();
   await client.query(
     `UPDATE operations_reports
-     SET content_revision = content_revision + 1, updated_at = now()
+     SET content_revision = content_revision + 1,
+         status = CASE WHEN status = 'ready_to_send' THEN 'needs_review' ELSE status END,
+         updated_at = now()
      WHERE id = $1 AND EXISTS (
        SELECT 1 FROM operations_businesses b
        WHERE b.id = operations_reports.business_id
@@ -1505,7 +1529,8 @@ async function invalidateEditableReportRender(
   const invalidated = await client.query<{ id: string }>(
     `
       UPDATE operations_reports
-      SET frozen_render_json = NULL,
+      SET status = CASE WHEN status = 'ready_to_send' THEN 'needs_review' ELSE status END,
+          frozen_render_json = NULL,
           frozen_at = NULL,
           last_preview_generated_at = NULL,
           last_pdf_generated_at = NULL,
@@ -2078,7 +2103,9 @@ export async function regroupOperationsReportFindings(
     await client.query(
       `
         UPDATE operations_reports
-        SET frozen_render_json = NULL,
+        SET status = CASE WHEN status = 'ready_to_send' THEN 'needs_review' ELSE status END,
+            content_revision = content_revision + 1,
+            frozen_render_json = NULL,
             frozen_at = NULL,
             last_preview_generated_at = NULL,
             last_pdf_generated_at = NULL,
@@ -2674,7 +2701,7 @@ export async function updateOperationsReport(
     `
       UPDATE operations_reports
       SET title = COALESCE($2, title),
-          status = COALESCE($3, status),
+          status = CASE WHEN status = 'ready_to_send' THEN 'needs_review' ELSE COALESCE($3, status) END,
           report_type = COALESCE($4, report_type),
           executive_summary = CASE WHEN $5::boolean THEN $6 ELSE executive_summary END,
           overall_summary = CASE WHEN $7::boolean THEN $8 ELSE overall_summary END,
@@ -2766,7 +2793,28 @@ export async function updateOperationsReportFinding(
 ): Promise<OperationsReportFindingRow | null> {
   const report = await getReportById(workspaceId, reportId);
   if (!report) return null;
-  assertReportContentMutable(report, input.expectedRevision);
+  const clientContentChanged = [
+    input.clientPriority,
+    input.title,
+    input.clientExplanation,
+    input.whyItMatters,
+    input.recommendedAction,
+    input.clientEvidence,
+    input.affectedUrlNote,
+    input.falsePositiveReason,
+    input.reviewedAt,
+    input.estimatedEffort,
+    input.isIncluded,
+    input.isFalsePositive,
+    input.displayOrder,
+    input.comparisonStatus,
+    input.affectedUrl,
+  ].some((value) => value !== undefined);
+  if (clientContentChanged) {
+    assertReportContentMutable(report, input.expectedRevision);
+  } else {
+    assertReportInternalMetadataMutable(report, input.expectedRevision);
+  }
   const client = await ensureConnected();
   const res = await client.query<OperationsReportFindingRow>(
     `
@@ -2839,9 +2887,11 @@ export async function updateOperationsReportFinding(
       input.expectedRevision,
     );
   }
-  if (finding) {
+  if (finding && clientContentChanged) {
     await bumpReportContentRevision(workspaceId, reportId);
     await invalidateEditableReportRender(workspaceId, reportId);
+  }
+  if (finding) {
     await recordAdminAuditLog(actor, {
       action: "operations_report_finding_updated",
       targetType: "operations_report_finding",
@@ -3151,6 +3201,7 @@ export async function updateOperationsReportActionPlanBatch(
         `
           UPDATE operations_reports
           SET content_revision = content_revision + 1,
+              status = CASE WHEN status = 'ready_to_send' THEN 'needs_review' ELSE status END,
               frozen_render_json = NULL,
               frozen_at = NULL,
               last_preview_generated_at = NULL,
@@ -3371,7 +3422,7 @@ export function getOperationsReportReadinessIssues(
   findings: OperationsReportFindingRow[],
   positiveObservations: OperationsReportPositiveObservationRow[] = [],
   actionPlanItems: OperationsReportActionPlanItemRow[] = [],
-  options: { requirePreview?: boolean; requirePdf?: boolean } = {},
+  stage: OperationsReportReadinessStage = "review",
 ): OperationsReportReadinessIssue[] {
   const issues: OperationsReportReadinessIssue[] = [];
   const add = (
@@ -3520,14 +3571,14 @@ export function getOperationsReportReadinessIssues(
       "preview",
     );
   }
-  if (options.requirePreview && !report.last_preview_generated_at) {
+  if (stage !== "review" && !report.last_preview_generated_at) {
     add(
       "preview_not_generated",
       "Open the saved client preview successfully.",
       "preview",
     );
   }
-  if (options.requirePdf && !report.last_pdf_generated_at) {
+  if (stage === "finalisation" && !report.last_pdf_generated_at) {
     add("pdf_not_generated", "Generate and inspect the server PDF.", "preview");
   }
   return issues;
@@ -3710,7 +3761,7 @@ export async function getOperationsReportPreview(
         detail.findings,
         detail.positiveObservations,
         detail.actionPlanItems,
-        { requirePreview: true, requirePdf: true },
+        "approval",
       ),
     };
   }
@@ -3728,7 +3779,7 @@ export async function getOperationsReportPreview(
       detail.findings,
       detail.positiveObservations,
       detail.actionPlanItems,
-      { requirePreview: true, requirePdf: true },
+      "approval",
     ),
   };
 }
@@ -3897,7 +3948,7 @@ export async function approveOperationsReport(
     detail.findings,
     detail.positiveObservations,
     detail.actionPlanItems,
-    { requirePreview: true, requirePdf: false },
+    "approval",
   );
   if (readinessIssues.length > 0) return { readinessIssues };
 
@@ -3944,13 +3995,74 @@ export async function markOperationsReportStatus(
   const detail = await getOperationsReportDetail(workspaceId, reportId);
   if (!detail) return null;
   assertReportStatusTransition(detail.report, status);
+  if (status === "needs_review" && detail.report.status === "ready_to_send") {
+    const reopenClient = new Client({ connectionString: DATABASE_URL });
+    await reopenClient.connect();
+    let transactionOpen = false;
+    try {
+      await reopenClient.query("BEGIN");
+      transactionOpen = true;
+      const reopened = await reopenClient.query<{ id: string }>(
+        `
+          UPDATE operations_reports
+          SET status = 'needs_review',
+              content_revision = content_revision + 1,
+              frozen_render_json = NULL,
+              frozen_at = NULL,
+              last_preview_generated_at = NULL,
+              last_pdf_generated_at = NULL,
+              updated_at = now()
+          WHERE id = $1
+            AND status = 'ready_to_send'
+            AND EXISTS (
+              SELECT 1 FROM operations_businesses b
+              WHERE b.id = operations_reports.business_id
+                AND b.internal_workspace_id = $2
+            )
+          RETURNING id
+        `,
+        [reportId, workspaceId],
+      );
+      if (!reopened.rows[0]) {
+        await reopenClient.query("ROLLBACK");
+        transactionOpen = false;
+        const latest = await getReportById(workspaceId, reportId);
+        if (!latest) return null;
+        if (isHistoricalReportStatus(latest.status) || latest.sent_at) {
+          throw immutableArtifactError("report");
+        }
+        return getOperationsReportDetail(workspaceId, reportId);
+      }
+      await reopenClient.query(
+        `DELETE FROM operations_report_pdf_renders
+         WHERE operations_report_id = $1`,
+        [reportId],
+      );
+      await reopenClient.query("COMMIT");
+      transactionOpen = false;
+    } catch (error) {
+      if (transactionOpen) await reopenClient.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      await reopenClient.end().catch(() => {});
+    }
+    await recordAdminAuditLog(actor, {
+      action: "operations_report_reopened_for_review",
+      targetType: "operations_report",
+      targetId: reportId,
+      metadata: {
+        previousContentRevision: detail.report.content_revision ?? 1,
+      },
+    });
+    return getOperationsReportDetail(workspaceId, reportId);
+  }
   if (status === "ready_to_send") {
     const issues = getOperationsReportReadinessIssues(
       detail.report,
       detail.findings,
       detail.positiveObservations,
       detail.actionPlanItems,
-      { requirePreview: true, requirePdf: true },
+      "finalisation",
     );
     if (issues.length > 0) return { readinessIssues: issues };
     if (!isOperationsReportApprovalCurrent(detail.report)) {
@@ -4535,6 +4647,60 @@ export async function recordOperationsReportSent(
       await client.query("ROLLBACK");
       return null;
     }
+    const sendReadinessIssues = getOperationsReportReadinessIssues(
+      lockedDetail.report,
+      lockedDetail.findings,
+      lockedDetail.positiveObservations,
+      lockedDetail.actionPlanItems,
+      "finalisation",
+    );
+    if (lockedDetail.report.status !== "ready_to_send") {
+      sendReadinessIssues.push({
+        code: "report_ready_to_send_required",
+        message:
+          "Approve the current report and generate its final PDF before recording delivery.",
+        section: "preview",
+      });
+    }
+    if (!isOperationsReportApprovalCurrent(lockedDetail.report)) {
+      sendReadinessIssues.push({
+        code: "report_approval_required",
+        message:
+          "Approve the current report revision before recording delivery.",
+        section: "preview",
+      });
+    }
+    if (!isCurrentClientReportPayload(lockedDetail.report.frozen_render_json)) {
+      sendReadinessIssues.push({
+        code: "report_final_render_required",
+        message: "Generate the final PDF before recording delivery.",
+        section: "preview",
+      });
+    }
+    const storedPdf = await client.query<{ id: string }>(
+      `SELECT render.id
+       FROM operations_report_pdf_renders render
+       WHERE render.operations_report_id = $1
+         AND EXISTS (
+           SELECT 1 FROM operations_reports r
+           JOIN operations_businesses b ON b.id = r.business_id
+           WHERE r.id = render.operations_report_id
+             AND b.internal_workspace_id = $2
+         )
+       LIMIT 1`,
+      [reportId, workspaceId],
+    );
+    if (!storedPdf.rows[0]) {
+      sendReadinessIssues.push({
+        code: "report_pdf_required",
+        message: "Generate the final PDF before recording delivery.",
+        section: "preview",
+      });
+    }
+    if (sendReadinessIssues.length > 0) {
+      await client.query("ROLLBACK");
+      return { readinessIssues: sendReadinessIssues };
+    }
     const payload = isCurrentClientReportPayload(
       lockedDetail.report.frozen_render_json,
     )
@@ -4615,7 +4781,7 @@ export async function recordOperationsReportSent(
             frozen_at = now(),
             updated_at = now()
         WHERE id = $1
-          AND status IN ('draft', 'needs_review', 'ready_to_send')
+          AND status = 'ready_to_send'
           AND EXISTS (SELECT 1 FROM operations_businesses b WHERE b.id = operations_reports.business_id AND b.internal_workspace_id = $6)
       `,
       [

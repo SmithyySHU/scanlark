@@ -48,3 +48,25 @@ test("Action Plan workspace batch uses one report-scoped repository mutation", (
     /return res\.json\(\{ report: serializeObject\(report\) \}\)/,
   );
 });
+
+test("final PDF generation advances the scoped report to ready-to-send", () => {
+  const route = routeSource.slice(
+    routeSource.indexOf('router.post("/reports/:reportId/generate-pdf"'),
+    routeSource.indexOf('router.get("/reports/:reportId/download"'),
+  );
+  assert.match(route, /await saveOperationsReportPdfRender\(/);
+  assert.match(
+    route,
+    /await markOperationsReportStatus\(\s*getWorkspaceId\(req\),\s*getActor\(req\),\s*reportId,\s*"ready_to_send",/,
+  );
+  assert.match(route, /"report_not_ready_after_pdf"/);
+});
+
+test("record-sent exposes repository finalisation readiness failures", () => {
+  const route = routeSource.slice(
+    routeSource.indexOf('router.post("/reports/:reportId/record-sent"'),
+    routeSource.indexOf('router.post("/reports/:reportId/record-client-reply"'),
+  );
+  assert.match(route, /"readinessIssues" in result/);
+  assert.match(route, /"report_not_ready_to_send"/);
+});

@@ -86,3 +86,12 @@ test("app navigation honours the report workspace unsaved-change blocker", () =>
     /if \(!window\.dispatchEvent\(navigationEvent\)\) return/,
   );
 });
+
+test("report finalisation refreshes in place and exposes explicit reopening", () => {
+  assert.match(source, /loadReportDetail\(false\)/);
+  assert.match(
+    source,
+    /onReopenForReview=\{\(\) => runReportAction\("mark-needs-review"\)\}/,
+  );
+  assert.doesNotMatch(reportWorkspaceSource, /onMarkReady/);
+});

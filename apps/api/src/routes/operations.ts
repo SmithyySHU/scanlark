@@ -649,6 +649,14 @@ function handleValidationError(res: Response, err: unknown) {
       "This record changed before your edit was saved.",
     );
   }
+  if (message === "report_ready_requires_reopen") {
+    return sendApiError(
+      res,
+      409,
+      "report_ready_requires_reopen",
+      "Reopen this ready-to-send report for review before editing it.",
+    );
+  }
   if (
     message === "artifact_immutable" ||
     message.startsWith("artifact_immutable:") ||
@@ -4084,6 +4092,15 @@ export function mountOperationsRoutes(app: express.Application) {
       }
       if (!result)
         return sendApiError(res, 404, "not_found", "Report not found");
+      if ("readinessIssues" in result) {
+        return sendApiError(
+          res,
+          400,
+          "report_not_ready_to_send",
+          "Approve the current report and generate its final PDF before recording delivery.",
+          { readinessIssues: result.readinessIssues },
+        );
+      }
       return res.json({ report: serializeObject(result) });
     } catch (err) {
       const handled = handleValidationError(res, err);
@@ -4251,6 +4268,26 @@ export function mountOperationsRoutes(app: express.Application) {
           reportId,
         );
         if (storedPdf) {
+          if (currentReport?.report.status !== "ready_to_send") {
+            const readyResult = await markOperationsReportStatus(
+              getWorkspaceId(req),
+              getActor(req),
+              reportId,
+              "ready_to_send",
+            );
+            if (!readyResult) {
+              return sendApiError(res, 404, "not_found", "Report not found");
+            }
+            if ("readinessIssues" in readyResult) {
+              return sendApiError(
+                res,
+                400,
+                "report_not_ready_after_pdf",
+                "The final PDF exists, but the report is not ready to send.",
+                { readinessIssues: readyResult.readinessIssues },
+              );
+            }
+          }
           res.setHeader("content-type", "application/pdf");
           res.setHeader(
             "content-disposition",
@@ -4309,6 +4346,24 @@ export function mountOperationsRoutes(app: express.Application) {
           generationSource: "actor",
         },
       );
+      const readyResult = await markOperationsReportStatus(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+        "ready_to_send",
+      );
+      if (!readyResult) {
+        return sendApiError(res, 404, "not_found", "Report not found");
+      }
+      if ("readinessIssues" in readyResult) {
+        return sendApiError(
+          res,
+          400,
+          "report_not_ready_after_pdf",
+          "The final PDF was generated, but the report is not ready to send.",
+          { readinessIssues: readyResult.readinessIssues },
+        );
+      }
       res.setHeader("content-type", "application/pdf");
       res.setHeader(
         "content-disposition",
