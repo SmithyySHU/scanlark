@@ -10,6 +10,7 @@ export type OperationsResourceKind =
   | "positive_observation"
   | "comparison_item"
   | "quote"
+  | "action_plan_item"
   | "quote_or_work_item"
   | "quote_or_work_requirement"
   | "work_order"
@@ -40,6 +41,12 @@ const RESOURCE_SCOPE_SQL: Record<OperationsResourceKind, string> = {
   positive_observation: `SELECT 1 FROM operations_report_positive_observations o JOIN operations_reports r ON r.id = o.operations_report_id JOIN operations_businesses b ON b.id = r.business_id WHERE o.id = $2 AND b.internal_workspace_id = $1`,
   comparison_item: `SELECT 1 FROM operations_report_comparison_items i JOIN operations_reports r ON r.id = i.operations_report_id JOIN operations_businesses b ON b.id = r.business_id WHERE i.id = $2 AND b.internal_workspace_id = $1`,
   quote: `SELECT 1 FROM operations_quotes q JOIN operations_businesses b ON b.id = q.business_id WHERE q.id = $2 AND b.internal_workspace_id = $1`,
+  action_plan_item: `
+    SELECT 1 FROM operations_report_action_plan_items i
+    JOIN operations_reports r ON r.id = i.operations_report_id
+    JOIN operations_businesses b ON b.id = r.business_id
+    WHERE i.id = $2 AND b.internal_workspace_id = $1
+  `,
   quote_or_work_item: `
     SELECT 1 FROM operations_quote_items i JOIN operations_quotes q ON q.id = i.quote_id JOIN operations_businesses b ON b.id = q.business_id WHERE i.id = $2 AND b.internal_workspace_id = $1
     UNION ALL

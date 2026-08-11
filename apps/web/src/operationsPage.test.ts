@@ -6,96 +6,59 @@ const source = readFileSync(
   new URL("./components/OperationsPage.tsx", import.meta.url),
   "utf8",
 );
+const reportWorkspaceSource = readFileSync(
+  new URL(
+    "./components/operations/reports/OperationsReportWorkspace.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
-test("action-plan save refreshes from stale patch and computes deterministic recovery", () => {
-  assert.match(source, /const actionPlanPatchRecoveryResult = useCallback\(/);
-  assert.match(source, /item\.report_finding_id != null/);
+test("action-plan patch function accepts source item context", () => {
   assert.match(
     source,
-    /item\.id !== staleItemId &&\s*item\.report_finding_id != null &&\s*item\.report_finding_id === staleFindingId/,
-  );
-  assert.match(source, /patchInput\?\.group_key === "address_now"/);
-  assert.match(source, /patchInput\?\.groupKey === "address_now"/);
-  assert.match(source, /if \(candidates\.length === 1\)/);
-  assert.match(
-    source,
-    /const groupKey\s*=\s*patchInput\?\.groupKey\s*===\s*"address_now"/,
-  );
-  assert.match(source, /const refreshActionPlanState = async \(\) => /);
-  assert.match(source, /actionPlanPatchRecoveryResult\(/);
-  assert.match(source, /setActionPlanPatchRecovery\(recovery\)/);
-});
-
-test("action-plan stale 404 branch keeps user in refreshed list view", () => {
-  assert.match(source, /if \(res\.status === 404\) \{/);
-  assert.match(source, /const refreshed = await refreshActionPlanState\(\);/);
-  assert.match(
-    source,
-    /Action plan item no longer matches this report\. The report has been refreshed; please choose the current item and try again\./,
+    /async function patchActionPlanItem\(\s*itemId: string,\s*input: Record<string, unknown>,\s*sourceItem\?: OperationsReportActionPlanItem,?\s*\)/,
   );
 });
 
-test("action-plan successful mutation updates and uses resolved ID", () => {
+test("patch path sends direct selected action-plan item id", () => {
   assert.match(
     source,
-    /const requestItemId = resolveActionPlanPatchItemId\(itemId,\s*input\);/,
-  );
-  assert.match(
-    source,
-    /const sendActionPlanPatch = async \(\s*targetItemId: string,\s*expectedRevision: number \| undefined,\s*\) =>/,
-  );
-  assert.match(
-    source,
-    /const staleItemHint = reportDetail\?\.actionPlanItems\.find/,
-  );
-  assert.match(source, /const refreshed = await refreshActionPlanState\(\);/);
-  assert.match(
-    source,
-    /actionPlanPatchRecoveryResult\(\s*itemId,\s*refreshedReport,\s*input,/,
-  );
-  assert.match(source, /refreshed\.restored && refreshed\.recovery\s*\)/);
-  assert.doesNotMatch(
-    source,
-    /Action plan item was regenerated and remapped to the current persisted item/,
+    /let res = await sendActionPlanPatch\(\s*itemId,\s*\(input\.expectedRevision as number \| undefined\)\s*\?\?\s*reportDetail\?\.report\.content_revision,\s*\)/,
   );
 });
 
-test("timing-group flow retries with replacement item when 404 returns deterministic remap", () => {
+test("action-plan 404 response uses report refresh recovery", () => {
   assert.match(
     source,
-    /const expectedRevision = input\.expectedRevision as number \| undefined;/,
+    /if \(res\.status === 404\) \{\s*const refreshed = await refreshActionPlanState\(\);/,
   );
   assert.match(
     source,
-    /const baseExpectedRevision =\s*expectedRevision \?\? reportDetail\?\.report\.content_revision;/,
+    /const recovery =[\s\S]*\brefreshed\.recovery\s*\?\?\s*\(/,
   );
   assert.match(
     source,
-    /let res = await sendActionPlanPatch\(requestItemId, baseExpectedRevision\);/,
+    /if \(!recovery\.replacementItemId\) \{\s*setActionError\(\s*"Action plan item no longer matches this report/,
   );
-  assert.match(
-    source,
-    /const replacementItemId = recovery\.replacementItemId;/,
-  );
-  assert.match(
-    source,
-    /res = await sendActionPlanPatch\(\s*replacementItemId,\s*refreshed\.report\?\.report\.content_revision \?\? baseExpectedRevision,\s*\);/,
-  );
-  assert.match(source, /clearActionPlanPatchRecovery\(\);/);
 });
 
-test("deterministic remap prevents stale-user recovery message when retry succeeds", () => {
+test("workaround route-level remap has been removed", () => {
+  assert.doesNotMatch(source, /resolvePatchTargetFromReport/);
+  assert.doesNotMatch(source, /hydrateReportForActionPlanSave/);
   assert.match(
     source,
-    /if \(replacementItemId && replacementItemId !== requestItemId\) \{\s*res = await sendActionPlanPatch\(/s,
+    /const refreshed = await refreshActionPlanState\(\);\s*const recovery =/,
   );
-  assert.match(source, /if \(!res\.ok\) \{\s*if \(res\.status === 404\) \{/s);
 });
 
-test("action-plan stale-state recovery is threaded into report workspace rendering", () => {
-  assert.match(source, /actionPlanPatchRecovery={actionPlanPatchRecovery}/);
+test("source item is passed from action-plan editor into patch handler", () => {
   assert.match(
-    source,
-    /resolveActionPlanPatchItemId={resolveActionPlanPatchItemId}/,
+    reportWorkspaceSource,
+    /await onPatch\(\s*item\.id,[\s\S]*item,\s*\)/,
+  );
+  assert.match(
+    reportWorkspaceSource,
+    /sourceItem\?: OperationsReportActionPlanItem,\s*\)\s*=> Promise<void>/,
   );
 });

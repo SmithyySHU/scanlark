@@ -367,6 +367,22 @@ test("stale action-plan IDs cannot mutate current report content", async () => {
     `,
     [reportId, finding.rows[0].id],
   );
+  assert.equal(
+    await canAccessOperationsResource(
+      workspaceA,
+      "action_plan_item",
+      replacement.rows[0].id,
+    ),
+    true,
+  );
+  assert.equal(
+    await canAccessOperationsResource(
+      workspaceB,
+      "action_plan_item",
+      replacement.rows[0].id,
+    ),
+    false,
+  );
 
   assert.equal(
     await updateOperationsReportActionPlanItem(
@@ -470,6 +486,157 @@ test("stale action-plan IDs cannot mutate current report content", async () => {
     otherReport.rows[0].id,
   ]);
   await db.query(`DELETE FROM sites WHERE id = $1`, [otherSite.rows[0].id]);
+});
+
+test("fresh action-plan timing updates mutate the same persisted item", async () => {
+  if (!statefulAuditEnabled) return;
+  const site = await db.query<{ id: string }>(
+    `INSERT INTO sites (url, user_id) VALUES ($1, $2) RETURNING id`,
+    [`https://action-plan-timing-${key}.test`, actor.id],
+  );
+  const scan = await db.query<{ id: string }>(
+    `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
+    [site.rows[0].id, `https://action-plan-timing-${key}.test`],
+  );
+  const report = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_reports (
+        business_id, site_id, scan_run_id, title, created_by_user_id,
+        executive_summary, overall_summary, main_strengths, main_concerns,
+        recommended_first_steps, scope_limitations, last_preview_generated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, $6, $6, $6, now())
+      RETURNING id
+    `,
+    [
+      businessA,
+      site.rows[0].id,
+      scan.rows[0].id,
+      "Action-plan timing regression",
+      actor.id,
+      "Timing regression summary.",
+    ],
+  );
+  const reportId = report.rows[0]!.id;
+  const finding = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_findings (
+        operations_report_id, source_type, category, original_severity,
+        client_priority, title, client_explanation, why_it_matters,
+        recommended_action, affected_url, reviewed_at
+      ) VALUES ($1, 'manual', 'manual', 'medium', 'important', $2, $3, $3, $3, $4, now())
+      RETURNING id
+    `,
+    [
+      reportId,
+      "Timing finding",
+      "Regression content.",
+      `https://action-plan-timing-${key}.test/page`,
+    ],
+  );
+  const action = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, report_finding_id, group_key, title
+      ) VALUES ($1, $2, 'consider_later', 'Stale timing regression') RETURNING id
+    `,
+    [reportId, finding.rows[0]!.id],
+  );
+
+  const itemId = action.rows[0]!.id;
+  const existsBefore = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
+    [itemId],
+  );
+  assert.equal(existsBefore.rows.length, 1);
+  assert.equal(existsBefore.rows[0]!.group_key, "consider_later");
+  assert.equal(existsBefore.rows[0]!.id, itemId);
+
+  const initialReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  const initialRevision = initialReport.rows[0]!.content_revision;
+
+  const movedNow = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    itemId,
+    {
+      groupKey: "address_now",
+      expectedRevision: initialRevision,
+    },
+  );
+  assert.equal(movedNow?.id, itemId);
+  assert.equal(movedNow?.group_key, "address_now");
+  const existsAfterNow = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
+    [itemId],
+  );
+  assert.equal(existsAfterNow.rows.length, 1);
+  assert.equal(existsAfterNow.rows[0]!.group_key, "address_now");
+
+  const nowReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  const nowRevision = nowReport.rows[0]!.content_revision;
+
+  const movedSoon = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    itemId,
+    {
+      groupKey: "address_soon",
+      expectedRevision: nowRevision,
+    },
+  );
+  assert.equal(movedSoon?.id, itemId);
+  assert.equal(movedSoon?.group_key, "address_soon");
+  const existsAfterSoon = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
+    [itemId],
+  );
+  assert.equal(existsAfterSoon.rows.length, 1);
+  assert.equal(existsAfterSoon.rows[0]!.group_key, "address_soon");
+
+  const soonReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  const soonRevision = soonReport.rows[0]!.content_revision;
+
+  const movedLater = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    itemId,
+    {
+      groupKey: "consider_later",
+      expectedRevision: soonRevision,
+    },
+  );
+  assert.equal(movedLater?.id, itemId);
+  assert.equal(movedLater?.group_key, "consider_later");
+  const existsAfterLater = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
+    [itemId],
+  );
+  assert.equal(existsAfterLater.rows.length, 1);
+  assert.equal(existsAfterLater.rows[0]!.group_key, "consider_later");
+
+  const persisted = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+    [reportId],
+  );
+  assert.equal(persisted.rows.length, 1);
+  assert.equal(persisted.rows[0]!.id, itemId);
+  assert.equal(persisted.rows[0]!.group_key, "consider_later");
+
+  await db.query(`DELETE FROM operations_reports WHERE id = $1`, [reportId]);
+  await db.query(`DELETE FROM sites WHERE id = $1`, [site.rows[0].id]);
+  await db.query(`DELETE FROM scan_runs WHERE id = $1`, [scan.rows[0].id]);
 });
 
 test("business lists and direct resource checks are workspace isolated", async () => {

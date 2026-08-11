@@ -2735,44 +2735,6 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setReportRegroupPreview(null);
   }, [loadReportDetailData]);
 
-  const resolveActionPlanPatchItemId = useCallback(
-    (itemId: string, patchInput?: Record<string, unknown>) => {
-      const recovery = actionPlanPatchRecoveryRef.current;
-      if (
-        recovery?.replacementItemId &&
-        recovery.staleItemId === itemId &&
-        recovery.replacementItemId
-      ) {
-        return recovery.replacementItemId;
-      }
-      const staleItem = reportDetail?.actionPlanItems.find(
-        (item) => item.id === itemId,
-      );
-      if (!staleItem || staleItem.report_finding_id == null) return itemId;
-      if (!reportDetail) return itemId;
-      const groupKey =
-        patchInput?.groupKey === "address_now" ||
-        patchInput?.groupKey === "address_soon" ||
-        patchInput?.groupKey === "consider_later"
-          ? (patchInput.groupKey as OperationsReportActionPlanGroup)
-          : patchInput?.group_key === "address_now" ||
-              patchInput?.group_key === "address_soon" ||
-              patchInput?.group_key === "consider_later"
-            ? (patchInput.group_key as OperationsReportActionPlanGroup)
-            : staleItem.group_key;
-      const candidates = reportDetail.actionPlanItems.filter(
-        (item) =>
-          item.id !== staleItem.id &&
-          item.report_finding_id != null &&
-          item.report_finding_id === staleItem.report_finding_id &&
-          item.group_key === groupKey,
-      );
-      if (candidates.length === 1) return candidates[0]!.id;
-      return itemId;
-    },
-    [reportDetail],
-  );
-
   const loadReportPreview = useCallback(async () => {
     if (!operationsReportId) return;
     try {
@@ -3346,6 +3308,24 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     loadServices,
     loadWorkOrders,
     operationsReportId,
+  ]);
+
+  useEffect(() => {
+    setReportPreview(null);
+    setReportDetail(null);
+    setReportDetailLoading(true);
+    clearActionPlanPatchRecovery();
+    actionPlanPatchRecoveryRef.current = null;
+    setReportReadinessIssues([]);
+    setReportRegroupPreview(null);
+    if (!operationsReportId) {
+      return;
+    }
+  }, [
+    clearActionPlanPatchRecovery,
+    operationsReportId,
+    setReportReadinessIssues,
+    setReportRegroupPreview,
   ]);
 
   useEffect(() => {
@@ -4120,14 +4100,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   async function patchActionPlanItem(
     itemId: string,
     input: Record<string, unknown>,
+    sourceItem?: OperationsReportActionPlanItem,
   ) {
     if (!operationsReportId) return;
     setActionError(null);
-    const staleItemHint = reportDetail?.actionPlanItems.find(
-      (item) => item.id === itemId,
-    );
     clearActionPlanPatchRecovery();
-    const requestItemId = resolveActionPlanPatchItemId(itemId, input);
 
     const sendActionPlanPatch = async (
       targetItemId: string,
@@ -4164,59 +4141,34 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           itemId,
           refreshedReport,
           input,
-          staleItemHint?.report_finding_id,
-          staleItemHint?.group_key,
+          sourceItem?.report_finding_id,
+          sourceItem?.group_key,
         ),
       };
     };
 
-    const expectedRevision = input.expectedRevision as number | undefined;
-    const baseExpectedRevision =
-      expectedRevision ?? reportDetail?.report.content_revision;
-    let res = await sendActionPlanPatch(requestItemId, baseExpectedRevision);
+    let res = await sendActionPlanPatch(
+      itemId,
+      (input.expectedRevision as number | undefined) ??
+        reportDetail?.report.content_revision,
+    );
     if (!res.ok) {
       if (res.status === 404) {
         const refreshed = await refreshActionPlanState();
         const recovery =
           refreshed.recovery ??
-          (actionPlanPatchRecoveryRef.current
-            ? {
-                staleItemId: actionPlanPatchRecoveryRef.current.staleItemId,
-                replacementItemId:
-                  actionPlanPatchRecoveryRef.current.replacementItemId,
-              }
+          (reportDetail
+            ? actionPlanPatchRecoveryResult(
+                itemId,
+                reportDetail,
+                input,
+                sourceItem?.report_finding_id,
+                sourceItem?.group_key,
+              )
             : {
                 staleItemId: itemId,
                 replacementItemId: null,
               });
-        const replacementItemId = recovery.replacementItemId;
-        if (replacementItemId && replacementItemId !== requestItemId) {
-          res = await sendActionPlanPatch(
-            replacementItemId,
-            refreshed.report?.report.content_revision ?? baseExpectedRevision,
-          );
-          if (!res.ok) {
-            if (res.status === 404) {
-              setActionPlanPatchRecovery(recovery);
-              actionPlanPatchRecoveryRef.current = recovery;
-              setActionError(
-                "Action plan item no longer matches this report. The report has been refreshed; please choose the current item and try again.",
-              );
-              return;
-            }
-            const message = await apiErrorMessage(
-              res,
-              "Failed to update action plan item",
-            );
-            setActionError(message);
-            throw new Error(message);
-          }
-          setActionError(null);
-          await refreshActionPlanState();
-          clearActionPlanPatchRecovery();
-          actionPlanPatchRecoveryRef.current = null;
-          return;
-        }
         setActionPlanPatchRecovery(recovery);
         actionPlanPatchRecoveryRef.current = recovery;
         if (!recovery.replacementItemId) {
@@ -10152,7 +10104,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }
 
   function renderReportDetail() {
-    if (reportDetailLoading && !reportDetail) {
+    if (reportDetailLoading || reportDetail?.report.id !== operationsReportId) {
       return <section className="ops-panel">Loading report...</section>;
     }
     if (!reportDetail) {
@@ -10175,7 +10127,6 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           onApplyRegroup={applyReportRegroup}
           onPatchObservation={patchPositiveObservation}
           onPatchActionPlanItem={patchActionPlanItem}
-          resolveActionPlanPatchItemId={resolveActionPlanPatchItemId}
           onApprove={() =>
             runReportAction("approve", {
               expectedRevision: report.content_revision,

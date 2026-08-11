@@ -920,6 +920,7 @@ export function mountOperationsRoutes(app: express.Application) {
     observationId: "positive_observation",
     comparisonItemId: "comparison_item",
     quoteId: "quote",
+    actionPlanItemId: "action_plan_item",
     itemId: "quote_or_work_item",
     requirementId: "quote_or_work_requirement",
     workOrderId: "work_order",
@@ -3941,10 +3942,10 @@ export function mountOperationsRoutes(app: express.Application) {
   );
 
   router.patch(
-    "/reports/:reportId/action-plan-items/:itemId",
+    "/reports/:reportId/action-plan-items/:actionPlanItemId",
     async (req, res) => {
       const reportId = getUuidParam(req, res, "reportId");
-      const itemId = getUuidParam(req, res, "itemId");
+      const itemId = getUuidParam(req, res, "actionPlanItemId");
       if (!reportId || !itemId) return;
       try {
         const item = await updateOperationsReportActionPlanItem(

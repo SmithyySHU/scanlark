@@ -56,18 +56,13 @@ test("action plan row list uses recovery-filtered items", () => {
   assert.match(source, /items={visibleActionPlanItemsWithRecovery}/);
 });
 
-test("action-plan save resolves mutable IDs through a resolver callback", () => {
-  assert.match(
+test("action-plan editor sends selected item ID directly to page-level patch", () => {
+  assert.match(source, /function ReportActionPlan\(/);
+  assert.match(source, /await onPatch\(item\.id, \{/);
+  assert.match(source, /function ActionPlanItemEditor/);
+  assert.doesNotMatch(
     source,
-    /resolveActionPlanPatchItemId: \(\s*itemId: string,\s*patchInput\?: Record<string, unknown>,\s*\) => string;/,
+    /const patchItemId = resolvePatchItemId\(item.id,[\s\S]*?await onPatch\(patchItemId,/,
   );
-  assert.match(source, /resolvePatchItemId={resolveActionPlanPatchItemId}/);
-  assert.match(
-    source,
-    /const patchItemId = resolvePatchItemId\(item.id,\s*\{\s*\.\.\.draft\.draft,\s*reviewedAt: draft\.draft\.reviewed_at,\s*\}\);/,
-  );
-  assert.match(
-    source,
-    /await onPatch\(patchItemId, \{\s*title: draft\.draft\.title,/s,
-  );
+  assert.doesNotMatch(source, /resolvePatchItemId=/);
 });
