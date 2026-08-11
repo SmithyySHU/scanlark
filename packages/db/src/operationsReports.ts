@@ -2920,7 +2920,7 @@ export async function updateOperationsReportActionPlanItem(
           updated_at = now()
       WHERE operations_report_id = $1
         AND id = $2
-        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $10 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
+        AND EXISTS (SELECT 1 FROM operations_reports r JOIN operations_businesses b ON b.id = r.business_id WHERE r.id = operations_report_action_plan_items.operations_report_id AND b.internal_workspace_id = $11 AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived'))
       RETURNING *
     `,
     [

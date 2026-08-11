@@ -465,6 +465,10 @@ test("stale action-plan IDs cannot mutate current report content", async () => {
     `,
     [otherReport.rows[0].id, otherFinding.rows[0].id],
   );
+  const currentReportRevision = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
 
   assert.equal(
     await updateOperationsReportActionPlanItem(
@@ -474,7 +478,7 @@ test("stale action-plan IDs cannot mutate current report content", async () => {
       otherAction.rows[0].id,
       {
         title: "Wrong report mutation attempt",
-        expectedRevision: reportRevision,
+        expectedRevision: currentReportRevision.rows[0]!.content_revision,
       },
     ),
     null,
@@ -557,31 +561,6 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
   );
   const initialRevision = initialReport.rows[0]!.content_revision;
 
-  const movedNow = await updateOperationsReportActionPlanItem(
-    workspaceA,
-    actor,
-    reportId,
-    itemId,
-    {
-      groupKey: "address_now",
-      expectedRevision: initialRevision,
-    },
-  );
-  assert.equal(movedNow?.id, itemId);
-  assert.equal(movedNow?.group_key, "address_now");
-  const existsAfterNow = await db.query<{ id: string; group_key: string }>(
-    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
-    [itemId],
-  );
-  assert.equal(existsAfterNow.rows.length, 1);
-  assert.equal(existsAfterNow.rows[0]!.group_key, "address_now");
-
-  const nowReport = await db.query<{ content_revision: number }>(
-    `SELECT content_revision FROM operations_reports WHERE id = $1`,
-    [reportId],
-  );
-  const nowRevision = nowReport.rows[0]!.content_revision;
-
   const movedSoon = await updateOperationsReportActionPlanItem(
     workspaceA,
     actor,
@@ -589,7 +568,7 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
     itemId,
     {
       groupKey: "address_soon",
-      expectedRevision: nowRevision,
+      expectedRevision: initialRevision,
     },
   );
   assert.equal(movedSoon?.id, itemId);
@@ -606,6 +585,33 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
     [reportId],
   );
   const soonRevision = soonReport.rows[0]!.content_revision;
+  assert.equal(soonRevision, initialRevision + 1);
+
+  const movedNow = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    itemId,
+    {
+      groupKey: "address_now",
+      expectedRevision: soonRevision,
+    },
+  );
+  assert.equal(movedNow?.id, itemId);
+  assert.equal(movedNow?.group_key, "address_now");
+  const existsAfterNow = await db.query<{ id: string; group_key: string }>(
+    `SELECT id, group_key FROM operations_report_action_plan_items WHERE id = $1`,
+    [itemId],
+  );
+  assert.equal(existsAfterNow.rows.length, 1);
+  assert.equal(existsAfterNow.rows[0]!.group_key, "address_now");
+
+  const nowReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  const nowRevision = nowReport.rows[0]!.content_revision;
+  assert.equal(nowRevision, soonRevision + 1);
 
   const movedLater = await updateOperationsReportActionPlanItem(
     workspaceA,
@@ -614,7 +620,7 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
     itemId,
     {
       groupKey: "consider_later",
-      expectedRevision: soonRevision,
+      expectedRevision: nowRevision,
     },
   );
   assert.equal(movedLater?.id, itemId);
@@ -626,13 +632,48 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
   assert.equal(existsAfterLater.rows.length, 1);
   assert.equal(existsAfterLater.rows[0]!.group_key, "consider_later");
 
-  const persisted = await db.query<{ id: string; group_key: string }>(
-    `SELECT id, group_key FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
+  const laterReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  assert.equal(laterReport.rows[0]!.content_revision, nowRevision + 1);
+  const updatedContent = await updateOperationsReportActionPlanItem(
+    workspaceA,
+    actor,
+    reportId,
+    itemId,
+    {
+      title: "Updated action title",
+      summary: "Updated action summary.",
+      expectedRevision: laterReport.rows[0]!.content_revision,
+    },
+  );
+  assert.equal(updatedContent?.id, itemId);
+  assert.equal(updatedContent?.title, "Updated action title");
+  assert.equal(updatedContent?.summary, "Updated action summary.");
+
+  const persisted = await db.query<{
+    id: string;
+    group_key: string;
+    title: string;
+    summary: string | null;
+  }>(
+    `SELECT id, group_key, title, summary FROM operations_report_action_plan_items WHERE operations_report_id = $1`,
     [reportId],
   );
   assert.equal(persisted.rows.length, 1);
   assert.equal(persisted.rows[0]!.id, itemId);
   assert.equal(persisted.rows[0]!.group_key, "consider_later");
+  assert.equal(persisted.rows[0]!.title, "Updated action title");
+  assert.equal(persisted.rows[0]!.summary, "Updated action summary.");
+  const finalReport = await db.query<{ content_revision: number }>(
+    `SELECT content_revision FROM operations_reports WHERE id = $1`,
+    [reportId],
+  );
+  assert.equal(
+    finalReport.rows[0]!.content_revision,
+    laterReport.rows[0]!.content_revision + 1,
+  );
 
   await db.query(`DELETE FROM operations_reports WHERE id = $1`, [reportId]);
   await db.query(`DELETE FROM sites WHERE id = $1`, [site.rows[0].id]);
