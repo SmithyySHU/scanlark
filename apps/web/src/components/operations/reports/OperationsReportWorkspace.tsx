@@ -144,6 +144,7 @@ type Props = {
     itemId: string,
     input: Record<string, unknown>,
   ) => Promise<void>;
+  resolveActionPlanPatchItemId: (itemId: string) => string;
   onApprove: () => Promise<void>;
   onMarkReady: () => Promise<void>;
   onRecordSent: () => Promise<void>;
@@ -169,6 +170,7 @@ export function OperationsReportWorkspace({
   onApplyRegroup,
   onPatchObservation,
   onPatchActionPlanItem,
+  resolveActionPlanPatchItemId,
   onApprove,
   onMarkReady,
   onRecordSent,
@@ -1314,6 +1316,7 @@ export function OperationsReportWorkspace({
             items={visibleActionPlanItemsWithRecovery}
             findings={detail.findings}
             onPatch={onPatchActionPlanItem}
+            resolvePatchItemId={resolveActionPlanPatchItemId}
             onDirty={setChildDirty}
             onOpenFinding={openActionPlanFinding}
           />
@@ -2029,12 +2032,14 @@ function ReportActionPlan({
   items,
   findings,
   onPatch,
+  resolvePatchItemId,
   onDirty,
   onOpenFinding,
 }: {
   items: OperationsReportActionPlanItem[];
   findings: OperationsReportFinding[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
+  resolvePatchItemId: (itemId: string) => string;
   onDirty: (key: string, dirty: boolean) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
@@ -2064,6 +2069,7 @@ function ReportActionPlan({
                 }
                 groups={groups}
                 onPatch={onPatch}
+                resolvePatchItemId={resolvePatchItemId}
                 onDirty={onDirty}
                 onOpenFinding={onOpenFinding}
               />
@@ -2079,6 +2085,7 @@ function ActionPlanItemEditor({
   finding,
   groups,
   onPatch,
+  resolvePatchItemId,
   onDirty,
   onOpenFinding,
 }: {
@@ -2086,6 +2093,7 @@ function ActionPlanItemEditor({
   finding: OperationsReportFinding | null;
   groups: OperationsReportActionPlanGroup[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
+  resolvePatchItemId: (itemId: string) => string;
   onDirty: (key: string, dirty: boolean) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
@@ -2102,7 +2110,8 @@ function ActionPlanItemEditor({
   }
 
   async function save() {
-    await onPatch(item.id, {
+    const patchItemId = resolvePatchItemId(item.id);
+    await onPatch(patchItemId, {
       title: draft.draft.title,
       summary: draft.draft.summary,
       groupKey: draft.draft.group_key,

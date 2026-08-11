@@ -15,29 +15,48 @@ test("action-plan save refreshes from stale patch and computes deterministic rec
   );
   assert.match(
     source,
-    /item\.report_finding_id === staleItem\.report_finding_id &&\s*item\.group_key === staleItem\.group_key/,
+    /item\.report_finding_id === staleItem\.report_finding_id &&\s*item\.group_key === groupKey/,
   );
   assert.match(source, /if \(candidates\.length === 1\)/);
   assert.match(
     source,
-    /const recovery = refreshedReport\s*\?\s*actionPlanPatchRecoveryResult\(itemId, refreshedReport\)\s*:\s*{\s*staleItemId:\s*itemId,\s*replacementItemId:\s*null\s*}/s,
+    /const groupKey\s*=\s*patchInput\?\.groupKey\s*===\s*"address_now"/,
   );
+  assert.match(source, /const refreshActionPlanState = async \(\) => /);
+  assert.match(source, /actionPlanPatchRecoveryResult\(/);
   assert.match(source, /setActionPlanPatchRecovery\(recovery\)/);
 });
 
 test("action-plan stale 404 branch keeps user in refreshed list view", () => {
   assert.match(source, /if \(res\.status === 404\) \{/);
+  assert.match(source, /const refreshed = await refreshActionPlanState\(\);/);
   assert.match(
     source,
-    /const refreshedReport = await loadReportDetailData\(\);/,
+    /Action plan item no longer matches this report\. The report has been refreshed; please choose the current item and try again\./,
   );
-  assert.match(source, /await loadReportPreview\(\);/);
+});
+
+test("action-plan successful mutation updates and uses resolved ID", () => {
   assert.match(
     source,
-    /Action plan item no longer matches this report|Action plan item was regenerated and remapped to the current persisted item/,
+    /const requestItemId = resolveActionPlanPatchItemId\(itemId\);/,
+  );
+  assert.match(
+    source,
+    /action-plan-items\/\$\{encodeURIComponent\(requestItemId\)\}/,
+  );
+  assert.match(source, /const refreshed = await refreshActionPlanState\(\);/);
+  assert.match(source, /refreshed\.restored && refreshed\.recovery\s*\)/);
+  assert.doesNotMatch(
+    source,
+    /Action plan item was regenerated and remapped to the current persisted item/,
   );
 });
 
 test("action-plan stale-state recovery is threaded into report workspace rendering", () => {
   assert.match(source, /actionPlanPatchRecovery={actionPlanPatchRecovery}/);
+  assert.match(
+    source,
+    /resolveActionPlanPatchItemId={resolveActionPlanPatchItemId}/,
+  );
 });

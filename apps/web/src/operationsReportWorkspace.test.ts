@@ -55,3 +55,16 @@ test("action-plan stale recovery hides stale row and clears stale dirty key", ()
 test("action plan row list uses recovery-filtered items", () => {
   assert.match(source, /items={visibleActionPlanItemsWithRecovery}/);
 });
+
+test("action-plan save resolves mutable IDs through a resolver callback", () => {
+  assert.match(
+    source,
+    /resolveActionPlanPatchItemId: \(itemId: string\) => string;/,
+  );
+  assert.match(source, /resolvePatchItemId={resolveActionPlanPatchItemId}/);
+  assert.match(source, /const patchItemId = resolvePatchItemId\(item.id\);/);
+  assert.match(
+    source,
+    /await onPatch\(patchItemId, \{\s*title: draft\.draft\.title,/s,
+  );
+});

@@ -2723,6 +2723,19 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     setReportRegroupPreview(null);
   }, [loadReportDetailData]);
 
+  const resolveActionPlanPatchItemId = useCallback(
+    (itemId: string) => {
+      if (
+        actionPlanPatchRecovery?.replacementItemId &&
+        actionPlanPatchRecovery.staleItemId === itemId
+      ) {
+        return actionPlanPatchRecovery.replacementItemId;
+      }
+      return itemId;
+    },
+    [actionPlanPatchRecovery],
+  );
+
   const loadReportPreview = useCallback(async () => {
     if (!operationsReportId) return;
     try {
@@ -2765,18 +2778,25 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     (
       staleItemId: string,
       refreshedReport: OperationsReportDetail,
+      patchInput?: Record<string, unknown>,
     ): ActionPlanPatchRecovery => {
       const staleItem = reportDetail?.actionPlanItems.find(
         (item) => item.id === staleItemId,
       );
       if (!staleItem) return { staleItemId, replacementItemId: null };
+      const groupKey =
+        patchInput?.groupKey === "address_now" ||
+        patchInput?.groupKey === "address_soon" ||
+        patchInput?.groupKey === "consider_later"
+          ? (patchInput.groupKey as OperationsReportActionPlanGroup)
+          : staleItem.group_key;
       const candidates = refreshedReport.actionPlanItems.filter(
         (item) =>
           item.id !== staleItem.id &&
           item.report_finding_id != null &&
           staleItem.report_finding_id != null &&
           item.report_finding_id === staleItem.report_finding_id &&
-          item.group_key === staleItem.group_key,
+          item.group_key === groupKey,
       );
       if (candidates.length === 1) {
         return {
@@ -4063,8 +4083,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     if (!operationsReportId) return;
     setActionError(null);
     setActionPlanPatchRecovery(null);
+    const requestItemId = resolveActionPlanPatchItemId(itemId);
     const res = await apiFetch(
-      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(itemId)}`,
+      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(requestItemId)}`,
       {
         method: "PATCH",
         headers: { "content-type": "application/json" },
@@ -4075,21 +4096,35 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         }),
       },
     );
+    const refreshActionPlanState = async () => {
+      const refreshedReport = await loadReportDetailData();
+      if (!refreshedReport) {
+        return {
+          restored: false,
+          recovery: null as ActionPlanPatchRecovery | null,
+        };
+      }
+      setReportDetail(refreshedReport);
+      setReportRegroupPreview(null);
+      await loadReportPreview();
+      return {
+        restored: true,
+        recovery: actionPlanPatchRecoveryResult(
+          requestItemId,
+          refreshedReport,
+          input,
+        ),
+      };
+    };
     if (!res.ok) {
       if (res.status === 404) {
-        const refreshedReport = await loadReportDetailData();
-        setReportDetail(refreshedReport);
-        setReportRegroupPreview(null);
-        await loadReportPreview();
-        const recovery = refreshedReport
-          ? actionPlanPatchRecoveryResult(itemId, refreshedReport)
-          : { staleItemId: itemId, replacementItemId: null };
+        const refreshed = await refreshActionPlanState();
+        const recovery =
+          refreshed.restored && refreshed.recovery
+            ? refreshed.recovery
+            : { staleItemId: requestItemId, replacementItemId: null };
         setActionPlanPatchRecovery(recovery);
-        if (recovery.replacementItemId) {
-          setActionError(
-            "Action plan item was regenerated and remapped to the current persisted item. Please continue editing the current item.",
-          );
-        } else {
+        if (!recovery.replacementItemId) {
           setActionError(
             "Action plan item no longer matches this report. The report has been refreshed; please choose the current item and try again.",
           );
@@ -4102,6 +4137,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       );
       setActionError(message);
       throw new Error(message);
+    }
+    const refreshed = await refreshActionPlanState();
+    if (refreshed.restored && refreshed.recovery) {
+      setActionPlanPatchRecovery(refreshed.recovery);
+      return;
     }
     await Promise.all([loadReportDetail(), loadReportPreview()]);
   }
@@ -10039,6 +10079,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           onApplyRegroup={applyReportRegroup}
           onPatchObservation={patchPositiveObservation}
           onPatchActionPlanItem={patchActionPlanItem}
+          resolveActionPlanPatchItemId={resolveActionPlanPatchItemId}
           onApprove={() =>
             runReportAction("approve", {
               expectedRevision: report.content_revision,
