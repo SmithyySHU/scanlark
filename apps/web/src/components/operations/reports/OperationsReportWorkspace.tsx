@@ -144,7 +144,10 @@ type Props = {
     itemId: string,
     input: Record<string, unknown>,
   ) => Promise<void>;
-  resolveActionPlanPatchItemId: (itemId: string) => string;
+  resolveActionPlanPatchItemId: (
+    itemId: string,
+    patchInput?: Record<string, unknown>,
+  ) => string;
   onApprove: () => Promise<void>;
   onMarkReady: () => Promise<void>;
   onRecordSent: () => Promise<void>;
@@ -2039,7 +2042,10 @@ function ReportActionPlan({
   items: OperationsReportActionPlanItem[];
   findings: OperationsReportFinding[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
-  resolvePatchItemId: (itemId: string) => string;
+  resolvePatchItemId: (
+    itemId: string,
+    patchInput?: Record<string, unknown>,
+  ) => string;
   onDirty: (key: string, dirty: boolean) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
@@ -2093,12 +2099,16 @@ function ActionPlanItemEditor({
   finding: OperationsReportFinding | null;
   groups: OperationsReportActionPlanGroup[];
   onPatch: (itemId: string, input: Record<string, unknown>) => Promise<void>;
-  resolvePatchItemId: (itemId: string) => string;
+  resolvePatchItemId: (
+    itemId: string,
+    patchInput?: Record<string, unknown>,
+  ) => string;
   onDirty: (key: string, dirty: boolean) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
   const draft = useOperationsReportDraft(item);
   const dirtyKey = `action-${item.id}`;
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     onDirty(dirtyKey, false);
@@ -2110,16 +2120,25 @@ function ActionPlanItemEditor({
   }
 
   async function save() {
-    const patchItemId = resolvePatchItemId(item.id);
-    await onPatch(patchItemId, {
-      title: draft.draft.title,
-      summary: draft.draft.summary,
-      groupKey: draft.draft.group_key,
-      isIncluded: draft.draft.is_included,
-      ...(finding ? {} : { reviewedAt: draft.draft.reviewed_at }),
-    });
-    draft.setDirty(false);
-    onDirty(dirtyKey, false);
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const patchItemId = resolvePatchItemId(item.id, {
+        ...draft.draft,
+        reviewedAt: draft.draft.reviewed_at,
+      });
+      await onPatch(patchItemId, {
+        title: draft.draft.title,
+        summary: draft.draft.summary,
+        groupKey: draft.draft.group_key,
+        isIncluded: draft.draft.is_included,
+        ...(finding ? {} : { reviewedAt: draft.draft.reviewed_at }),
+      });
+      draft.setDirty(false);
+      onDirty(dirtyKey, false);
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   return (
@@ -2224,7 +2243,7 @@ function ActionPlanItemEditor({
       </div>
       <button
         className="ops-button ops-button--primary"
-        disabled={!draft.dirty}
+        disabled={!draft.dirty || isSaving}
         onClick={() => void save()}
       >
         Save action

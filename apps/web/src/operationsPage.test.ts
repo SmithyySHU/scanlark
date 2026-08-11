@@ -9,14 +9,13 @@ const source = readFileSync(
 
 test("action-plan save refreshes from stale patch and computes deterministic recovery", () => {
   assert.match(source, /const actionPlanPatchRecoveryResult = useCallback\(/);
+  assert.match(source, /item\.report_finding_id != null/);
   assert.match(
     source,
-    /item\.report_finding_id != null &&\s*staleItem\.report_finding_id != null/,
+    /item\.id !== staleItemId &&\s*item\.report_finding_id != null &&\s*item\.report_finding_id === staleFindingId/,
   );
-  assert.match(
-    source,
-    /item\.report_finding_id === staleItem\.report_finding_id &&\s*item\.group_key === groupKey/,
-  );
+  assert.match(source, /patchInput\?\.group_key === "address_now"/);
+  assert.match(source, /patchInput\?\.groupKey === "address_now"/);
   assert.match(source, /if \(candidates\.length === 1\)/);
   assert.match(
     source,
@@ -39,13 +38,21 @@ test("action-plan stale 404 branch keeps user in refreshed list view", () => {
 test("action-plan successful mutation updates and uses resolved ID", () => {
   assert.match(
     source,
-    /const requestItemId = resolveActionPlanPatchItemId\(itemId\);/,
+    /const requestItemId = resolveActionPlanPatchItemId\(itemId,\s*input\);/,
   );
   assert.match(
     source,
     /action-plan-items\/\$\{encodeURIComponent\(requestItemId\)\}/,
   );
+  assert.match(
+    source,
+    /const staleItemHint = reportDetail\?\.actionPlanItems\.find/,
+  );
   assert.match(source, /const refreshed = await refreshActionPlanState\(\);/);
+  assert.match(
+    source,
+    /actionPlanPatchRecoveryResult\(\s*itemId,\s*refreshedReport,\s*input,/,
+  );
   assert.match(source, /refreshed\.restored && refreshed\.recovery\s*\)/);
   assert.doesNotMatch(
     source,

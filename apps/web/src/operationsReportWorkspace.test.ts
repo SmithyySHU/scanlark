@@ -59,10 +59,13 @@ test("action plan row list uses recovery-filtered items", () => {
 test("action-plan save resolves mutable IDs through a resolver callback", () => {
   assert.match(
     source,
-    /resolveActionPlanPatchItemId: \(itemId: string\) => string;/,
+    /resolveActionPlanPatchItemId: \(\s*itemId: string,\s*patchInput\?: Record<string, unknown>,\s*\) => string;/,
   );
   assert.match(source, /resolvePatchItemId={resolveActionPlanPatchItemId}/);
-  assert.match(source, /const patchItemId = resolvePatchItemId\(item.id\);/);
+  assert.match(
+    source,
+    /const patchItemId = resolvePatchItemId\(item.id,\s*\{\s*\.\.\.draft\.draft,\s*reviewedAt: draft\.draft\.reviewed_at,\s*\}\);/,
+  );
   assert.match(
     source,
     /await onPatch\(patchItemId, \{\s*title: draft\.draft\.title,/s,

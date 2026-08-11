@@ -2442,6 +2442,18 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionPlanPatchRecovery, setActionPlanPatchRecovery] =
     useState<ActionPlanPatchRecovery | null>(null);
+  const actionPlanPatchRecoveryRef = useRef<ActionPlanPatchRecovery | null>(
+    null,
+  );
+
+  const clearActionPlanPatchRecovery = useCallback(() => {
+    actionPlanPatchRecoveryRef.current = null;
+    setActionPlanPatchRecovery(null);
+  }, []);
+
+  useEffect(() => {
+    clearActionPlanPatchRecovery();
+  }, [clearActionPlanPatchRecovery, operationsReportId]);
 
   const activeFilter =
     (searchParams.get("filter") as BusinessListFilter | null) ?? "active";
@@ -2724,16 +2736,41 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   }, [loadReportDetailData]);
 
   const resolveActionPlanPatchItemId = useCallback(
-    (itemId: string) => {
+    (itemId: string, patchInput?: Record<string, unknown>) => {
+      const recovery = actionPlanPatchRecoveryRef.current;
       if (
-        actionPlanPatchRecovery?.replacementItemId &&
-        actionPlanPatchRecovery.staleItemId === itemId
+        recovery?.replacementItemId &&
+        recovery.staleItemId === itemId &&
+        recovery.replacementItemId
       ) {
-        return actionPlanPatchRecovery.replacementItemId;
+        return recovery.replacementItemId;
       }
+      const staleItem = reportDetail?.actionPlanItems.find(
+        (item) => item.id === itemId,
+      );
+      if (!staleItem || staleItem.report_finding_id == null) return itemId;
+      if (!reportDetail) return itemId;
+      const groupKey =
+        patchInput?.groupKey === "address_now" ||
+        patchInput?.groupKey === "address_soon" ||
+        patchInput?.groupKey === "consider_later"
+          ? (patchInput.groupKey as OperationsReportActionPlanGroup)
+          : patchInput?.group_key === "address_now" ||
+              patchInput?.group_key === "address_soon" ||
+              patchInput?.group_key === "consider_later"
+            ? (patchInput.group_key as OperationsReportActionPlanGroup)
+            : staleItem.group_key;
+      const candidates = reportDetail.actionPlanItems.filter(
+        (item) =>
+          item.id !== staleItem.id &&
+          item.report_finding_id != null &&
+          item.report_finding_id === staleItem.report_finding_id &&
+          item.group_key === groupKey,
+      );
+      if (candidates.length === 1) return candidates[0]!.id;
       return itemId;
     },
-    [actionPlanPatchRecovery],
+    [reportDetail],
   );
 
   const loadReportPreview = useCallback(async () => {
@@ -2763,39 +2800,43 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     const staleItem = reportDetail.actionPlanItems.find(
       (item) => item.id === actionPlanPatchRecovery.staleItemId,
     );
-    if (
-      !staleItem &&
-      (actionPlanPatchRecovery.replacementItemId == null ||
-        reportDetail.actionPlanItems.some(
-          (item) => item.id === actionPlanPatchRecovery.replacementItemId,
-        ))
-    ) {
-      setActionPlanPatchRecovery(null);
+    if (!staleItem && actionPlanPatchRecovery.replacementItemId == null) {
+      clearActionPlanPatchRecovery();
     }
-  }, [actionPlanPatchRecovery, reportDetail]);
+  }, [actionPlanPatchRecovery, reportDetail, clearActionPlanPatchRecovery]);
 
   const actionPlanPatchRecoveryResult = useCallback(
     (
       staleItemId: string,
       refreshedReport: OperationsReportDetail,
       patchInput?: Record<string, unknown>,
+      staleItemFindingId?: string | null,
+      staleItemGroupKey?: OperationsReportActionPlanGroup,
     ): ActionPlanPatchRecovery => {
       const staleItem = reportDetail?.actionPlanItems.find(
         (item) => item.id === staleItemId,
       );
-      if (!staleItem) return { staleItemId, replacementItemId: null };
+      const staleFindingId =
+        staleItem?.report_finding_id ?? staleItemFindingId ?? null;
+      const staleGroupKey = staleItem?.group_key ?? staleItemGroupKey;
+      if (!staleFindingId || !staleGroupKey) {
+        return { staleItemId, replacementItemId: null };
+      }
       const groupKey =
         patchInput?.groupKey === "address_now" ||
         patchInput?.groupKey === "address_soon" ||
         patchInput?.groupKey === "consider_later"
           ? (patchInput.groupKey as OperationsReportActionPlanGroup)
-          : staleItem.group_key;
+          : patchInput?.group_key === "address_now" ||
+              patchInput?.group_key === "address_soon" ||
+              patchInput?.group_key === "consider_later"
+            ? (patchInput.group_key as OperationsReportActionPlanGroup)
+            : staleGroupKey;
       const candidates = refreshedReport.actionPlanItems.filter(
         (item) =>
-          item.id !== staleItem.id &&
+          item.id !== staleItemId &&
           item.report_finding_id != null &&
-          staleItem.report_finding_id != null &&
-          item.report_finding_id === staleItem.report_finding_id &&
+          item.report_finding_id === staleFindingId &&
           item.group_key === groupKey,
       );
       if (candidates.length === 1) {
@@ -4082,8 +4123,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   ) {
     if (!operationsReportId) return;
     setActionError(null);
-    setActionPlanPatchRecovery(null);
-    const requestItemId = resolveActionPlanPatchItemId(itemId);
+    const staleItemHint = reportDetail?.actionPlanItems.find(
+      (item) => item.id === itemId,
+    );
+    clearActionPlanPatchRecovery();
+    const requestItemId = resolveActionPlanPatchItemId(itemId, input);
     const res = await apiFetch(
       `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(requestItemId)}`,
       {
@@ -4110,9 +4154,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       return {
         restored: true,
         recovery: actionPlanPatchRecoveryResult(
-          requestItemId,
+          itemId,
           refreshedReport,
           input,
+          staleItemHint?.report_finding_id,
+          staleItemHint?.group_key,
         ),
       };
     };
@@ -4122,8 +4168,13 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         const recovery =
           refreshed.restored && refreshed.recovery
             ? refreshed.recovery
-            : { staleItemId: requestItemId, replacementItemId: null };
+            : {
+                staleItemId: itemId,
+                replacementItemId:
+                  actionPlanPatchRecoveryRef.current?.replacementItemId ?? null,
+              };
         setActionPlanPatchRecovery(recovery);
+        actionPlanPatchRecoveryRef.current = recovery;
         if (!recovery.replacementItemId) {
           setActionError(
             "Action plan item no longer matches this report. The report has been refreshed; please choose the current item and try again.",
@@ -4141,6 +4192,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     const refreshed = await refreshActionPlanState();
     if (refreshed.restored && refreshed.recovery) {
       setActionPlanPatchRecovery(refreshed.recovery);
+      actionPlanPatchRecoveryRef.current = refreshed.recovery;
       return;
     }
     await Promise.all([loadReportDetail(), loadReportPreview()]);
