@@ -18,6 +18,7 @@ import {
   missingFindingReadinessFields,
 } from "../../../utils/reportReadiness";
 import { ReportClientPreview } from "./ReportClientPreview";
+import { registerReportBeforeUnloadGuard } from "./reportBeforeUnload";
 import type {
   ClientReportPayload,
   OperationsReportActionPlanGroup,
@@ -557,14 +558,8 @@ export function OperationsReportWorkspace({
   }, [findingDraft.dirty, selectedFindingId]);
 
   useEffect(() => {
-    if (!previewStale) return;
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [previewStale]);
+    return registerReportBeforeUnloadGuard(window, previewStale);
+  }, [detail.report.id, previewStale]);
 
   useEffect(() => {
     if (filter !== "needs_editing") return;

@@ -97,3 +97,24 @@ test("leaving with dirty Action Plan drafts requires confirmation", () => {
   );
   assert.match(source, /event\.preventDefault\(\)/);
 });
+
+test("browser unload guard follows all report dirty state and report identity", () => {
+  assert.match(
+    source,
+    /const actionPlanDirtyCount =\s*dirtyActionPlanItemIds\.size \+ dirtyPositiveObservationIds\.size/,
+  );
+  assert.match(
+    source,
+    /const previewStale =\s*reportDraft\.dirty \|\| findingDraft\.dirty \|\| actionPlanDirtyCount > 0/,
+  );
+  assert.match(
+    source,
+    /return registerReportBeforeUnloadGuard\(window, previewStale\)/,
+  );
+  assert.match(source, /\[detail\.report\.id, previewStale\]/);
+  assert.match(
+    source,
+    /setDirtyActionPlanItemIds\(new Set\(\)\);\s*setDirtyPositiveObservationIds\(new Set\(\)\);\s*setActionPlanSaveState\("saved"\)/,
+  );
+  assert.doesNotMatch(source, /event\.returnValue = ""/);
+});
