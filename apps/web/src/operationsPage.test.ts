@@ -42,7 +42,7 @@ test("action-plan successful mutation updates and uses resolved ID", () => {
   );
   assert.match(
     source,
-    /action-plan-items\/\$\{encodeURIComponent\(requestItemId\)\}/,
+    /const sendActionPlanPatch = async \(\s*targetItemId: string,\s*expectedRevision: number \| undefined,\s*\) =>/,
   );
   assert.match(
     source,
@@ -58,6 +58,38 @@ test("action-plan successful mutation updates and uses resolved ID", () => {
     source,
     /Action plan item was regenerated and remapped to the current persisted item/,
   );
+});
+
+test("timing-group flow retries with replacement item when 404 returns deterministic remap", () => {
+  assert.match(
+    source,
+    /const expectedRevision = input\.expectedRevision as number \| undefined;/,
+  );
+  assert.match(
+    source,
+    /const baseExpectedRevision =\s*expectedRevision \?\? reportDetail\?\.report\.content_revision;/,
+  );
+  assert.match(
+    source,
+    /let res = await sendActionPlanPatch\(requestItemId, baseExpectedRevision\);/,
+  );
+  assert.match(
+    source,
+    /const replacementItemId = recovery\.replacementItemId;/,
+  );
+  assert.match(
+    source,
+    /res = await sendActionPlanPatch\(\s*replacementItemId,\s*refreshed\.report\?\.report\.content_revision \?\? baseExpectedRevision,\s*\);/,
+  );
+  assert.match(source, /clearActionPlanPatchRecovery\(\);/);
+});
+
+test("deterministic remap prevents stale-user recovery message when retry succeeds", () => {
+  assert.match(
+    source,
+    /if \(replacementItemId && replacementItemId !== requestItemId\) \{\s*res = await sendActionPlanPatch\(/s,
+  );
+  assert.match(source, /if \(!res\.ok\) \{\s*if \(res\.status === 404\) \{/s);
 });
 
 test("action-plan stale-state recovery is threaded into report workspace rendering", () => {

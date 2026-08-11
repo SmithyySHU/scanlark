@@ -4128,24 +4128,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     );
     clearActionPlanPatchRecovery();
     const requestItemId = resolveActionPlanPatchItemId(itemId, input);
-    const res = await apiFetch(
-      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(requestItemId)}`,
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          ...input,
-          expectedRevision:
-            input.expectedRevision ?? reportDetail?.report.content_revision,
-        }),
-      },
-    );
+
+    const sendActionPlanPatch = async (
+      targetItemId: string,
+      expectedRevision: number | undefined,
+    ) =>
+      await apiFetch(
+        `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan-items/${encodeURIComponent(targetItemId)}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...input,
+            expectedRevision,
+          }),
+        },
+      );
+
     const refreshActionPlanState = async () => {
       const refreshedReport = await loadReportDetailData();
       if (!refreshedReport) {
         return {
           restored: false,
           recovery: null as ActionPlanPatchRecovery | null,
+          report: null,
         };
       }
       setReportDetail(refreshedReport);
@@ -4153,6 +4159,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       await loadReportPreview();
       return {
         restored: true,
+        report: refreshedReport,
         recovery: actionPlanPatchRecoveryResult(
           itemId,
           refreshedReport,
@@ -4162,17 +4169,54 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         ),
       };
     };
+
+    const expectedRevision = input.expectedRevision as number | undefined;
+    const baseExpectedRevision =
+      expectedRevision ?? reportDetail?.report.content_revision;
+    let res = await sendActionPlanPatch(requestItemId, baseExpectedRevision);
     if (!res.ok) {
       if (res.status === 404) {
         const refreshed = await refreshActionPlanState();
         const recovery =
-          refreshed.restored && refreshed.recovery
-            ? refreshed.recovery
+          refreshed.recovery ??
+          (actionPlanPatchRecoveryRef.current
+            ? {
+                staleItemId: actionPlanPatchRecoveryRef.current.staleItemId,
+                replacementItemId:
+                  actionPlanPatchRecoveryRef.current.replacementItemId,
+              }
             : {
                 staleItemId: itemId,
-                replacementItemId:
-                  actionPlanPatchRecoveryRef.current?.replacementItemId ?? null,
-              };
+                replacementItemId: null,
+              });
+        const replacementItemId = recovery.replacementItemId;
+        if (replacementItemId && replacementItemId !== requestItemId) {
+          res = await sendActionPlanPatch(
+            replacementItemId,
+            refreshed.report?.report.content_revision ?? baseExpectedRevision,
+          );
+          if (!res.ok) {
+            if (res.status === 404) {
+              setActionPlanPatchRecovery(recovery);
+              actionPlanPatchRecoveryRef.current = recovery;
+              setActionError(
+                "Action plan item no longer matches this report. The report has been refreshed; please choose the current item and try again.",
+              );
+              return;
+            }
+            const message = await apiErrorMessage(
+              res,
+              "Failed to update action plan item",
+            );
+            setActionError(message);
+            throw new Error(message);
+          }
+          setActionError(null);
+          await refreshActionPlanState();
+          clearActionPlanPatchRecovery();
+          actionPlanPatchRecoveryRef.current = null;
+          return;
+        }
         setActionPlanPatchRecovery(recovery);
         actionPlanPatchRecoveryRef.current = recovery;
         if (!recovery.replacementItemId) {
