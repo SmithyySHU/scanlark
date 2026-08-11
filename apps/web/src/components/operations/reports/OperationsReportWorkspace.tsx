@@ -40,6 +40,27 @@ type ReportTab =
   | "settings"
   | "activity";
 
+type ActionPlanBatchSaveInput = {
+  expectedRevision: number;
+  actionPlanItems: Array<{
+    id: string;
+    groupKey: OperationsReportActionPlanGroup;
+    title: string;
+    summary: string | null;
+    isIncluded: boolean;
+    reviewedAt: string | null;
+    displayOrder: number;
+  }>;
+  positiveObservations: Array<{
+    id: string;
+    title: string;
+    description: string | null;
+    isIncluded: boolean;
+    reviewedAt: string | null;
+    displayOrder: number;
+  }>;
+};
+
 const priorityOptions: Array<{
   value: OperationsReportPriority;
   label: string;
@@ -110,6 +131,35 @@ function actionPlanLabel(value: string) {
   return "Consider later";
 }
 
+function actionPlanItemMatches(
+  draft: OperationsReportActionPlanItem,
+  persisted: OperationsReportActionPlanItem | undefined,
+) {
+  return Boolean(
+    persisted &&
+    draft.group_key === persisted.group_key &&
+    draft.title === persisted.title &&
+    draft.summary === persisted.summary &&
+    draft.is_included === persisted.is_included &&
+    draft.reviewed_at === persisted.reviewed_at &&
+    draft.display_order === persisted.display_order,
+  );
+}
+
+function positiveObservationMatches(
+  draft: OperationsReportPositiveObservation,
+  persisted: OperationsReportPositiveObservation | undefined,
+) {
+  return Boolean(
+    persisted &&
+    draft.title === persisted.title &&
+    draft.description === persisted.description &&
+    draft.is_included === persisted.is_included &&
+    draft.reviewed_at === persisted.reviewed_at &&
+    draft.display_order === persisted.display_order,
+  );
+}
+
 function clientReportFilename(payload: ClientReportPayload | null) {
   if (!payload) return "scanlark-website-health-report.pdf";
   const business = sanitizeFilenamePart(payload.business.name) || "business";
@@ -136,14 +186,9 @@ type Props = {
   onBulkFindings: (input: Record<string, unknown>) => Promise<void>;
   onPreviewRegroup: () => Promise<void>;
   onApplyRegroup: (previewHash: string) => Promise<void>;
-  onPatchObservation: (
-    observationId: string,
-    input: Record<string, unknown>,
-  ) => Promise<void>;
-  onPatchActionPlanItem: (
-    itemId: string,
-    input: Record<string, unknown>,
-  ) => Promise<void>;
+  onSaveActionPlan: (
+    input: ActionPlanBatchSaveInput,
+  ) => Promise<OperationsReportDetail>;
   onApprove: () => Promise<void>;
   onMarkReady: () => Promise<void>;
   onRecordSent: () => Promise<void>;
@@ -167,8 +212,7 @@ export function OperationsReportWorkspace({
   onBulkFindings,
   onPreviewRegroup,
   onApplyRegroup,
-  onPatchObservation,
-  onPatchActionPlanItem,
+  onSaveActionPlan,
   onApprove,
   onMarkReady,
   onRecordSent,
@@ -208,8 +252,28 @@ export function OperationsReportWorkspace({
     "saved" | "saving" | "unsaved" | "error"
   >("saved");
   const [findingSaveError, setFindingSaveError] = useState<string | null>(null);
-  const [dirtyChildKeys, setDirtyChildKeys] = useState<Set<string>>(
-    () => new Set(),
+  const [actionPlanDrafts, setActionPlanDrafts] = useState<
+    Record<string, OperationsReportActionPlanItem>
+  >(() =>
+    Object.fromEntries(detail.actionPlanItems.map((item) => [item.id, item])),
+  );
+  const [positiveObservationDrafts, setPositiveObservationDrafts] = useState<
+    Record<string, OperationsReportPositiveObservation>
+  >(() =>
+    Object.fromEntries(
+      detail.positiveObservations.map((item) => [item.id, item]),
+    ),
+  );
+  const [dirtyActionPlanItemIds, setDirtyActionPlanItemIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const [dirtyPositiveObservationIds, setDirtyPositiveObservationIds] =
+    useState<Set<string>>(() => new Set());
+  const [actionPlanSaveState, setActionPlanSaveState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [actionPlanSaveError, setActionPlanSaveError] = useState<string | null>(
+    null,
   );
   const reportDraft = useOperationsReportDraft(detail.report, artifactReadOnly);
   const selectedFinding = detail.findings.find(
@@ -258,8 +322,10 @@ export function OperationsReportWorkspace({
     0,
     includedCount - reviewedIncludedCount,
   );
+  const actionPlanDirtyCount =
+    dirtyActionPlanItemIds.size + dirtyPositiveObservationIds.size;
   const previewStale =
-    reportDraft.dirty || findingDraft.dirty || dirtyChildKeys.size > 0;
+    reportDraft.dirty || findingDraft.dirty || actionPlanDirtyCount > 0;
   const approvalCurrent =
     Boolean(
       detail.report.approved_at &&
@@ -299,7 +365,7 @@ export function OperationsReportWorkspace({
       .filter((finding) => finding.is_included && !finding.is_false_positive)
       .map((finding) => finding.id),
   );
-  const visibleActionPlanItems = detail.actionPlanItems.filter(
+  const visibleActionPlanItems = Object.values(actionPlanDrafts).filter(
     (item) =>
       item.report_finding_id == null ||
       includedFindingIds.has(item.report_finding_id),
@@ -364,6 +430,40 @@ export function OperationsReportWorkspace({
     }
   }, [detail.findings, selectedFindingId]);
 
+  useEffect(() => {
+    setActionPlanDrafts(
+      Object.fromEntries(detail.actionPlanItems.map((item) => [item.id, item])),
+    );
+    setPositiveObservationDrafts(
+      Object.fromEntries(
+        detail.positiveObservations.map((item) => [item.id, item]),
+      ),
+    );
+    setDirtyActionPlanItemIds(new Set());
+    setDirtyPositiveObservationIds(new Set());
+    setActionPlanSaveState("idle");
+    setActionPlanSaveError(null);
+  }, [detail.report.id]);
+
+  useEffect(() => {
+    if (actionPlanDirtyCount === 0) return;
+    const handleAppNavigation = (event: Event) => {
+      if (
+        !window.confirm(
+          "You have unsaved Action Plan changes. Leave without saving?",
+        )
+      ) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("scanlark:before-navigation", handleAppNavigation);
+    return () =>
+      window.removeEventListener(
+        "scanlark:before-navigation",
+        handleAppNavigation,
+      );
+  }, [actionPlanDirtyCount]);
+
   const filterButtons = useMemo(
     () =>
       [
@@ -401,26 +501,54 @@ export function OperationsReportWorkspace({
 
   const openActionPlanFinding = useCallback(
     (findingId: string) => {
-      setTab("findings");
+      if (!switchTab("findings")) return;
       setFilter("all");
       setCategory("");
       setSearch("");
       selectFinding(findingId);
     },
-    [selectFinding],
+    [
+      actionPlanDirtyCount,
+      findingDraft.dirty,
+      reportDraft.dirty,
+      selectFinding,
+    ],
   );
 
-  function switchTab(nextTab: ReportTab) {
-    if (findingDraft.dirty || reportDraft.dirty || dirtyChildKeys.size > 0) {
+  function discardActionPlanDrafts() {
+    setActionPlanDrafts(
+      Object.fromEntries(detail.actionPlanItems.map((item) => [item.id, item])),
+    );
+    setPositiveObservationDrafts(
+      Object.fromEntries(
+        detail.positiveObservations.map((item) => [item.id, item]),
+      ),
+    );
+    setDirtyActionPlanItemIds(new Set());
+    setDirtyPositiveObservationIds(new Set());
+    setActionPlanSaveState("idle");
+    setActionPlanSaveError(null);
+  }
+
+  function switchTab(nextTab: ReportTab): boolean {
+    if (nextTab === tab) return true;
+    if (actionPlanDirtyCount > 0) {
+      const proceed = window.confirm(
+        "You have unsaved Action Plan changes. Leave without saving?",
+      );
+      if (!proceed) return false;
+      discardActionPlanDrafts();
+    }
+    if (findingDraft.dirty || reportDraft.dirty) {
       const proceed = window.confirm(
         "You have unsaved report edits. Change tab and discard those unsaved edits?",
       );
-      if (!proceed) return;
+      if (!proceed) return false;
       findingDraft.setDirty(false);
       reportDraft.setDirty(false);
-      setDirtyChildKeys(new Set());
     }
     setTab(nextTab);
+    return true;
   }
 
   useEffect(() => {
@@ -554,19 +682,109 @@ export function OperationsReportWorkspace({
     });
   }
 
-  function setChildDirty(key: string, dirty: boolean) {
-    setDirtyChildKeys((current) => {
-      const next = new Set(current);
-      if (dirty) next.add(key);
-      else next.delete(key);
-      return next;
+  function updateActionPlanDraft(
+    itemId: string,
+    patch: Partial<OperationsReportActionPlanItem>,
+  ) {
+    setActionPlanDrafts((current) => {
+      const existing = current[itemId];
+      if (!existing) return current;
+      const nextItem = { ...existing, ...patch };
+      const persisted = detail.actionPlanItems.find(
+        (item) => item.id === itemId,
+      );
+      setDirtyActionPlanItemIds((currentDirty) => {
+        const nextDirty = new Set(currentDirty);
+        if (actionPlanItemMatches(nextItem, persisted))
+          nextDirty.delete(itemId);
+        else nextDirty.add(itemId);
+        return nextDirty;
+      });
+      setActionPlanSaveState("idle");
+      setActionPlanSaveError(null);
+      return { ...current, [itemId]: nextItem };
     });
   }
 
-  useEffect(() => {
-    if (!actionPlanPatchRecovery) return;
-    setChildDirty(`action-${actionPlanPatchRecovery.staleItemId}`, false);
-  }, [actionPlanPatchRecovery]);
+  function updatePositiveObservationDraft(
+    observationId: string,
+    patch: Partial<OperationsReportPositiveObservation>,
+  ) {
+    setPositiveObservationDrafts((current) => {
+      const existing = current[observationId];
+      if (!existing) return current;
+      const nextObservation = { ...existing, ...patch };
+      const persisted = detail.positiveObservations.find(
+        (item) => item.id === observationId,
+      );
+      setDirtyPositiveObservationIds((currentDirty) => {
+        const nextDirty = new Set(currentDirty);
+        if (positiveObservationMatches(nextObservation, persisted)) {
+          nextDirty.delete(observationId);
+        } else {
+          nextDirty.add(observationId);
+        }
+        return nextDirty;
+      });
+      setActionPlanSaveState("idle");
+      setActionPlanSaveError(null);
+      return { ...current, [observationId]: nextObservation };
+    });
+  }
+
+  async function saveActionPlanChanges() {
+    if (actionPlanDirtyCount === 0 || actionPlanSaveState === "saving") return;
+    setActionPlanSaveState("saving");
+    setActionPlanSaveError(null);
+    try {
+      const savedDetail = await onSaveActionPlan({
+        expectedRevision: detail.report.content_revision ?? 1,
+        actionPlanItems: [...dirtyActionPlanItemIds].map((id) => {
+          const item = actionPlanDrafts[id];
+          return {
+            id,
+            groupKey: item.group_key,
+            title: item.title,
+            summary: item.summary,
+            isIncluded: item.is_included,
+            reviewedAt: item.reviewed_at,
+            displayOrder: item.display_order,
+          };
+        }),
+        positiveObservations: [...dirtyPositiveObservationIds].map((id) => {
+          const observation = positiveObservationDrafts[id];
+          return {
+            id,
+            title: observation.title,
+            description: observation.description,
+            isIncluded: observation.is_included,
+            reviewedAt: observation.reviewed_at,
+            displayOrder: observation.display_order,
+          };
+        }),
+      });
+      setActionPlanDrafts(
+        Object.fromEntries(
+          savedDetail.actionPlanItems.map((item) => [item.id, item]),
+        ),
+      );
+      setPositiveObservationDrafts(
+        Object.fromEntries(
+          savedDetail.positiveObservations.map((item) => [item.id, item]),
+        ),
+      );
+      setDirtyActionPlanItemIds(new Set());
+      setDirtyPositiveObservationIds(new Set());
+      setActionPlanSaveState("saved");
+    } catch (error) {
+      setActionPlanSaveState("error");
+      setActionPlanSaveError(
+        error instanceof Error
+          ? error.message
+          : "Failed to save Action Plan changes",
+      );
+    }
+  }
 
   function openReadinessIssue(issue: OperationsReportReadinessIssue) {
     setTab(issue.section);
@@ -1309,19 +1527,44 @@ export function OperationsReportWorkspace({
       )}
 
       {tab === "action_plan" && (
-        <section className="ops-two-column">
-          <ReportActionPlan
-            items={visibleActionPlanItemsWithRecovery}
-            findings={detail.findings}
-            onPatch={onPatchActionPlanItem}
-            onDirty={setChildDirty}
-            onOpenFinding={openActionPlanFinding}
-          />
-          <ReportPositiveObservations
-            observations={detail.positiveObservations}
-            onPatch={onPatchObservation}
-            onDirty={setChildDirty}
-          />
+        <section>
+          <div className="ops-panel ops-report-action-plan-savebar">
+            <div>
+              <strong>
+                {actionPlanDirtyCount > 0
+                  ? `${actionPlanDirtyCount} unsaved change${actionPlanDirtyCount === 1 ? "" : "s"}`
+                  : actionPlanSaveState === "saved"
+                    ? "Changes saved"
+                    : "No unsaved changes"}
+              </strong>
+              {actionPlanSaveError && (
+                <div className="ops-error">{actionPlanSaveError}</div>
+              )}
+            </div>
+            <button
+              className="ops-button ops-button--primary"
+              disabled={
+                artifactReadOnly ||
+                actionPlanDirtyCount === 0 ||
+                actionPlanSaveState === "saving"
+              }
+              onClick={() => void saveActionPlanChanges()}
+            >
+              {actionPlanSaveState === "saving" ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+          <div className="ops-two-column">
+            <ReportActionPlan
+              items={visibleActionPlanItemsWithRecovery}
+              findings={detail.findings}
+              onChange={updateActionPlanDraft}
+              onOpenFinding={openActionPlanFinding}
+            />
+            <ReportPositiveObservations
+              observations={Object.values(positiveObservationDrafts)}
+              onChange={updatePositiveObservationDraft}
+            />
+          </div>
         </section>
       )}
 
@@ -2028,18 +2271,15 @@ function FindingEditor({
 function ReportActionPlan({
   items,
   findings,
-  onPatch,
-  onDirty,
+  onChange,
   onOpenFinding,
 }: {
   items: OperationsReportActionPlanItem[];
   findings: OperationsReportFinding[];
-  onPatch: (
+  onChange: (
     itemId: string,
-    input: Record<string, unknown>,
-    sourceItem?: OperationsReportActionPlanItem,
-  ) => Promise<void>;
-  onDirty: (key: string, dirty: boolean) => void;
+    patch: Partial<OperationsReportActionPlanItem>,
+  ) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
   const groups: OperationsReportActionPlanGroup[] = [
@@ -2067,8 +2307,7 @@ function ReportActionPlan({
                     : null
                 }
                 groups={groups}
-                onPatch={onPatch}
-                onDirty={onDirty}
+                onChange={onChange}
                 onOpenFinding={onOpenFinding}
               />
             ))}
@@ -2082,54 +2321,20 @@ function ActionPlanItemEditor({
   item,
   finding,
   groups,
-  onPatch,
-  onDirty,
+  onChange,
   onOpenFinding,
 }: {
   item: OperationsReportActionPlanItem;
   finding: OperationsReportFinding | null;
   groups: OperationsReportActionPlanGroup[];
-  onPatch: (
+  onChange: (
     itemId: string,
-    input: Record<string, unknown>,
-    sourceItem?: OperationsReportActionPlanItem,
-  ) => Promise<void>;
-  onDirty: (key: string, dirty: boolean) => void;
+    patch: Partial<OperationsReportActionPlanItem>,
+  ) => void;
   onOpenFinding: (findingId: string) => void;
 }) {
-  const draft = useOperationsReportDraft(item);
-  const dirtyKey = `action-${item.id}`;
-  const [isSaving, setIsSaving] = useState(false);
-
-  useEffect(() => {
-    onDirty(dirtyKey, false);
-  }, [dirtyKey, item.updated_at]);
-
   function update(patch: Partial<OperationsReportActionPlanItem>) {
-    draft.updateDraft(patch);
-    onDirty(dirtyKey, true);
-  }
-
-  async function save() {
-    if (isSaving) return;
-    setIsSaving(true);
-    try {
-      await onPatch(
-        item.id,
-        {
-          title: draft.draft.title,
-          summary: draft.draft.summary,
-          groupKey: draft.draft.group_key,
-          isIncluded: draft.draft.is_included,
-          ...(finding ? {} : { reviewedAt: draft.draft.reviewed_at }),
-        },
-        item,
-      );
-      draft.setDirty(false);
-      onDirty(dirtyKey, false);
-    } finally {
-      setIsSaving(false);
-    }
+    onChange(item.id, patch);
   }
 
   return (
@@ -2176,7 +2381,7 @@ function ActionPlanItemEditor({
         <label className="ops-checkbox">
           <input
             type="checkbox"
-            checked={draft.draft.is_included}
+            checked={item.is_included}
             onChange={(event) => update({ is_included: event.target.checked })}
           />
           Include
@@ -2185,7 +2390,7 @@ function ActionPlanItemEditor({
           <label className="ops-checkbox">
             <input
               type="checkbox"
-              checked={Boolean(draft.draft.reviewed_at)}
+              checked={Boolean(item.reviewed_at)}
               onChange={(event) =>
                 update({
                   reviewed_at: event.target.checked
@@ -2201,14 +2406,14 @@ function ActionPlanItemEditor({
       <label>
         Action
         <input
-          value={draft.draft.title}
+          value={item.title}
           onChange={(event) => update({ title: event.target.value })}
         />
       </label>
       <label>
         Short client summary
         <textarea
-          value={draft.draft.summary ?? ""}
+          value={item.summary ?? ""}
           onChange={(event) => update({ summary: event.target.value })}
         />
       </label>
@@ -2216,7 +2421,7 @@ function ActionPlanItemEditor({
         <label>
           Timing
           <select
-            value={draft.draft.group_key}
+            value={item.group_key}
             onChange={(event) =>
               update({
                 group_key: event.target
@@ -2232,28 +2437,19 @@ function ActionPlanItemEditor({
           </select>
         </label>
       </div>
-      <button
-        className="ops-button ops-button--primary"
-        disabled={!draft.dirty || isSaving}
-        onClick={() => void save()}
-      >
-        Save action
-      </button>
     </article>
   );
 }
 
 function ReportPositiveObservations({
   observations,
-  onPatch,
-  onDirty,
+  onChange,
 }: {
   observations: OperationsReportPositiveObservation[];
-  onPatch: (
+  onChange: (
     observationId: string,
-    input: Record<string, unknown>,
-  ) => Promise<void>;
-  onDirty: (key: string, dirty: boolean) => void;
+    patch: Partial<OperationsReportPositiveObservation>,
+  ) => void;
 }) {
   return (
     <div className="ops-panel">
@@ -2268,8 +2464,7 @@ function ReportPositiveObservations({
           <PositiveObservationEditor
             key={item.id}
             item={item}
-            onPatch={onPatch}
-            onDirty={onDirty}
+            onChange={onChange}
           />
         ))}
       </div>
@@ -2279,38 +2474,16 @@ function ReportPositiveObservations({
 
 function PositiveObservationEditor({
   item,
-  onPatch,
-  onDirty,
+  onChange,
 }: {
   item: OperationsReportPositiveObservation;
-  onPatch: (
+  onChange: (
     observationId: string,
-    input: Record<string, unknown>,
-  ) => Promise<void>;
-  onDirty: (key: string, dirty: boolean) => void;
+    patch: Partial<OperationsReportPositiveObservation>,
+  ) => void;
 }) {
-  const draft = useOperationsReportDraft(item);
-  const dirtyKey = `positive-${item.id}`;
-
-  useEffect(() => {
-    onDirty(dirtyKey, false);
-  }, [dirtyKey, item.updated_at]);
-
   function update(patch: Partial<OperationsReportPositiveObservation>) {
-    draft.updateDraft(patch);
-    onDirty(dirtyKey, true);
-  }
-
-  async function save() {
-    await onPatch(item.id, {
-      title: draft.draft.title,
-      description: draft.draft.description,
-      isIncluded: draft.draft.is_included,
-      reviewedAt: draft.draft.reviewed_at,
-      displayOrder: draft.draft.display_order,
-    });
-    draft.setDirty(false);
-    onDirty(dirtyKey, false);
+    onChange(item.id, patch);
   }
 
   return (
@@ -2319,7 +2492,7 @@ function PositiveObservationEditor({
         <label className="ops-checkbox">
           <input
             type="checkbox"
-            checked={draft.draft.is_included}
+            checked={item.is_included}
             onChange={(event) => update({ is_included: event.target.checked })}
           />
           Include
@@ -2327,7 +2500,7 @@ function PositiveObservationEditor({
         <label className="ops-checkbox">
           <input
             type="checkbox"
-            checked={Boolean(draft.draft.reviewed_at)}
+            checked={Boolean(item.reviewed_at)}
             onChange={(event) =>
               update({
                 reviewed_at: event.target.checked
@@ -2342,14 +2515,14 @@ function PositiveObservationEditor({
       <label>
         Observation
         <input
-          value={draft.draft.title}
+          value={item.title}
           onChange={(event) => update({ title: event.target.value })}
         />
       </label>
       <label>
         Client description
         <textarea
-          value={draft.draft.description ?? ""}
+          value={item.description ?? ""}
           onChange={(event) => update({ description: event.target.value })}
         />
       </label>
@@ -2358,20 +2531,13 @@ function PositiveObservationEditor({
         <input
           type="number"
           min="0"
-          value={draft.draft.display_order}
+          value={item.display_order}
           onChange={(event) =>
             update({ display_order: Number(event.target.value) || 0 })
           }
         />
       </label>
       {item.source_key && <small>Supported by scan data</small>}
-      <button
-        className="ops-button ops-button--primary"
-        disabled={!draft.dirty}
-        onClick={() => void save()}
-      >
-        Save observation
-      </button>
     </article>
   );
 }

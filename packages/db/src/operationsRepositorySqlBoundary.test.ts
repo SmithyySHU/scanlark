@@ -10,6 +10,7 @@ const requiredScopedExports: Record<string, string[]> = {
   "operationsReports.ts": [
     "updateOperationsReportFinding",
     "updateOperationsReportPositiveObservation",
+    "updateOperationsReportActionPlanBatch",
     "updateOperationsReportActionPlanItem",
     "bulkUpdateOperationsReportFindings",
     "reorderOperationsReportFindings",

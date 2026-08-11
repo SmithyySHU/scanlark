@@ -37,6 +37,7 @@ import type {
   OperationsReportClientPriority,
   OperationsReportComparisonStatus,
   OperationsReportActionPlanGroup,
+  OperationsReportActionPlanBatchUpdateInput,
   OperationsReportActionPlanItemUpdateInput,
   OperationsReportCreateInput,
   OperationsReportFindingUpdateInput,
@@ -2334,6 +2335,64 @@ export function parseOperationsReportActionPlanItemUpdateInput(
   }
   parsed.displayOrder = optionalDisplayOrder(record);
   return parsed;
+}
+
+export function parseOperationsReportActionPlanBatchUpdateInput(
+  body: unknown,
+): OperationsReportActionPlanBatchUpdateInput {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("invalid_action_plan_batch");
+  }
+  const record = body as Record<string, unknown>;
+  const expectedRevision = optionalExpectedRevision(record);
+  if (expectedRevision === undefined) {
+    throw new Error("invalid_expected_revision");
+  }
+  if (
+    !Array.isArray(record.actionPlanItems) ||
+    !Array.isArray(record.positiveObservations)
+  ) {
+    throw new Error("invalid_action_plan_batch");
+  }
+  if (
+    record.actionPlanItems.length + record.positiveObservations.length >
+    250
+  ) {
+    throw new Error("invalid_action_plan_batch_size");
+  }
+
+  const actionPlanItems = record.actionPlanItems.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("invalid_action_plan_item");
+    }
+    const item = value as Record<string, unknown>;
+    if (typeof item.id !== "string" || !UUID_RE.test(item.id)) {
+      throw new Error("invalid_action_plan_item_id");
+    }
+    if ("expectedRevision" in item) {
+      throw new Error("invalid_action_plan_item_revision");
+    }
+    const { expectedRevision: _expectedRevision, ...patch } =
+      parseOperationsReportActionPlanItemUpdateInput(item);
+    return { id: item.id, ...patch };
+  });
+  const positiveObservations = record.positiveObservations.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("invalid_positive_observation");
+    }
+    const observation = value as Record<string, unknown>;
+    if (typeof observation.id !== "string" || !UUID_RE.test(observation.id)) {
+      throw new Error("invalid_positive_observation_id");
+    }
+    if ("expectedRevision" in observation) {
+      throw new Error("invalid_positive_observation_revision");
+    }
+    const { expectedRevision: _expectedRevision, ...patch } =
+      parseOperationsReportPositiveObservationUpdateInput(observation);
+    return { id: observation.id, ...patch };
+  });
+
+  return { expectedRevision, actionPlanItems, positiveObservations };
 }
 
 export function parseOperationsReportFindingBulkInput(

@@ -13,6 +13,7 @@ const reportWorkspaceSource = readFileSync(
   ),
   "utf8",
 );
+const appSource = readFileSync(new URL("./app.tsx", import.meta.url), "utf8");
 
 test("action-plan patch function accepts source item context", () => {
   assert.match(
@@ -53,12 +54,35 @@ test("workaround route-level remap has been removed", () => {
 });
 
 test("source item is passed from action-plan editor into patch handler", () => {
+  assert.match(reportWorkspaceSource, /onChange\(item\.id, patch\)/);
+});
+
+test("batch Action Plan save updates detail in place without loading remount", () => {
   assert.match(
-    reportWorkspaceSource,
-    /await onPatch\(\s*item\.id,[\s\S]*item,\s*\)/,
+    source,
+    /async function saveReportActionPlan\([\s\S]*?\/action-plan`/,
   );
   assert.match(
-    reportWorkspaceSource,
-    /sourceItem\?: OperationsReportActionPlanItem,\s*\)\s*=> Promise<void>/,
+    source,
+    /const data = \(await res\.json\(\)\) as \{ report: OperationsReportDetail \};\s*setReportDetail\(data\.report\)/,
+  );
+  assert.doesNotMatch(
+    source,
+    /async function saveReportActionPlan\([\s\S]*?loadReportDetail\(\)[\s\S]*?return data\.report/,
+  );
+});
+
+test("Action Plan batch save is wired into the report workspace", () => {
+  assert.match(source, /onSaveActionPlan=\{saveReportActionPlan\}/);
+});
+
+test("app navigation honours the report workspace unsaved-change blocker", () => {
+  assert.match(
+    appSource,
+    /new Event\("scanlark:before-navigation", \{\s*cancelable: true,/,
+  );
+  assert.match(
+    appSource,
+    /if \(!window\.dispatchEvent\(navigationEvent\)\) return/,
   );
 });

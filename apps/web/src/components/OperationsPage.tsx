@@ -4097,6 +4097,49 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     await Promise.all([loadReportDetail(), loadReportPreview()]);
   }
 
+  async function saveReportActionPlan(input: {
+    expectedRevision: number;
+    actionPlanItems: Array<{
+      id: string;
+      groupKey: OperationsReportActionPlanGroup;
+      title: string;
+      summary: string | null;
+      isIncluded: boolean;
+      reviewedAt: string | null;
+      displayOrder: number;
+    }>;
+    positiveObservations: Array<{
+      id: string;
+      title: string;
+      description: string | null;
+      isIncluded: boolean;
+      reviewedAt: string | null;
+      displayOrder: number;
+    }>;
+  }): Promise<OperationsReportDetail> {
+    if (!operationsReportId) throw new Error("Report not found");
+    setActionError(null);
+    const res = await apiFetch(
+      `${apiBase}/operations/reports/${encodeURIComponent(operationsReportId)}/action-plan`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) {
+      throw new Error(
+        await apiErrorMessage(res, "Failed to save Action Plan changes"),
+      );
+    }
+    const data = (await res.json()) as { report: OperationsReportDetail };
+    setReportDetail(data.report);
+    setReportRegroupPreview(null);
+    clearActionPlanPatchRecovery();
+    await loadReportPreview();
+    return data.report;
+  }
+
   async function patchActionPlanItem(
     itemId: string,
     input: Record<string, unknown>,
@@ -10125,8 +10168,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
           onBulkFindings={bulkPatchReportFindings}
           onPreviewRegroup={previewReportRegroup}
           onApplyRegroup={applyReportRegroup}
-          onPatchObservation={patchPositiveObservation}
-          onPatchActionPlanItem={patchActionPlanItem}
+          onSaveActionPlan={saveReportActionPlan}
           onApprove={() =>
             runReportAction("approve", {
               expectedRevision: report.content_revision,
@@ -13142,6 +13184,17 @@ const operationsStyles = `
     padding-left: 18px;
     color: var(--text-muted);
     font-size: 12px;
+  }
+  .ops-report-action-plan-savebar {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .ops-report-action-plan-savebar > div {
+    display: grid;
+    gap: 6px;
   }
   .ops-report-approval {
     display: grid;

@@ -1,6 +1,8 @@
 import { recordAdminAuditLog, type AdminActor } from "./admin";
 import { ensureConnected } from "./client";
+import { DATABASE_URL } from "./env";
 import { createHash } from "node:crypto";
+import { Client } from "pg";
 import { formatIssuePresentation } from "./issuePresentation";
 import type { ScanIssue, ScanIssueSeverity } from "./scanIssues";
 import {
@@ -363,6 +365,20 @@ export type OperationsReportActionPlanItemUpdateInput = {
   isIncluded?: boolean;
   reviewedAt?: Date | null;
   displayOrder?: number;
+};
+
+export type OperationsReportActionPlanBatchUpdateInput = {
+  expectedRevision: number;
+  actionPlanItems: Array<
+    Omit<OperationsReportActionPlanItemUpdateInput, "expectedRevision"> & {
+      id: string;
+    }
+  >;
+  positiveObservations: Array<
+    Omit<OperationsReportPositiveObservationUpdateInput, "expectedRevision"> & {
+      id: string;
+    }
+  >;
 };
 
 export type OperationsReportReadinessSection =
@@ -2958,6 +2974,241 @@ export async function updateOperationsReportActionPlanItem(
     });
   }
   return item;
+}
+
+export async function updateOperationsReportActionPlanBatch(
+  workspaceId: string,
+  actor: AdminActor,
+  reportId: string,
+  input: OperationsReportActionPlanBatchUpdateInput,
+): Promise<OperationsReportDetail | null> {
+  const client = new Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  let transactionOpen = false;
+  try {
+    await client.query("BEGIN");
+    transactionOpen = true;
+    const locked = await client.query<OperationsReportRow>(
+      `
+        SELECT r.*
+        FROM operations_reports r
+        JOIN operations_businesses b ON b.id = r.business_id
+        WHERE r.id = $1
+          AND b.internal_workspace_id = $2
+        FOR UPDATE OF r
+      `,
+      [reportId, workspaceId],
+    );
+    const report = locked.rows[0];
+    if (!report) {
+      await client.query("ROLLBACK");
+      transactionOpen = false;
+      return null;
+    }
+    assertReportContentMutable(report, input.expectedRevision);
+
+    const actionPlanItemIds = input.actionPlanItems.map((item) => item.id);
+    const observationIds = input.positiveObservations.map((item) => item.id);
+    if (new Set(actionPlanItemIds).size !== actionPlanItemIds.length) {
+      throw new Error("duplicate_action_plan_item");
+    }
+    if (new Set(observationIds).size !== observationIds.length) {
+      throw new Error("duplicate_positive_observation");
+    }
+
+    if (actionPlanItemIds.length > 0) {
+      const validItems = await client.query<{ count: string }>(
+        `
+          SELECT COUNT(*)::text AS count
+          FROM operations_report_action_plan_items item
+          WHERE item.operations_report_id = $1
+            AND item.id = ANY($2::uuid[])
+            AND EXISTS (
+              SELECT 1
+              FROM operations_reports r
+              JOIN operations_businesses b ON b.id = r.business_id
+              WHERE r.id = item.operations_report_id
+                AND b.internal_workspace_id = $3
+            )
+        `,
+        [reportId, actionPlanItemIds, workspaceId],
+      );
+      if (Number(validItems.rows[0]?.count ?? 0) !== actionPlanItemIds.length) {
+        await client.query("ROLLBACK");
+        transactionOpen = false;
+        return null;
+      }
+    }
+
+    if (observationIds.length > 0) {
+      const validObservations = await client.query<{ count: string }>(
+        `
+          SELECT COUNT(*)::text AS count
+          FROM operations_report_positive_observations observation
+          WHERE observation.operations_report_id = $1
+            AND observation.id = ANY($2::uuid[])
+            AND EXISTS (
+              SELECT 1
+              FROM operations_reports r
+              JOIN operations_businesses b ON b.id = r.business_id
+              WHERE r.id = observation.operations_report_id
+                AND b.internal_workspace_id = $3
+            )
+        `,
+        [reportId, observationIds, workspaceId],
+      );
+      if (
+        Number(validObservations.rows[0]?.count ?? 0) !== observationIds.length
+      ) {
+        await client.query("ROLLBACK");
+        transactionOpen = false;
+        return null;
+      }
+    }
+
+    for (const item of input.actionPlanItems) {
+      const updated = await client.query(
+        `
+          UPDATE operations_report_action_plan_items
+          SET group_key = COALESCE($3, group_key),
+              title = COALESCE($4, title),
+              summary = CASE WHEN $5::boolean THEN $6 ELSE summary END,
+              is_included = COALESCE($7, is_included),
+              reviewed_at = CASE WHEN $8::boolean THEN $9 ELSE reviewed_at END,
+              display_order = COALESCE($10, display_order),
+              updated_at = now()
+          WHERE operations_report_id = $1
+            AND id = $2
+            AND EXISTS (
+              SELECT 1
+              FROM operations_reports r
+              JOIN operations_businesses b ON b.id = r.business_id
+              WHERE r.id = operations_report_action_plan_items.operations_report_id
+                AND b.internal_workspace_id = $11
+                AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived')
+            )
+        `,
+        [
+          reportId,
+          item.id,
+          item.groupKey ?? null,
+          item.title === undefined
+            ? null
+            : requiredText(item.title, "action_plan_item_title"),
+          item.summary !== undefined,
+          textValue(item.summary),
+          item.isIncluded,
+          item.reviewedAt !== undefined,
+          item.reviewedAt ?? null,
+          item.displayOrder,
+          workspaceId,
+        ],
+      );
+      if (updated.rowCount !== 1) throw new Error("action_plan_batch_failed");
+    }
+
+    for (const observation of input.positiveObservations) {
+      const updated = await client.query(
+        `
+          UPDATE operations_report_positive_observations
+          SET title = COALESCE($3, title),
+              description = CASE WHEN $4::boolean THEN $5 ELSE description END,
+              is_included = COALESCE($6, is_included),
+              reviewed_at = CASE WHEN $7::boolean THEN $8 ELSE reviewed_at END,
+              display_order = COALESCE($9, display_order),
+              updated_at = now()
+          WHERE operations_report_id = $1
+            AND id = $2
+            AND EXISTS (
+              SELECT 1
+              FROM operations_reports r
+              JOIN operations_businesses b ON b.id = r.business_id
+              WHERE r.id = operations_report_positive_observations.operations_report_id
+                AND b.internal_workspace_id = $10
+                AND r.status NOT IN ('sent', 'client_replied', 'fixes_quoted', 'work_in_progress', 'completed', 'archived')
+            )
+        `,
+        [
+          reportId,
+          observation.id,
+          observation.title === undefined
+            ? null
+            : requiredText(observation.title, "positive_observation_title"),
+          observation.description !== undefined,
+          textValue(observation.description),
+          observation.isIncluded,
+          observation.reviewedAt !== undefined,
+          observation.reviewedAt ?? null,
+          observation.displayOrder,
+          workspaceId,
+        ],
+      );
+      if (updated.rowCount !== 1) throw new Error("action_plan_batch_failed");
+    }
+
+    if (actionPlanItemIds.length > 0 || observationIds.length > 0) {
+      const updatedReport = await client.query(
+        `
+          UPDATE operations_reports
+          SET content_revision = content_revision + 1,
+              frozen_render_json = NULL,
+              frozen_at = NULL,
+              last_preview_generated_at = NULL,
+              last_pdf_generated_at = NULL,
+              updated_at = now()
+          WHERE id = $1
+            AND content_revision = $3
+            AND status IN ('draft', 'needs_review', 'ready_to_send')
+            AND EXISTS (
+              SELECT 1 FROM operations_businesses b
+              WHERE b.id = operations_reports.business_id
+                AND b.internal_workspace_id = $2
+            )
+        `,
+        [reportId, workspaceId, input.expectedRevision],
+      );
+      if (updatedReport.rowCount !== 1) throw staleRevisionError("report");
+      await client.query(
+        `
+          DELETE FROM operations_report_pdf_renders render
+          WHERE render.operations_report_id = $1
+            AND EXISTS (
+              SELECT 1
+              FROM operations_reports r
+              JOIN operations_businesses b ON b.id = r.business_id
+              WHERE r.id = render.operations_report_id
+                AND b.internal_workspace_id = $2
+            )
+        `,
+        [reportId, workspaceId],
+      );
+      await client.query(
+        `
+          INSERT INTO admin_audit_log (
+            admin_user_id, admin_email, action, target_type, target_id,
+            metadata_json
+          ) VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          actor.id,
+          actor.email,
+          "operations_report_action_plan_batch_updated",
+          "operations_report",
+          reportId,
+          { actionPlanItemIds, positiveObservationIds: observationIds },
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return getOperationsReportDetail(workspaceId, reportId);
+  } catch (error) {
+    if (transactionOpen) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    await client.end().catch(() => {});
+  }
 }
 
 export async function bulkUpdateOperationsReportFindings(

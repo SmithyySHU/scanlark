@@ -12551,6 +12551,10 @@ const App: React.FC = () => {
     searchParams?: Record<string, string | null | undefined>,
     options?: { replace?: boolean },
   ) {
+    const navigationEvent = new Event("scanlark:before-navigation", {
+      cancelable: true,
+    });
+    if (!window.dispatchEvent(navigationEvent)) return;
     const normalizedPath = normalizeDashboardCompatPath(
       pathname.replace(/\/+$/, "") || "/",
     );

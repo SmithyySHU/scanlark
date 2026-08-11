@@ -36,3 +36,15 @@ test("Action plan scope remains workspace-owned through dedicated resource kind"
   );
   assert.equal(scopeSource.includes('"action_plan_item"'), true);
 });
+
+test("Action Plan workspace batch uses one report-scoped repository mutation", () => {
+  assert.match(routeSource, /"\/reports\/:reportId\/action-plan"/);
+  assert.match(
+    routeSource,
+    /await updateOperationsReportActionPlanBatch\(\s*getWorkspaceId\(req\),\s*getActor\(req\),\s*reportId,\s*parseOperationsReportActionPlanBatchUpdateInput\(req\.body\),/,
+  );
+  assert.match(
+    routeSource,
+    /return res\.json\(\{ report: serializeObject\(report\) \}\)/,
+  );
+});

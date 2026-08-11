@@ -8,6 +8,7 @@ import {
   approveOperationsReport,
   getOperationsReportPreview,
   isOperationsReportApprovalCurrent,
+  updateOperationsReportActionPlanBatch,
   updateOperationsReportActionPlanItem,
   updateOperationsReportFinding,
 } from "./operationsReports";
@@ -678,6 +679,221 @@ test("fresh action-plan timing updates mutate the same persisted item", async ()
   await db.query(`DELETE FROM operations_reports WHERE id = $1`, [reportId]);
   await db.query(`DELETE FROM sites WHERE id = $1`, [site.rows[0].id]);
   await db.query(`DELETE FROM scan_runs WHERE id = $1`, [scan.rows[0].id]);
+});
+
+test("Action Plan batch save is atomic, revision-bound, and workspace-scoped", async () => {
+  if (!statefulAuditEnabled) return;
+  const site = await db.query<{ id: string }>(
+    `INSERT INTO sites (url, user_id) VALUES ($1, $2) RETURNING id`,
+    [`https://action-plan-batch-${key}.test`, actor.id],
+  );
+  const scan = await db.query<{ id: string }>(
+    `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
+    [site.rows[0].id, `https://action-plan-batch-${key}.test`],
+  );
+  const report = await db.query<{ id: string; content_revision: number }>(
+    `
+      INSERT INTO operations_reports (
+        business_id, site_id, scan_run_id, title, created_by_user_id,
+        executive_summary, overall_summary, main_strengths, main_concerns,
+        recommended_first_steps, scope_limitations, last_preview_generated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, $6, $6, $6, now())
+      RETURNING id, content_revision
+    `,
+    [
+      businessA,
+      site.rows[0].id,
+      scan.rows[0].id,
+      "Action Plan batch regression",
+      actor.id,
+      "Batch regression summary.",
+    ],
+  );
+  const reportId = report.rows[0]!.id;
+  const findings = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_findings (
+        operations_report_id, source_type, category, original_severity,
+        client_priority, title, client_explanation, why_it_matters,
+        recommended_action, affected_url, reviewed_at
+      ) VALUES
+        ($1, 'manual', 'manual', 'medium', 'important', 'Batch action A', 'Explanation A', 'Why A', 'Action A', $2, now()),
+        ($1, 'manual', 'manual', 'low', 'improvement', 'Batch action B', 'Explanation B', 'Why B', 'Action B', $3, now())
+      RETURNING id
+    `,
+    [
+      reportId,
+      `https://action-plan-batch-${key}.test/a`,
+      `https://action-plan-batch-${key}.test/b`,
+    ],
+  );
+  const actions = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, report_finding_id, group_key, title, summary
+      ) VALUES
+        ($1, $2, 'consider_later', 'Original action A', 'Original summary A'),
+        ($1, $3, 'address_soon', 'Original action B', 'Original summary B')
+      RETURNING id
+    `,
+    [reportId, findings.rows[0]!.id, findings.rows[1]!.id],
+  );
+  const observation = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_positive_observations (
+        operations_report_id, title, description, source_key
+      ) VALUES ($1, 'Original positive', 'Original description', 'batch-test')
+      RETURNING id
+    `,
+    [reportId],
+  );
+
+  const initialRevision = report.rows[0]!.content_revision;
+  const saved = await updateOperationsReportActionPlanBatch(
+    workspaceA,
+    actor,
+    reportId,
+    {
+      expectedRevision: initialRevision,
+      actionPlanItems: [
+        { id: actions.rows[0]!.id, groupKey: "address_soon" },
+        { id: actions.rows[1]!.id, summary: "Updated summary B" },
+      ],
+      positiveObservations: [
+        {
+          id: observation.rows[0]!.id,
+          title: "Updated positive",
+          description: "Updated positive description",
+        },
+      ],
+    },
+  );
+  assert.ok(saved);
+  assert.equal(saved.report.content_revision, initialRevision + 1);
+  assert.equal(
+    saved.actionPlanItems.find((item) => item.id === actions.rows[0]!.id)
+      ?.group_key,
+    "address_soon",
+  );
+  assert.equal(
+    saved.actionPlanItems.find((item) => item.id === actions.rows[1]!.id)
+      ?.summary,
+    "Updated summary B",
+  );
+  assert.equal(saved.positiveObservations[0]?.title, "Updated positive");
+
+  await assert.rejects(
+    updateOperationsReportActionPlanBatch(workspaceA, actor, reportId, {
+      expectedRevision: initialRevision,
+      actionPlanItems: [
+        { id: actions.rows[0]!.id, title: "Stale title attempt" },
+      ],
+      positiveObservations: [],
+    }),
+    /stale_revision:report/,
+  );
+
+  const concurrentRevision =
+    saved.report.content_revision ?? initialRevision + 1;
+  const concurrent = await Promise.allSettled([
+    updateOperationsReportActionPlanBatch(workspaceA, actor, reportId, {
+      expectedRevision: concurrentRevision,
+      actionPlanItems: [
+        { id: actions.rows[0]!.id, title: "Concurrent action winner" },
+      ],
+      positiveObservations: [],
+    }),
+    updateOperationsReportActionPlanBatch(workspaceA, actor, reportId, {
+      expectedRevision: concurrentRevision,
+      actionPlanItems: [
+        { id: actions.rows[1]!.id, summary: "Concurrent summary winner" },
+      ],
+      positiveObservations: [],
+    }),
+  ]);
+  assert.equal(
+    concurrent.filter((result) => result.status === "fulfilled").length,
+    1,
+  );
+  assert.equal(
+    concurrent.filter(
+      (result) =>
+        result.status === "rejected" &&
+        result.reason instanceof Error &&
+        result.reason.message === "stale_revision:report",
+    ).length,
+    1,
+  );
+  const afterConcurrent = await db.query<{
+    content_revision: number;
+    action_title: string;
+  }>(
+    `
+      SELECT r.content_revision, item.title AS action_title
+      FROM operations_reports r
+      JOIN operations_report_action_plan_items item ON item.operations_report_id = r.id
+      WHERE r.id = $1 AND item.id = $2
+    `,
+    [reportId, actions.rows[0]!.id],
+  );
+  assert.equal(
+    afterConcurrent.rows[0]!.content_revision,
+    concurrentRevision + 1,
+  );
+
+  const otherSite = await db.query<{ id: string }>(
+    `INSERT INTO sites (url, user_id) VALUES ($1, $2) RETURNING id`,
+    [`https://action-plan-batch-other-${key}.test`, actor.id],
+  );
+  const otherScan = await db.query<{ id: string }>(
+    `INSERT INTO scan_runs (site_id, status, start_url, finished_at) VALUES ($1, 'completed', $2, now()) RETURNING id`,
+    [otherSite.rows[0].id, `https://action-plan-batch-other-${key}.test`],
+  );
+  const otherReport = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_reports (
+        business_id, site_id, scan_run_id, title, created_by_user_id,
+        executive_summary, overall_summary, main_strengths, main_concerns,
+        recommended_first_steps, scope_limitations
+      ) VALUES ($1, $2, $3, 'Other batch report', $4, 'Summary', 'Summary', 'Summary', 'Summary', 'Summary', 'Summary')
+      RETURNING id
+    `,
+    [businessB, otherSite.rows[0].id, otherScan.rows[0].id, actor.id],
+  );
+  const foreignAction = await db.query<{ id: string }>(
+    `
+      INSERT INTO operations_report_action_plan_items (
+        operations_report_id, group_key, title
+      ) VALUES ($1, 'address_now', 'Foreign workspace action')
+      RETURNING id
+    `,
+    [otherReport.rows[0]!.id],
+  );
+  const currentRevision = afterConcurrent.rows[0]!.content_revision;
+  const titleBeforeInvalidBatch = afterConcurrent.rows[0]!.action_title;
+  assert.equal(
+    await updateOperationsReportActionPlanBatch(workspaceA, actor, reportId, {
+      expectedRevision: currentRevision,
+      actionPlanItems: [
+        { id: actions.rows[0]!.id, title: "Must roll back" },
+        { id: foreignAction.rows[0]!.id, title: "Must not update" },
+      ],
+      positiveObservations: [],
+    }),
+    null,
+  );
+  const unchanged = await db.query<{ title: string }>(
+    `SELECT title FROM operations_report_action_plan_items WHERE id = $1`,
+    [actions.rows[0]!.id],
+  );
+  assert.equal(unchanged.rows[0]!.title, titleBeforeInvalidBatch);
+
+  await db.query(`DELETE FROM operations_reports WHERE id = $1`, [reportId]);
+  await db.query(`DELETE FROM sites WHERE id = $1`, [site.rows[0]!.id]);
+  await db.query(`DELETE FROM operations_reports WHERE id = $1`, [
+    otherReport.rows[0]!.id,
+  ]);
+  await db.query(`DELETE FROM sites WHERE id = $1`, [otherSite.rows[0]!.id]);
 });
 
 test("business lists and direct resource checks are workspace isolated", async () => {

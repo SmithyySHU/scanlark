@@ -369,6 +369,7 @@ export {
   setOperationsReportArchived,
   saveOperationsReportPdfRender,
   updateOperationsReport,
+  updateOperationsReportActionPlanBatch,
   updateOperationsReportActionPlanItem,
   updateOperationsReportComparisonItem,
   updateOperationsReportFinding,
@@ -377,6 +378,7 @@ export {
 export type {
   OperationsClientReportPayload,
   OperationsReportActionPlanGroup,
+  OperationsReportActionPlanBatchUpdateInput,
   OperationsReportActionPlanItemRow,
   OperationsReportActionPlanItemUpdateInput,
   OperationsReportApprovalResult,

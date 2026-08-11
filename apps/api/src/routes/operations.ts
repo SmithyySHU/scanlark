@@ -116,6 +116,7 @@ import {
   updateOperationsQuoteItem,
   updateOperationsQuoteServiceItem,
   updateOperationsReport,
+  updateOperationsReportActionPlanBatch,
   updateOperationsReportActionPlanItem,
   updateOperationsReportComparisonItem,
   updateOperationsReportFinding,
@@ -191,6 +192,7 @@ import {
   parseOperationsQuoteUpdateInput,
   parseOperationsReportClientPriority,
   parseOperationsReportApprovalInput,
+  parseOperationsReportActionPlanBatchUpdateInput,
   parseOperationsReportActionPlanItemUpdateInput,
   parseOperationsReportComparisonStatus,
   parseOperationsReportComparisonUpdateInput,
@@ -3940,6 +3942,38 @@ export function mountOperationsRoutes(app: express.Application) {
       }
     },
   );
+
+  router.patch("/reports/:reportId/action-plan", async (req, res) => {
+    const reportId = getUuidParam(req, res, "reportId");
+    if (!reportId) return;
+    try {
+      const report = await updateOperationsReportActionPlanBatch(
+        getWorkspaceId(req),
+        getActor(req),
+        reportId,
+        parseOperationsReportActionPlanBatchUpdateInput(req.body),
+      );
+      if (!report) {
+        return sendApiError(
+          res,
+          404,
+          "not_found",
+          "Report or Action Plan record not found",
+        );
+      }
+      return res.json({ report: serializeObject(report) });
+    } catch (err) {
+      const handled = handleValidationError(res, err);
+      if (handled) return handled;
+      console.error("Operations report Action Plan batch update failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_report_action_plan_batch_update_failed",
+        "Failed to save Action Plan changes",
+      );
+    }
+  });
 
   router.patch(
     "/reports/:reportId/action-plan-items/:actionPlanItemId",

@@ -32,7 +32,7 @@ test("finding lifecycle actions save draft content in the same revision-bound re
   );
 });
 
-test("action-plan stale recovery hides stale row and clears stale dirty key", () => {
+test("action-plan stale recovery still hides an obsolete persisted row", () => {
   assert.match(
     source,
     /actionPlanPatchRecovery: \{\s*staleItemId: string;\s*replacementItemId: string \| null;\s*\} \| null/,
@@ -42,27 +42,58 @@ test("action-plan stale recovery hides stale row and clears stale dirty key", ()
     /const visibleActionPlanItemsWithRecovery = visibleActionPlanItems\.filter\(/,
   );
   assert.match(source, /item.id !== actionPlanPatchRecovery\.staleItemId/);
-  assert.match(
-    source,
-    /useEffect\(\(\) => \{\s*if \(!actionPlanPatchRecovery\) return;\s*setChildDirty\(/,
-  );
-  assert.match(
-    source,
-    /`action-\$\{actionPlanPatchRecovery\.staleItemId\}`, false\);/,
-  );
 });
 
 test("action plan row list uses recovery-filtered items", () => {
   assert.match(source, /items={visibleActionPlanItemsWithRecovery}/);
 });
 
-test("action-plan editor sends selected item ID directly to page-level patch", () => {
-  assert.match(source, /function ReportActionPlan\(/);
-  assert.match(source, /await onPatch\(item\.id, \{/);
-  assert.match(source, /function ActionPlanItemEditor/);
+test("Action Plan and positive observation edits use one dirty batch save", () => {
+  assert.match(source, /const \[dirtyActionPlanItemIds,/);
+  assert.match(source, /const \[dirtyPositiveObservationIds,/);
+  assert.match(source, /async function saveActionPlanChanges\(\)/);
+  assert.match(
+    source,
+    /actionPlanItems: \[\.\.\.dirtyActionPlanItemIds\]\.map/,
+  );
+  assert.match(
+    source,
+    /positiveObservations: \[\.\.\.dirtyPositiveObservationIds\]\.map/,
+  );
+  assert.match(source, /Save changes/);
+  assert.doesNotMatch(source, /Save action/);
+  assert.doesNotMatch(source, /Save observation/);
+});
+
+test("batch save preserves the Action Plan tab and retains drafts on failure", () => {
+  assert.match(
+    source,
+    /const \[tab, setTab\] = useState<ReportTab>\("overview"\)/,
+  );
+  assert.match(source, /const savedDetail = await onSaveActionPlan\(/);
   assert.doesNotMatch(
     source,
-    /const patchItemId = resolvePatchItemId\(item.id,[\s\S]*?await onPatch\(patchItemId,/,
+    /const savedDetail = await onSaveActionPlan\([\s\S]*?setTab\("overview"\)/,
   );
-  assert.doesNotMatch(source, /resolvePatchItemId=/);
+  assert.match(
+    source,
+    /catch \(error\) \{\s*setActionPlanSaveState\("error"\);\s*setActionPlanSaveError\(/,
+  );
+  assert.match(
+    source,
+    /disabled=\{\s*artifactReadOnly \|\|\s*actionPlanDirtyCount === 0/,
+  );
+});
+
+test("leaving with dirty Action Plan drafts requires confirmation", () => {
+  assert.match(
+    source,
+    /"You have unsaved Action Plan changes\. Leave without saving\?"/,
+  );
+  assert.match(source, /if \(!proceed\) return false/);
+  assert.match(
+    source,
+    /window\.addEventListener\("scanlark:before-navigation", handleAppNavigation\)/,
+  );
+  assert.match(source, /event\.preventDefault\(\)/);
 });
