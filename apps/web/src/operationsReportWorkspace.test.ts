@@ -150,11 +150,18 @@ test("ready and historical reports do not present normal editable content", () =
 });
 
 test("internal report coverage is visible without entering the client preview", () => {
-  assert.match(source, /<h2>Coverage \/ reconciliation<\/h2>/);
-  assert.match(source, /detail\.coverage\.participatingSourceIssues/);
-  assert.match(source, /detail\.coverage\.manualVerificationRequired/);
-  assert.match(source, /detail\.coverage\.unaccounted/);
-  assert.match(source, /Inspect source dispositions/);
+  assert.match(
+    source,
+    /<ReportCoveragePanel coverage=\{detail\.coverage\} \/>/,
+  );
+  assert.match(source, /<h2>Coverage<\/h2>/);
+  assert.match(source, /View full reconciliation/);
+  assert.match(source, /Requires attention/);
+  assert.match(
+    source,
+    /Check the destination manually without bypassing access controls/,
+  );
+  assert.doesNotMatch(source, /detail\.coverage\.items\.map\(\(item\) =>/);
   const clientPreview = readFileSync(
     new URL(
       "./components/operations/reports/ReportClientPreview.tsx",

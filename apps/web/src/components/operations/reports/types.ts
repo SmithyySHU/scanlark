@@ -227,6 +227,18 @@ export type OperationsReportSourceDisposition =
   | "false_positive"
   | "internal_system_only";
 
+export type OperationsReportCoverageItem = {
+  sourceIssueId: string;
+  category: string;
+  issueType: string;
+  title: string;
+  affectedUrl: string;
+  disposition: OperationsReportSourceDisposition | "unaccounted";
+  reason: string;
+  reportFindingId: string | null;
+  reportFindingTitle: string | null;
+};
+
 export type OperationsReportCoverage = {
   participatingSourceIssues: number;
   includedClientFindings: number;
@@ -237,17 +249,7 @@ export type OperationsReportCoverage = {
   internalSystemOnly: number;
   unaccounted: number;
   complete: boolean;
-  items: Array<{
-    sourceIssueId: string;
-    category: string;
-    issueType: string;
-    title: string;
-    affectedUrl: string;
-    disposition: OperationsReportSourceDisposition | "unaccounted";
-    reason: string;
-    reportFindingId: string | null;
-    reportFindingTitle: string | null;
-  }>;
+  items: OperationsReportCoverageItem[];
 };
 
 export type ClientReportPayload = {

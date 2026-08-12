@@ -12717,6 +12717,56 @@ const operationsStyles = `
     margin: 0;
     overflow-wrap: anywhere;
   }
+  .ops-report-coverage {
+    display: grid;
+    gap: 14px;
+  }
+  .ops-report-coverage > p {
+    margin: 0;
+  }
+  .ops-report-coverage-attention,
+  .ops-report-coverage-full > section {
+    display: grid;
+    gap: 8px;
+  }
+  .ops-report-coverage-attention h3,
+  .ops-report-coverage-full h3 {
+    margin: 4px 0 0;
+    font-size: 14px;
+  }
+  .ops-warning-card,
+  .ops-compact-card {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--panel-elev) 75%, transparent);
+  }
+  .ops-warning-card {
+    border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
+    background: color-mix(in srgb, var(--warning) 9%, var(--panel));
+  }
+  .ops-warning-card small,
+  .ops-compact-card small {
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+  .ops-report-coverage details > summary {
+    width: fit-content;
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 750;
+    cursor: pointer;
+  }
+  .ops-report-coverage-full {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .ops-report-coverage-full[open] {
+    display: grid;
+    gap: 16px;
+  }
   .ops-checkbox {
     display: flex;
     gap: 8px;

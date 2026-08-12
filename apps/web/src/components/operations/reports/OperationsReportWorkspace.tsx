@@ -19,6 +19,12 @@ import {
 } from "../../../utils/reportReadiness";
 import { ReportClientPreview } from "./ReportClientPreview";
 import { registerReportBeforeUnloadGuard } from "./reportBeforeUnload";
+import {
+  coverageAccountedCount,
+  coverageAttentionSections,
+  groupOperationsReportCoverage,
+  type OperationsReportCoverageGroup,
+} from "./reportCoverage";
 import type {
   ClientReportPayload,
   OperationsReportActionPlanGroup,
@@ -199,6 +205,144 @@ type Props = {
   onCreateRevision: () => Promise<void>;
   onCreateQuote: () => void;
 };
+
+function CoverageSourceRows({
+  group,
+}: {
+  group: OperationsReportCoverageGroup;
+}) {
+  return (
+    <div className="ops-list">
+      {group.items.map((item) => (
+        <div className="ops-list-row" key={item.sourceIssueId}>
+          <div>
+            <strong>{item.title}</strong>
+            <small>
+              {item.category} · {item.issueType}
+            </small>
+            <small>{item.affectedUrl}</small>
+          </div>
+          <small>Source ID: {item.sourceIssueId}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CoverageGroup({
+  group,
+  attention,
+}: {
+  group: OperationsReportCoverageGroup;
+  attention?: boolean;
+}) {
+  const countLabel = `${group.items.length} observation${group.items.length === 1 ? "" : "s"}`;
+  return (
+    <div className={attention ? "ops-warning-card" : "ops-compact-card"}>
+      <strong>{group.title}</strong>
+      <small>
+        {countLabel} · {group.category} · {group.issueType}
+      </small>
+      {group.reportFindingTitle && (
+        <small>Report finding: {group.reportFindingTitle}</small>
+      )}
+      <small>{group.reason}</small>
+      {attention && group.disposition === "unaccounted" && (
+        <small>
+          Reconcile or reclassify this source before approving the report.
+        </small>
+      )}
+      {attention && group.disposition === "manual_verification_required" && (
+        <small>
+          Check the destination manually without bypassing access controls, then
+          include it only if the visitor journey confirms a genuine failure.
+        </small>
+      )}
+      {group.items.length === 1 ? (
+        <>
+          <small>{group.items[0].affectedUrl}</small>
+          <small>Source ID: {group.items[0].sourceIssueId}</small>
+        </>
+      ) : (
+        <details>
+          <summary>View {countLabel}</summary>
+          <CoverageSourceRows group={group} />
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ReportCoveragePanel({
+  coverage,
+}: {
+  coverage: OperationsReportDetail["coverage"];
+}) {
+  const sections = useMemo(
+    () => groupOperationsReportCoverage(coverage.items),
+    [coverage.items],
+  );
+  const attentionSections = useMemo(
+    () => coverageAttentionSections(sections),
+    [sections],
+  );
+  const accounted = coverageAccountedCount(coverage);
+  return (
+    <div className="ops-panel ops-report-coverage">
+      <h2>Coverage</h2>
+      <p className={coverage.complete ? "ops-success" : "ops-warning"}>
+        {accounted} of {coverage.participatingSourceIssues} reportable scan
+        observations accounted for.
+        {coverage.unaccounted > 0 && (
+          <strong>
+            {" "}
+            {coverage.unaccounted} require
+            {coverage.unaccounted === 1 ? "s" : ""} review.
+          </strong>
+        )}
+      </p>
+      <dl className="ops-definition-grid">
+        <dt>Included directly</dt>
+        <dd>{coverage.includedClientFindings}</dd>
+        <dt>Grouped into findings</dt>
+        <dd>{coverage.groupedIntoClientFindings}</dd>
+        <dt>Manual verification</dt>
+        <dd>{coverage.manualVerificationRequired}</dd>
+        <dt>Excluded</dt>
+        <dd>{coverage.excludedByOperator}</dd>
+        <dt>False positives</dt>
+        <dd>{coverage.falsePositives}</dd>
+        <dt>Internal only</dt>
+        <dd>{coverage.internalSystemOnly}</dd>
+        <dt>Unaccounted</dt>
+        <dd>{coverage.unaccounted}</dd>
+      </dl>
+      {attentionSections.length > 0 && (
+        <section className="ops-report-coverage-attention">
+          <h3>Requires attention</h3>
+          {attentionSections.flatMap((section) =>
+            section.groups.map((group) => (
+              <CoverageGroup group={group} attention key={group.key} />
+            )),
+          )}
+        </section>
+      )}
+      <details className="ops-report-coverage-full">
+        <summary>View full reconciliation</summary>
+        {sections.map((section) => (
+          <section key={section.disposition}>
+            <h3>
+              {section.label} — {section.count}
+            </h3>
+            {section.groups.map((group) => (
+              <CoverageGroup group={group} key={group.key} />
+            ))}
+          </section>
+        ))}
+      </details>
+    </div>
+  );
+}
 
 export function OperationsReportWorkspace({
   readOnly,
@@ -1564,57 +1708,7 @@ export function OperationsReportWorkspace({
               )}
             </div>
           </div>
-          <div className="ops-panel ops-report-coverage">
-            <h2>Coverage / reconciliation</h2>
-            <p
-              className={
-                detail.coverage.complete ? "ops-success" : "ops-warning"
-              }
-            >
-              {detail.coverage.complete
-                ? `Coverage complete. All ${detail.coverage.participatingSourceIssues} reportable scan observations are accounted for.`
-                : `Coverage requires review. ${detail.coverage.unaccounted} observation${detail.coverage.unaccounted === 1 ? " is" : "s are"} not classified.`}
-            </p>
-            <dl className="ops-definition-grid">
-              <dt>Included directly</dt>
-              <dd>{detail.coverage.includedClientFindings}</dd>
-              <dt>Grouped into findings</dt>
-              <dd>{detail.coverage.groupedIntoClientFindings}</dd>
-              <dt>Manual verification</dt>
-              <dd>{detail.coverage.manualVerificationRequired}</dd>
-              <dt>Excluded by operator</dt>
-              <dd>{detail.coverage.excludedByOperator}</dd>
-              <dt>False positives</dt>
-              <dd>{detail.coverage.falsePositives}</dd>
-              <dt>Internal/system only</dt>
-              <dd>{detail.coverage.internalSystemOnly}</dd>
-              <dt>Unaccounted</dt>
-              <dd>{detail.coverage.unaccounted}</dd>
-            </dl>
-            <details>
-              <summary>Inspect source dispositions</summary>
-              <div className="ops-list">
-                {detail.coverage.items.map((item) => (
-                  <div className="ops-list-row" key={item.sourceIssueId}>
-                    <div>
-                      <strong>{item.title}</strong>
-                      <small>
-                        {item.category} · {item.issueType}
-                      </small>
-                      <small>{item.affectedUrl}</small>
-                    </div>
-                    <div>
-                      <strong>{item.disposition.replaceAll("_", " ")}</strong>
-                      <small>{item.reason}</small>
-                      {item.reportFindingTitle && (
-                        <small>Finding: {item.reportFindingTitle}</small>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </details>
-          </div>
+          <ReportCoveragePanel coverage={detail.coverage} />
           {findingDraft.draft &&
             (() => {
               const draft = findingDraft.draft;

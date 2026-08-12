@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { Client } from "pg";
 import { closeConnection } from "./client";
@@ -290,19 +291,35 @@ test("mixed scan categories reconcile every source without hiding security contr
   );
   assert.ok(blockedSource);
   await db.query(
-    `UPDATE operations_report_source_dispositions
-     SET disposition = 'included_client_finding', reason = 'Legacy inconsistent fixture.'
-     WHERE operations_report_id = $1 AND source_issue_id = $2`,
-    [reportId, blockedSource.sourceIssueId],
+    `UPDATE operations_report_findings
+     SET is_included = true
+     WHERE id = $1`,
+    [blocked.id],
   );
-  const inconsistent = await getOperationsReportCoverage(workspaceId, reportId);
-  assert.equal(inconsistent?.unaccounted, 1);
   await db.query(
     `UPDATE operations_report_source_dispositions
      SET disposition = 'manual_verification_required',
          reason = 'The automated request could not confirm that the destination is broken; manual verification is required.'
      WHERE operations_report_id = $1 AND source_issue_id = $2`,
     [reportId, blockedSource.sourceIssueId],
+  );
+  const inconsistent = await getOperationsReportCoverage(workspaceId, reportId);
+  assert.equal(inconsistent?.unaccounted, 1);
+  await db.query(
+    readFileSync(
+      new URL(
+        "../migrations/058_operations_report_coverage_repair.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const repaired = await getOperationsReportCoverage(workspaceId, reportId);
+  assert.equal(repaired?.manualVerificationRequired, 1);
+  assert.equal(repaired?.unaccounted, 0);
+  await db.query(
+    `UPDATE operations_reports SET content_revision = 1 WHERE id = $1`,
+    [reportId],
   );
 });
 
