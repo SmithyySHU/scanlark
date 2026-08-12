@@ -524,6 +524,7 @@ function parseClientServiceListOptions(req: Request) {
     renewalsApproaching: req.query.renewalsApproaching === "true",
     siteAttention: req.query.siteAttention === "true",
     includeEnded: req.query.includeEnded === "true",
+    includeArchived: req.query.includeArchived === "true",
   };
 }
 
@@ -1372,14 +1373,24 @@ export function mountOperationsRoutes(app: express.Application) {
   router.get("/services/:serviceId", async (req, res) => {
     const serviceId = getUuidParam(req, res, "serviceId");
     if (!serviceId) return;
-    const service = await getOperationsClientServiceDetail(
-      getWorkspaceId(req),
-      serviceId,
-    );
-    if (!service) {
-      return sendApiError(res, 404, "not_found", "Service not found");
+    try {
+      const service = await getOperationsClientServiceDetail(
+        getWorkspaceId(req),
+        serviceId,
+      );
+      if (!service) {
+        return sendApiError(res, 404, "not_found", "Service not found");
+      }
+      return res.json({ service: serializeObject(service) });
+    } catch (err) {
+      console.error("Operations service detail failed", err);
+      return sendApiError(
+        res,
+        500,
+        "operations_service_detail_failed",
+        "Failed to load service details",
+      );
     }
-    return res.json({ service: serializeObject(service) });
   });
 
   router.patch("/services/:serviceId", async (req, res) => {

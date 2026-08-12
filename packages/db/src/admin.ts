@@ -167,8 +167,9 @@ function withPagination(params: unknown[], limit: number, offset: number) {
 export async function recordAdminAuditLog(
   actor: AdminActor,
   input: AdminAuditAction,
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ): Promise<AdminAuditLogRow> {
-  const client = await ensureConnected();
+  const client = transactionClient ?? (await ensureConnected());
   const res = await client.query<AdminAuditLogRow>(
     `
       INSERT INTO admin_audit_log (

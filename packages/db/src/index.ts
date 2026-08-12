@@ -498,6 +498,7 @@ export {
   calculateServicePeriod,
   cancelOperationsClientService,
   changeOperationsClientServicePlan,
+  classifyOperationsClientService,
   createOperationsClientService,
   createOperationsClientServiceUsage,
   createOperationsServiceMonthlyReport,
@@ -515,6 +516,7 @@ export {
   listOperationsClientServiceUsage,
   listOperationsServicePlans,
   markOperationsServiceReviewComplete,
+  OPERATIONS_CLIENT_SERVICE_ENDED_STATUSES,
   OPERATIONS_CLIENT_SERVICE_STATUSES,
   OPERATIONS_SERVICE_BILLING_CADENCES,
   OPERATIONS_SERVICE_INCIDENT_REVIEW_STATES,
@@ -539,6 +541,7 @@ export {
 export type {
   OperationsClientServiceDetail,
   OperationsClientServiceArchiveEligibility,
+  OperationsClientServiceDiagnosticClassification,
   OperationsClientServiceInput,
   OperationsClientServiceRow,
   OperationsClientServiceSiteInput,

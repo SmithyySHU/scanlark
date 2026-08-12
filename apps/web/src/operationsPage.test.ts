@@ -95,3 +95,49 @@ test("report finalisation refreshes in place and exposes explicit reopening", ()
   );
   assert.doesNotMatch(reportWorkspaceSource, /onMarkReady/);
 });
+
+test("managed-service creation blocks repeated submissions until completion", () => {
+  assert.match(
+    source,
+    /if \(!beginServiceCreate\(serviceCreateInFlightRef\)\) return/,
+  );
+  assert.match(
+    source,
+    /finally \{\s*finishServiceCreate\(serviceCreateInFlightRef\)/,
+  );
+  assert.match(source, /disabled=\{serviceCreating\}/);
+  assert.match(source, /Creating service…/);
+});
+
+test("central and business managed-service views load canonical scoped lists", () => {
+  assert.match(
+    source,
+    /const \[businessServices, setBusinessServices\] = useState/,
+  );
+  assert.match(
+    source,
+    /const loadBusinessServices = useCallback[\s\S]*businessId,[\s\S]*limit: "100"/,
+  );
+  assert.match(source, /businessServices\.map\(\(service\)/);
+  assert.doesNotMatch(
+    source,
+    /services\.filter\(\(service\) => service\.business_id === b\.id\)/,
+  );
+  assert.match(source, /No managed services for this business\./);
+  assert.match(
+    source,
+    /includeArchived: searchParams\.get\("includeArchived"\)/,
+  );
+  assert.match(
+    source,
+    /servicesPage\.offset \+ servicesPage\.countReturned <\s*servicesPage\.totalMatching/,
+  );
+});
+
+test("managed-service detail does not present server failures as not found", () => {
+  assert.match(source, /if \(res\.status === 404\)/);
+  assert.match(source, /setServiceDetailError\("not_found"\)/);
+  assert.match(source, /Service details are temporarily unavailable\./);
+  assert.match(source, /serviceDetailError === "not_found"/);
+  assert.match(source, /Relationship integrity review required\./);
+});

@@ -56,6 +56,12 @@ export const OPERATIONS_CLIENT_SERVICE_STATUSES = [
   "completed",
 ] as const;
 
+export const OPERATIONS_CLIENT_SERVICE_ENDED_STATUSES = [
+  "cancelled",
+  "expired",
+  "completed",
+] as const;
+
 export const OPERATIONS_SERVICE_USAGE_TYPES = [
   "support",
   "small_fix",
@@ -98,6 +104,12 @@ export type OperationsServiceReviewFrequency =
   (typeof OPERATIONS_SERVICE_REVIEW_FREQUENCIES)[number];
 export type OperationsClientServiceStatus =
   (typeof OPERATIONS_CLIENT_SERVICE_STATUSES)[number];
+export type OperationsClientServiceDiagnosticClassification =
+  | "valid_service"
+  | "valid_draft"
+  | "ended_service"
+  | "archived_service"
+  | "relationship_integrity_violation";
 export type OperationsServiceUsageType =
   (typeof OPERATIONS_SERVICE_USAGE_TYPES)[number];
 export type OperationsServiceReviewOutcome =
@@ -205,6 +217,10 @@ export type OperationsClientServiceRow = {
   site_attention_count?: number;
   open_task_count?: number;
   last_activity_at?: Date | null;
+  integrity_issue_count?: number;
+  contact_relationship_valid?: boolean;
+  service_plan_relationship_valid?: boolean;
+  diagnostic_classification?: OperationsClientServiceDiagnosticClassification;
 };
 
 export type OperationsClientServiceSiteRow = {
@@ -235,6 +251,7 @@ export type OperationsClientServiceSiteRow = {
   next_scheduled_at?: Date | null;
   schedule_enabled?: boolean | null;
   schedule_frequency?: string | null;
+  business_relationship_valid?: boolean;
 };
 
 export type OperationsClientServiceUsageRow = {
@@ -345,6 +362,8 @@ export type OperationsClientServiceDetail = {
   }>;
   allowance: OperationsServiceAllowanceSummary;
   activationIssues: string[];
+  integrityIssues: string[];
+  diagnosticClassification: OperationsClientServiceDiagnosticClassification;
 };
 
 export type OperationsServicePlanInput = {
@@ -691,8 +710,11 @@ export function calculateServicePeriod(
   };
 }
 
-async function nextDocumentNumber(documentType: string, prefix: string) {
-  const client = await ensureConnected();
+async function nextDocumentNumber(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  documentType: string,
+  prefix: string,
+) {
   const year = new Date().getUTCFullYear();
   const res = await client.query<{ last_value: number }>(
     `
@@ -729,8 +751,9 @@ async function addActivity(
     relatedWorkOrderId?: string | null;
     relatedCommunicationId?: string | null;
   },
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ) {
-  const client = await ensureConnected();
+  const client = transactionClient ?? (await ensureConnected());
   await client.query(
     `
       INSERT INTO operations_client_service_activity (
@@ -795,15 +818,18 @@ async function recordStatusChange(
   );
 }
 
-async function validateServiceRelationships(input: {
-  workspaceId: string;
-  businessId: string;
-  contactId?: string | null;
-  servicePlanId?: string | null;
-  sourceQuoteId?: string | null;
-  sourceWorkOrderId?: string | null;
-}) {
-  const client = await ensureConnected();
+async function validateServiceRelationships(
+  input: {
+    workspaceId: string;
+    businessId: string;
+    contactId?: string | null;
+    servicePlanId?: string | null;
+    sourceQuoteId?: string | null;
+    sourceWorkOrderId?: string | null;
+  },
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
+) {
+  const client = transactionClient ?? (await ensureConnected());
   const business = await client.query<{ id: string }>(
     `SELECT id FROM operations_businesses WHERE id = $1 AND internal_workspace_id = $2`,
     [input.businessId, input.workspaceId],
@@ -844,8 +870,9 @@ async function siteBelongsToBusiness(
   workspaceId: string,
   businessId: string,
   siteId: string,
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ) {
-  const client = await ensureConnected();
+  const client = transactionClient ?? (await ensureConnected());
   const res = await client.query<{ id: string }>(
     `
       SELECT s.id
@@ -1152,9 +1179,15 @@ export async function setOperationsServicePlanArchived(
 async function copyPlanDefaults(
   workspaceId: string,
   planId: string | null | undefined,
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ) {
   if (!planId) return null;
-  return getOperationsServicePlan(workspaceId, planId);
+  const client = transactionClient ?? (await ensureConnected());
+  const res = await client.query<OperationsServicePlanRow>(
+    `SELECT * FROM operations_service_plan_templates WHERE id = $1 AND internal_workspace_id = $2`,
+    [planId, workspaceId],
+  );
+  return res.rows[0] ?? null;
 }
 
 export async function createOperationsClientService(
@@ -1162,42 +1195,56 @@ export async function createOperationsClientService(
   actor: AdminActor,
   input: OperationsClientServiceInput,
 ) {
-  const validation = await validateServiceRelationships({
-    workspaceId,
-    ...input,
-  });
-  if (validation !== "ok") return validation;
-  const plan = await copyPlanDefaults(workspaceId, input.servicePlanId);
-  const config = getOperationsServiceConfig();
-  const serviceNumber = await nextDocumentNumber(
-    "client_service",
-    config.servicePrefix,
-  );
-  const startDate = input.startDate ?? null;
-  const nextReportAt = startDate
-    ? nextFromFrequency(
-        input.reportFrequency ?? plan?.default_report_frequency ?? "monthly",
-        startDate,
-        config,
-      )
-    : null;
-  const nextReviewAt =
-    input.nextReviewAt ??
-    (startDate
+  const client = await ensureConnected();
+  let transactionOpen = false;
+  try {
+    await client.query("BEGIN");
+    transactionOpen = true;
+    const validation = await validateServiceRelationships(
+      {
+        workspaceId,
+        ...input,
+      },
+      client,
+    );
+    if (validation !== "ok") {
+      await client.query("ROLLBACK");
+      transactionOpen = false;
+      return validation;
+    }
+    const plan = await copyPlanDefaults(
+      workspaceId,
+      input.servicePlanId,
+      client,
+    );
+    const config = getOperationsServiceConfig();
+    const serviceNumber = await nextDocumentNumber(
+      client,
+      "client_service",
+      config.servicePrefix,
+    );
+    const startDate = input.startDate ?? null;
+    const nextReportAt = startDate
       ? nextFromFrequency(
-          input.reviewFrequency ??
-            plan?.default_review_frequency ??
-            "quarterly",
+          input.reportFrequency ?? plan?.default_report_frequency ?? "monthly",
           startDate,
           config,
         )
-      : null);
-  const renewalReminderAt = input.renewalDate
-    ? addDays(startOfDate(input.renewalDate), -config.renewalReminderDays)
-    : null;
-  const client = await ensureConnected();
-  try {
-    await client.query("BEGIN");
+      : null;
+    const nextReviewAt =
+      input.nextReviewAt ??
+      (startDate
+        ? nextFromFrequency(
+            input.reviewFrequency ??
+              plan?.default_review_frequency ??
+              "quarterly",
+            startDate,
+            config,
+          )
+        : null);
+    const renewalReminderAt = input.renewalDate
+      ? addDays(startOfDate(input.renewalDate), -config.renewalReminderDays)
+      : null;
     const res = await client.query<OperationsClientServiceRow>(
       `
         INSERT INTO operations_client_services (
@@ -1273,11 +1320,18 @@ export async function createOperationsClientService(
       ],
     );
     const service = res.rows[0];
-    for (const siteId of input.siteIds ?? []) {
+    if (!service) throw new Error("service_create_scope_failed");
+    for (const siteId of [...new Set(input.siteIds ?? [])]) {
       if (
-        !(await siteBelongsToBusiness(workspaceId, input.businessId, siteId))
+        !(await siteBelongsToBusiness(
+          workspaceId,
+          input.businessId,
+          siteId,
+          client,
+        ))
       ) {
         await client.query("ROLLBACK");
+        transactionOpen = false;
         return "site_not_linked_to_business" as const;
       }
       await client.query(
@@ -1303,25 +1357,42 @@ export async function createOperationsClientService(
         [service.id, siteId, service.includes_uptime_monitoring, workspaceId],
       );
     }
-    await client.query("COMMIT");
-    await addActivity(actor, {
-      clientServiceId: service.id,
-      businessId: service.business_id,
-      activityType: "service_created",
-      title: `Service ${service.service_number} created`,
-    });
-    await recordAdminAuditLog(actor, {
-      action: "operations_client_service_created",
-      targetType: "operations_client_service",
-      targetId: service.id,
-      metadata: {
+    await addActivity(
+      actor,
+      {
+        clientServiceId: service.id,
         businessId: service.business_id,
-        sourceQuoteId: input.sourceQuoteId ?? null,
+        activityType: "service_created",
+        title: `Service ${service.service_number} created`,
       },
-    });
-    return getOperationsClientServiceDetail(workspaceId, service.id);
+      client,
+    );
+    await recordAdminAuditLog(
+      actor,
+      {
+        action: "operations_client_service_created",
+        targetType: "operations_client_service",
+        targetId: service.id,
+        metadata: {
+          businessId: service.business_id,
+          sourceQuoteId: input.sourceQuoteId ?? null,
+        },
+      },
+      client,
+    );
+    const detail = await getOperationsClientServiceDetail(
+      workspaceId,
+      service.id,
+      client,
+    );
+    if (!detail) throw new Error("service_create_detail_unavailable");
+    await client.query("COMMIT");
+    transactionOpen = false;
+    return detail;
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (transactionOpen) {
+      await client.query("ROLLBACK").catch(() => undefined);
+    }
     throw err;
   }
 }
@@ -1339,6 +1410,7 @@ export async function listOperationsClientServices(
     renewalsApproaching?: boolean;
     siteAttention?: boolean;
     includeEnded?: boolean;
+    includeArchived?: boolean;
     limit: number;
     offset: number;
   },
@@ -1346,7 +1418,7 @@ export async function listOperationsClientServices(
   const client = await ensureConnected();
   const where: string[] = ["b.internal_workspace_id = $1"];
   const values: unknown[] = [workspaceId];
-  if (!options.includeEnded) {
+  if (!options.includeArchived) {
     where.push(`s.archived_at IS NULL`);
   }
   if (options.businessId) {
@@ -1372,7 +1444,15 @@ export async function listOperationsClientServices(
     where.push(`(s.name ILIKE $${values.length} OR s.service_number ILIKE $${values.length} OR b.name ILIKE $${values.length} OR EXISTS (
       SELECT 1 FROM operations_client_service_sites css
       JOIN sites site ON site.id = css.site_id
-      WHERE css.client_service_id = s.id AND css.removed_at IS NULL AND site.url ILIKE $${values.length}
+      WHERE css.client_service_id = s.id
+        AND css.removed_at IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM operations_business_sites obs
+          WHERE obs.business_id = s.business_id
+            AND obs.site_id = css.site_id
+        )
+        AND site.url ILIKE $${values.length}
     ))`);
   }
   if (options.reportsDue)
@@ -1402,15 +1482,41 @@ export async function listOperationsClientServices(
              COALESCE(site_counts.covered_site_count, 0)::int AS covered_site_count,
              COALESCE(attention.site_attention_count, 0)::int AS site_attention_count,
              COALESCE(task_counts.open_task_count, 0)::int AS open_task_count,
-             activity.last_activity_at
+             activity.last_activity_at,
+             (
+               CASE WHEN s.contact_id IS NOT NULL AND c.id IS NULL THEN 1 ELSE 0 END
+               + CASE WHEN s.service_plan_id IS NOT NULL AND p.id IS NULL THEN 1 ELSE 0 END
+               + (
+                 SELECT COUNT(*)::int
+                 FROM operations_client_service_sites integrity_css
+                 WHERE integrity_css.client_service_id = s.id
+                   AND integrity_css.removed_at IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM operations_business_sites integrity_obs
+                     WHERE integrity_obs.business_id = s.business_id
+                       AND integrity_obs.site_id = integrity_css.site_id
+                   )
+               )
+             )::int AS integrity_issue_count
       FROM operations_client_services s
       JOIN operations_businesses b ON b.id = s.business_id
-      LEFT JOIN operations_contacts c ON c.id = s.contact_id
-      LEFT JOIN operations_service_plan_templates p ON p.id = s.service_plan_id
+      LEFT JOIN operations_contacts c
+        ON c.id = s.contact_id AND c.business_id = s.business_id
+      LEFT JOIN operations_service_plan_templates p
+        ON p.id = s.service_plan_id
+       AND p.internal_workspace_id = b.internal_workspace_id
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS covered_site_count
         FROM operations_client_service_sites css
-        WHERE css.client_service_id = s.id AND css.removed_at IS NULL
+        WHERE css.client_service_id = s.id
+          AND css.removed_at IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM operations_business_sites obs
+            WHERE obs.business_id = s.business_id
+              AND obs.site_id = css.site_id
+          )
       ) site_counts ON TRUE
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS site_attention_count
@@ -1438,6 +1544,12 @@ export async function listOperationsClientServices(
         ) issues ON TRUE
         WHERE css.client_service_id = s.id
           AND css.removed_at IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM operations_business_sites obs
+            WHERE obs.business_id = s.business_id
+              AND obs.site_id = css.site_id
+          )
           AND (
             COALESCE(open_uptime.open_incidents, 0) > 0
             OR latest_scan.status = 'failed'
@@ -1468,16 +1580,45 @@ export async function listOperationsClientServices(
       SELECT COUNT(*) AS count
       FROM operations_client_services s
       JOIN operations_businesses b ON b.id = s.business_id
-      LEFT JOIN operations_service_plan_templates p ON p.id = s.service_plan_id
+      LEFT JOIN operations_service_plan_templates p
+        ON p.id = s.service_plan_id
+       AND p.internal_workspace_id = b.internal_workspace_id
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS site_attention_count
         FROM operations_client_service_sites css
+        LEFT JOIN LATERAL (
+          SELECT status
+          FROM scan_runs sr
+          WHERE sr.site_id = css.site_id
+          ORDER BY sr.started_at DESC
+          LIMIT 1
+        ) latest_scan ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS open_incidents
+          FROM uptime_incidents ui
+          WHERE ui.site_id = css.site_id AND ui.status = 'open'
+        ) open_uptime ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS important_issues
+          FROM scan_issues si
+          JOIN scan_runs sr ON sr.id = si.scan_run_id
+          WHERE sr.site_id = css.site_id
+            AND sr.status = 'completed'
+            AND si.severity IN ('critical', 'high')
+            AND sr.started_at >= now() - interval '45 days'
+        ) issues ON TRUE
         WHERE css.client_service_id = s.id
           AND css.removed_at IS NULL
           AND EXISTS (
             SELECT 1
-            FROM uptime_incidents ui
-            WHERE ui.site_id = css.site_id AND ui.status = 'open'
+            FROM operations_business_sites obs
+            WHERE obs.business_id = s.business_id
+              AND obs.site_id = css.site_id
+          )
+          AND (
+            COALESCE(open_uptime.open_incidents, 0) > 0
+            OR latest_scan.status = 'failed'
+            OR COALESCE(issues.important_issues, 0) > 0
           )
       ) attention ON TRUE
       ${whereSql}
@@ -1485,12 +1626,35 @@ export async function listOperationsClientServices(
     values.slice(0, -2),
   );
   return {
-    services: services.rows,
+    services: services.rows.map((service) => ({
+      ...service,
+      diagnostic_classification: classifyOperationsClientService(
+        service,
+        service.integrity_issue_count ?? 0,
+      ),
+    })),
     totalMatching: countValue(total.rows[0]),
     countReturned: services.rows.length,
     limit: options.limit,
     offset: options.offset,
   };
+}
+
+export function classifyOperationsClientService(
+  service: Pick<OperationsClientServiceRow, "status" | "archived_at">,
+  integrityIssueCount = 0,
+): OperationsClientServiceDiagnosticClassification {
+  if (integrityIssueCount > 0) return "relationship_integrity_violation";
+  if (service.archived_at) return "archived_service";
+  if (
+    OPERATIONS_CLIENT_SERVICE_ENDED_STATUSES.some(
+      (status) => status === service.status,
+    )
+  ) {
+    return "ended_service";
+  }
+  if (service.status === "draft") return "valid_draft";
+  return "valid_service";
 }
 
 export function getServiceActivationIssues(
@@ -1499,7 +1663,11 @@ export function getServiceActivationIssues(
 ) {
   const issues: string[] = [];
   if (!service.business_id) issues.push("business_required");
-  if (sites.filter((site) => !site.removed_at).length === 0) {
+  if (
+    sites.filter(
+      (site) => !site.removed_at && site.business_relationship_valid !== false,
+    ).length === 0
+  ) {
     issues.push("covered_site_required");
   }
   if (!service.start_date) issues.push("start_date_required");
@@ -1522,8 +1690,9 @@ export function getServiceActivationIssues(
 export async function getOperationsClientServiceDetail(
   workspaceId: string,
   serviceId: string,
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ) {
-  const client = await ensureConnected();
+  const client = transactionClient ?? (await ensureConnected());
   const serviceRes = await client.query<OperationsClientServiceRow>(
     `
       SELECT s.*,
@@ -1533,11 +1702,16 @@ export async function getOperationsClientServiceDetail(
              c.last_name AS contact_last_name,
              c.email AS contact_email,
              p.name AS plan_name,
-             p.plan_type
+             p.plan_type,
+             (s.contact_id IS NULL OR c.id IS NOT NULL) AS contact_relationship_valid,
+             (s.service_plan_id IS NULL OR p.id IS NOT NULL) AS service_plan_relationship_valid
       FROM operations_client_services s
       JOIN operations_businesses b ON b.id = s.business_id
-      LEFT JOIN operations_contacts c ON c.id = s.contact_id
-      LEFT JOIN operations_service_plan_templates p ON p.id = s.service_plan_id
+      LEFT JOIN operations_contacts c
+        ON c.id = s.contact_id AND c.business_id = s.business_id
+      LEFT JOIN operations_service_plan_templates p
+        ON p.id = s.service_plan_id
+       AND p.internal_workspace_id = b.internal_workspace_id
       WHERE s.id = $2
         AND b.internal_workspace_id = $1
     `,
@@ -1551,22 +1725,51 @@ export async function getOperationsClientServiceDetail(
         `
         SELECT css.*,
                s.url AS site_url,
-               s.display_name AS site_display_name,
+               s.site_display_name,
                s.schedule_enabled,
                s.schedule_frequency,
                s.next_scheduled_at,
+               EXISTS (
+                 SELECT 1
+                 FROM operations_client_services relationship_service
+                 JOIN operations_business_sites relationship_site
+                   ON relationship_site.business_id = relationship_service.business_id
+                  AND relationship_site.site_id = css.site_id
+                 WHERE relationship_service.id = css.client_service_id
+               ) AS business_relationship_valid,
                latest.id AS latest_scan_id,
                latest.status AS latest_scan_status,
                latest.finished_at AS latest_scan_finished_at,
-               latest.health_score AS latest_scan_score,
+               latest.score AS latest_scan_score,
                COALESCE(issue_counts.critical_count, 0)::int AS critical_issue_count,
                COALESCE(issue_counts.high_count, 0)::int AS high_issue_count,
                COALESCE(incident_counts.active_incident_count, 0)::int AS active_incident_count
         FROM operations_client_service_sites css
         JOIN sites s ON s.id = css.site_id
         LEFT JOIN LATERAL (
-          SELECT sr.*
+          SELECT sr.*,
+                 CASE
+                   WHEN sr.status = 'completed' THEN
+                     GREATEST(
+                       0,
+                       100
+                       - COALESCE(score_counts.critical_count, 0) * 25
+                       - COALESCE(score_counts.high_count, 0) * 12
+                       - COALESCE(score_counts.medium_count, 0) * 6
+                       - COALESCE(score_counts.low_count, 0) * 2
+                     )
+                   ELSE NULL
+                 END::int AS score
           FROM scan_runs sr
+          LEFT JOIN LATERAL (
+            SELECT
+              COUNT(*) FILTER (WHERE si.severity = 'critical' AND si.status = 'open')::int AS critical_count,
+              COUNT(*) FILTER (WHERE si.severity = 'high' AND si.status = 'open')::int AS high_count,
+              COUNT(*) FILTER (WHERE si.severity = 'medium' AND si.status = 'open')::int AS medium_count,
+              COUNT(*) FILTER (WHERE si.severity = 'low' AND si.status = 'open')::int AS low_count
+            FROM scan_issues si
+            WHERE si.scan_run_id = sr.id
+          ) score_counts ON TRUE
           WHERE sr.site_id = s.id
           ORDER BY sr.started_at DESC
           LIMIT 1
@@ -1680,7 +1883,22 @@ export async function getOperationsClientServiceDetail(
   const allowance = await getOperationsServiceAllowanceSummary(
     workspaceId,
     serviceId,
+    new Date(),
+    client,
   );
+  const integrityIssues = [
+    ...(service.contact_relationship_valid === false
+      ? ["contact_business_mismatch"]
+      : []),
+    ...(service.service_plan_relationship_valid === false
+      ? ["service_plan_workspace_mismatch"]
+      : []),
+    ...(sites.rows.some(
+      (site) => !site.removed_at && site.business_relationship_valid === false,
+    )
+      ? ["covered_site_business_mismatch"]
+      : []),
+  ];
   return {
     service,
     sites: sites.rows,
@@ -1692,6 +1910,11 @@ export async function getOperationsClientServiceDetail(
     tasks: tasks.rows,
     allowance,
     activationIssues: getServiceActivationIssues(service, sites.rows),
+    integrityIssues,
+    diagnosticClassification: classifyOperationsClientService(
+      service,
+      integrityIssues.length,
+    ),
   };
 }
 
@@ -2788,8 +3011,9 @@ export async function getOperationsServiceAllowanceSummary(
   workspaceId: string,
   serviceId: string,
   occurredAt: Date = new Date(),
+  transactionClient?: Awaited<ReturnType<typeof ensureConnected>>,
 ) {
-  const client = await ensureConnected();
+  const client = transactionClient ?? (await ensureConnected());
   const serviceRes = await client.query<OperationsClientServiceRow>(
     `SELECT s.* FROM operations_client_services s JOIN operations_businesses b ON b.id = s.business_id WHERE s.id = $2 AND b.internal_workspace_id = $1`,
     [workspaceId, serviceId],

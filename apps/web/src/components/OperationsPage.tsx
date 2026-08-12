@@ -16,6 +16,10 @@ import type {
   OperationsReportReadinessIssue,
   OperationsReportRegroupPreview,
 } from "./operations/reports/types";
+import {
+  beginServiceCreate,
+  finishServiceCreate,
+} from "./operations/serviceCreateGuard";
 
 type OperationsRouteKey =
   | "home"
@@ -1117,6 +1121,13 @@ type OperationsClientServiceRow = {
   site_attention_count?: number;
   open_task_count?: number;
   last_activity_at?: string | null;
+  integrity_issue_count?: number;
+  diagnostic_classification?:
+    | "valid_service"
+    | "valid_draft"
+    | "ended_service"
+    | "archived_service"
+    | "relationship_integrity_violation";
 };
 
 type OperationsClientServiceSite = {
@@ -1144,6 +1155,7 @@ type OperationsClientServiceSite = {
   next_scheduled_at?: string | null;
   schedule_enabled?: boolean | null;
   schedule_frequency?: string | null;
+  business_relationship_valid?: boolean;
 };
 
 type OperationsClientServiceUsage = {
@@ -1213,6 +1225,13 @@ type OperationsClientServiceDetail = {
     warning: string | null;
   };
   activationIssues: string[];
+  integrityIssues: string[];
+  diagnosticClassification:
+    | "valid_service"
+    | "valid_draft"
+    | "ended_service"
+    | "archived_service"
+    | "relationship_integrity_violation";
 };
 
 type ServiceFormState = {
@@ -2427,6 +2446,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
   );
   const [servicePlansLoading, setServicePlansLoading] = useState(false);
   const [services, setServices] = useState<OperationsClientServiceRow[]>([]);
+  const [businessServices, setBusinessServices] = useState<
+    OperationsClientServiceRow[]
+  >([]);
   const [servicesSummary, setServicesSummary] = useState({
     active: 0,
     reportsDue: 0,
@@ -2436,13 +2458,25 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     renewals: 0,
     cancellations: 0,
   });
+  const [servicesPage, setServicesPage] = useState({
+    totalMatching: 0,
+    countReturned: 0,
+    limit: 50,
+    offset: 0,
+  });
   const [servicesLoading, setServicesLoading] = useState(false);
+  const [businessServicesLoading, setBusinessServicesLoading] = useState(false);
   const [serviceDetail, setServiceDetail] =
     useState<OperationsClientServiceDetail | null>(null);
   const [serviceDetailLoading, setServiceDetailLoading] = useState(false);
+  const [serviceDetailError, setServiceDetailError] = useState<string | null>(
+    null,
+  );
   const [serviceCreateDetail, setServiceCreateDetail] =
     useState<BusinessDetail | null>(null);
   const [serviceFormOpen, setServiceFormOpen] = useState(false);
+  const [serviceCreating, setServiceCreating] = useState(false);
+  const serviceCreateInFlightRef = useRef(false);
   const [serviceForm, setServiceForm] =
     useState<ServiceFormState>(emptyServiceForm);
   const [serviceUsageForm, setServiceUsageForm] =
@@ -3113,14 +3147,15 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       planType: searchParams.get("planType"),
       billingCadence: searchParams.get("billingCadence"),
       businessId:
-        businessId && activeRoute === "businesses" ? businessId : null,
+        activeRoute === "services" ? searchParams.get("businessId") : null,
       reportsDue: searchParams.get("reportsDue"),
       reviewsDue: searchParams.get("reviewsDue"),
       renewalsApproaching: searchParams.get("renewalsApproaching"),
       siteAttention: searchParams.get("siteAttention"),
       includeEnded: searchParams.get("includeEnded"),
+      includeArchived: searchParams.get("includeArchived"),
       limit: "50",
-      offset: "0",
+      offset: searchParams.get("offset") ?? "0",
     };
     try {
       const res = await apiFetch(
@@ -3130,8 +3165,18 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data = (await res.json()) as {
         services: OperationsClientServiceRow[];
+        totalMatching: number;
+        countReturned: number;
+        limit: number;
+        offset: number;
       };
       setServices(data.services);
+      setServicesPage({
+        totalMatching: data.totalMatching,
+        countReturned: data.countReturned,
+        limit: data.limit,
+        offset: data.offset,
+      });
       setServicesSummary({
         active: data.services.filter((item) =>
           ["active", "pending_start", "review_due"].includes(item.status),
@@ -3160,27 +3205,77 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     } catch (err) {
       console.warn("Failed to load services", err);
       setServices([]);
+      setServicesPage((current) => ({
+        ...current,
+        totalMatching: 0,
+        countReturned: 0,
+      }));
     } finally {
       setServicesLoading(false);
     }
-  }, [activeRoute, apiBase, apiFetch, businessId, searchParams]);
+  }, [activeRoute, apiBase, apiFetch, searchParams]);
+
+  const loadBusinessServices = useCallback(async () => {
+    if (!businessId) {
+      setBusinessServices([]);
+      return;
+    }
+    setBusinessServicesLoading(true);
+    try {
+      const res = await apiFetch(
+        `${apiBase}/operations/services${buildQuery({
+          businessId,
+          limit: "100",
+          offset: "0",
+        })}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      const data = (await res.json()) as {
+        services: OperationsClientServiceRow[];
+      };
+      setBusinessServices(data.services);
+    } catch (err) {
+      console.warn("Failed to load business services", err);
+      setBusinessServices([]);
+    } finally {
+      setBusinessServicesLoading(false);
+    }
+  }, [apiBase, apiFetch, businessId]);
 
   const loadServiceDetail = useCallback(async () => {
     if (!operationsClientServiceId) return;
     setServiceDetailLoading(true);
+    setServiceDetail(null);
+    setServiceDetailError(null);
     try {
       const res = await apiFetch(
         `${apiBase}/operations/services/${encodeURIComponent(operationsClientServiceId)}`,
         { cache: "no-store" },
       );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+      if (res.status === 404) {
+        setServiceDetailError("not_found");
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(
+          await apiErrorMessage(
+            res,
+            "Service details are temporarily unavailable.",
+          ),
+        );
+      }
       const data = (await res.json()) as {
         service: OperationsClientServiceDetail;
       };
       setServiceDetail(data.service);
     } catch (err) {
       console.warn("Failed to load service", err);
-      setServiceDetail(null);
+      setServiceDetailError(
+        err instanceof Error
+          ? err.message
+          : "Service details are temporarily unavailable.",
+      );
     } finally {
       setServiceDetailLoading(false);
     }
@@ -3217,7 +3312,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       void loadCommunications();
       void loadQuotes();
       void loadWorkOrders();
-      void loadServices();
+      void loadBusinessServices();
     }
   }, [
     businessId,
@@ -3226,7 +3321,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
     loadCommunications,
     loadDetail,
     loadQuotes,
-    loadServices,
+    loadBusinessServices,
     loadWorkOrders,
   ]);
 
@@ -4861,6 +4956,8 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   async function submitService(event: React.FormEvent) {
     event.preventDefault();
+    if (!beginServiceCreate(serviceCreateInFlightRef)) return;
+    setServiceCreating(true);
     setActionError(null);
     try {
       const res = await apiFetch(`${apiBase}/operations/services`, {
@@ -4894,6 +4991,9 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       setActionError(
         err instanceof Error ? err.message : "Failed to create service",
       );
+    } finally {
+      finishServiceCreate(serviceCreateInFlightRef);
+      setServiceCreating(false);
     }
   }
 
@@ -9012,6 +9112,7 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             <h2>Create managed service</h2>
             <button
               className="ops-button"
+              disabled={serviceCreating}
               onClick={() => setServiceFormOpen(false)}
             >
               Close
@@ -9307,8 +9408,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
               Explicit zero-cost or internal arrangement
             </label>
             <div className="ops-form-actions">
-              <button className="ops-button ops-button--primary">
-                Save draft service
+              <button
+                className="ops-button ops-button--primary"
+                disabled={serviceCreating}
+              >
+                {serviceCreating ? "Creating service…" : "Save draft service"}
               </button>
             </div>
           </form>
@@ -9372,6 +9476,24 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
 
   function renderServicesPage() {
     if (operationsClientServiceId) return renderServiceDetail();
+    const includeEnded = searchParams.get("includeEnded") === "true";
+    const includeArchived = searchParams.get("includeArchived") === "true";
+    const filteredBusinessId = searchParams.get("businessId");
+    const servicePageHref = (offset: number) =>
+      `/operations/services${buildQuery({
+        search: searchParams.get("search"),
+        status: searchParams.get("status"),
+        planType: searchParams.get("planType"),
+        billingCadence: searchParams.get("billingCadence"),
+        businessId: filteredBusinessId,
+        reportsDue: searchParams.get("reportsDue"),
+        reviewsDue: searchParams.get("reviewsDue"),
+        renewalsApproaching: searchParams.get("renewalsApproaching"),
+        siteAttention: searchParams.get("siteAttention"),
+        includeEnded: includeEnded ? "true" : null,
+        includeArchived: includeArchived ? "true" : null,
+        offset: offset > 0 ? String(offset) : null,
+      })}`;
     const cards = [
       ["Active", servicesSummary.active],
       ["Reports due", servicesSummary.reportsDue],
@@ -9392,6 +9514,30 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
             </p>
           </div>
           <div className="ops-inline-actions">
+            {renderLink(
+              `/operations/services${buildQuery({
+                businessId: filteredBusinessId,
+              })}`,
+              "Current",
+              `ops-button${!includeEnded && !includeArchived ? " ops-button--primary" : ""}`,
+            )}
+            {renderLink(
+              `/operations/services${buildQuery({
+                businessId: filteredBusinessId,
+                includeEnded: "true",
+              })}`,
+              "Include ended",
+              `ops-button${includeEnded && !includeArchived ? " ops-button--primary" : ""}`,
+            )}
+            {renderLink(
+              `/operations/services${buildQuery({
+                businessId: filteredBusinessId,
+                includeEnded: "true",
+                includeArchived: "true",
+              })}`,
+              "Include archived",
+              `ops-button${includeArchived ? " ops-button--primary" : ""}`,
+            )}
             <button
               className="ops-button ops-button--primary"
               onClick={() => openCreateService()}
@@ -9416,10 +9562,33 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         </section>
         <section className="ops-panel">
           <div className="ops-panel__header">
-            <h2>{services.length} services</h2>
-            <button className="ops-button" onClick={() => void loadServices()}>
-              Refresh
-            </button>
+            <h2>
+              {servicesPage.countReturned} of {servicesPage.totalMatching}{" "}
+              services
+            </h2>
+            <div className="ops-inline-actions">
+              {servicesPage.offset > 0 &&
+                renderLink(
+                  servicePageHref(
+                    Math.max(0, servicesPage.offset - servicesPage.limit),
+                  ),
+                  "Previous",
+                  "ops-button",
+                )}
+              {servicesPage.offset + servicesPage.countReturned <
+                servicesPage.totalMatching &&
+                renderLink(
+                  servicePageHref(servicesPage.offset + servicesPage.limit),
+                  "Next",
+                  "ops-button",
+                )}
+              <button
+                className="ops-button"
+                onClick={() => void loadServices()}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
           {servicesLoading ? (
             <div className="ops-empty-card">Loading services...</div>
@@ -9450,6 +9619,11 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
                     review {formatDateTime(service.next_review_at)} · renewal{" "}
                     {formatDateTime(service.renewal_date)}
                   </small>
+                  {(service.integrity_issue_count ?? 0) > 0 && (
+                    <small className="ops-error">
+                      Relationship integrity review required.
+                    </small>
+                  )}
                   <div className="ops-inline-actions">
                     {renderLink(
                       `/operations/services/${service.id}`,
@@ -9587,7 +9761,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
       return <section className="ops-panel">Loading service...</section>;
     }
     if (!serviceDetail) {
-      return <section className="ops-panel">Service not found.</section>;
+      return (
+        <section className="ops-panel">
+          {serviceDetailError === "not_found"
+            ? "Service not found."
+            : (serviceDetailError ??
+              "Service details are temporarily unavailable.")}
+        </section>
+      );
     }
     const service = serviceDetail.service;
     return (
@@ -9663,6 +9844,14 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         {serviceDetail.activationIssues.length > 0 && (
           <section className="ops-warning">
             {serviceDetail.activationIssues.map((issue) => (
+              <div key={issue}>{issue.replace(/_/g, " ")}</div>
+            ))}
+          </section>
+        )}
+        {serviceDetail.integrityIssues.length > 0 && (
+          <section className="ops-error">
+            <strong>Relationship integrity review required.</strong>
+            {serviceDetail.integrityIssues.map((issue) => (
               <div key={issue}>{issue.replace(/_/g, " ")}</div>
             ))}
           </section>
@@ -11415,46 +11604,59 @@ export const OperationsPage: React.FC<OperationsPageProps> = ({
         <section className="ops-panel">
           <div className="ops-panel__header">
             <h2>Managed Services</h2>
-            <button
-              className="ops-button"
-              onClick={() => openCreateService({ businessId: b.id })}
-            >
-              Create service
-            </button>
+            <div className="ops-inline-actions">
+              {renderLink(
+                `/operations/services${buildQuery({
+                  businessId: b.id,
+                  includeEnded: "true",
+                })}`,
+                "View service history",
+                "ops-button",
+              )}
+              <button
+                className="ops-button"
+                onClick={() => openCreateService({ businessId: b.id })}
+              >
+                Create service
+              </button>
+            </div>
           </div>
-          {services.filter((service) => service.business_id === b.id).length ===
-          0 ? (
+          {businessServicesLoading ? (
+            <div className="ops-empty-card">Loading managed services...</div>
+          ) : businessServices.length === 0 ? (
             <div className="ops-empty-card">
-              No managed services have been set up for this business yet.
+              No managed services for this business.
             </div>
           ) : (
             <div className="ops-list">
-              {services
-                .filter((service) => service.business_id === b.id)
-                .map((service) => (
-                  <div key={service.id} className="ops-list-card">
-                    <strong>
-                      {service.service_number} · {service.name}
-                    </strong>
-                    <small>
-                      {serviceStatusLabels[service.status]} ·{" "}
-                      {formatMoney(
-                        service.agreed_price_minor,
-                        service.currency,
-                      )}{" "}
-                      · {service.covered_site_count ?? 0} sites
+              {businessServices.map((service) => (
+                <div key={service.id} className="ops-list-card">
+                  <strong>
+                    {service.service_number} · {service.name}
+                  </strong>
+                  <small>
+                    {service.plan_name ?? "Custom plan"} ·{" "}
+                    {serviceStatusLabels[service.status]} ·{" "}
+                    {formatMoney(service.agreed_price_minor, service.currency)}{" "}
+                    · {service.covered_site_count ?? 0} sites
+                  </small>
+                  <small>
+                    Start {formatDateTime(service.start_date)} · next report{" "}
+                    {formatDateTime(service.next_report_at)} · review{" "}
+                    {formatDateTime(service.next_review_at)}
+                  </small>
+                  {(service.integrity_issue_count ?? 0) > 0 && (
+                    <small className="ops-error">
+                      Relationship integrity review required.
                     </small>
-                    <small>
-                      Next report {formatDateTime(service.next_report_at)} ·
-                      review {formatDateTime(service.next_review_at)}
-                    </small>
-                    {renderLink(
-                      `/operations/services/${service.id}`,
-                      "Open service",
-                      "ops-button ops-button--primary",
-                    )}
-                  </div>
-                ))}
+                  )}
+                  {renderLink(
+                    `/operations/services/${service.id}`,
+                    "Open service",
+                    "ops-button ops-button--primary",
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </section>
