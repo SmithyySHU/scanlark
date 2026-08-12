@@ -1118,16 +1118,20 @@ test("operations report grouping consolidates repeated source issues safely", ()
     id,
     scan_run_id: "scan_1",
     site_id: "site_1",
-    category:
-      issue_type === "frame_ancestors_missing"
-        ? "security_header"
-        : issue_type.startsWith("homepage_")
-          ? "performance_basic"
-          : issue_type.includes("link") ||
-              issue_type === "no_response" ||
-              issue_type === "ignored_safety_skip"
-            ? "link_integrity"
-            : "seo_basic",
+    category: [
+      "hsts_missing",
+      "frame_ancestors_missing",
+      "x_frame_options_missing",
+      "referrer_policy_missing",
+    ].includes(issue_type)
+      ? "security_header"
+      : issue_type.startsWith("homepage_")
+        ? "performance_basic"
+        : issue_type.includes("link") ||
+            issue_type === "no_response" ||
+            issue_type === "ignored_safety_skip"
+          ? "link_integrity"
+          : "seo_basic",
     severity: issue_type === "broken_link" ? "medium" : "low",
     status: "open",
     issue_type,
@@ -1188,6 +1192,19 @@ test("operations report grouping consolidates repeated source issues safely", ()
         "https://www.example.com",
         null,
       ),
+      issue("header_2", "hsts_missing", "https://www.example.com", null),
+      issue(
+        "header_3",
+        "referrer_policy_missing",
+        "https://www.example.com",
+        null,
+      ),
+      issue(
+        "header_4",
+        "x_frame_options_missing",
+        "https://www.example.com",
+        null,
+      ),
       issue(
         "perf_1",
         "homepage_asset_count_high",
@@ -1227,7 +1244,20 @@ test("operations report grouping consolidates repeated source issues safely", ()
   );
   assert.equal(
     byKey.get("security_header:browser_security_controls")?.sourceIssueCount,
-    1,
+    4,
+  );
+  assert.match(
+    byKey.get("security_header:browser_security_controls")?.title ?? "",
+    /HSTS/,
+  );
+  assert.match(
+    byKey.get("security_header:browser_security_controls")?.title ?? "",
+    /Referrer-Policy/,
+  );
+  assert.equal(
+    byKey.get("security_header:browser_security_controls")?.sourceIssueIds
+      .length,
+    4,
   );
   assert.equal(
     byKey.get("performance_basic:homepage_weight")?.sourceIssueCount,
@@ -1236,6 +1266,16 @@ test("operations report grouping consolidates repeated source issues safely", ()
   assert.equal(
     byKey.get("link_integrity:ignored_safety_skip")?.isIncluded,
     false,
+  );
+  assert.equal(
+    byKey.get("link_integrity:external:blocked_link:external_destinations")
+      ?.isIncluded,
+    false,
+  );
+  assert.equal(
+    byKey.get("link_integrity:external:blocked_link:external_destinations")
+      ?.sourceDisposition,
+    "manual_verification_required",
   );
   assert.equal(
     byKey.get("seo_basic:meta_description")?.representativeExamples.length,

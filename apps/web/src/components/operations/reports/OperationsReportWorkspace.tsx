@@ -1564,6 +1564,57 @@ export function OperationsReportWorkspace({
               )}
             </div>
           </div>
+          <div className="ops-panel ops-report-coverage">
+            <h2>Coverage / reconciliation</h2>
+            <p
+              className={
+                detail.coverage.complete ? "ops-success" : "ops-warning"
+              }
+            >
+              {detail.coverage.complete
+                ? `Coverage complete. All ${detail.coverage.participatingSourceIssues} reportable scan observations are accounted for.`
+                : `Coverage requires review. ${detail.coverage.unaccounted} observation${detail.coverage.unaccounted === 1 ? " is" : "s are"} not classified.`}
+            </p>
+            <dl className="ops-definition-grid">
+              <dt>Included directly</dt>
+              <dd>{detail.coverage.includedClientFindings}</dd>
+              <dt>Grouped into findings</dt>
+              <dd>{detail.coverage.groupedIntoClientFindings}</dd>
+              <dt>Manual verification</dt>
+              <dd>{detail.coverage.manualVerificationRequired}</dd>
+              <dt>Excluded by operator</dt>
+              <dd>{detail.coverage.excludedByOperator}</dd>
+              <dt>False positives</dt>
+              <dd>{detail.coverage.falsePositives}</dd>
+              <dt>Internal/system only</dt>
+              <dd>{detail.coverage.internalSystemOnly}</dd>
+              <dt>Unaccounted</dt>
+              <dd>{detail.coverage.unaccounted}</dd>
+            </dl>
+            <details>
+              <summary>Inspect source dispositions</summary>
+              <div className="ops-list">
+                {detail.coverage.items.map((item) => (
+                  <div className="ops-list-row" key={item.sourceIssueId}>
+                    <div>
+                      <strong>{item.title}</strong>
+                      <small>
+                        {item.category} · {item.issueType}
+                      </small>
+                      <small>{item.affectedUrl}</small>
+                    </div>
+                    <div>
+                      <strong>{item.disposition.replaceAll("_", " ")}</strong>
+                      <small>{item.reason}</small>
+                      {item.reportFindingTitle && (
+                        <small>Finding: {item.reportFindingTitle}</small>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          </div>
           {findingDraft.draft &&
             (() => {
               const draft = findingDraft.draft;

@@ -720,6 +720,35 @@ type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
   activity: OperationsReportActivity[];
+  coverage: {
+    participatingSourceIssues: number;
+    includedClientFindings: number;
+    groupedIntoClientFindings: number;
+    manualVerificationRequired: number;
+    excludedByOperator: number;
+    falsePositives: number;
+    internalSystemOnly: number;
+    unaccounted: number;
+    complete: boolean;
+    items: Array<{
+      sourceIssueId: string;
+      category: string;
+      issueType: string;
+      title: string;
+      affectedUrl: string;
+      disposition:
+        | "included_client_finding"
+        | "grouped_into_client_finding"
+        | "manual_verification_required"
+        | "excluded_by_operator"
+        | "false_positive"
+        | "internal_system_only"
+        | "unaccounted";
+      reason: string;
+      reportFindingId: string | null;
+      reportFindingTitle: string | null;
+    }>;
+  };
   revisionHistory?: OperationsReportRevisionHistory[];
 };
 

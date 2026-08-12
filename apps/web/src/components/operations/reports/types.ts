@@ -215,7 +215,39 @@ export type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItem[];
   comparisonItems: OperationsReportComparisonItem[];
   activity: OperationsReportActivity[];
+  coverage: OperationsReportCoverage;
   revisionHistory?: OperationsReportRevisionHistory[];
+};
+
+export type OperationsReportSourceDisposition =
+  | "included_client_finding"
+  | "grouped_into_client_finding"
+  | "manual_verification_required"
+  | "excluded_by_operator"
+  | "false_positive"
+  | "internal_system_only";
+
+export type OperationsReportCoverage = {
+  participatingSourceIssues: number;
+  includedClientFindings: number;
+  groupedIntoClientFindings: number;
+  manualVerificationRequired: number;
+  excludedByOperator: number;
+  falsePositives: number;
+  internalSystemOnly: number;
+  unaccounted: number;
+  complete: boolean;
+  items: Array<{
+    sourceIssueId: string;
+    category: string;
+    issueType: string;
+    title: string;
+    affectedUrl: string;
+    disposition: OperationsReportSourceDisposition | "unaccounted";
+    reason: string;
+    reportFindingId: string | null;
+    reportFindingTitle: string | null;
+  }>;
 };
 
 export type ClientReportPayload = {

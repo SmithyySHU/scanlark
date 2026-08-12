@@ -204,6 +204,43 @@ export type OperationsReportFindingSourceRow = {
   updated_at: Date;
 };
 
+export const OPERATIONS_REPORT_SOURCE_DISPOSITIONS = [
+  "included_client_finding",
+  "grouped_into_client_finding",
+  "manual_verification_required",
+  "excluded_by_operator",
+  "false_positive",
+  "internal_system_only",
+] as const;
+
+export type OperationsReportSourceDisposition =
+  (typeof OPERATIONS_REPORT_SOURCE_DISPOSITIONS)[number];
+
+export type OperationsReportCoverageItem = {
+  sourceIssueId: string;
+  category: string;
+  issueType: string;
+  title: string;
+  affectedUrl: string;
+  disposition: OperationsReportSourceDisposition | "unaccounted";
+  reason: string;
+  reportFindingId: string | null;
+  reportFindingTitle: string | null;
+};
+
+export type OperationsReportCoverage = {
+  participatingSourceIssues: number;
+  includedClientFindings: number;
+  groupedIntoClientFindings: number;
+  manualVerificationRequired: number;
+  excludedByOperator: number;
+  falsePositives: number;
+  internalSystemOnly: number;
+  unaccounted: number;
+  complete: boolean;
+  items: OperationsReportCoverageItem[];
+};
+
 export type OperationsReportPositiveObservationRow = {
   id: string;
   operations_report_id: string;
@@ -283,6 +320,7 @@ export type OperationsReportDetail = {
   actionPlanItems: OperationsReportActionPlanItemRow[];
   comparisonItems: OperationsReportComparisonItemRow[];
   activity: OperationsReportActivityRow[];
+  coverage: OperationsReportCoverage;
   revisionHistory?: OperationsReportRevisionHistoryRow[];
 };
 
@@ -520,6 +558,8 @@ type OperationsReportGroupingCandidate = {
   affectedUrlNote: string | null;
   isIncluded: boolean;
   internalNote: string | null;
+  sourceDisposition: OperationsReportSourceDisposition;
+  dispositionReason: string;
   issues: ScanIssue[];
   representativeExamples: OperationsReportFindingExample[];
   occurrenceCount: number;
@@ -809,6 +849,31 @@ function issueGroupLabel(issue: ScanIssue, siteUrl: string) {
   return issue.title;
 }
 
+const SECURITY_CONTROL_LABELS: Partial<
+  Record<ScanIssue["issue_type"], string>
+> = {
+  hsts_missing: "HSTS",
+  csp_missing: "Content-Security-Policy",
+  frame_ancestors_missing: "CSP frame-ancestors",
+  x_frame_options_missing: "X-Frame-Options",
+  x_content_type_options_missing: "X-Content-Type-Options",
+  referrer_policy_missing: "Referrer-Policy",
+  permissions_policy_missing: "Permissions-Policy",
+  set_cookie_missing_secure: "cookie Secure flag",
+  set_cookie_missing_httponly: "cookie HttpOnly flag",
+  set_cookie_missing_samesite: "cookie SameSite attribute",
+};
+
+function securityControlLabels(issues: ScanIssue[]) {
+  return [
+    ...new Set(
+      issues.map(
+        (issue) => SECURITY_CONTROL_LABELS[issue.issue_type] ?? issue.title,
+      ),
+    ),
+  ];
+}
+
 function defaultGroupedFindingContent(
   group: Pick<
     OperationsReportGroupingCandidate,
@@ -864,15 +929,15 @@ function defaultGroupedFindingContent(
     };
   }
   if (group.groupKey === "security_header:browser_security_controls") {
+    const controls = securityControlLabels(group.issues);
+    const controlList = controls.join(", ");
     return {
-      title: "Website security headers could be strengthened",
-      technicalSummary: `${group.issues.length} preventative browser security control${group.issues.length === 1 ? "" : "s"} could be improved.`,
-      clientExplanation:
-        "The website can add or strengthen browser instructions that reduce avoidable exposure to framing, content-type and referrer-related risks.",
+      title: `Browser security controls are missing: ${controlList}`,
+      technicalSummary: `The HTTPS response is missing ${controls.length} confirmed browser control${controls.length === 1 ? "" : "s"}: ${controlList}.`,
+      clientExplanation: `The website is missing these browser instructions: ${controlList}. They cover distinct transport, framing, content handling, privacy or cookie-hardening protections.`,
       whyItMatters:
         "These controls are preventative hardening measures. They do not mean the website is compromised, but they help browsers handle pages more safely.",
-      recommendedAction:
-        "Review the recommended response headers with the website host or developer and apply the appropriate browser security controls.",
+      recommendedAction: `Review and implement each missing control with the website host or developer: ${controlList}.`,
       affectedUrl: first.affected_url,
       affectedUrlNote: null,
       internalNote:
@@ -896,6 +961,8 @@ function defaultGroupedFindingContent(
   }
   if (first.category === "link_integrity") {
     const internal = group.groupKey.includes(":internal:");
+    const uncertain =
+      first.issue_type === "blocked_link" || first.issue_type === "no_response";
     const outcome =
       first.issue_type === "blocked_link"
         ? "blocked by the destination or checker"
@@ -903,28 +970,33 @@ function defaultGroupedFindingContent(
           ? "not responding"
           : "unavailable";
     return {
-      title: internal
-        ? "Internal links point to unavailable pages"
-        : "Several external links lead to unavailable pages",
+      title: uncertain
+        ? "Links require manual destination verification"
+        : internal
+          ? "Internal links point to unavailable pages"
+          : "Several external links lead to unavailable pages",
       technicalSummary: `${resources || group.issues.length} destination${(resources || group.issues.length) === 1 ? "" : "s"} were ${outcome}.`,
-      clientExplanation: internal
-        ? "One or more links on the website point visitors to pages that are not available."
-        : "Some links from the website point to external destinations that did not return a healthy response during the check.",
+      clientExplanation: uncertain
+        ? "The automated check could not reliably confirm whether these destinations work for a normal visitor. They are held for manual review and are not treated as confirmed broken links."
+        : internal
+          ? "One or more links on the website point visitors to pages that are not available."
+          : "Some links from the website point to external destinations that did not return a healthy response during the check.",
       whyItMatters: internal
         ? "Broken internal links interrupt visitor journeys and can make important content harder to reach."
         : "Unavailable external references can frustrate visitors and make supporting evidence, press links or resources look outdated.",
-      recommendedAction: internal
-        ? "Update the affected internal links to the correct page or remove links that are no longer needed."
-        : "Review the unavailable external destinations and replace, update or remove links that are no longer useful.",
+      recommendedAction: uncertain
+        ? "Open each destination manually without attempting to bypass access controls, then include it only if a normal visitor journey confirms a genuine failure."
+        : internal
+          ? "Update the affected internal links to the correct page or remove links that are no longer needed."
+          : "Review the unavailable external destinations and replace, update or remove links that are no longer useful.",
       affectedUrl: internal && resources === 1 ? first.affected_url : null,
       affectedUrlNote:
         resources > 1 || !internal
           ? `${resources || group.issues.length} destination${(resources || group.issues.length) === 1 ? "" : "s"} affected; representative examples are shown.`
           : null,
-      internalNote:
-        first.issue_type === "blocked_link"
-          ? "Blocked external links may require manual confirmation because some third-party hosts reject automated checks."
-          : null,
+      internalNote: uncertain
+        ? "Automated evidence was blocked, restricted or inconclusive. Manual verification is required before client inclusion."
+        : null,
     };
   }
   return {
@@ -984,11 +1056,32 @@ function buildGroupedFindingCandidates(
       );
       const isInternalSafety =
         groupKey === "link_integrity:ignored_safety_skip";
+      const requiresManualVerification = groupIssues.some(
+        (issue) =>
+          issue.issue_type === "blocked_link" ||
+          issue.issue_type === "no_response",
+      );
+      const sourceDisposition: OperationsReportSourceDisposition =
+        isInternalSafety
+          ? "internal_system_only"
+          : requiresManualVerification
+            ? "manual_verification_required"
+            : groupIssues.length > 1
+              ? "grouped_into_client_finding"
+              : "included_client_finding";
       return {
         ...candidateBase,
         category: first.category,
         priority,
-        isIncluded: !isInternalSafety,
+        isIncluded: !isInternalSafety && !requiresManualVerification,
+        sourceDisposition,
+        dispositionReason: isInternalSafety
+          ? "The URL was intentionally skipped by passive crawler safety rules."
+          : requiresManualVerification
+            ? "The automated request could not confirm that the destination is broken; manual verification is required."
+            : groupIssues.length > 1
+              ? "Represented by a grouped client finding with complete source membership."
+              : "Represented directly by an included client finding.",
         representativeExamples: groupIssues
           .map(representativeExampleForIssue)
           .slice(0, 5),
@@ -1019,6 +1112,8 @@ export function buildOperationsReportGroupingPreviewForIssues(
     affectedResourceCount: candidate.affectedResourceCount,
     representativeExamples: candidate.representativeExamples,
     recommendedAction: candidate.recommendedAction,
+    sourceIssueIds: candidate.issues.map((issue) => issue.id),
+    sourceDisposition: candidate.sourceDisposition,
   }));
 }
 
@@ -1521,6 +1616,105 @@ async function listReportActivity(
   return res.rows;
 }
 
+export async function getOperationsReportCoverage(
+  workspaceId: string,
+  reportId: string,
+): Promise<OperationsReportCoverage | null> {
+  const client = await ensureConnected();
+  const result = await client.query<{
+    source_issue_id: string;
+    category: string;
+    issue_type: string;
+    title: string;
+    affected_url: string;
+    disposition: OperationsReportSourceDisposition | null;
+    reason: string | null;
+    report_finding_id: string | null;
+    report_finding_title: string | null;
+    is_included: boolean | null;
+    is_false_positive: boolean | null;
+  }>(
+    `
+      SELECT issue.id AS source_issue_id,
+             issue.category,
+             issue.issue_type,
+             issue.title,
+             issue.affected_url,
+             disposition.disposition,
+             disposition.reason,
+             source.report_finding_id,
+             finding.title AS report_finding_title,
+             finding.is_included,
+             finding.is_false_positive
+      FROM operations_reports report
+      JOIN operations_businesses business ON business.id = report.business_id
+      JOIN scan_issues issue
+        ON issue.scan_run_id = report.scan_run_id
+       AND issue.status = 'open'
+      LEFT JOIN operations_report_source_dispositions disposition
+        ON disposition.operations_report_id = report.id
+       AND disposition.source_issue_id = issue.id
+      LEFT JOIN operations_report_finding_sources source
+        ON source.id = disposition.report_finding_source_id
+       AND source.operations_report_id = report.id
+       AND source.source_issue_id = issue.id
+      LEFT JOIN operations_report_findings finding
+        ON finding.id = source.report_finding_id
+       AND finding.operations_report_id = report.id
+      WHERE report.id = $2
+        AND business.internal_workspace_id = $1
+      ORDER BY issue.category, issue.issue_type, issue.affected_url, issue.id
+    `,
+    [workspaceId, reportId],
+  );
+  const exists = await getReportById(workspaceId, reportId);
+  if (!exists) return null;
+  const items: OperationsReportCoverageItem[] = result.rows.map((row) => {
+    const clientDisposition =
+      row.disposition === "included_client_finding" ||
+      row.disposition === "grouped_into_client_finding";
+    const dispositionConsistent = row.disposition
+      ? clientDisposition
+        ? row.is_included === true && row.is_false_positive === false
+        : row.is_included === false || row.is_false_positive === true
+      : false;
+    return {
+      sourceIssueId: row.source_issue_id,
+      category: row.category,
+      issueType: row.issue_type,
+      title: row.title,
+      affectedUrl: row.affected_url,
+      disposition: dispositionConsistent
+        ? (row.disposition as OperationsReportSourceDisposition)
+        : "unaccounted",
+      reason: dispositionConsistent
+        ? (row.reason as string)
+        : row.disposition
+          ? "The source disposition conflicts with the finding's client-inclusion state. Reconcile the report finding."
+          : "No report source disposition exists.",
+      reportFindingId: row.report_finding_id,
+      reportFindingTitle: row.report_finding_title,
+    };
+  });
+  const count = (disposition: OperationsReportSourceDisposition) =>
+    items.filter((item) => item.disposition === disposition).length;
+  const unaccounted = items.filter(
+    (item) => item.disposition === "unaccounted",
+  ).length;
+  return {
+    participatingSourceIssues: items.length,
+    includedClientFindings: count("included_client_finding"),
+    groupedIntoClientFindings: count("grouped_into_client_finding"),
+    manualVerificationRequired: count("manual_verification_required"),
+    excludedByOperator: count("excluded_by_operator"),
+    falsePositives: count("false_positive"),
+    internalSystemOnly: count("internal_system_only"),
+    unaccounted,
+    complete: unaccounted === 0,
+    items,
+  };
+}
+
 async function invalidateEditableReportRender(
   workspaceId: string,
   reportId: string,
@@ -1654,8 +1848,32 @@ async function insertFindingsForScan(
     );
     const findingId = findingRes.rows[0].id;
     for (const [sourceIndex, issue] of group.issues.entries()) {
-      await client.query(
-        `
+      await insertReportFindingSourceDisposition(client, {
+        reportId,
+        findingId,
+        issue,
+        sourceIndex,
+        disposition: group.sourceDisposition,
+        reason: group.dispositionReason,
+      });
+    }
+  }
+}
+
+async function insertReportFindingSourceDisposition(
+  client: Awaited<ReturnType<typeof ensureConnected>>,
+  input: {
+    reportId: string;
+    findingId: string;
+    issue: ScanIssue;
+    sourceIndex: number;
+    disposition: OperationsReportSourceDisposition;
+    reason: string;
+    reviewedForClient?: boolean;
+  },
+) {
+  const source = await client.query<{ id: string }>(
+    `
           INSERT INTO operations_report_finding_sources (
             operations_report_id,
             report_finding_id,
@@ -1665,31 +1883,90 @@ async function insertFindingsForScan(
             affected_resource_url,
             outcome_key,
             evidence_json,
-            display_order
+            display_order,
+            reviewed_for_client
           )
-          VALUES ($1, $2, $3, 'scan_issue', $4, $5, $6, $7, $8)
+          VALUES ($1, $2, $3, 'scan_issue', $4, $5, $6, $7, $8, $9)
+          RETURNING id
         `,
-        [
-          reportId,
-          findingId,
-          issue.id,
-          issue.source_url || issue.affected_url,
-          issue.source_url ? issue.affected_url : null,
-          issueOutcomeKey(issue),
-          {
-            issueType: issue.issue_type,
-            sourceUrl: issue.source_url,
-            sourceTitle: issue.title,
-            sourceDescription: issue.description,
-            changeStatus: issue.change_status,
-            evidence: issue.evidence_json,
-            detectedAt: issue.last_seen_at.toISOString(),
-          },
-          sourceIndex,
-        ],
-      );
-    }
-  }
+    [
+      input.reportId,
+      input.findingId,
+      input.issue.id,
+      input.issue.source_url || input.issue.affected_url,
+      input.issue.source_url ? input.issue.affected_url : null,
+      issueOutcomeKey(input.issue),
+      {
+        issueType: input.issue.issue_type,
+        sourceUrl: input.issue.source_url,
+        sourceTitle: input.issue.title,
+        sourceDescription: input.issue.description,
+        changeStatus: input.issue.change_status,
+        evidence: input.issue.evidence_json,
+        detectedAt: input.issue.last_seen_at.toISOString(),
+      },
+      input.sourceIndex,
+      input.reviewedForClient ?? false,
+    ],
+  );
+  await client.query(
+    `INSERT INTO operations_report_source_dispositions (
+       report_finding_source_id, operations_report_id, source_issue_id,
+       disposition, reason
+     ) VALUES ($1, $2, $3, $4, $5)`,
+    [
+      source.rows[0].id,
+      input.reportId,
+      input.issue.id,
+      input.disposition,
+      input.reason,
+    ],
+  );
+}
+
+async function setFindingCoverageDisposition(
+  workspaceId: string,
+  reportId: string,
+  findingId: string,
+  mode: "include" | "exclude" | "false_positive",
+  falsePositiveReason?: string | null,
+) {
+  const client = await ensureConnected();
+  await client.query(
+    `
+      UPDATE operations_report_source_dispositions disposition
+      SET disposition = CASE
+            WHEN $4::text = 'false_positive' THEN 'false_positive'
+            WHEN $4::text = 'exclude' THEN 'excluded_by_operator'
+            WHEN source_count.count > 1 THEN 'grouped_into_client_finding'
+            ELSE 'included_client_finding'
+          END,
+          reason = CASE
+            WHEN $4::text = 'false_positive' THEN
+              COALESCE(NULLIF(trim($5::text), ''), 'Operator marked the report finding as a false positive.')
+            WHEN $4::text = 'exclude' THEN 'Operator excluded the report finding from client output.'
+            WHEN source_count.count > 1 THEN 'Represented by a grouped client finding with complete source membership.'
+            ELSE 'Represented directly by an included client finding.'
+          END,
+          updated_at = now()
+      FROM operations_report_finding_sources source
+      JOIN operations_report_findings finding ON finding.id = source.report_finding_id
+      JOIN operations_reports report ON report.id = finding.operations_report_id
+      JOIN operations_businesses business ON business.id = report.business_id
+      JOIN LATERAL (
+        SELECT COUNT(*)::int AS count
+        FROM operations_report_finding_sources sibling
+        WHERE sibling.report_finding_id = finding.id
+          AND sibling.source_issue_id IS NOT NULL
+      ) source_count ON true
+      WHERE disposition.report_finding_source_id = source.id
+        AND source.report_finding_id = $3
+        AND source.operations_report_id = $2
+        AND report.id = $2
+        AND business.internal_workspace_id = $1
+    `,
+    [workspaceId, reportId, findingId, mode, falsePositiveReason ?? null],
+  );
 }
 
 function reportRegroupBlockedReason(report: OperationsReportRow) {
@@ -1704,9 +1981,10 @@ function reportRegroupBlockedReason(report: OperationsReportRow) {
 
 function findingHasAdminEdits(finding: OperationsReportFindingRow) {
   return Boolean(
+    finding.is_false_positive ||
+    finding.updated_at.getTime() !== finding.created_at.getTime() ||
     finding.reviewed_at ||
     textValue(finding.review_note) ||
-    textValue(finding.internal_note) ||
     textValue(finding.client_evidence) ||
     textValue(finding.estimated_effort),
   );
@@ -1842,6 +2120,7 @@ async function insertGroupedCandidateFinding(
   reportId: string,
   candidate: OperationsReportGroupingCandidate,
   existingFindings: OperationsReportFindingRow[],
+  existingCoverage: OperationsReportCoverage,
   displayOrder: number,
 ) {
   const matches = matchingExistingFindings(candidate, existingFindings).filter(
@@ -1868,6 +2147,49 @@ async function insertGroupedCandidateFinding(
           )
           .join("\n\n")
       : null;
+  const finalIsIncluded = preserved?.is_included ?? candidate.isIncluded;
+  const finalIsFalsePositive = preserved?.is_false_positive ?? false;
+  const preservedCoverage = preserved
+    ? existingCoverage.items.filter(
+        (item) => item.reportFindingId === preserved.id,
+      )
+    : [];
+  const preservedDisposition =
+    preservedCoverage.length > 0 &&
+    preservedCoverage.every(
+      (item) => item.disposition === preservedCoverage[0].disposition,
+    )
+      ? preservedCoverage[0].disposition
+      : null;
+  const preservedDispositionReason =
+    preservedCoverage.find((item) => item.disposition === preservedDisposition)
+      ?.reason ?? null;
+  const finalDisposition: OperationsReportSourceDisposition =
+    finalIsFalsePositive
+      ? "false_positive"
+      : finalIsIncluded
+        ? candidate.issues.length > 1
+          ? "grouped_into_client_finding"
+          : "included_client_finding"
+        : preservedDisposition === "manual_verification_required" ||
+            preservedDisposition === "internal_system_only" ||
+            preservedDisposition === "excluded_by_operator"
+          ? preservedDisposition
+          : preserved
+            ? "excluded_by_operator"
+            : candidate.sourceDisposition;
+  const finalDispositionReason = finalIsFalsePositive
+    ? preserved?.false_positive_reason ||
+      "Operator marked the report finding as a false positive."
+    : finalIsIncluded
+      ? candidate.issues.length > 1
+        ? "Represented by a grouped client finding with complete source membership."
+        : "Represented directly by an included client finding."
+      : preservedDispositionReason
+        ? preservedDispositionReason
+        : preserved
+          ? "Operator excluded the report finding from client output."
+          : candidate.dispositionReason;
   const findingRes = await client.query<{ id: string }>(
     `
       INSERT INTO operations_report_findings (
@@ -1889,6 +2211,7 @@ async function insertGroupedCandidateFinding(
         evidence_json,
         is_included,
         is_false_positive,
+        false_positive_reason,
         internal_note,
         review_note,
         reviewed_at,
@@ -1904,7 +2227,7 @@ async function insertGroupedCandidateFinding(
         requires_merge_review,
         regrouped_at
       )
-      VALUES ($1, $2, 'scan_issue', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, false, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, now())
+      VALUES ($1, $2, 'scan_issue', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, now())
       RETURNING id
     `,
     [
@@ -1930,7 +2253,9 @@ async function insertGroupedCandidateFinding(
         sourceIssueCount: candidate.issues.length,
         occurrenceCount: candidate.occurrenceCount,
       },
-      preserved?.is_included ?? candidate.isIncluded,
+      finalIsIncluded,
+      finalIsFalsePositive,
+      preserved?.false_positive_reason ?? null,
       [candidate.internalNote, mergeNotes].filter(Boolean).join("\n\n") || null,
       preserved?.review_note ?? null,
       preserved?.reviewed_at ?? null,
@@ -1948,42 +2273,15 @@ async function insertGroupedCandidateFinding(
   );
   const findingId = findingRes.rows[0].id;
   for (const [index, issue] of candidate.issues.entries()) {
-    await client.query(
-      `
-        INSERT INTO operations_report_finding_sources (
-          operations_report_id,
-          report_finding_id,
-          source_issue_id,
-          source_kind,
-          affected_page_url,
-          affected_resource_url,
-          outcome_key,
-          evidence_json,
-          display_order,
-          reviewed_for_client
-        )
-        VALUES ($1, $2, $3, 'scan_issue', $4, $5, $6, $7, $8, $9)
-      `,
-      [
-        reportId,
-        findingId,
-        issue.id,
-        issue.source_url || issue.affected_url,
-        issue.source_url ? issue.affected_url : null,
-        issueOutcomeKey(issue),
-        {
-          issueType: issue.issue_type,
-          sourceUrl: issue.source_url,
-          sourceTitle: issue.title,
-          sourceDescription: issue.description,
-          changeStatus: issue.change_status,
-          evidence: issue.evidence_json,
-          detectedAt: issue.last_seen_at.toISOString(),
-        },
-        index,
-        Boolean(preserved?.reviewed_at),
-      ],
-    );
+    await insertReportFindingSourceDisposition(client, {
+      reportId,
+      findingId,
+      issue,
+      sourceIndex: index,
+      disposition: finalDisposition,
+      reason: finalDispositionReason,
+      reviewedForClient: Boolean(preserved?.reviewed_at),
+    });
   }
 }
 
@@ -2096,6 +2394,7 @@ export async function regroupOperationsReportFindings(
         reportId,
         candidate,
         detail.findings,
+        detail.coverage,
         index,
       );
     }
@@ -2646,6 +2945,7 @@ export async function getOperationsReportDetail(
     actionPlanItems,
     comparisonItems,
     activity,
+    coverage,
   ] = await Promise.all([
     listFindings(workspaceId, reportId),
     listFindingSources(workspaceId, reportId),
@@ -2653,6 +2953,7 @@ export async function getOperationsReportDetail(
     listActionPlanItems(workspaceId, reportId),
     listComparisonItems(workspaceId, reportId),
     listReportActivity(workspaceId, reportId),
+    getOperationsReportCoverage(workspaceId, reportId),
   ]);
   return {
     report,
@@ -2662,6 +2963,7 @@ export async function getOperationsReportDetail(
     actionPlanItems,
     comparisonItems,
     activity,
+    coverage: coverage as OperationsReportCoverage,
     revisionHistory: await getOperationsReportRevisionHistory(
       workspaceId,
       reportId,
@@ -2888,6 +3190,29 @@ export async function updateOperationsReportFinding(
     );
   }
   if (finding && clientContentChanged) {
+    if (finding.is_false_positive || input.isFalsePositive === true) {
+      await setFindingCoverageDisposition(
+        workspaceId,
+        reportId,
+        findingId,
+        "false_positive",
+        finding.false_positive_reason,
+      );
+    } else if (input.isIncluded === false) {
+      await setFindingCoverageDisposition(
+        workspaceId,
+        reportId,
+        findingId,
+        "exclude",
+      );
+    } else if (input.isIncluded === true || input.isFalsePositive === false) {
+      await setFindingCoverageDisposition(
+        workspaceId,
+        reportId,
+        findingId,
+        "include",
+      );
+    }
     await bumpReportContentRevision(workspaceId, reportId);
     await invalidateEditableReportRender(workspaceId, reportId);
   }
@@ -3317,6 +3642,22 @@ export async function bulkUpdateOperationsReportFindings(
     );
   }
   if (res.rows.length > 0) {
+    if (
+      input.action === "include" ||
+      input.action === "restore" ||
+      input.action === "exclude"
+    ) {
+      await Promise.all(
+        res.rows.map((finding) =>
+          setFindingCoverageDisposition(
+            workspaceId,
+            reportId,
+            finding.id,
+            input.action === "exclude" ? "exclude" : "include",
+          ),
+        ),
+      );
+    }
     await bumpReportContentRevision(workspaceId, reportId);
     await invalidateEditableReportRender(workspaceId, reportId);
   }
@@ -3423,6 +3764,7 @@ export function getOperationsReportReadinessIssues(
   positiveObservations: OperationsReportPositiveObservationRow[] = [],
   actionPlanItems: OperationsReportActionPlanItemRow[] = [],
   stage: OperationsReportReadinessStage = "review",
+  coverage?: OperationsReportCoverage,
 ): OperationsReportReadinessIssue[] {
   const issues: OperationsReportReadinessIssue[] = [];
   const add = (
@@ -3576,6 +3918,13 @@ export function getOperationsReportReadinessIssues(
       "preview_not_generated",
       "Open the saved client preview successfully.",
       "preview",
+    );
+  }
+  if (stage !== "review" && coverage && coverage.unaccounted > 0) {
+    add(
+      "report_source_coverage_incomplete",
+      `Classify ${coverage.unaccounted} unaccounted scan observation${coverage.unaccounted === 1 ? "" : "s"} before approval.`,
+      "findings",
     );
   }
   if (stage === "finalisation" && !report.last_pdf_generated_at) {
@@ -3762,6 +4111,7 @@ export async function getOperationsReportPreview(
         detail.positiveObservations,
         detail.actionPlanItems,
         "approval",
+        detail.coverage,
       ),
     };
   }
@@ -3780,6 +4130,7 @@ export async function getOperationsReportPreview(
       detail.positiveObservations,
       detail.actionPlanItems,
       "approval",
+      detail.coverage,
     ),
   };
 }
@@ -3949,6 +4300,7 @@ export async function approveOperationsReport(
     detail.positiveObservations,
     detail.actionPlanItems,
     "approval",
+    detail.coverage,
   );
   if (readinessIssues.length > 0) return { readinessIssues };
 
@@ -4063,6 +4415,7 @@ export async function markOperationsReportStatus(
       detail.positiveObservations,
       detail.actionPlanItems,
       "finalisation",
+      detail.coverage,
     );
     if (issues.length > 0) return { readinessIssues: issues };
     if (!isOperationsReportApprovalCurrent(detail.report)) {
@@ -4488,19 +4841,47 @@ async function createRevisedOperationsReportUnlocked(
       [source.id, revision.id],
     );
     await client.query(
+      `CREATE TEMP TABLE report_revision_source_map (old_id uuid PRIMARY KEY, new_id uuid NOT NULL) ON COMMIT DROP`,
+    );
+    await client.query(
+      `
+        INSERT INTO report_revision_source_map (old_id, new_id)
+        SELECT source.id, gen_random_uuid()
+        FROM operations_report_finding_sources source
+        WHERE source.operations_report_id = $1
+      `,
+      [source.id],
+    );
+    await client.query(
       `
         INSERT INTO operations_report_finding_sources (
-          operations_report_id, report_finding_id, source_issue_id,
+          id, operations_report_id, report_finding_id, source_issue_id,
           source_link_id, source_kind, affected_page_url,
           affected_resource_url, outcome_key, evidence_json, display_order,
           reviewed_for_client
         )
-        SELECT $2, map.new_id, s.source_issue_id, s.source_link_id,
+        SELECT source_map.new_id, $2, map.new_id, s.source_issue_id, s.source_link_id,
           s.source_kind, s.affected_page_url, s.affected_resource_url,
           s.outcome_key, s.evidence_json, s.display_order, s.reviewed_for_client
         FROM operations_report_finding_sources s
         JOIN report_revision_finding_map map ON map.old_id = s.report_finding_id
+        JOIN report_revision_source_map source_map ON source_map.old_id = s.id
         WHERE s.operations_report_id = $1
+      `,
+      [source.id, revision.id],
+    );
+    await client.query(
+      `
+        INSERT INTO operations_report_source_dispositions (
+          report_finding_source_id, operations_report_id, source_issue_id,
+          disposition, reason
+        )
+        SELECT source_map.new_id, $2, disposition.source_issue_id,
+          disposition.disposition, disposition.reason
+        FROM operations_report_source_dispositions disposition
+        JOIN report_revision_source_map source_map
+          ON source_map.old_id = disposition.report_finding_source_id
+        WHERE disposition.operations_report_id = $1
       `,
       [source.id, revision.id],
     );
@@ -4653,6 +5034,7 @@ export async function recordOperationsReportSent(
       lockedDetail.positiveObservations,
       lockedDetail.actionPlanItems,
       "finalisation",
+      lockedDetail.coverage,
     );
     if (lockedDetail.report.status !== "ready_to_send") {
       sendReadinessIssues.push({

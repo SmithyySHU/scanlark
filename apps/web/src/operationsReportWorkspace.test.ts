@@ -148,3 +148,19 @@ test("ready and historical reports do not present normal editable content", () =
     /approved_content_revision[^]*?` · revision \$\{detail\.report\.approved_content_revision\}`/,
   );
 });
+
+test("internal report coverage is visible without entering the client preview", () => {
+  assert.match(source, /<h2>Coverage \/ reconciliation<\/h2>/);
+  assert.match(source, /detail\.coverage\.participatingSourceIssues/);
+  assert.match(source, /detail\.coverage\.manualVerificationRequired/);
+  assert.match(source, /detail\.coverage\.unaccounted/);
+  assert.match(source, /Inspect source dispositions/);
+  const clientPreview = readFileSync(
+    new URL(
+      "./components/operations/reports/ReportClientPreview.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(clientPreview, /coverage|reconciliation|unaccounted/i);
+});

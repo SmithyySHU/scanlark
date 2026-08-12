@@ -13,6 +13,7 @@ import {
   isOperationsReportApprovalCurrent,
   type OperationsReportActionPlanItemRow,
   type OperationsReportFindingRow,
+  type OperationsReportCoverage,
   type OperationsReportRow,
 } from "./operationsReports";
 
@@ -165,6 +166,33 @@ test("report readiness stages do not require a final PDF before approval", () =>
       "finalisation",
     ).map((issue) => issue.code),
     ["pdf_not_generated"],
+  );
+});
+
+test("approval fails closed when a participating scan issue is unaccounted", () => {
+  const coverage = {
+    participatingSourceIssues: 1,
+    includedClientFindings: 0,
+    groupedIntoClientFindings: 0,
+    manualVerificationRequired: 0,
+    excludedByOperator: 0,
+    falsePositives: 0,
+    internalSystemOnly: 0,
+    unaccounted: 1,
+    complete: false,
+    items: [],
+  } satisfies OperationsReportCoverage;
+  const issues = getOperationsReportReadinessIssues(
+    readyReport(),
+    [readyFinding()],
+    [],
+    [],
+    "approval",
+    coverage,
+  );
+  assert.equal(
+    issues.some((issue) => issue.code === "report_source_coverage_incomplete"),
+    true,
   );
 });
 
