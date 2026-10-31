@@ -19,7 +19,7 @@
     "file-type": "^22.0.1",
     "iron-session": "^8.0.2",
     "multer": "^2.2.0",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^10.3.1",
     "playwright": "^1.55.1"
   },
   "devDependencies": {
